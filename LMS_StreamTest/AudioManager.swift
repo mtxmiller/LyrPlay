@@ -6,6 +6,8 @@ import os.log
 class AudioManager: NSObject, ObservableObject {
     private var mediaPlayer: VLCMediaPlayer!
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
+    private var lastReportedTime: Double = 0
+    private var timeStuckCount = 0
     
     override init() {
         super.init()
@@ -71,6 +73,19 @@ class AudioManager: NSObject, ObservableObject {
         }
         
         let timeInSeconds = Double(vlcTime.intValue) / 1000.0
+        
+        // Check if time seems stuck (for debugging)
+        if abs(timeInSeconds - lastReportedTime) < 0.01 && timeInSeconds > 0 {
+            timeStuckCount += 1
+            if timeStuckCount > 5 {
+                os_log(.error, log: logger, "⚠️ VLC time stuck at %.2f seconds", timeInSeconds)
+                timeStuckCount = 0
+            }
+        } else {
+            timeStuckCount = 0
+        }
+        lastReportedTime = timeInSeconds
+        
         return timeInSeconds
     }
     
