@@ -9,6 +9,9 @@ class AudioManager: NSObject, ObservableObject {
     private var lastReportedTime: Double = 0
     private var timeStuckCount = 0
     
+    // Callback for when track ends
+    var onTrackEnded: (() -> Void)?
+    
     override init() {
         super.init()
         setupVLC()
@@ -23,12 +26,31 @@ class AudioManager: NSObject, ObservableObject {
     private func setupAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
+            // Configure for background playbook
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay, .defaultToSpeaker])
             try audioSession.setActive(true)
-            os_log(.info, log: logger, "Audio session configured")
+            os_log(.info, log: logger, "Audio session configured for background playback")
+            
+            // Set up now playing info center
+            // setupNowPlayingInfo() // Temporarily commented out
         } catch {
-            os_log(.error, log: logger, "Audio session setup failed: %{public}s", error.localizedDescription)
+            os_log(.error, log: logger, "Failed to setup audio session: %{public}s", error.localizedDescription)
         }
+    }
+    
+    private func setupNowPlayingInfo() {
+        // Temporarily comment out this method until MediaPlayer import issue is resolved
+        /*
+        let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+        
+        var nowPlayingInfo = [String: Any]()
+        nowPlayingInfo[MPMediaItemPropertyTitle] = "LMS Stream"
+        nowPlayingInfo[MPMediaItemPropertyArtist] = "Unknown Artist"
+        nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = 0
+        nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
+        
+        nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
+        */
     }
     
     func playStream(urlString: String) {
@@ -73,13 +95,24 @@ class AudioManager: NSObject, ObservableObject {
         }
         
         let timeInSeconds = Double(vlcTime.intValue) / 1000.0
+        let playerState = mediaPlayer.state
         
-        // Check if time seems stuck (for debugging)
-        if abs(timeInSeconds - lastReportedTime) < 0.01 && timeInSeconds > 0 {
+        // Check if time seems stuck (for debugging and end detection)
+        if abs(timeInSeconds - lastReportedTime) < 0.1 && timeInSeconds > 0 {
             timeStuckCount += 1
-            if timeStuckCount > 5 {
-                os_log(.error, log: logger, "⚠️ VLC time stuck at %.2f seconds", timeInSeconds)
+            if timeStuckCount == 5 {
+                os_log(.error, log: logger, "⚠️ VLC time stuck at %.2f seconds, state: %{public}s", timeInSeconds, vlcStateDescription(playerState))
+            }
+            
+            // If time is stuck AND VLC state suggests end of playback
+            if timeStuckCount >= 15 && (playerState == .ended || playerState == .stopped || !mediaPlayer.isPlaying) {
+                os_log(.info, log: logger, "🎵 Detected track end via stuck time + VLC state - notifying server")
                 timeStuckCount = 0
+                lastReportedTime = 0
+                DispatchQueue.main.async {
+                    self.onTrackEnded?()
+                }
+                return timeInSeconds // Return the stuck time, don't reset to 0
             }
         } else {
             timeStuckCount = 0
@@ -87,6 +120,21 @@ class AudioManager: NSObject, ObservableObject {
         lastReportedTime = timeInSeconds
         
         return timeInSeconds
+    }
+    
+    func checkIfTrackEnded() -> Bool {
+        let playerState = mediaPlayer.state
+        let isPlaying = mediaPlayer.isPlaying
+        
+        os_log(.debug, log: logger, "Manual track end check - State: %{public}s, Playing: %{public}s",
+               vlcStateDescription(playerState), isPlaying ? "YES" : "NO")
+        
+        if playerState == .ended || (timeStuckCount > 10 && !isPlaying) {
+            os_log(.info, log: logger, "🎵 Manual check detected track end")
+            return true
+        }
+        
+        return false
     }
     
     private func stateDescription(_ state: VLCMediaPlayerState) -> String {
@@ -131,5 +179,27 @@ class AudioManager: NSObject, ObservableObject {
     
     deinit {
         stop()
+    }
+}
+
+// MARK: - VLCMediaPlayerDelegate
+extension AudioManager: VLCMediaPlayerDelegate {
+    
+    // This delegate method might not be called reliably, using NotificationCenter instead
+    func mediaPlayerStateChanged(_ aNotification: Notification) {
+        // Implementation moved to @objc method above
+    }
+    
+    private func vlcStateDescription(_ state: VLCMediaPlayerState) -> String {
+        switch state {
+        case .stopped: return "Stopped"
+        case .opening: return "Opening"
+        case .buffering: return "Buffering"
+        case .ended: return "Ended"
+        case .error: return "Error"
+        case .playing: return "Playing"
+        case .paused: return "Paused"
+        @unknown default: return "Unknown(\(state.rawValue))"
+        }
     }
 }

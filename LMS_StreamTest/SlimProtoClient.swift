@@ -20,6 +20,13 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.info, log: logger, "SlimProtoClient initializing")
         socket = GCDAsyncSocket(delegate: self, delegateQueue: DispatchQueue(label: "com.lmsstream.socket"))
         os_log(.info, log: logger, "Socket initialized with custom queue")
+        
+        // Set up callback for when tracks end
+        audioManager.onTrackEnded = { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleTrackEnded()
+            }
+        }
     }
     
     func connect() {
@@ -421,12 +428,24 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // Get current playback time from audio manager
         let currentTime = audioManager.getCurrentTime()
         
+        // Also check if track ended manually
+        if isStreamActive && audioManager.checkIfTrackEnded() {
+            handleTrackEnded()
+        }
+        
         // Add some bounds checking to prevent crazy values
         if currentTime < 0 || currentTime > 86400 { // Max 24 hours
             return 0.0
         }
         
         return currentTime
+    }
+    
+    private func handleTrackEnded() {
+        os_log(.info, log: logger, "Track ended - sending STMd to request next track")
+        isStreamActive = false
+        currentStreamURL = nil
+        sendStatus("STMd") // Decoder ready - request next track
     }
     
     func socketDidDisconnect(_ sock: GCDAsyncSocket, withError err: Error?) {
