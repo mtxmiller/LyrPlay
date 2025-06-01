@@ -390,13 +390,17 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             playerID = match.replacingOccurrences(of: "player=", with: "")
         }
         
-        // Use LMS JSON-RPC API to request current track
+        // Use LMS JSON-RPC API to request current track with comprehensive metadata
         let jsonRPC = [
             "id": 1,
             "method": "slim.request",
             "params": [
                 playerID,
-                ["status", "-", "1", "tags:u"]  // Get current track info
+                [
+                    "status", "-", "1",
+                    // Request comprehensive metadata tags including artist variations
+                    "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z"
+                ]
             ]
         ] as [String : Any]
         
@@ -422,12 +426,17 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 return
             }
             
+            // *** DEBUG: Log the raw JSON response ***
+            if let jsonString = String(data: data, encoding: .utf8) {
+                os_log(.debug, log: self.logger, "📄 Raw JSON response: %{public}s", jsonString)
+            }
+            
             // Parse response to get current track URL
             self.parseCurrentTrackResponse(data: data)
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting current track info to replace with transcoded version")
+        os_log(.info, log: logger, "🌐 Requesting current track info with comprehensive metadata tags")
     }
     
     private func parseCurrentTrackResponse(data: Data) {
@@ -437,28 +446,147 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
                 
-                let trackTitle = firstTrack["title"] as? String ?? "Unknown"
+                // *** DEBUG: Log ALL available keys in the track data ***
+                let availableKeys = firstTrack.keys.sorted()
+                os_log(.info, log: logger, "🔍 Available track metadata keys: %{public}s", availableKeys.joined(separator: ", "))
+                
+                // *** DEBUG: Log specific values for key fields ***
+                let debugKeys = ["artist", "albumartist", "trackartist", "contributor", "title", "album", "id"]
+                for key in debugKeys {
+                    if let value = firstTrack[key] {
+                        os_log(.info, log: logger, "🔍 Key '%{public}s': %{public}s", key, String(describing: value))
+                    }
+                }
+                
+                // Extract basic metadata
+                let trackTitle = firstTrack["title"] as? String ??
+                               firstTrack["track"] as? String ?? "Unknown Track"
+                
+                let trackAlbum = firstTrack["album"] as? String ?? "Unknown Album"
+                
+                // *** ENHANCED ARTIST EXTRACTION ***
+                var trackArtist = "Unknown Artist"
+                
+                // Method 1: Direct artist field
+                if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
+                    trackArtist = artist
+                    os_log(.info, log: logger, "✅ Found artist (direct): %{public}s", artist)
+                }
+                // Method 2: Album artist field
+                else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
+                    trackArtist = albumArtist
+                    os_log(.info, log: logger, "✅ Found artist (albumartist): %{public}s", albumArtist)
+                }
+                // Method 3: Track artist field
+                else if let trackArtistField = firstTrack["trackartist"] as? String, !trackArtistField.isEmpty {
+                    trackArtist = trackArtistField
+                    os_log(.info, log: logger, "✅ Found artist (trackartist): %{public}s", trackArtistField)
+                }
+                // Method 4: Check for band field
+                else if let band = firstTrack["band"] as? String, !band.isEmpty {
+                    trackArtist = band
+                    os_log(.info, log: logger, "✅ Found artist (band): %{public}s", band)
+                }
+                // Method 5: Check contributors array (common LMS pattern)
+                else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
+                    for contributor in contributors {
+                        if let role = contributor["role"] as? String,
+                           let name = contributor["name"] as? String {
+                            os_log(.info, log: logger, "🔍 Contributor: %{public}s (role: %{public}s)", name, role)
+                            
+                            // Look for artist roles
+                            if role.lowercased().contains("artist") ||
+                               role.lowercased() == "performer" ||
+                               role.lowercased() == "composer" {
+                                trackArtist = name
+                                os_log(.info, log: logger, "✅ Found artist in contributors: %{public}s (role: %{public}s)", name, role)
+                                break
+                            }
+                        }
+                    }
+                }
+                // Method 6: Look for any field ending with "artist"
+                else {
+                    for (key, value) in firstTrack {
+                        if key.lowercased().hasSuffix("artist"),
+                           let artistValue = value as? String,
+                           !artistValue.isEmpty {
+                            trackArtist = artistValue
+                            os_log(.info, log: logger, "✅ Found artist in field '%{public}s': %{public}s", key, artistValue)
+                            break
+                        }
+                    }
+                }
+                
+                // *** EXTRACT ADDITIONAL METADATA LIKE THE WORKING APP ***
+                let duration = firstTrack["duration"] as? Double ?? 0.0
+                let genre = firstTrack["genre"] as? String ?? ""
+                let trackNumber = firstTrack["tracknum"] as? Int ?? firstTrack["track_number"] as? Int
+                
                 let playlistIndex = firstTrack["playlist index"] as? Int ?? -1
                 
-                os_log(.info, log: logger, "🔍 Current track: '%{public}s' (index: %d)", trackTitle, playlistIndex)
+                os_log(.info, log: logger, "🎵 Final metadata - Title: '%{public}s', Artist: '%{public}s', Album: '%{public}s', Duration: %.1f, Genre: '%{public}s' (index: %d)",
+                       trackTitle, trackArtist, trackAlbum, duration, genre, playlistIndex)
                 
                 // *** USE TRACK ID WITH WORKING DOWNLOAD FORMAT ***
                 if let trackID = firstTrack["id"] as? Int {
                     let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
-                    os_log(.info, log: logger, "🎵 Replacing with transcoded URL: %{public}s", streamingURL)
+                    
+                    // Create artwork URL
+                    let artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
+                    
+                    os_log(.info, log: logger, "🎵 Stream URL: %{public}s", streamingURL)
+                    os_log(.info, log: logger, "🖼️ Artwork URL: %{public}s", artworkURL)
                     
                     // Replace the current stream with the transcoded version
                     DispatchQueue.main.async {
                         // Only replace if we're not already playing this exact URL
                         if self.currentStreamURL != streamingURL {
+                            // Update track metadata first
+                            self.audioManager.updateTrackMetadata(
+                                title: trackTitle,
+                                artist: trackArtist,
+                                album: trackAlbum,
+                                artworkURL: artworkURL
+                            )
+                            
+                            // Then start the stream
                             self.audioManager.playStream(urlString: streamingURL)
                             self.currentStreamURL = streamingURL
-                            os_log(.info, log: self.logger, "✅ Switched to transcoded stream for: %{public}s", trackTitle)
+                            os_log(.info, log: self.logger, "✅ Switched to transcoded stream: '%{public}s' by %{public}s", trackTitle, trackArtist)
                         } else {
-                            os_log(.info, log: self.logger, "ℹ️ Already playing correct transcoded stream")
+                            // Still update metadata even if URL is the same
+                            self.audioManager.updateTrackMetadata(
+                                title: trackTitle,
+                                artist: trackArtist,
+                                album: trackAlbum,
+                                artworkURL: artworkURL
+                            )
+                            os_log(.info, log: self.logger, "ℹ️ Metadata updated: '%{public}s' by %{public}s", trackTitle, trackArtist)
                         }
                     }
                     return
+                } else {
+                    // Try string ID (some LMS configurations use string IDs)
+                    if let trackIDString = firstTrack["id"] as? String, let trackID = Int(trackIDString) {
+                        let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
+                        let artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
+                        
+                        DispatchQueue.main.async {
+                            self.audioManager.updateTrackMetadata(
+                                title: trackTitle,
+                                artist: trackArtist,
+                                album: trackAlbum,
+                                artworkURL: artworkURL
+                            )
+                            
+                            if self.currentStreamURL != streamingURL {
+                                self.audioManager.playStream(urlString: streamingURL)
+                                self.currentStreamURL = streamingURL
+                            }
+                        }
+                        return
+                    }
                 }
                 
                 os_log(.error, log: logger, "❌ Could not extract track ID from current track info")

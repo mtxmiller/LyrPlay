@@ -19,6 +19,12 @@ class AudioManager: NSObject, ObservableObject {
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var timeObserver: Any?
     
+    // *** Track metadata ***
+    private var currentTrackTitle: String = "LMS Stream"
+    private var currentArtist: String = "Unknown Artist"
+    private var currentAlbum: String = "Lyrion Music Server"
+    private var currentArtwork: UIImage?
+    
     // Callback for when track ends
     var onTrackEnded: (() -> Void)?
     
@@ -222,9 +228,16 @@ class AudioManager: NSObject, ObservableObject {
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         
         var nowPlayingInfo = [String: Any]()
-        nowPlayingInfo[MPMediaItemPropertyTitle] = "LMS Stream"
-        nowPlayingInfo[MPMediaItemPropertyArtist] = "Unknown Artist"
-        nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = "Lyrion Music Server"
+        nowPlayingInfo[MPMediaItemPropertyTitle] = currentTrackTitle
+        nowPlayingInfo[MPMediaItemPropertyArtist] = currentArtist
+        nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = currentAlbum
+        
+        // Add artwork if available
+        if let artwork = currentArtwork {
+            nowPlayingInfo[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in
+                return artwork
+            }
+        }
         
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
     }
@@ -250,6 +263,45 @@ class AudioManager: NSObject, ObservableObject {
             self?.stop()
             return .success
         }
+    }
+    
+    // *** NEW: Update track metadata ***
+    func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil) {
+        os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s", title, artist)
+        
+        currentTrackTitle = title
+        currentArtist = artist
+        currentAlbum = album
+        
+        // Load artwork if URL provided
+        if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
+            loadArtwork(from: url)
+        } else {
+            currentArtwork = nil
+            setupNowPlayingInfo() // Update immediately without artwork
+        }
+    }
+    
+    private func loadArtwork(from url: URL) {
+        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s", url.absoluteString)
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
+                    self?.currentArtwork = nil
+                } else if let data = data, let image = UIImage(data: data) {
+                    os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Artwork loaded successfully")
+                    self?.currentArtwork = image
+                } else {
+                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Invalid artwork data")
+                    self?.currentArtwork = nil
+                }
+                
+                // Update now playing info with or without artwork
+                self?.setupNowPlayingInfo()
+            }
+        }.resume()
     }
     
     // *** NATIVE AVPLAYER STREAMING ***
