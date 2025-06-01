@@ -369,16 +369,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         os_log(.info, log: logger, "🔍 Original stream path: %{public}s", path)
         
-        // *** NEW APPROACH: Use LMS JSON-RPC to get transcoded URL ***
-        requestTranscodedURL(originalPath: path)
-        
-        // For now, return the original URL while we wait for the API response
+        // *** ACKNOWLEDGE THE STREAM FIRST, THEN GET CURRENT TRACK ***
+        // Return the original URL so SlimProto flow continues normally
         let originalURL = "http://\(host):9000\(path)"
-        os_log(.info, log: logger, "⚠️ Using original URL temporarily: %{public}s", originalURL)
+        
+        // Request the current track info asynchronously to replace the stream
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.requestCurrentTrackURL(originalPath: path)
+        }
+        
+        os_log(.info, log: logger, "⚠️ Returning original URL, will replace with transcoded version shortly")
         return originalURL
     }
     
-    private func requestTranscodedURL(originalPath: String) {
+    private func requestCurrentTrackURL(originalPath: String) {
         // Extract player ID from path
         var playerID = "00:04:20:12:34:56"
         if let playerRange = originalPath.range(of: "player=([^&]+)", options: .regularExpression) {
@@ -386,13 +390,13 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             playerID = match.replacingOccurrences(of: "player=", with: "")
         }
         
-        // Use LMS JSON-RPC API to request current track with transcoding
+        // Use LMS JSON-RPC API to request current track
         let jsonRPC = [
             "id": 1,
             "method": "slim.request",
             "params": [
                 playerID,
-                ["status", "-", "1", "tags:u"]  // Get current track URL with transcoding
+                ["status", "-", "1", "tags:u"]  // Get current track info
             ]
         ] as [String : Any]
         
@@ -418,75 +422,48 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 return
             }
             
-            // Parse response to get transcoded URL
-            self.parseTranscodedURLResponse(data: data)
+            // Parse response to get current track URL
+            self.parseCurrentTrackResponse(data: data)
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting transcoded URL via JSON-RPC API")
+        os_log(.info, log: logger, "🌐 Requesting current track info to replace with transcoded version")
     }
     
-    private func parseTranscodedURLResponse(data: Data) {
+    private func parseCurrentTrackResponse(data: Data) {
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let result = json["result"] as? [String: Any],
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
                 
-                os_log(.info, log: logger, "🔍 JSON-RPC response track info: %{public}s", String(describing: firstTrack))
+                let trackTitle = firstTrack["title"] as? String ?? "Unknown"
+                let playlistIndex = firstTrack["playlist index"] as? Int ?? -1
                 
-                // *** PRIORITY: Use track ID with your working download format ***
+                os_log(.info, log: logger, "🔍 Current track: '%{public}s' (index: %d)", trackTitle, playlistIndex)
+                
+                // *** USE TRACK ID WITH WORKING DOWNLOAD FORMAT ***
                 if let trackID = firstTrack["id"] as? Int {
                     let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
-                    os_log(.info, log: logger, "🎵 Using working download format with track ID: %{public}s", streamingURL)
+                    os_log(.info, log: logger, "🎵 Replacing with transcoded URL: %{public}s", streamingURL)
                     
-                    // Start playback with the working URL format
+                    // Replace the current stream with the transcoded version
                     DispatchQueue.main.async {
-                        self.audioManager.playStream(urlString: streamingURL)
+                        // Only replace if we're not already playing this exact URL
+                        if self.currentStreamURL != streamingURL {
+                            self.audioManager.playStream(urlString: streamingURL)
+                            self.currentStreamURL = streamingURL
+                            os_log(.info, log: self.logger, "✅ Switched to transcoded stream for: %{public}s", trackTitle)
+                        } else {
+                            os_log(.info, log: self.logger, "ℹ️ Already playing correct transcoded stream")
+                        }
                     }
                     return
                 }
                 
-                // *** FALLBACK: Try other approaches if no ID ***
-                var trackURL: String?
-                
-                if let url = firstTrack["url"] as? String {
-                    trackURL = url
-                } else if let path = firstTrack["path"] as? String {
-                    let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-                    trackURL = "http://\(host):9000/music/\(encodedPath)?t=mp3&br=320000"
-                }
-                
-                guard var finalURL = trackURL else {
-                    os_log(.error, log: logger, "❌ Could not extract any URL from JSON response")
-                    return
-                }
-                
-                // Convert file:// URLs to HTTP streaming URLs
-                if finalURL.starts(with: "file://") {
-                    let filePath = finalURL.replacingOccurrences(of: "file://", with: "")
-                    let encodedPath = filePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? filePath
-                    finalURL = "http://\(host):9000/stream.mp3?path=\(encodedPath)&t=mp3&br=320000"
-                    os_log(.info, log: logger, "🔄 Converted file URL to streaming URL: %{public}s", finalURL)
-                }
-                
-                // Ensure transcoding parameters are present
-                if !finalURL.contains("t=mp3") {
-                    finalURL += finalURL.contains("?") ? "&t=mp3&br=320000" : "?t=mp3&br=320000"
-                }
-                
-                os_log(.info, log: logger, "🎵 Final fallback URL: %{public}s", finalURL)
-                
-                // Start playback with the transcoded URL
-                DispatchQueue.main.async {
-                    self.audioManager.playStream(urlString: finalURL)
-                }
+                os_log(.error, log: logger, "❌ Could not extract track ID from current track info")
             } else {
-                os_log(.error, log: logger, "❌ Failed to parse JSON-RPC response")
-                // Log the raw response for debugging
-                if let responseString = String(data: data, encoding: .utf8) {
-                    os_log(.debug, log: logger, "Raw JSON response: %{public}s", responseString)
-                }
+                os_log(.error, log: logger, "❌ Failed to parse current track response")
             }
         } catch {
             os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
