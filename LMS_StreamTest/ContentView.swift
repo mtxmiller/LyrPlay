@@ -30,7 +30,7 @@ struct ContentView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
                 
-                if let url = URL(string: "http://192.168.1.8:9000") {
+                if let url = URL(string: "http://ser5:9000") {
                     WebView(url: url, isLoading: $isLoading, loadError: $loadError)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .ignoresSafeArea(.all)

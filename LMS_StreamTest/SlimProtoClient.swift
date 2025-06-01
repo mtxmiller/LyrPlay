@@ -5,7 +5,7 @@ import os.log
 
 class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var socket: GCDAsyncSocket!
-    private let host = "192.168.1.8" // Replace with your LMS IP
+    private let host = "ser5" // Replace with your LMS IP
     private let port: UInt16 = 3483
     private var audioManager: AudioManager
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SlimProtoClient")
