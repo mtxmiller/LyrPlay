@@ -1,6 +1,7 @@
 import Foundation
-import MobileVLCKit  // Using MobileVLCKit as you specified
+import MobileVLCKit  // Using MobileVLCKit as specified
 import AVFoundation
+import MediaPlayer  // Missing import for MPNowPlayingInfoCenter and MPRemoteCommandCenter
 import os.log
 
 class AudioManager: NSObject, ObservableObject {
@@ -26,31 +27,72 @@ class AudioManager: NSObject, ObservableObject {
     private func setupAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            // Configure for background playbook
+            // Configure for background playback
             try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay, .defaultToSpeaker])
             try audioSession.setActive(true)
             os_log(.info, log: logger, "Audio session configured for background playback")
             
-            // Set up now playing info center
-            // setupNowPlayingInfo() // Temporarily commented out
+            // Set up now playing info center and remote commands
+            setupNowPlayingInfo()
+            setupRemoteCommandCenter()
         } catch {
             os_log(.error, log: logger, "Failed to setup audio session: %{public}s", error.localizedDescription)
         }
     }
     
     private func setupNowPlayingInfo() {
-        // Temporarily comment out this method until MediaPlayer import issue is resolved
-        /*
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         
         var nowPlayingInfo = [String: Any]()
         nowPlayingInfo[MPMediaItemPropertyTitle] = "LMS Stream"
         nowPlayingInfo[MPMediaItemPropertyArtist] = "Unknown Artist"
+        nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = "Lyrion Music Server"
         nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = 0
         nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
+        nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
         
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
-        */
+        os_log(.info, log: logger, "Now Playing info configured")
+    }
+    
+    private func setupRemoteCommandCenter() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        // Enable the commands you want to support
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.stopCommand.isEnabled = true
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.isEnabled = true
+        
+        // Add handlers for the commands
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            self?.play()
+            return .success
+        }
+        
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            self?.pause()
+            return .success
+        }
+        
+        commandCenter.stopCommand.addTarget { [weak self] _ in
+            self?.stop()
+            return .success
+        }
+        
+        // Note: Next/Previous would need to communicate with LMS server
+        commandCenter.nextTrackCommand.addTarget { _ in
+            // Would need to send command to LMS server
+            return .success
+        }
+        
+        commandCenter.previousTrackCommand.addTarget { _ in
+            // Would need to send command to LMS server
+            return .success
+        }
+        
+        os_log(.info, log: logger, "Remote command center configured")
     }
     
     func playStream(urlString: String) {
@@ -66,21 +108,27 @@ class AudioManager: NSObject, ObservableObject {
         mediaPlayer.media = media
         mediaPlayer.play()
         
+        // Update now playing info
+        updateNowPlayingInfo(isPlaying: true)
+        
         os_log(.info, log: logger, "VLC playback started")
     }
     
     func play() {
         mediaPlayer.play()
+        updateNowPlayingInfo(isPlaying: true)
         os_log(.info, log: logger, "VLC resumed playback")
     }
     
     func pause() {
         mediaPlayer.pause()
+        updateNowPlayingInfo(isPlaying: false)
         os_log(.info, log: logger, "VLC paused playback")
     }
     
     func stop() {
         mediaPlayer.stop()
+        updateNowPlayingInfo(isPlaying: false)
         os_log(.info, log: logger, "VLC stopped playback")
     }
     
@@ -137,25 +185,24 @@ class AudioManager: NSObject, ObservableObject {
         return false
     }
     
-    private func stateDescription(_ state: VLCMediaPlayerState) -> String {
-        switch state {
-        case .stopped:
-            return "Stopped"
-        case .opening:
-            return "Opening"
-        case .buffering:
-            return "Buffering"
-        case .ended:
-            return "Ended"
-        case .error:
-            return "Error"
-        case .playing:
-            return "Playing"
-        case .paused:
-            return "Paused"
-        @unknown default:
-            return "Unknown(\(state.rawValue))"
+    private func updateNowPlayingInfo(isPlaying: Bool) {
+        let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+        
+        var nowPlayingInfo = nowPlayingInfoCenter.nowPlayingInfo ?? [String: Any]()
+        
+        // Update playback state
+        nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = getCurrentTime()
+        
+        // Get duration from VLC if available
+        if let media = mediaPlayer.media {
+            let duration = media.length
+            if duration.intValue > 0 {
+                nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = Double(duration.intValue) / 1000.0
+            }
         }
+        
+        nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
     }
     
     func getPlayerState() -> VLCMediaPlayerState {
@@ -177,19 +224,6 @@ class AudioManager: NSObject, ObservableObject {
         return mediaPlayer.position
     }
     
-    deinit {
-        stop()
-    }
-}
-
-// MARK: - VLCMediaPlayerDelegate
-extension AudioManager: VLCMediaPlayerDelegate {
-    
-    // This delegate method might not be called reliably, using NotificationCenter instead
-    func mediaPlayerStateChanged(_ aNotification: Notification) {
-        // Implementation moved to @objc method above
-    }
-    
     private func vlcStateDescription(_ state: VLCMediaPlayerState) -> String {
         switch state {
         case .stopped: return "Stopped"
@@ -200,6 +234,28 @@ extension AudioManager: VLCMediaPlayerDelegate {
         case .playing: return "Playing"
         case .paused: return "Paused"
         @unknown default: return "Unknown(\(state.rawValue))"
+        }
+    }
+    
+    deinit {
+        stop()
+    }
+}
+
+// MARK: - VLCMediaPlayerDelegate
+extension AudioManager: VLCMediaPlayerDelegate {
+    
+    // This delegate method might not be called reliably, using NotificationCenter instead
+    func mediaPlayerStateChanged(_ aNotification: Notification) {
+        // Implementation can be added here if needed for more reactive state handling
+        let playerState = mediaPlayer.state
+        os_log(.debug, log: logger, "VLC state changed to: %{public}s", vlcStateDescription(playerState))
+        
+        if playerState == .ended {
+            os_log(.info, log: logger, "🎵 VLC reported track ended via delegate")
+            DispatchQueue.main.async {
+                self.onTrackEnded?()
+            }
         }
     }
 }
