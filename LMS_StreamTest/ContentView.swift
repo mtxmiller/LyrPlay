@@ -19,7 +19,13 @@ struct ContentView: View {
         self._audioManager = StateObject(wrappedValue: audioMgr)
         
         // Create SlimProtoClient with the AudioManager
-        self._slimClient = StateObject(wrappedValue: SlimProtoClient(audioManager: audioMgr))
+        let slimProtoClient = SlimProtoClient(audioManager: audioMgr)
+        self._slimClient = StateObject(wrappedValue: slimProtoClient)
+        
+        // *** NEW: Connect AudioManager back to SlimClient for lock screen commands ***
+        audioMgr.slimClient = slimProtoClient
+        
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ AudioManager and SlimClient connected for lock screen support")
     }
     
     var body: some View {

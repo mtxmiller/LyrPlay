@@ -14,6 +14,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var currentStreamURL: String?
     private var serverTimestamp: UInt32 = 0  // Store server timestamp for echo back
     private var hasRequestedInitialStatus = false  // Track if we've asked for current status
+    private var isPausedByLockScreen = false
+    private var lastKnownPosition: Double = 0.0
     
     init(audioManager: AudioManager = AudioManager()) {
         self.audioManager = audioManager
@@ -226,6 +228,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                             switch streamCommand {
                             case UInt8(ascii: "s"): // start
                                 os_log(.info, log: logger, "Starting stream playback")
+                                // *** CLEAR PAUSE STATE WHEN STARTING NEW STREAM ***
+                                isPausedByLockScreen = false
                                 currentStreamURL = url
                                 isStreamActive = true
                                 
@@ -242,22 +246,40 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                                     self.sendStatus("STMs") // Stream started
                                 }
                             case UInt8(ascii: "p"): // pause
-                                os_log(.info, log: logger, "Pausing stream")
+                                os_log(.info, log: logger, "⏸️ Server pause command")
+                                // *** CRITICAL: Set pause state for server-initiated pause too ***
+                                isPausedByLockScreen = true
+                                lastKnownPosition = audioManager.getCurrentTime()
                                 audioManager.pause()
                                 sendStatus("STMp") // Paused
                             case UInt8(ascii: "u"): // unpause
-                                os_log(.info, log: logger, "Unpausing stream")
+                                os_log(.info, log: logger, "▶️ Server unpause command")
+                                // *** CLEAR PAUSE STATE WHEN SERVER UNPAUSES ***
+                                isPausedByLockScreen = false
                                 audioManager.play()
                                 sendStatus("STMr") // Resume
                             case UInt8(ascii: "q"): // stop
-                                os_log(.info, log: logger, "Stopping stream")
+                                os_log(.info, log: logger, "⏹️ Server stop command")
+                                // *** CLEAR PAUSE STATE WHEN STOPPING ***
+                                isPausedByLockScreen = false
                                 audioManager.stop()
                                 isStreamActive = false
                                 currentStreamURL = nil
                                 sendStatus("STMf") // Flushed/stopped
                             case UInt8(ascii: "t"): // status request
-                                sendStatus("STMt") // Timer/status
+                                os_log(.debug, log: logger, "🔄 Server status request (with HTTP data)")
+                                
+                                // *** RESPOND BASED ON ACTUAL STATE ***
+                                if isPausedByLockScreen {
+                                    sendStatus("STMp") // Pause status
+                                    os_log(.info, log: logger, "📍 Responding with PAUSE status (frozen at %.2f seconds)", lastKnownPosition)
+                                } else {
+                                    sendStatus("STMt") // Timer/heartbeat status
+                                }
                             case UInt8(ascii: "f"): // flush
+                                os_log(.info, log: logger, "🗑️ Server flush command")
+                                // *** CLEAR PAUSE STATE WHEN FLUSHING ***
+                                isPausedByLockScreen = false
                                 audioManager.stop()
                                 isStreamActive = false
                                 currentStreamURL = nil
@@ -288,23 +310,40 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                         os_log(.error, log: logger, "🚨 Server sent START command but no HTTP data! This shouldn't happen.")
                         sendStatus("STMn") // Not supported - request proper stream
                     case UInt8(ascii: "p"): // pause
-                        os_log(.info, log: logger, "⏸️ Server pause command")
+                        os_log(.info, log: logger, "⏸️ Server pause command (no HTTP data)")
+                        // *** CRITICAL: Set pause state for server-initiated pause ***
+                        isPausedByLockScreen = true
+                        lastKnownPosition = audioManager.getCurrentTime()
                         audioManager.pause()
                         sendStatus("STMp")
                     case UInt8(ascii: "u"): // unpause
-                        os_log(.info, log: logger, "▶️ Server unpause command")
+                        os_log(.info, log: logger, "▶️ Server unpause command (no HTTP data)")
+                        // *** CLEAR PAUSE STATE WHEN SERVER UNPAUSES ***
+                        isPausedByLockScreen = false
                         audioManager.play()
                         sendStatus("STMr")
                     case UInt8(ascii: "q"): // stop
-                        os_log(.info, log: logger, "⏹️ Server stop command")
+                        os_log(.info, log: logger, "⏹️ Server stop command (no HTTP data)")
+                        // *** CLEAR PAUSE STATE WHEN STOPPING ***
+                        isPausedByLockScreen = false
                         audioManager.stop()
                         isStreamActive = false
                         sendStatus("STMf")
                     case UInt8(ascii: "t"): // status request
-                        os_log(.debug, log: logger, "🔄 Server status request")
-                        sendStatus("STMt") // Just send timer/heartbeat status
+                        os_log(.debug, log: logger, "🔄 Server status request (no HTTP data)")
+                        
+                        // *** CRITICAL: Respond based on our ACTUAL state ***
+                        if isPausedByLockScreen {
+                            sendStatus("STMp") // Send PAUSE status
+                            os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
+                        } else {
+                            sendStatus("STMt") // Timer/heartbeat status
+                            os_log(.info, log: logger, "📍 Responding to status request with TIMER status")
+                        }
                     case UInt8(ascii: "f"): // flush
-                        os_log(.info, log: logger, "🗑️ Server flush command")
+                        os_log(.info, log: logger, "🗑️ Server flush command (no HTTP data)")
+                        // *** CLEAR PAUSE STATE WHEN FLUSHING ***
+                        isPausedByLockScreen = false
                         audioManager.stop()
                         isStreamActive = false
                         sendStatus("STMf")
@@ -321,11 +360,22 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         case "aude":
             sendStatus("STMt") // Acknowledge with heartbeat
         case "stat":
-            sendStatus("STMt") // Timer/heartbeat
+            // *** RESPOND TO STAT REQUESTS BASED ON ACTUAL STATE ***
+            if isPausedByLockScreen {
+                sendStatus("STMp") // Send pause status when paused
+                os_log(.info, log: logger, "📍 STAT request - responding with PAUSE status")
+            } else {
+                sendStatus("STMt") // Timer/heartbeat
+            }
         case "vers":
             sendStatus("STMt") // Acknowledge with heartbeat
         case "vfdc":
-            sendStatus("STMt")
+            // *** RESPOND TO VFD COMMANDS BASED ON ACTUAL STATE ***
+            if isPausedByLockScreen {
+                sendStatus("STMp") // Send pause status when paused
+            } else {
+                sendStatus("STMt")
+            }
         case "grfe":
             sendStatus("STMt")
         case "grfb":
@@ -438,6 +488,119 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         task.resume()
         os_log(.info, log: logger, "🌐 Requesting current track info with comprehensive metadata tags")
     }
+    
+    func sendLockScreenCommand(_ command: String) {
+        os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
+        
+        guard socket.isConnected else {
+            os_log(.error, log: logger, "Cannot send lock screen command - not connected to server")
+            return
+        }
+        
+        switch command.lowercased() {
+        case "play":
+            // Send unpause/resume status to server
+            isPausedByLockScreen = false
+            sendStatus("STMr") // Resume
+            
+            // *** ALSO NOTIFY VIA JSON-RPC API ***
+            sendJSONRPCCommand("play")
+            
+            os_log(.info, log: logger, "✅ Sent resume status to LMS server")
+            
+        case "pause":
+            // *** CRITICAL: Track that we're paused and save position ***
+            isPausedByLockScreen = true
+            lastKnownPosition = audioManager.getCurrentTime()
+            
+            // Send pause status to server
+            sendStatus("STMp") // Paused
+            
+            // *** ALSO NOTIFY VIA JSON-RPC API ***
+            sendJSONRPCCommand("pause")
+            
+            os_log(.info, log: logger, "✅ Sent pause status to LMS server (position: %.2f)", lastKnownPosition)
+            
+        case "stop":
+            // Send stop status to server
+            isPausedByLockScreen = false
+            lastKnownPosition = 0.0
+            sendStatus("STMf") // Flushed/stopped
+            
+            // *** ALSO NOTIFY VIA JSON-RPC API ***
+            sendJSONRPCCommand("stop")
+            
+            isStreamActive = false
+            currentStreamURL = nil
+            os_log(.info, log: logger, "✅ Sent stop status to LMS server")
+            
+        default:
+            os_log(.error, log: logger, "Unknown lock screen command: %{public}s", command)
+        }
+    }
+    
+    private func sendJSONRPCCommand(_ command: String) {
+        // Extract player ID from current connection or use default
+        let playerID = "00:04:20:12:34:56" // Your MAC address from HELO
+        
+        var jsonRPCCommand: [String: Any]
+        
+        switch command.lowercased() {
+        case "pause":
+            jsonRPCCommand = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["pause", "1"]] // 1 = pause
+            ]
+        case "play":
+            jsonRPCCommand = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["pause", "0"]] // 0 = unpause/play
+            ]
+        case "stop":
+            jsonRPCCommand = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["stop"]]
+            ]
+        default:
+            os_log(.error, log: logger, "Unknown JSON-RPC command: %{public}s", command)
+            return
+        }
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPCCommand) else {
+            os_log(.error, log: logger, "Failed to create JSON-RPC command for %{public}s", command)
+            return
+        }
+        
+        // Send API request to LMS
+        var request = URLRequest(url: URL(string: "http://\(host):9000/jsonrpc.js")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        request.timeoutInterval = 5.0 // Quick timeout for UI responsiveness
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    os_log(.error, log: self.logger, "JSON-RPC %{public}s command failed: %{public}s", command, error.localizedDescription)
+                } else {
+                    os_log(.info, log: self.logger, "✅ JSON-RPC %{public}s command sent successfully", command)
+                    
+                    // Debug: Log the response if available
+                    if let data = data, let responseString = String(data: data, encoding: .utf8) {
+                        os_log(.debug, log: self.logger, "JSON-RPC response: %{public}s", responseString)
+                    }
+                }
+            }
+        }
+        
+        task.resume()
+        os_log(.info, log: logger, "🌐 Sent JSON-RPC %{public}s command to LMS", command)
+    }
+
+    
     
     private func parseCurrentTrackResponse(data: Data) {
         do {
@@ -611,8 +774,16 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private func sendStatus(_ code: String) {
         os_log(.info, log: logger, "Sending STAT with code: %{public}s", code)
         
-        // Get real-time info from audio manager if available
-        let currentTime = getCurrentPlaybackTime()
+        // *** CRITICAL: Use frozen position when paused ***
+        let currentTime: Double
+        if isPausedByLockScreen && (code == "STMp") {
+            currentTime = lastKnownPosition // Use frozen position for pause status
+            os_log(.info, log: logger, "🔒 Using frozen position for PAUSE status: %.2f", currentTime)
+        } else if code == "STMt" && !isPausedByLockScreen {
+            currentTime = getCurrentPlaybackTime() // Live position for timer status
+        } else {
+            currentTime = lastKnownPosition // Default to last known when paused
+        }
         
         // Create a minimal but correct STAT message
         var statusData = Data()
@@ -627,8 +798,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // MAS Initialized (1 byte) - 'm' for initialized
         statusData.append(UInt8(ascii: "m"))
         
-        // MAS Mode (1 byte)
-        statusData.append(0)
+        // *** CRITICAL: MAS Mode reflects ACTUAL pause state ***
+        // MAS Mode (1 byte) - According to SlimProto spec:
+        if isPausedByLockScreen || code == "STMp" {
+            statusData.append(UInt8(ascii: "p")) // 'p' = paused
+            os_log(.info, log: logger, "🔒 MAS Mode set to PAUSED ('p')")
+        } else {
+            statusData.append(0) // 0 = playing/stopped
+            os_log(.info, log: logger, "▶️ MAS Mode set to PLAYING (0)")
+        }
         
         // Buffer size (4 bytes) - fake reasonable value
         let bufferSize: UInt32 = 262144  // 256KB
@@ -639,8 +817,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bufferSize & 0xff)
         ]))
         
-        // Buffer fullness (4 bytes) - fake reasonable value
-        let bufferFullness: UInt32 = 131072  // 128KB
+        // Buffer fullness (4 bytes) - when paused, show buffer as empty/minimal
+        let bufferFullness: UInt32 = isPausedByLockScreen ? 0 : 131072  // 0 when paused, 128KB when playing
         statusData.append(Data([
             UInt8((bufferFullness >> 24) & 0xff),
             UInt8((bufferFullness >> 16) & 0xff),
@@ -684,8 +862,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferSize & 0xff)
         ]))
         
-        // Output buffer fullness (4 bytes)
-        let outputBufferFullness: UInt32 = 4096
+        // Output buffer fullness (4 bytes) - when paused, output buffer should be empty
+        let outputBufferFullness: UInt32 = isPausedByLockScreen ? 0 : 4096
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
             UInt8((outputBufferFullness >> 16) & 0xff),
@@ -693,9 +871,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferFullness & 0xff)
         ]))
         
-        // *** CRITICAL: Only set elapsed time for STMt status messages ***
-        if code == "STMt" {
-            // Elapsed seconds (4 bytes) - ONLY for status updates
+        // *** TIMING FIELDS: Different handling for STMp vs STMt ***
+        if code == "STMt" || code == "STMp" {
+            // Elapsed seconds (4 bytes)
             let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
             let elapsedSeconds = UInt32(safeCurrentTime)
             statusData.append(Data([
@@ -728,9 +906,13 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT sent with elapsed time: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
+            if code == "STMp" {
+                os_log(.info, log: logger, "STAT sent - PAUSE STATUS with position: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
+            } else {
+                os_log(.info, log: logger, "STAT sent - TIMER STATUS with elapsed time: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
+            }
         } else {
-            // For non-status messages, don't include timing fields
+            // For other status codes, don't include timing fields
             os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
         }
         

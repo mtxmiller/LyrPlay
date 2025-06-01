@@ -18,6 +18,8 @@ class AudioManager: NSObject, ObservableObject {
     // *** Background management ***
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var timeObserver: Any?
+    weak var slimClient: SlimProtoClient?
+
     
     // *** Track metadata ***
     private var currentTrackTitle: String = "LMS Stream"
@@ -250,19 +252,36 @@ class AudioManager: NSObject, ObservableObject {
         commandCenter.stopCommand.isEnabled = true
         
         commandCenter.playCommand.addTarget { [weak self] _ in
+            os_log(.info, log: self?.logger ?? OSLog.disabled, "🎵 Lock Screen PLAY command received")
             self?.play()
+            
+            // *** NEW: Notify server about lock screen play command ***
+            self?.slimClient?.sendLockScreenCommand("play")
+            
             return .success
         }
         
         commandCenter.pauseCommand.addTarget { [weak self] _ in
+            os_log(.info, log: self?.logger ?? OSLog.disabled, "⏸️ Lock Screen PAUSE command received")
             self?.pause()
+            
+            // *** NEW: Notify server about lock screen pause command ***
+            self?.slimClient?.sendLockScreenCommand("pause")
+            
             return .success
         }
         
         commandCenter.stopCommand.addTarget { [weak self] _ in
+            os_log(.info, log: self?.logger ?? OSLog.disabled, "⏹️ Lock Screen STOP command received")
             self?.stop()
+            
+            // *** NEW: Notify server about lock screen stop command ***
+            self?.slimClient?.sendLockScreenCommand("stop")
+            
             return .success
         }
+        
+        os_log(.info, log: logger, "✅ Remote Command Center configured with server notifications")
     }
     
     // *** NEW: Update track metadata ***
