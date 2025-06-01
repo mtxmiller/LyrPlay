@@ -23,52 +23,74 @@ struct ContentView: View {
     }
     
     var body: some View {
-        VStack(spacing: 0) {
-            if let url = URL(string: "http://192.168.1.8:9000") {
-                WebView(url: url, isLoading: $isLoading, loadError: $loadError)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                        .foregroundColor(.orange)
-                    Text("Invalid LMS URL")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Text("Check your server configuration")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding()
-            }
-            
-            // Status bar
-            VStack {
-                if isLoading {
-                    HStack {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Loading LMS Interface...")
+        GeometryReader { geometry in
+            ZStack {
+                // Set background color to match your LMS skin (dark gray/black)
+                Color.black
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .ignoresSafeArea(.all)
+                
+                if let url = URL(string: "http://192.168.1.8:9000") {
+                    WebView(url: url, isLoading: $isLoading, loadError: $loadError)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .ignoresSafeArea(.all)
+                } else {
+                    VStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.orange)
+                        Text("Invalid LMS URL")
+                            .font(.headline)
+                            .foregroundColor(.red)
+                        Text("Check your server configuration")
                             .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 8)
-                    .background(Color(.systemBackground))
+                    .padding()
                 }
                 
-                if let error = loadError {
-                    HStack {
-                        Image(systemName: "exclamationmark.circle")
-                            .foregroundColor(.red)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
+                // Status bar - overlay style so it doesn't take up space
+                if isLoading || loadError != nil {
+                    VStack {
+                        Spacer()
+                        
+                        if isLoading {
+                            HStack {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Loading LMS Interface...")
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(8)
+                        }
+                        
+                        if let error = loadError {
+                            HStack {
+                                Image(systemName: "exclamationmark.circle")
+                                    .foregroundColor(.red)
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(8)
+                        }
+                        
+                        Spacer()
+                            .frame(height: 50) // Account for home indicator
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color(.systemBackground))
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .allowsHitTesting(false) // Allow touches to pass through to WebView
                 }
             }
         }
+        .ignoresSafeArea(.all)
         .onAppear {
             if !hasConnected {
                 os_log(.info, log: logger, "ContentView onAppear, triggering connect")
@@ -95,6 +117,10 @@ struct WebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
+        
+        // Set background color to match LMS skin
+        webView.backgroundColor = UIColor.black
+        webView.scrollView.backgroundColor = UIColor.black
         
         let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         webView.load(request)

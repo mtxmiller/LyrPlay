@@ -13,6 +13,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var isStreamActive = false
     private var currentStreamURL: String?
     private var serverTimestamp: UInt32 = 0  // Store server timestamp for echo back
+    private var hasRequestedInitialStatus = false  // Track if we've asked for current status
     
     init(audioManager: AudioManager = AudioManager()) {
         self.audioManager = audioManager
@@ -48,6 +49,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // Start periodic status updates
         startStatusTimer()
+        
+        // *** NEW: Request current status after connecting to pick up existing streams ***
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if !self.hasRequestedInitialStatus {
+                self.hasRequestedInitialStatus = true
+                self.sendStatus("STMt") // Request current status to see if already playing
+                os_log(.info, log: self.logger, "🔄 Requested initial status to detect existing streams")
+            }
+        }
     }
     
     private func startStatusTimer() {
@@ -94,8 +104,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
         
         // Add capabilities string to tell server what formats we support
-        // Be very explicit about supported formats and add device info
-        let capabilities = "mp3,aac,pcm,Model=squeezeslave,ModelName=LMSStream,MaxSampleRate=48000,HasDigitalOut,HasPreAmp"
+        // FORCE transcoding by only claiming MP3 support
+        let capabilities = "mp3,Model=SqueezeLite,ModelName=LMSStream,MaxSampleRate=48000"
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
@@ -170,6 +180,38 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 let autostart = payload[1]
                 let format = payload[2]
                 
+                // *** LOG BOTH FORMAT AND COMMAND FOR DEBUGGING ***
+                let commandChar = String(UnicodeScalar(streamCommand) ?? "?")
+                os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
+                       commandChar, streamCommand, format, format)
+                
+                // *** CHECK IF SERVER IS SENDING FLAC FORMAT ***
+                if format == 102 { // 'f' = FLAC format
+                    os_log(.error, log: logger, "⚠️ Server wants to send FLAC - will modify URL for transcoding")
+                    // Don't reject - accept it but modify the URL later
+                }
+                
+                // *** ACCEPT MP3 FORMAT ***
+                if format == 109 { // 'm' = MP3 format
+                    os_log(.info, log: logger, "✅ Server responding with MP3 format - proceeding")
+                } else if format != 102 { // Not FLAC and not MP3
+                    os_log(.error, log: logger, "⚠️ Unknown format byte: %d (0x%02x)", format, format)
+                }
+                
+                // *** LOG PAYLOAD SIZE TO UNDERSTAND WHAT WE'RE GETTING ***
+                os_log(.info, log: logger, "🔍 Stream payload size: %d bytes (need >24 for HTTP data)", payload.count)
+                
+                // *** NEW: Extract server timestamp and elapsed time for stream pickup ***
+                let serverElapsedTime = extractServerElapsedTime(from: payload)
+                
+                // *** DEBUG: Log payload bytes for troubleshooting ***
+                if payload.count >= 24 {
+                    let replayGainBytes = payload.subdata(in: 16..<20)
+                    let rawValue = replayGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    os_log(.debug, log: logger, "🔍 Payload replay_gain bytes 16-19: %02x %02x %02x %02x = %d seconds",
+                           replayGainBytes[0], replayGainBytes[1], replayGainBytes[2], replayGainBytes[3], rawValue)
+                }
+                
                 // Extract HTTP request from remaining payload
                 if payload.count > 24 {
                     let httpData = payload.subdata(in: 24..<payload.count)
@@ -186,7 +228,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                                 os_log(.info, log: logger, "Starting stream playback")
                                 currentStreamURL = url
                                 isStreamActive = true
-                                audioManager.playStream(urlString: url)
+                                
+                                // *** NEW: Start stream with server elapsed time for sync ***
+                                if serverElapsedTime > 0 {
+                                    os_log(.info, log: logger, "🔄 Picking up existing stream at position: %.2f seconds", serverElapsedTime)
+                                    audioManager.playStreamAtPosition(urlString: url, startTime: serverElapsedTime)
+                                } else {
+                                    audioManager.playStream(urlString: url)
+                                }
+                                
                                 sendStatus("STMc") // Connect - acknowledge stream start
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     self.sendStatus("STMs") // Stream started
@@ -223,6 +273,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                     }
                 } else {
                     // Handle commands that don't need URLs (like pause, stop, status, etc.)
+                    os_log(.error, log: logger, "⚠️ Stream command '%{public}s' has no HTTP data - handling as control command", commandChar)
+                    
                     // For status requests, extract the server timestamp from the payload
                     if streamCommand == UInt8(ascii: "t") && payload.count >= 24 {
                         // Extract server timestamp from replay_gain field (bytes 16-19)
@@ -232,21 +284,32 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                     }
                     
                     switch streamCommand {
+                    case UInt8(ascii: "s"): // start - but no URL!
+                        os_log(.error, log: logger, "🚨 Server sent START command but no HTTP data! This shouldn't happen.")
+                        sendStatus("STMn") // Not supported - request proper stream
                     case UInt8(ascii: "p"): // pause
+                        os_log(.info, log: logger, "⏸️ Server pause command")
                         audioManager.pause()
                         sendStatus("STMp")
                     case UInt8(ascii: "u"): // unpause
+                        os_log(.info, log: logger, "▶️ Server unpause command")
                         audioManager.play()
                         sendStatus("STMr")
                     case UInt8(ascii: "q"): // stop
+                        os_log(.info, log: logger, "⏹️ Server stop command")
                         audioManager.stop()
+                        isStreamActive = false
                         sendStatus("STMf")
                     case UInt8(ascii: "t"): // status request
+                        os_log(.debug, log: logger, "🔄 Server status request")
                         sendStatus("STMt") // Just send timer/heartbeat status
                     case UInt8(ascii: "f"): // flush
+                        os_log(.info, log: logger, "🗑️ Server flush command")
                         audioManager.stop()
+                        isStreamActive = false
                         sendStatus("STMf")
                     default:
+                        os_log(.error, log: logger, "❓ Unknown stream command: '%{public}s' (%d)", commandChar, streamCommand)
                         sendStatus("STMt") // Default to timer status
                     }
                 }
@@ -272,6 +335,28 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         }
     }
     
+    // *** NEW: Extract elapsed time from server stream command ***
+    private func extractServerElapsedTime(from payload: Data) -> Double {
+        // In SlimProto, the elapsed time might be in the replay_gain field (bytes 16-19)
+        // or in the format-specific data. Let's try to extract it.
+        guard payload.count >= 24 else { return 0.0 }
+        
+        // Try to extract from replay_gain field (bytes 16-19) as elapsed seconds
+        let elapsedData = payload.subdata(in: 16..<20)
+        let elapsedSeconds = elapsedData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        
+        // *** FIX: Much more restrictive sanity check ***
+        // Elapsed time shouldn't be more than 1 hour for most tracks
+        if elapsedSeconds > 0 && elapsedSeconds < 3600 { // Max 1 hour
+            os_log(.info, log: logger, "🔄 Extracted valid server elapsed time: %d seconds", elapsedSeconds)
+            return Double(elapsedSeconds)
+        } else if elapsedSeconds > 0 {
+            os_log(.error, log: logger, "⚠️ Server elapsed time seems too high: %d seconds - ignoring", elapsedSeconds)
+        }
+        
+        return 0.0
+    }
+    
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
         // Parse HTTP request like "GET /stream.mp3?player=xx:xx:xx:xx:xx:xx HTTP/1.0"
         let lines = httpRequest.components(separatedBy: "\n")
@@ -282,9 +367,140 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         let path = parts[1]
         
-        // Use the original stream URL - VLC can handle FLAC
-        let fullURL = "http://\(host):9000\(path)"
-        return fullURL
+        os_log(.info, log: logger, "🔍 Original stream path: %{public}s", path)
+        
+        // *** NEW APPROACH: Use LMS JSON-RPC to get transcoded URL ***
+        requestTranscodedURL(originalPath: path)
+        
+        // For now, return the original URL while we wait for the API response
+        let originalURL = "http://\(host):9000\(path)"
+        os_log(.info, log: logger, "⚠️ Using original URL temporarily: %{public}s", originalURL)
+        return originalURL
+    }
+    
+    private func requestTranscodedURL(originalPath: String) {
+        // Extract player ID from path
+        var playerID = "00:04:20:12:34:56"
+        if let playerRange = originalPath.range(of: "player=([^&]+)", options: .regularExpression) {
+            let match = String(originalPath[playerRange])
+            playerID = match.replacingOccurrences(of: "player=", with: "")
+        }
+        
+        // Use LMS JSON-RPC API to request current track with transcoding
+        let jsonRPC = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [
+                playerID,
+                ["status", "-", "1", "tags:u"]  // Get current track URL with transcoding
+            ]
+        ] as [String : Any]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            os_log(.error, log: logger, "Failed to create JSON-RPC request")
+            return
+        }
+        
+        // Send API request to LMS
+        var request = URLRequest(url: URL(string: "http://\(host):9000/jsonrpc.js")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                os_log(.error, log: self.logger, "JSON-RPC request failed: %{public}s", error.localizedDescription)
+                return
+            }
+            
+            guard let data = data else {
+                os_log(.error, log: self.logger, "No data received from JSON-RPC")
+                return
+            }
+            
+            // Parse response to get transcoded URL
+            self.parseTranscodedURLResponse(data: data)
+        }
+        
+        task.resume()
+        os_log(.info, log: logger, "🌐 Requesting transcoded URL via JSON-RPC API")
+    }
+    
+    private func parseTranscodedURLResponse(data: Data) {
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = json["result"] as? [String: Any],
+               let loop = result["playlist_loop"] as? [[String: Any]],
+               let firstTrack = loop.first {
+                
+                os_log(.info, log: logger, "🔍 JSON-RPC response track info: %{public}s", String(describing: firstTrack))
+                
+                // *** PRIORITY: Use track ID with your working download format ***
+                if let trackID = firstTrack["id"] as? Int {
+                    let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
+                    os_log(.info, log: logger, "🎵 Using working download format with track ID: %{public}s", streamingURL)
+                    
+                    // Start playback with the working URL format
+                    DispatchQueue.main.async {
+                        self.audioManager.playStream(urlString: streamingURL)
+                    }
+                    return
+                }
+                
+                // *** FALLBACK: Try other approaches if no ID ***
+                var trackURL: String?
+                
+                if let url = firstTrack["url"] as? String {
+                    trackURL = url
+                } else if let path = firstTrack["path"] as? String {
+                    let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+                    trackURL = "http://\(host):9000/music/\(encodedPath)?t=mp3&br=320000"
+                }
+                
+                guard var finalURL = trackURL else {
+                    os_log(.error, log: logger, "❌ Could not extract any URL from JSON response")
+                    return
+                }
+                
+                // Convert file:// URLs to HTTP streaming URLs
+                if finalURL.starts(with: "file://") {
+                    let filePath = finalURL.replacingOccurrences(of: "file://", with: "")
+                    let encodedPath = filePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? filePath
+                    finalURL = "http://\(host):9000/stream.mp3?path=\(encodedPath)&t=mp3&br=320000"
+                    os_log(.info, log: logger, "🔄 Converted file URL to streaming URL: %{public}s", finalURL)
+                }
+                
+                // Ensure transcoding parameters are present
+                if !finalURL.contains("t=mp3") {
+                    finalURL += finalURL.contains("?") ? "&t=mp3&br=320000" : "?t=mp3&br=320000"
+                }
+                
+                os_log(.info, log: logger, "🎵 Final fallback URL: %{public}s", finalURL)
+                
+                // Start playback with the transcoded URL
+                DispatchQueue.main.async {
+                    self.audioManager.playStream(urlString: finalURL)
+                }
+            } else {
+                os_log(.error, log: logger, "❌ Failed to parse JSON-RPC response")
+                // Log the raw response for debugging
+                if let responseString = String(data: data, encoding: .utf8) {
+                    os_log(.debug, log: logger, "Raw JSON response: %{public}s", responseString)
+                }
+            }
+        } catch {
+            os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
+        }
+    }
+    
+    private func sendFormatRequest() {
+        os_log(.info, log: logger, "🎵 Requesting MP3 format from server")
+        
+        // Send a simple "not supported" response to reject FLAC
+        // This should cause the server to try a different format
+        sendStatus("STMn") // Not supported - triggers format renegotiation
+        
+        os_log(.info, log: logger, "🎵 Format rejection sent - server should retry with MP3")
     }
     
     private func sendStatus(_ code: String) {
@@ -329,7 +545,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // Bytes received (8 bytes) - estimate based on time and bitrate
         let estimatedBitrate: UInt64 = 320000 // 320kbps
-        let bytesReceived: UInt64 = UInt64(currentTime * Double(estimatedBitrate) / 8.0)
+        let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
+        let bytesReceived: UInt64 = UInt64(safeCurrentTime * Double(estimatedBitrate) / 8.0)
         statusData.append(Data([
             UInt8((bytesReceived >> 56) & 0xff),
             UInt8((bytesReceived >> 48) & 0xff),
@@ -374,7 +591,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // *** CRITICAL: Only set elapsed time for STMt status messages ***
         if code == "STMt" {
             // Elapsed seconds (4 bytes) - ONLY for status updates
-            let elapsedSeconds = UInt32(currentTime)
+            let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
+            let elapsedSeconds = UInt32(safeCurrentTime)
             statusData.append(Data([
                 UInt8((elapsedSeconds >> 24) & 0xff),
                 UInt8((elapsedSeconds >> 16) & 0xff),
@@ -386,7 +604,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             statusData.append(Data([0x00, 0x00]))
             
             // Elapsed milliseconds (4 bytes)
-            let elapsedMs = UInt32(currentTime * 1000)
+            let elapsedMs = UInt32(safeCurrentTime * 1000)
             statusData.append(Data([
                 UInt8((elapsedMs >> 24) & 0xff),
                 UInt8((elapsedMs >> 16) & 0xff),
@@ -405,7 +623,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT sent with elapsed time: %.2f seconds (raw: %d ms)", currentTime, elapsedMs)
+            os_log(.info, log: logger, "STAT sent with elapsed time: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
         } else {
             // For non-status messages, don't include timing fields
             os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
@@ -458,6 +676,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // Stop status timer
         statusTimer?.invalidate()
         statusTimer = nil
+        
+        // Reset connection state
+        hasRequestedInitialStatus = false
         
         // Attempt to reconnect after a delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
