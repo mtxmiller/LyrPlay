@@ -10,6 +10,10 @@ class AudioManager: NSObject, ObservableObject {
     private var lastReportedTime: Double = 0
     private var timeStuckCount = 0
     
+    // *** NEW: Track intentional pause state ***
+    private var isIntentionallyPaused = false
+    private var isIntentionallyStopped = false
+    
     // Callback for when track ends
     var onTrackEnded: (() -> Void)?
     
@@ -103,6 +107,13 @@ class AudioManager: NSObject, ObservableObject {
         
         os_log(.info, log: logger, "Playing FLAC stream with VLC: %{public}s", urlString)
         
+        // *** RESET pause/stop state when starting new stream ***
+        isIntentionallyPaused = false
+        isIntentionallyStopped = false
+        // Only reset timing when actually starting a NEW stream
+        lastReportedTime = 0
+        timeStuckCount = 0
+        
         // Create VLC media and play
         let media = VLCMedia(url: url)
         mediaPlayer.media = media
@@ -115,18 +126,25 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func play() {
+        // *** CLEAR pause state when resuming ***
+        isIntentionallyPaused = false
         mediaPlayer.play()
         updateNowPlayingInfo(isPlaying: true)
         os_log(.info, log: logger, "VLC resumed playback")
     }
     
     func pause() {
+        // *** SET pause state when pausing ***
+        isIntentionallyPaused = true
         mediaPlayer.pause()
         updateNowPlayingInfo(isPlaying: false)
         os_log(.info, log: logger, "VLC paused playback")
     }
     
     func stop() {
+        // *** SET stop state when stopping ***
+        isIntentionallyStopped = true
+        isIntentionallyPaused = false
         mediaPlayer.stop()
         updateNowPlayingInfo(isPlaying: false)
         os_log(.info, log: logger, "VLC stopped playback")
@@ -152,13 +170,16 @@ class AudioManager: NSObject, ObservableObject {
                 os_log(.error, log: logger, "⚠️ VLC time stuck at %.2f seconds, state: %{public}s", timeInSeconds, vlcStateDescription(playerState))
             }
             
-            // If time is stuck AND VLC state suggests end of playback
+            // *** ONLY trigger track end if NOT intentionally paused/stopped ***
             if timeStuckCount >= 15 && (playerState == .ended || playerState == .stopped || !mediaPlayer.isPlaying) {
-                os_log(.info, log: logger, "🎵 Detected track end via stuck time + VLC state - notifying server")
-                timeStuckCount = 0
-                lastReportedTime = 0
-                DispatchQueue.main.async {
-                    self.onTrackEnded?()
+                if !isIntentionallyPaused && !isIntentionallyStopped {
+                    os_log(.info, log: logger, "🎵 Detected track end via stuck time + VLC state - notifying server")
+                    // Don't reset timing variables here - let them maintain their values
+                    DispatchQueue.main.async {
+                        self.onTrackEnded?()
+                    }
+                } else {
+                    os_log(.info, log: logger, "⏸️ Time stuck but playback is intentionally paused/stopped - not triggering track end")
                 }
                 return timeInSeconds // Return the stuck time, don't reset to 0
             }
@@ -174,10 +195,12 @@ class AudioManager: NSObject, ObservableObject {
         let playerState = mediaPlayer.state
         let isPlaying = mediaPlayer.isPlaying
         
-        os_log(.debug, log: logger, "Manual track end check - State: %{public}s, Playing: %{public}s",
-               vlcStateDescription(playerState), isPlaying ? "YES" : "NO")
+        os_log(.debug, log: logger, "Manual track end check - State: %{public}s, Playing: %{public}s, Paused: %{public}s, Stopped: %{public}s",
+               vlcStateDescription(playerState), isPlaying ? "YES" : "NO",
+               isIntentionallyPaused ? "YES" : "NO", isIntentionallyStopped ? "YES" : "NO")
         
-        if playerState == .ended || (timeStuckCount > 10 && !isPlaying) {
+        // *** ONLY return true if track actually ended (not paused/stopped) ***
+        if playerState == .ended || (timeStuckCount > 10 && !isPlaying && !isIntentionallyPaused && !isIntentionallyStopped) {
             os_log(.info, log: logger, "🎵 Manual check detected track end")
             return true
         }
@@ -251,7 +274,8 @@ extension AudioManager: VLCMediaPlayerDelegate {
         let playerState = mediaPlayer.state
         os_log(.debug, log: logger, "VLC state changed to: %{public}s", vlcStateDescription(playerState))
         
-        if playerState == .ended {
+        // *** ONLY trigger track end if state is ended AND not intentionally paused/stopped ***
+        if playerState == .ended && !isIntentionallyPaused && !isIntentionallyStopped {
             os_log(.info, log: logger, "🎵 VLC reported track ended via delegate")
             DispatchQueue.main.async {
                 self.onTrackEnded?()
