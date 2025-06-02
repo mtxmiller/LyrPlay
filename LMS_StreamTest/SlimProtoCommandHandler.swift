@@ -1,5 +1,5 @@
 // File: SlimProtoCommandHandler.swift
-// Updated with working logic from reference client
+// FINAL FIX: Add SETD command handler to properly report player name to LMS
 import Foundation
 import os.log
 
@@ -19,7 +19,7 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - State
     private var isStreamActive = false
-    private var isPausedByLockScreen = false // Match reference naming
+    private var isPausedByLockScreen = false
     private var serverTimestamp: UInt32 = 0
     private var lastKnownPosition: Double = 0.0
     
@@ -29,30 +29,33 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        os_log(.info, log: logger, "SlimProtoCommandHandler initialized")
+        os_log(.info, log: logger, "SlimProtoCommandHandler initialized with SETD support")
     }
     
-    // MARK: - Command Processing (from reference)
+    // MARK: - Command Processing (ENHANCED with SETD support)
     func processCommand(_ command: SlimProtoCommand) {
         switch command.type {
         case "strm":
             processServerCommand(command.type, payload: command.payload)
+        case "setd":
+            // *** CRITICAL FIX: Handle SETD commands for player name ***
+            processSetdCommand(command.payload)
         case "audg", "aude":
             slimProtoClient?.sendStatus("STMt") // Acknowledge with heartbeat
         case "stat":
             // Respond to STAT requests based on actual state
             if isPausedByLockScreen {
-                slimProtoClient?.sendStatus("STMp") // Send pause status when paused
+                slimProtoClient?.sendStatus("STMp")
                 os_log(.info, log: logger, "📍 STAT request - responding with PAUSE status")
             } else {
-                slimProtoClient?.sendStatus("STMt") // Timer/heartbeat
+                slimProtoClient?.sendStatus("STMt")
             }
         case "vers":
-            slimProtoClient?.sendStatus("STMt") // Acknowledge with heartbeat
+            slimProtoClient?.sendStatus("STMt")
         case "vfdc":
             // Respond to VFD commands based on actual state
             if isPausedByLockScreen {
-                slimProtoClient?.sendStatus("STMp") // Send pause status when paused
+                slimProtoClient?.sendStatus("STMp")
             } else {
                 slimProtoClient?.sendStatus("STMt")
             }
@@ -64,7 +67,81 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    // MARK: - Stream Command Processing (from reference)
+    // MARK: - SETD Command Processing (NEW - CRITICAL FIX)
+    private func processSetdCommand(_ payload: Data) {
+        guard payload.count >= 1 else {
+            os_log(.error, log: logger, "SETD command payload too short")
+            return
+        }
+        
+        let setdId = payload[0]
+        os_log(.info, log: logger, "📛 SETD command received - ID: %d, payload length: %d", setdId, payload.count)
+        
+        // Handle player name query and change (ID 0 = player name)
+        if setdId == 0 {
+            if payload.count == 1 {
+                // Server is querying our player name - send it back
+                os_log(.info, log: logger, "📛 Server requesting player name - sending: '%{public}s'", settings.effectivePlayerName)
+                sendSetdPlayerName(settings.effectivePlayerName)
+            } else if payload.count > 1 {
+                // Server is setting our player name
+                let nameData = payload.subdata(in: 1..<payload.count)
+                if let newName = String(data: nameData, encoding: .utf8) {
+                    let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    os_log(.info, log: logger, "📛 Server setting player name to: '%{public}s'", trimmedName)
+                    
+                    // Update our settings with the server-provided name
+                    DispatchQueue.main.async {
+                        self.settings.playerName = trimmedName
+                        self.settings.saveSettings()
+                    }
+                    
+                    // Confirm the change back to server
+                    sendSetdPlayerName(trimmedName)
+                } else {
+                    os_log(.error, log: logger, "📛 Failed to decode SETD player name")
+                }
+            }
+        } else {
+            os_log(.info, log: logger, "📛 SETD command with unsupported ID: %d", setdId)
+        }
+    }
+    
+    // MARK: - Send SETD Player Name Response (NEW - CRITICAL FIX)
+    private func sendSetdPlayerName(_ playerName: String) {
+        guard let slimProtoClient = slimProtoClient else {
+            os_log(.error, log: logger, "Cannot send SETD - no client reference")
+            return
+        }
+        
+        // Create SETD response packet
+        var setdData = Data()
+        
+        // SETD ID (1 byte) - 0 = player name
+        setdData.append(0)
+        
+        // Player name as UTF-8 string
+        if let nameData = playerName.data(using: .utf8) {
+            setdData.append(nameData)
+        }
+        
+        // Create the full message
+        let command = "SETD".data(using: .ascii)!
+        let length = UInt32(setdData.count).bigEndian
+        let lengthData = withUnsafeBytes(of: length) { Data($0) }
+        
+        var fullMessage = Data()
+        fullMessage.append(command)      // 4 bytes: "SETD"
+        fullMessage.append(lengthData)   // 4 bytes: length
+        fullMessage.append(setdData)     // payload: ID + name
+        
+        // Send via the client's socket
+        slimProtoClient.sendRawMessage(fullMessage)
+        
+        os_log(.info, log: logger, "✅ SETD player name sent: '%{public}s' (%d bytes)", playerName, setdData.count)
+    }
+    
+    // MARK: - Stream Command Processing (existing code...)
     private func processServerCommand(_ command: String, payload: Data) {
         guard command == "strm" else { return }
         
@@ -77,7 +154,7 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
                    commandChar, streamCommand, format, format)
             
-            // Enhanced format handling (from reference)
+            // Enhanced format handling
             var formatName = "Unknown"
             var shouldAccept = false
             
@@ -113,59 +190,47 @@ class SlimProtoCommandHandler: ObservableObject {
             }
             
             if !shouldAccept {
-                // Reject this format and request transcoding
                 os_log(.info, log: logger, "🔄 Rejecting %{public}s format, requesting AAC transcode", formatName)
-                slimProtoClient?.sendStatus("STMn") // Not supported - triggers format renegotiation
+                slimProtoClient?.sendStatus("STMn")
                 return
             }
             
-            // Extract server elapsed time for stream pickup (from reference)
             let serverElapsedTime = extractServerElapsedTime(from: payload)
             
-            // Extract HTTP request from remaining payload
             if payload.count > 24 {
                 let httpData = payload.subdata(in: 24..<payload.count)
                 if let httpRequest = String(data: httpData, encoding: .utf8) {
                     os_log(.info, log: logger, "HTTP request for %{public}s: %{public}s", formatName, httpRequest)
                     
-                    // Parse the URL from the HTTP request
                     if let url = extractURLFromHTTPRequest(httpRequest) {
                         os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
                         
-                        // Handle different stream commands (from reference)
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
                             handleStartCommand(url: url, format: formatName, startTime: serverElapsedTime)
-                            
                         case UInt8(ascii: "p"): // pause
                             handlePauseCommand()
-                            
                         case UInt8(ascii: "u"): // unpause
                             handleUnpauseCommand()
-                            
                         case UInt8(ascii: "q"): // stop
                             handleStopCommand()
-                            
                         case UInt8(ascii: "t"): // status request
                             handleStatusRequest(payload)
-                            
                         case UInt8(ascii: "f"): // flush
                             handleFlushCommand()
-                            
                         default:
-                            slimProtoClient?.sendStatus("STMt") // Generic status
+                            slimProtoClient?.sendStatus("STMt")
                         }
                     } else {
-                        slimProtoClient?.sendStatus("STMn") // Not supported/error
+                        slimProtoClient?.sendStatus("STMn")
                     }
                 } else {
-                    slimProtoClient?.sendStatus("STMn") // Not supported/error
+                    slimProtoClient?.sendStatus("STMn")
                 }
             } else {
-                // Handle commands that don't need URLs (from reference)
+                // Handle commands without HTTP data
                 os_log(.error, log: logger, "⚠️ Stream command '%{public}s' has no HTTP data - handling as control command", commandChar)
                 
-                // Extract server timestamp from the payload
                 if streamCommand == UInt8(ascii: "t") && payload.count >= 24 {
                     let timestampData = payload.subdata(in: 16..<20)
                     serverTimestamp = timestampData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
@@ -175,8 +240,8 @@ class SlimProtoCommandHandler: ObservableObject {
                 
                 switch streamCommand {
                 case UInt8(ascii: "s"): // start - but no URL!
-                    os_log(.error, log: logger, "🚨 Server sent START command but no HTTP data! This shouldn't happen.")
-                    slimProtoClient?.sendStatus("STMn") // Not supported - request proper stream
+                    os_log(.error, log: logger, "🚨 Server sent START command but no HTTP data!")
+                    slimProtoClient?.sendStatus("STMn")
                 case UInt8(ascii: "p"): // pause
                     handlePauseCommand()
                 case UInt8(ascii: "u"): // unpause
@@ -189,27 +254,25 @@ class SlimProtoCommandHandler: ObservableObject {
                     handleFlushCommand()
                 default:
                     os_log(.error, log: logger, "❓ Unknown stream command: '%{public}s' (%d)", commandChar, streamCommand)
-                    slimProtoClient?.sendStatus("STMt") // Default to timer status
+                    slimProtoClient?.sendStatus("STMt")
                 }
             }
         } else {
-            slimProtoClient?.sendStatus("STMn") // Not supported
+            slimProtoClient?.sendStatus("STMn")
         }
     }
     
-    // MARK: - Individual Command Handlers (from reference)
+    // MARK: - Individual Command Handlers (existing code...)
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream playback", format)
         isPausedByLockScreen = false
         isStreamActive = true
         
-        // Notify delegate
         delegate?.didStartStream(url: url, format: format, startTime: startTime)
         
-        // Send acknowledgments (from reference)
-        slimProtoClient?.sendStatus("STMc") // Connect - acknowledge stream start
+        slimProtoClient?.sendStatus("STMc")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.slimProtoClient?.sendStatus("STMs") // Stream started
+            self.slimProtoClient?.sendStatus("STMs")
         }
     }
     
@@ -219,7 +282,7 @@ class SlimProtoCommandHandler: ObservableObject {
         lastKnownPosition = getCurrentPlaybackTime() ?? 0.0
         
         delegate?.didPauseStream()
-        slimProtoClient?.sendStatus("STMp") // Paused
+        slimProtoClient?.sendStatus("STMp")
     }
     
     private func handleUnpauseCommand() {
@@ -227,7 +290,7 @@ class SlimProtoCommandHandler: ObservableObject {
         isPausedByLockScreen = false
         
         delegate?.didResumeStream()
-        slimProtoClient?.sendStatus("STMr") // Resume
+        slimProtoClient?.sendStatus("STMr")
     }
     
     private func handleStopCommand() {
@@ -237,7 +300,7 @@ class SlimProtoCommandHandler: ObservableObject {
         lastKnownPosition = 0.0
         
         delegate?.didStopStream()
-        slimProtoClient?.sendStatus("STMf") // Flushed/stopped
+        slimProtoClient?.sendStatus("STMf")
     }
     
     private func handleFlushCommand() {
@@ -247,13 +310,12 @@ class SlimProtoCommandHandler: ObservableObject {
         lastKnownPosition = 0.0
         
         delegate?.didStopStream()
-        slimProtoClient?.sendStatus("STMf") // Flushed
+        slimProtoClient?.sendStatus("STMf")
     }
     
     private func handleStatusRequest(_ payload: Data) {
         os_log(.debug, log: logger, "🔄 Server status request")
         
-        // Extract server timestamp for echo back (from reference)
         if payload.count >= 24 {
             let timestampData = payload.subdata(in: 16..<20)
             serverTimestamp = timestampData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
@@ -263,26 +325,23 @@ class SlimProtoCommandHandler: ObservableObject {
         
         delegate?.didReceiveStatusRequest()
         
-        // Respond based on our actual state (from reference)
         if isPausedByLockScreen {
-            slimProtoClient?.sendStatus("STMp") // Send PAUSE status
+            slimProtoClient?.sendStatus("STMp")
             os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
         } else {
-            slimProtoClient?.sendStatus("STMt") // Timer/heartbeat status
+            slimProtoClient?.sendStatus("STMt")
             os_log(.info, log: logger, "📍 Responding to status request with TIMER status")
         }
     }
     
-    // MARK: - Utility Methods (from reference)
+    // MARK: - Utility Methods (existing code...)
     private func extractServerElapsedTime(from payload: Data) -> Double {
         guard payload.count >= 24 else { return 0.0 }
         
-        // Try to extract from replay_gain field (bytes 16-19) as elapsed seconds
         let elapsedData = payload.subdata(in: 16..<20)
         let elapsedSeconds = elapsedData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         
-        // Much more restrictive sanity check - elapsed time shouldn't be more than 1 hour
-        if elapsedSeconds > 0 && elapsedSeconds < 3600 { // Max 1 hour
+        if elapsedSeconds > 0 && elapsedSeconds < 3600 {
             os_log(.info, log: logger, "🔄 Extracted valid server elapsed time: %d seconds", elapsedSeconds)
             return Double(elapsedSeconds)
         } else if elapsedSeconds > 0 {
@@ -293,7 +352,6 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
-        // Parse HTTP request like "GET /stream.mp3?player=xx:xx:xx:xx:xx:xx HTTP/1.0"
         let lines = httpRequest.components(separatedBy: "\n")
         guard let firstLine = lines.first else { return nil }
         
@@ -306,7 +364,6 @@ class SlimProtoCommandHandler: ObservableObject {
         let fullURL = "http://\(host):\(webPort)\(path)"
         
         os_log(.info, log: logger, "🔍 Extracted stream URL: %{public}s", fullURL)
-        
         return fullURL
     }
     
@@ -315,10 +372,9 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "🎵 Track ended - sending STMd to request next track")
         isStreamActive = false
         lastKnownPosition = 0.0
-        slimProtoClient?.sendStatus("STMd") // Decoder ready - request next track
+        slimProtoClient?.sendStatus("STMd")
     }
     
-    // Method to be called by coordinator when audio manager reports time updates
     func updatePlaybackPosition(_ position: Double) {
         if !isPausedByLockScreen {
             lastKnownPosition = position
@@ -335,9 +391,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    // MARK: - Audio Manager Integration
     private func getCurrentPlaybackTime() -> Double? {
-        // This will be enhanced to get actual time from audio manager via coordinator
         return lastKnownPosition
     }
 }

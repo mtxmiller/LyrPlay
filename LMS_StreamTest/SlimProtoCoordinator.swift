@@ -1,5 +1,5 @@
 // File: SlimProtoCoordinator.swift
-// Updated to work with the integrated reference client logic
+// Phase 2: Updated to work with enhanced connection manager
 import Foundation
 import os.log
 
@@ -17,6 +17,7 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - State Management
     private var statusTimer: Timer?
+    private var lastStatusSent: Date?
     
     // MARK: - Initialization
     init(audioManager: AudioManager) {
@@ -28,7 +29,7 @@ class SlimProtoCoordinator: ObservableObject {
         setupDelegation()
         setupAudioCallbacks()
         
-        os_log(.info, log: logger, "SlimProtoCoordinator initialized with working reference logic")
+        os_log(.info, log: logger, "SlimProtoCoordinator initialized with Enhanced Connection Manager")
     }
     
     // MARK: - Setup
@@ -45,7 +46,7 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     private func setupAudioCallbacks() {
-        // Set up track ended callback (from reference)
+        // Set up track ended callback
         audioManager.onTrackEnded = { [weak self] in
             DispatchQueue.main.async {
                 self?.commandHandler.notifyTrackEnded()
@@ -64,34 +65,29 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     func disconnect() {
+        os_log(.info, log: logger, "User requested disconnection")
+        connectionManager.userInitiatedDisconnection()
         stopStatusTimer()
         client.disconnect()
-        os_log(.info, log: logger, "Disconnected")
     }
     
     func updateServerSettings(host: String, port: UInt16) {
         client.updateServerSettings(host: host, port: port)
     }
     
-    // MARK: - Status Timer (from reference, with background awareness)
+    // MARK: - Enhanced Status Timer with Background Awareness
     private func startStatusTimer() {
         stopStatusTimer()
         
-        // Adjust timer interval based on background state
-        let interval: TimeInterval
-        switch connectionManager.backgroundConnectionStrategy {
-        case .normal:
-            interval = 10.0  // Normal interval (from reference)
-        case .minimal:
-            interval = 20.0  // Longer interval in background
-        case .suspended:
-            interval = 60.0  // Very long interval if suspended
-        }
+        // Get interval from connection manager's background strategy
+        let interval = connectionManager.backgroundConnectionStrategy.statusInterval
         
         statusTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.sendPeriodicStatus()
         }
-        os_log(.info, log: logger, "Status timer started with %.1f second interval", interval)
+        
+        os_log(.info, log: logger, "Status timer started with %.1f second interval (%{public}s strategy)",
+               interval, connectionManager.backgroundConnectionStrategy.description)
     }
     
     private func stopStatusTimer() {
@@ -100,6 +96,11 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     private func sendPeriodicStatus() {
+        // Don't send if we just sent one recently (avoid spam)
+        if let lastSent = lastStatusSent, Date().timeIntervalSince(lastSent) < 5.0 {
+            return
+        }
+        
         // Update position from audio manager before sending status
         let currentTime = audioManager.getCurrentTime()
         commandHandler.updatePlaybackPosition(currentTime)
@@ -108,19 +109,39 @@ class SlimProtoCoordinator: ObservableObject {
         let isPlaying = audioManager.getPlayerState() == "Playing"
         client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
         
-        // Only send periodic heartbeat if we're actually streaming (from reference)
+        // Only send heartbeat if we have an active stream
         if commandHandler.streamState != "Stopped" {
-            client.sendStatus("STMt") // Send periodic heartbeat
+            client.sendStatus("STMt")
+            lastStatusSent = Date()
+            
+            // Record heartbeat for health monitoring
+            connectionManager.recordHeartbeatResponse()
         }
     }
     
-    // MARK: - Connection State
+    // MARK: - Connection State (Enhanced)
     var connectionState: String {
         return connectionManager.connectionState.displayName
     }
     
     var streamState: String {
         return commandHandler.streamState
+    }
+    
+    var networkStatus: String {
+        return connectionManager.networkStatus.displayName
+    }
+    
+    var connectionSummary: String {
+        return connectionManager.connectionSummary
+    }
+    
+    var isInBackground: Bool {
+        return connectionManager.isInBackground
+    }
+    
+    var backgroundTimeRemaining: TimeInterval {
+        return connectionManager.backgroundTimeRemaining
     }
     
     deinit {
@@ -135,7 +156,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         connectionManager.didConnect()
-        startStatusTimer() // Start periodic status updates (from reference)
+        startStatusTimer()
     }
     
     func slimProtoDidDisconnect(error: Error?) {
@@ -145,12 +166,15 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     }
     
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {
+        // Record that we received a command (shows connection is alive)
+        connectionManager.recordHeartbeatResponse()
+        
         // Forward to command handler
         commandHandler.processCommand(command)
     }
 }
 
-// MARK: - SlimProtoConnectionManagerDelegate
+// MARK: - Enhanced SlimProtoConnectionManagerDelegate
 extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerShouldReconnect() {
@@ -159,9 +183,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerDidEnterBackground() {
-        os_log(.info, log: logger, "📱 Coordinator handling background transition")
+        os_log(.info, log: logger, "📱 Coordinator handling enhanced background transition")
         
-        // Send immediate status to keep connection alive (from reference)
+        // Send immediate status to keep connection alive
         if connectionManager.connectionState.isConnected {
             let currentTime = audioManager.getCurrentTime()
             let isCurrentlyPlaying = audioManager.getPlayerState() == "Playing"
@@ -171,21 +195,22 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             
             // Send status to server immediately
             client.sendStatus("STMt")
+            connectionManager.recordHeartbeatResponse()
             
-            os_log(.info, log: logger, "📱 Sent background status - Playing: %{public}s, Position: %.2f",
-                   isCurrentlyPlaying ? "YES" : "NO", currentTime)
+            os_log(.info, log: logger, "📱 Sent background status - Playing: %{public}s, Position: %.2f, Time remaining: %.0f sec",
+                   isCurrentlyPlaying ? "YES" : "NO", currentTime, connectionManager.backgroundTimeRemaining)
         }
         
-        // Restart timer with background interval
+        // Restart timer with background strategy interval
         if statusTimer != nil {
             startStatusTimer()
         }
     }
     
     func connectionManagerDidEnterForeground() {
-        os_log(.info, log: logger, "📱 Coordinator handling foreground transition")
+        os_log(.info, log: logger, "📱 Coordinator handling enhanced foreground transition")
         
-        // Check if connection is still alive (from reference)
+        // Check if connection is still alive
         if connectionManager.connectionState.isConnected {
             let currentTime = audioManager.getCurrentTime()
             let isCurrentlyPlaying = audioManager.getPlayerState() == "Playing"
@@ -195,18 +220,60 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             
             // Send immediate status update
             client.sendStatus("STMt")
+            connectionManager.recordHeartbeatResponse()
             
             os_log(.info, log: logger, "📱 Sent foreground status - Playing: %{public}s, Position: %.2f",
                    isCurrentlyPlaying ? "YES" : "NO", currentTime)
         } else {
             // Connection lost in background - try to reconnect
-            os_log(.error, log: logger, "📱 Connection lost in background - reconnecting")
+            os_log(.error, log: logger, "📱 Connection lost in background - attempting reconnection")
             connect()
         }
         
         // Restart timer with normal interval
         if statusTimer != nil {
             startStatusTimer()
+        }
+    }
+    
+    func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
+        os_log(.info, log: logger, "🌐 Network change - Available: %{public}s, Expensive: %{public}s",
+               isAvailable ? "YES" : "NO", isExpensive ? "YES" : "NO")
+        
+        if isAvailable {
+            // Network became available - adjust strategy if needed
+            if connectionManager.connectionState.canAttemptConnection {
+                os_log(.info, log: logger, "🌐 Network available - attempting connection")
+                connect()
+            }
+        } else {
+            // Network lost - we'll be disconnected soon
+            os_log(.error, log: logger, "🌐 Network lost - connection will be affected")
+        }
+        
+        // Restart status timer with appropriate interval for network type
+        if statusTimer != nil {
+            startStatusTimer()
+        }
+    }
+    
+    func connectionManagerShouldCheckHealth() {
+        os_log(.info, log: logger, "💓 Connection health check requested")
+        
+        // Send a test status to verify connection is alive
+        if connectionManager.connectionState.isConnected {
+            let currentTime = audioManager.getCurrentTime()
+            let isPlaying = audioManager.getPlayerState() == "Playing"
+            
+            // Update client state
+            client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
+            
+            // Send status - if this fails, we'll get a disconnect event
+            client.sendStatus("STMt")
+            
+            os_log(.info, log: logger, "💓 Health check status sent")
+        } else {
+            os_log(.error, log: logger, "💓 Health check failed - not connected")
         }
     }
 }
@@ -217,7 +284,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didStartStream(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "🎵 Starting audio stream: %{public}s (%{public}s)", url, format)
         
-        // Use format-aware playback (from reference)
+        // Use format-aware playback
         if startTime > 0 {
             os_log(.info, log: logger, "🔄 Picking up existing stream at position: %.2f seconds", startTime)
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
@@ -228,7 +295,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Update the client with stream start
         client.setPlaybackState(isPlaying: true, position: startTime)
         
-        // Fetch metadata for lock screen (from reference)
+        // Fetch metadata for lock screen
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.fetchCurrentTrackMetadata()
         }
@@ -271,34 +338,34 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Update client with real position and state
         let isPlaying = audioManager.getPlayerState() == "Playing"
         client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
+        
+        // Record that we handled a status request (shows connection is alive)
+        connectionManager.recordHeartbeatResponse()
     }
 }
 
-// MARK: - Lock Screen Integration (from reference)
+// MARK: - Lock Screen Integration
 extension SlimProtoCoordinator {
     
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        guard client.connectionState == "Connected" else {
+        guard connectionManager.connectionState.isConnected else {
             os_log(.error, log: logger, "Cannot send lock screen command - not connected to server")
             return
         }
         
         switch command.lowercased() {
         case "play":
-            // Send unpause/resume status to server (from reference)
             sendJSONRPCCommand("play")
             os_log(.info, log: logger, "✅ Sent resume command to LMS server")
             
         case "pause":
-            // Send pause status to server (from reference)
             let currentTime = audioManager.getCurrentTime()
             sendJSONRPCCommand("pause")
             os_log(.info, log: logger, "✅ Sent pause command to LMS server (position: %.2f)", currentTime)
             
         case "stop":
-            // Send stop status to server (from reference)
             sendJSONRPCCommand("stop")
             os_log(.info, log: logger, "✅ Sent stop command to LMS server")
             
@@ -316,7 +383,6 @@ extension SlimProtoCoordinator {
     }
     
     private func sendJSONRPCCommand(_ command: String, parameters: [String] = []) {
-        // Extract player ID from settings (from reference)
         let playerID = settings.playerMACAddress
         
         var jsonRPCCommand: [String: Any]
@@ -326,13 +392,13 @@ extension SlimProtoCoordinator {
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
-                "params": [playerID, ["pause", "1"]] // 1 = pause
+                "params": [playerID, ["pause", "1"]]
             ]
         case "play":
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
-                "params": [playerID, ["pause", "0"]] // 0 = unpause/play
+                "params": [playerID, ["pause", "0"]]
             ]
         case "stop":
             jsonRPCCommand = [
@@ -358,7 +424,7 @@ extension SlimProtoCoordinator {
             return
         }
         
-        // Send API request to LMS (from reference)
+        // Send API request to LMS
         let webPort = settings.serverWebPort
         let host = settings.serverHost
         var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
@@ -374,7 +440,7 @@ extension SlimProtoCoordinator {
                 } else {
                     os_log(.info, log: self.logger, "✅ JSON-RPC %{public}s command sent successfully", command)
                     
-                    // For skip commands, refresh metadata after a delay (from reference)
+                    // For skip commands, refresh metadata after a delay
                     if command == "playlist" {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             self.fetchCurrentTrackMetadata()
@@ -389,14 +455,12 @@ extension SlimProtoCoordinator {
     }
 }
 
-// MARK: - Metadata Integration (from reference)
+// MARK: - Metadata Integration
 extension SlimProtoCoordinator {
     
     private func fetchCurrentTrackMetadata() {
-        // Extract player ID (from reference)
         let playerID = settings.playerMACAddress
         
-        // Use LMS JSON-RPC API to request current track with comprehensive metadata (from reference)
         let jsonRPC = [
             "id": 1,
             "method": "slim.request",
@@ -404,18 +468,16 @@ extension SlimProtoCoordinator {
                 playerID,
                 [
                     "status", "-", "1",
-                    // Request comprehensive metadata tags (from reference)
                     "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z"
                 ]
             ]
         ] as [String : Any]
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            os_log(.error, log: logger, "Failed to create JSON-RPC request")
+            os_log(.error, log: logger, "Failed to create metadata request")
             return
         }
         
-        // Send API request to LMS (from reference)
         let webPort = settings.serverWebPort
         let host = settings.serverHost
         var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
@@ -426,21 +488,20 @@ extension SlimProtoCoordinator {
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                os_log(.error, log: self.logger, "JSON-RPC metadata request failed: %{public}s", error.localizedDescription)
+                os_log(.error, log: self.logger, "Metadata request failed: %{public}s", error.localizedDescription)
                 return
             }
             
             guard let data = data else {
-                os_log(.error, log: self.logger, "No data received from metadata JSON-RPC")
+                os_log(.error, log: self.logger, "No metadata received")
                 return
             }
             
-            // Parse response to get current track metadata
             self.parseTrackMetadata(data: data)
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting current track metadata")
+        os_log(.info, log: logger, "🌐 Requesting track metadata")
     }
     
     private func parseTrackMetadata(data: Data) {
@@ -450,82 +511,67 @@ extension SlimProtoCoordinator {
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
                 
-                // Extract basic metadata (from reference)
                 let trackTitle = firstTrack["title"] as? String ??
                                firstTrack["track"] as? String ?? "LMS Stream"
                 
                 let trackAlbum = firstTrack["album"] as? String ?? "Lyrion Music Server"
-                
-                // Extract duration information (from reference)
                 let duration = firstTrack["duration"] as? Double ?? 0.0
-                os_log(.info, log: logger, "🔍 Track duration from metadata: %.0f seconds", duration)
                 
-                // Enhanced artist extraction (from reference)
+                // Enhanced artist extraction
                 var trackArtist = "Unknown Artist"
                 
-                // Method 1: Direct artist field
                 if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
                     trackArtist = artist
-                    os_log(.info, log: logger, "✅ Found artist (direct): %{public}s", artist)
-                }
-                // Method 2: Album artist field
-                else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
+                } else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
                     trackArtist = albumArtist
-                    os_log(.info, log: logger, "✅ Found artist (albumartist): %{public}s", albumArtist)
-                }
-                // Method 3: Contributors array (from reference)
-                else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
+                } else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
                     for contributor in contributors {
                         if let role = contributor["role"] as? String,
-                           let name = contributor["name"] as? String {
-                            os_log(.info, log: logger, "🔍 Contributor: %{public}s (role: %{public}s)", name, role)
-                            
-                            // Look for artist roles
-                            if role.lowercased().contains("artist") ||
-                               role.lowercased() == "performer" ||
-                               role.lowercased() == "composer" {
-                                trackArtist = name
-                                os_log(.info, log: logger, "✅ Found artist in contributors: %{public}s (role: %{public}s)", name, role)
-                                break
-                            }
+                           let name = contributor["name"] as? String,
+                           role.lowercased().contains("artist") {
+                            trackArtist = name
+                            break
                         }
                     }
                 }
                 
-                os_log(.info, log: logger, "🎵 Metadata - Title: '%{public}s', Artist: '%{public}s', Album: '%{public}s', Duration: %.0f sec",
-                       trackTitle, trackArtist, trackAlbum, duration)
-                
-                // Create artwork URL if track ID is available (from reference)
+                // Create artwork URL
                 var artworkURL: String? = nil
                 if let trackID = firstTrack["id"] as? Int {
                     let webPort = settings.serverWebPort
                     let host = settings.serverHost
                     artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
-                    os_log(.info, log: logger, "🖼️ Artwork URL: %{public}s", artworkURL!)
-                } else if let trackIDString = firstTrack["id"] as? String, let trackID = Int(trackIDString) {
-                    let webPort = settings.serverWebPort
-                    let host = settings.serverHost
-                    artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
                 }
                 
-                // Pass duration to metadata update (from reference)
+                os_log(.info, log: logger, "🎵 Metadata: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                
                 DispatchQueue.main.async {
                     self.audioManager.updateTrackMetadata(
                         title: trackTitle,
                         artist: trackArtist,
                         album: trackAlbum,
                         artworkURL: artworkURL,
-                        duration: duration  // Include duration
+                        duration: duration
                     )
-                    os_log(.info, log: self.logger, "✅ Updated lock screen metadata with duration: '%{public}s' by %{public}s (%.0f sec)",
-                           trackTitle, trackArtist, duration)
                 }
                 
             } else {
-                os_log(.error, log: logger, "❌ Failed to parse track metadata response")
+                os_log(.error, log: logger, "Failed to parse metadata response")
             }
         } catch {
-            os_log(.error, log: logger, "JSON parsing error for metadata: %{public}s", error.localizedDescription)
+            os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
+        }
+    }
+}
+
+// MARK: - Background Strategy Extension
+extension SlimProtoConnectionManager.BackgroundStrategy {
+    var description: String {
+        switch self {
+        case .normal: return "normal"
+        case .reduced: return "reduced"
+        case .minimal: return "minimal"
+        case .suspended: return "suspended"
         }
     }
 }

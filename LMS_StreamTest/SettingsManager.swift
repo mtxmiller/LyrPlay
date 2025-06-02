@@ -1,8 +1,9 @@
 // File: SettingsManager.swift
+// Cleaned up - removed failed Name= parameter, keeping what works
 import Foundation
 import Network
 import os.log
-import UIKit  // ADD THIS LINE
+import UIKit
 
 class SettingsManager: ObservableObject {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SettingsManager")
@@ -20,8 +21,8 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
-    private(set) var deviceModel: String = "squeezelite"  // Changed from "LMSStreamApp"
-    private(set) var deviceModelName: String = "squeezelite"  // Changed from "LMS Stream for iOS"
+    private(set) var deviceModel: String = "squeezelite"
+    private(set) var deviceModelName: String = "LMS Stream for iOS"
     
     // MARK: - UserDefaults Keys
     private enum Keys {
@@ -57,7 +58,6 @@ class SettingsManager: ObservableObject {
     private func loadSettings() {
         os_log(.info, log: logger, "Loading settings from UserDefaults")
         
-        // Check for settings migration
         migrateSettingsIfNeeded()
         
         serverHost = UserDefaults.standard.string(forKey: Keys.serverHost) ?? ""
@@ -99,17 +99,14 @@ class SettingsManager: ObservableObject {
         let savedVersion = UserDefaults.standard.integer(forKey: Keys.settingsVersion)
         
         if savedVersion == 0 {
-            // First launch or version 0 - no migration needed
             os_log(.info, log: logger, "First launch or no previous settings version")
         } else if savedVersion < currentSettingsVersion {
             os_log(.info, log: logger, "Migrating settings from version %d to %d", savedVersion, currentSettingsVersion)
-            // Add migration logic here when needed
         }
     }
     
     // MARK: - MAC Address Management
     private func generateMACAddress() {
-        // Generate a locally administered MAC address (first byte has bit 1 set)
         var macBytes: [UInt8] = []
         macBytes.append(0x02) // Locally administered
         
@@ -141,14 +138,12 @@ class SettingsManager: ObservableObject {
     func testConnection() async -> ConnectionTestResult {
         os_log(.info, log: logger, "Testing connection to %{public}s", serverHost)
         
-        // Validate host format
         guard !serverHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .invalidHost("Host address cannot be empty")
         }
         
         let cleanHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // Test web port (HTTP)
         let webTestResult = await testHTTPConnection(host: cleanHost, port: serverWebPort)
         switch webTestResult {
         case .failure(let error):
@@ -157,7 +152,6 @@ class SettingsManager: ObservableObject {
             break
         }
         
-        // Test SlimProto port (TCP)
         let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: serverSlimProtoPort)
         switch slimProtoTestResult {
         case .failure(let error):
@@ -231,7 +225,6 @@ class SettingsManager: ObservableObject {
                         continuation.resume(returning: .failure("TCP connection failed: \(error.localizedDescription)"))
                     }
                 case .cancelled:
-                    // Don't resume here as we might have already resumed
                     break
                 default:
                     break
@@ -240,7 +233,6 @@ class SettingsManager: ObservableObject {
             
             connection.start(queue: queue)
             
-            // Timeout handling
             queue.asyncAfter(deadline: .now() + connectionTimeout) {
                 if !hasResumed {
                     hasResumed = true
@@ -266,7 +258,6 @@ class SettingsManager: ObservableObject {
         isConfigured = false
         isDebugModeEnabled = false
         
-        // Reset to defaults but keep MAC address
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
@@ -312,29 +303,26 @@ class SettingsManager: ObservableObject {
         playerMACAddress.uppercased()
     }
     
+    // MARK: - CLEAN: Simple capabilities string (SETD will handle the player name)
     var capabilitiesString: String {
         let formats = preferredFormats.joined(separator: ",")
-        let playerDisplayName = playerName.isEmpty ? UIDevice.current.name : playerName
         
-        // Match real squeezelite capability format
-        return "\(formats),Model=\(playerDisplayName),ModelName=squeezelite,MaxSampleRate=48000,Channels=2,SampleSize=16"
+        // Simple, clean capabilities - let SETD handle the player name
+        return "\(formats),Model=squeezelite,ModelName=LMS Stream for iOS,MaxSampleRate=48000,Channels=2,SampleSize=16"
     }
 
-    // Add this new computed property for the player display name
     var effectivePlayerName: String {
-        if !playerName.isEmpty {
-            return playerName
+        if !playerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return playerName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
-        // Use device name as fallback, but clean it up
         let deviceName = UIDevice.current.name
-        
-        // Remove common suffixes that don't look good in LMS
         let cleanName = deviceName
             .replacingOccurrences(of: "'s iPhone", with: "")
             .replacingOccurrences(of: "'s iPad", with: "")
             .replacingOccurrences(of: " iPhone", with: "")
             .replacingOccurrences(of: " iPad", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         
         return cleanName.isEmpty ? "iOS Player" : cleanName
     }

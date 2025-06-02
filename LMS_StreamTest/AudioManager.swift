@@ -37,7 +37,7 @@ class AudioManager: NSObject, ObservableObject {
         setupAudioSession()
         setupBackgroundObservers()
     }
-    
+
     private func setupAVPlayer() {
         // Create AVPlayer - native iOS player with proper background support
         player = AVPlayer()

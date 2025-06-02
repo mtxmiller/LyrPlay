@@ -1,5 +1,5 @@
 // File: ContentView.swift
-// Updated to use new SlimProto architecture
+// Phase 2: Enhanced to show network status and background information
 import SwiftUI
 import WebKit
 import os.log
@@ -15,7 +15,7 @@ struct ContentView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     
     init() {
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with new architecture")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Phase 2 enhancements")
         
         // Create AudioManager first
         let audioMgr = AudioManager()
@@ -28,7 +28,7 @@ struct ContentView: View {
         // Connect AudioManager back to coordinator for lock screen support
         audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ New SlimProto architecture initialized")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Phase 2 SlimProto architecture initialized")
     }
     
     var body: some View {
@@ -77,9 +77,9 @@ struct ContentView: View {
                 // Settings button overlay
                 settingsButtonOverlay
                 
-                // Debug info overlay (only in debug mode)
+                // Enhanced debug info overlay (Phase 2)
                 if settings.isDebugModeEnabled {
-                    debugOverlay
+                    enhancedDebugOverlay
                 }
             }
         }
@@ -190,19 +190,24 @@ struct ContentView: View {
         }
     }
     
-    // Debug overlay showing connection and stream state
-    private var debugOverlay: some View {
+    // Enhanced debug overlay showing Phase 2 features
+    private var enhancedDebugOverlay: some View {
         VStack {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Debug Info")
+                    Text("Enhanced Debug Info")
                         .font(.caption)
                         .fontWeight(.bold)
                         .foregroundColor(.white)
                     
+                    // Connection status with network info
                     Text("Connection: \(slimProtoCoordinator.connectionState)")
                         .font(.caption2)
                         .foregroundColor(connectionStateColor)
+                    
+                    Text("Network: \(slimProtoCoordinator.networkStatus)")
+                        .font(.caption2)
+                        .foregroundColor(networkStatusColor)
                     
                     Text("Stream: \(slimProtoCoordinator.streamState)")
                         .font(.caption2)
@@ -212,10 +217,28 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundColor(.gray)
                     
-                    // Show background state
-                    Text("Background: \(UIApplication.shared.applicationState == .background ? "YES" : "NO")")
+                    // Enhanced background state info
+                    if slimProtoCoordinator.isInBackground {
+                        Text("Background: YES")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                        
+                        if slimProtoCoordinator.backgroundTimeRemaining > 0 {
+                            Text("Time: \(Int(slimProtoCoordinator.backgroundTimeRemaining))s")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    } else {
+                        Text("Background: NO")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                    
+                    // Connection summary
+                    Text(slimProtoCoordinator.connectionSummary)
                         .font(.caption2)
-                        .foregroundColor(UIApplication.shared.applicationState == .background ? .orange : .green)
+                        .foregroundColor(.gray)
+                        .lineLimit(2)
                 }
                 .padding(8)
                 .background(Color.black.opacity(0.7))
@@ -238,6 +261,21 @@ struct ContentView: View {
             return .yellow
         case "Failed":
             return .red
+        case "No Network":
+            return .orange
+        default:
+            return .gray
+        }
+    }
+    
+    private var networkStatusColor: Color {
+        switch slimProtoCoordinator.networkStatus {
+        case "Wi-Fi", "Wired":
+            return .green
+        case "Cellular":
+            return .yellow
+        case "No Network":
+            return .red
         default:
             return .gray
         }
@@ -246,7 +284,7 @@ struct ContentView: View {
     private func connectToLMS() {
         guard !hasConnected else { return }
         
-        os_log(.info, log: logger, "Connecting to LMS server: %{public}s", settings.serverHost)
+        os_log(.info, log: logger, "Connecting to LMS server with Phase 2 enhancements: %{public}s", settings.serverHost)
         
         // Update coordinator with current settings
         slimProtoCoordinator.updateServerSettings(

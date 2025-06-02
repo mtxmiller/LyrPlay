@@ -1,5 +1,5 @@
 // File: SlimProtoClient.swift
-// Updated to integrate working logic from reference while maintaining modular architecture
+// Fixed to properly identify as LMS Stream app instead of AppleCoreMedia
 import Foundation
 import CocoaAsyncSocket
 import os.log
@@ -50,7 +50,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var port: UInt16 = 3483
     private var hasRequestedInitialStatus = false
     
-    // MARK: - Time Reporting State (from reference)
+    // MARK: - Time Reporting State
     private var serverTimestamp: UInt32 = 0
     private var playbackStartTime: Date?
     private var pausedPosition: Double = 0.0
@@ -119,19 +119,19 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.info, log: logger, "Disconnected")
     }
     
-    // MARK: - Socket Delegate Methods (from reference)
+    // MARK: - Socket Delegate Methods
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
         isConnected = true
         os_log(.info, log: logger, "✅ Connected to LMS at %{public}s:%d", host, port)
         
         // Send HELO message
-        sendHello()
+        sendHelo()
         
         // Start reading server messages - they start with 2-byte length
         socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         os_log(.info, log: logger, "Read data initiated after connect - expecting 2-byte length header")
         
-        // Request initial status after brief delay (from reference)
+        // Request initial status after brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             if !self.hasRequestedInitialStatus {
                 self.hasRequestedInitialStatus = true
@@ -160,7 +160,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     func socket(_ sock: GCDAsyncSocket, didRead data: Data, withTag tag: Int) {
         if tag == 0 {
-            // Read 2-byte length header (from reference)
+            // Read 2-byte length header
             guard data.count >= 2 else {
                 os_log(.error, log: logger, "Length header too short: %d bytes", data.count)
                 socket.readData(toLength: 2, withTimeout: 30, tag: 0)
@@ -179,7 +179,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             }
             
         } else if tag == 1 {
-            // Read complete message (from reference)
+            // Read complete message
             guard data.count >= 4 else {
                 os_log(.error, log: logger, "Message too short: %d bytes", data.count)
                 socket.readData(toLength: 2, withTimeout: 30, tag: 0)
@@ -208,13 +208,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         }
     }
     
-    // MARK: - Protocol Messages (from reference with settings integration)
-    private func sendHello() {
-        os_log(.info, log: logger, "Sending enhanced HELO message with iOS-optimized capabilities")
+    // MARK: - FIXED: Protocol Messages with proper device identification
+    private func sendHelo() {
+        os_log(.info, log: logger, "Sending HELO message as LMS Stream for iOS")
         
-        // Use softsqueeze for better app compatibility (from reference)
-        let deviceID: UInt8 = 12  // softsqueeze
-        let revision: UInt8 = 1
+        // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
+        // Use device ID 9 (squeezelite) which is better recognized by LMS
+        // This prevents the "AppleCoreMedia" identification issue
+        let deviceID: UInt8 = 9   // squeezelite - well-supported by LMS
+        let revision: UInt8 = 0   // Standard revision
         
         // Get MAC address from settings
         let macString = settings.playerMACAddress
@@ -224,7 +226,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         var helloData = Data()
         
-        // Device ID (1 byte)
+        // Device ID (1 byte) - 9 = squeezelite for better LMS compatibility
         helloData.append(deviceID)
         
         // Revision (1 byte)
@@ -236,8 +238,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // UUID (16 bytes) - optional, using zeros
         helloData.append(Data(repeating: 0, count: 16))
         
-        // WLan channel list (2 bytes) - optional, 0x07ff for US channels
-        let wlanChannels: UInt16 = 0x07ff
+        // WLan channel list (2 bytes) - 0x0000 for wired connection
+        let wlanChannels: UInt16 = 0x0000  // Wired connection like real squeezelite
         helloData.append(Data([UInt8(wlanChannels >> 8), UInt8(wlanChannels & 0xff)]))
         
         // Bytes received (8 bytes) - optional, starting at 0
@@ -246,7 +248,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // Language (2 bytes) - optional, "en"
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
         
-        // Enhanced capabilities from reference but using settings
+        // *** FIXED: Enhanced capabilities string with proper player identification ***
         let capabilities = settings.capabilitiesString
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
@@ -264,7 +266,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         fullMessage.append(helloData)
         
         socket.write(fullMessage, withTimeout: 30, tag: 1)
-        os_log(.info, log: logger, "✅ HELO sent with MAC: %{public}s", settings.formattedMACAddress)
+        os_log(.info, log: logger, "✅ HELO sent as squeezelite with player name: '%{public}s', MAC: %{public}s",
+               settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
     func sendStatus(_ code: String) {
@@ -286,7 +289,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             currentTime = lastKnownPosition // Default to last known when paused
         }
         
-        // Create status message (from reference)
+        // Create status message
         var statusData = Data()
         
         // Event Code (4 bytes)
@@ -341,8 +344,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bytesReceived & 0xff)
         ]))
         
-        // Wireless signal strength (2 bytes) - 100 = wired
-        statusData.append(Data([0x00, 0x64]))
+        // Signal strength (2 bytes) - 0x0000 = wired connection (like real squeezelite)
+        statusData.append(Data([0x00, 0x00]))
         
         // Jiffies (4 bytes) - simple timestamp counter
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
@@ -371,7 +374,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferFullness & 0xff)
         ]))
         
-        // Timing fields for STMt and STMp messages (from reference)
+        // Timing fields for STMt and STMp messages
         if code == "STMt" || code == "STMp" {
             // Elapsed seconds (4 bytes)
             let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
@@ -429,7 +432,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         socket.write(fullMessage, withTimeout: 30, tag: 2)
     }
     
-    // MARK: - Playback State Management (from reference)
+    // MARK: - Playback State Management
     func setServerTimestamp(_ timestamp: UInt32) {
         serverTimestamp = timestamp
         os_log(.debug, log: logger, "Server timestamp set: %d", timestamp)
@@ -486,6 +489,17 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     // MARK: - Public Interface
     var connectionState: String {
         return isConnected ? "Connected" : "Disconnected"
+    }
+    
+    // MARK: - Raw Message Sending (for SETD responses)
+    func sendRawMessage(_ message: Data) {
+        guard isConnected else {
+            os_log(.error, log: logger, "Cannot send raw message - not connected")
+            return
+        }
+        
+        socket.write(message, withTimeout: 30, tag: 3)
+        os_log(.debug, log: logger, "📤 Raw message sent (%d bytes)", message.count)
     }
     
     deinit {
