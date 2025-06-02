@@ -18,7 +18,7 @@ class AudioManager: NSObject, ObservableObject {
     // *** Background management ***
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var timeObserver: Any?
-    weak var slimClient: SlimProtoClient?
+    weak var slimClient: SlimProtoCoordinator?
 
     
     // *** Track metadata ***

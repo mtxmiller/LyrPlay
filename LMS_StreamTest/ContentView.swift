@@ -1,4 +1,5 @@
 // File: ContentView.swift
+// Updated to use new SlimProto architecture
 import SwiftUI
 import WebKit
 import os.log
@@ -6,7 +7,7 @@ import os.log
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
     @StateObject private var audioManager = AudioManager()
-    @StateObject private var slimClient: SlimProtoClient
+    @StateObject private var slimProtoCoordinator: SlimProtoCoordinator
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var hasConnected = false
@@ -14,20 +15,20 @@ struct ContentView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     
     init() {
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with new architecture")
         
         // Create AudioManager first
         let audioMgr = AudioManager()
         self._audioManager = StateObject(wrappedValue: audioMgr)
         
-        // Create SlimProtoClient with the AudioManager
-        let slimProtoClient = SlimProtoClient(audioManager: audioMgr)
-        self._slimClient = StateObject(wrappedValue: slimProtoClient)
+        // Create SlimProtoCoordinator with AudioManager
+        let coordinator = SlimProtoCoordinator(audioManager: audioMgr)
+        self._slimProtoCoordinator = StateObject(wrappedValue: coordinator)
         
-        // Connect AudioManager back to SlimClient for lock screen commands
-        audioMgr.slimClient = slimProtoClient
+        // Connect AudioManager back to coordinator for lock screen support
+        audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ AudioManager and SlimClient connected for lock screen support")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ New SlimProto architecture initialized")
     }
     
     var body: some View {
@@ -75,6 +76,11 @@ struct ContentView: View {
                 
                 // Settings button overlay
                 settingsButtonOverlay
+                
+                // Debug info overlay (only in debug mode)
+                if settings.isDebugModeEnabled {
+                    debugOverlay
+                }
             }
         }
         .ignoresSafeArea(.all)
@@ -184,18 +190,71 @@ struct ContentView: View {
         }
     }
     
+    // Debug overlay showing connection and stream state
+    private var debugOverlay: some View {
+        VStack {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Debug Info")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                    
+                    Text("Connection: \(slimProtoCoordinator.connectionState)")
+                        .font(.caption2)
+                        .foregroundColor(connectionStateColor)
+                    
+                    Text("Stream: \(slimProtoCoordinator.streamState)")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                    
+                    Text("Player: \(settings.formattedMACAddress)")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                    
+                    // Show background state
+                    Text("Background: \(UIApplication.shared.applicationState == .background ? "YES" : "NO")")
+                        .font(.caption2)
+                        .foregroundColor(UIApplication.shared.applicationState == .background ? .orange : .green)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(8)
+                
+                Spacer()
+            }
+            .padding(.leading, 20)
+            .padding(.top, 100)
+            
+            Spacer()
+        }
+    }
+    
+    private var connectionStateColor: Color {
+        switch slimProtoCoordinator.connectionState {
+        case "Connected":
+            return .green
+        case "Connecting", "Reconnecting":
+            return .yellow
+        case "Failed":
+            return .red
+        default:
+            return .gray
+        }
+    }
+    
     private func connectToLMS() {
         guard !hasConnected else { return }
         
         os_log(.info, log: logger, "Connecting to LMS server: %{public}s", settings.serverHost)
         
-        // Update SlimProtoClient with current settings
-        slimClient.updateServerSettings(
+        // Update coordinator with current settings
+        slimProtoCoordinator.updateServerSettings(
             host: settings.serverHost,
             port: UInt16(settings.serverSlimProtoPort)
         )
         
-        slimClient.connect()
+        slimProtoCoordinator.connect()
         hasConnected = true
     }
 }

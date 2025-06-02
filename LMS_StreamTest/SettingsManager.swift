@@ -2,6 +2,7 @@
 import Foundation
 import Network
 import os.log
+import UIKit  // ADD THIS LINE
 
 class SettingsManager: ObservableObject {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SettingsManager")
@@ -19,8 +20,8 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
-    private(set) var deviceModel: String = "LMSStreamApp"
-    private(set) var deviceModelName: String = "LMS Stream for iOS"
+    private(set) var deviceModel: String = "squeezelite"  // Changed from "LMSStreamApp"
+    private(set) var deviceModelName: String = "squeezelite"  // Changed from "LMS Stream for iOS"
     
     // MARK: - UserDefaults Keys
     private enum Keys {
@@ -313,6 +314,28 @@ class SettingsManager: ObservableObject {
     
     var capabilitiesString: String {
         let formats = preferredFormats.joined(separator: ",")
-        return "\(formats),Model=\(deviceModel),ModelName=\(deviceModelName),MaxSampleRate=48000,Channels=2,SampleSize=16"
+        let playerDisplayName = playerName.isEmpty ? UIDevice.current.name : playerName
+        
+        // Match real squeezelite capability format
+        return "\(formats),Model=\(playerDisplayName),ModelName=squeezelite,MaxSampleRate=48000,Channels=2,SampleSize=16"
+    }
+
+    // Add this new computed property for the player display name
+    var effectivePlayerName: String {
+        if !playerName.isEmpty {
+            return playerName
+        }
+        
+        // Use device name as fallback, but clean it up
+        let deviceName = UIDevice.current.name
+        
+        // Remove common suffixes that don't look good in LMS
+        let cleanName = deviceName
+            .replacingOccurrences(of: "'s iPhone", with: "")
+            .replacingOccurrences(of: "'s iPad", with: "")
+            .replacingOccurrences(of: " iPhone", with: "")
+            .replacingOccurrences(of: " iPad", with: "")
+        
+        return cleanName.isEmpty ? "iOS Player" : cleanName
     }
 }
