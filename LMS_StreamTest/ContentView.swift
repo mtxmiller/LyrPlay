@@ -4,11 +4,13 @@ import WebKit
 import os.log
 
 struct ContentView: View {
+    @StateObject private var settings = SettingsManager.shared
     @StateObject private var audioManager = AudioManager()
     @StateObject private var slimClient: SlimProtoClient
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var hasConnected = false
+    @State private var showingSettings = false
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     
     init() {
@@ -22,13 +24,31 @@ struct ContentView: View {
         let slimProtoClient = SlimProtoClient(audioManager: audioMgr)
         self._slimClient = StateObject(wrappedValue: slimProtoClient)
         
-        // *** NEW: Connect AudioManager back to SlimClient for lock screen commands ***
+        // Connect AudioManager back to SlimClient for lock screen commands
         audioMgr.slimClient = slimProtoClient
         
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ AudioManager and SlimClient connected for lock screen support")
     }
     
     var body: some View {
+        Group {
+            if !settings.isConfigured {
+                // Show onboarding flow for first-time users
+                OnboardingFlow()
+            } else {
+                // Show main app interface for configured users
+                mainAppView
+            }
+        }
+        .onReceive(settings.$isConfigured) { isConfigured in
+            if isConfigured && !hasConnected {
+                // Connect to LMS when configuration is complete
+                connectToLMS()
+            }
+        }
+    }
+    
+    private var mainAppView: some View {
         GeometryReader { geometry in
             ZStack {
                 // Set background color to match your LMS skin (dark gray/black)
@@ -36,74 +56,147 @@ struct ContentView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
                 
-                if let url = URL(string: "http://ser5:9000") {
-                    WebView(url: url, isLoading: $isLoading, loadError: $loadError)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .ignoresSafeArea(.all)
+                if let url = URL(string: settings.webURL) {
+                    WebView(
+                        url: url,
+                        isLoading: $isLoading,
+                        loadError: $loadError
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .ignoresSafeArea(.all)
                 } else {
-                    VStack {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.largeTitle)
-                            .foregroundColor(.orange)
-                        Text("Invalid LMS URL")
-                            .font(.headline)
-                            .foregroundColor(.red)
-                        Text("Check your server configuration")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding()
+                    serverErrorView
                 }
                 
                 // Status bar - overlay style so it doesn't take up space
                 if isLoading || loadError != nil {
-                    VStack {
-                        Spacer()
-                        
-                        if isLoading {
-                            HStack {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                                Text("Loading LMS Interface...")
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                            }
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 12)
-                            .background(Color.black.opacity(0.8))
-                            .cornerRadius(8)
-                        }
-                        
-                        if let error = loadError {
-                            HStack {
-                                Image(systemName: "exclamationmark.circle")
-                                    .foregroundColor(.red)
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            }
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 12)
-                            .background(Color.black.opacity(0.8))
-                            .cornerRadius(8)
-                        }
-                        
-                        Spacer()
-                            .frame(height: 50) // Account for home indicator
-                    }
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .allowsHitTesting(false) // Allow touches to pass through to WebView
+                    statusOverlay
                 }
+                
+                // Settings button overlay
+                settingsButtonOverlay
             }
         }
         .ignoresSafeArea(.all)
         .onAppear {
             if !hasConnected {
-                os_log(.info, log: logger, "ContentView onAppear, triggering connect")
-                slimClient.connect()
-                hasConnected = true
+                connectToLMS()
             }
         }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
+    }
+    
+    private var serverErrorView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundColor(.orange)
+            
+            Text("Invalid LMS URL")
+                .font(.headline)
+                .foregroundColor(.red)
+            
+            Text("Server: \(settings.serverHost)")
+                .font(.body)
+                .foregroundColor(.white)
+            
+            Text("Check your server configuration")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Button("Open Settings") {
+                showingSettings = true
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .padding(.horizontal, 40)
+        }
+        .padding()
+    }
+    
+    private var statusOverlay: some View {
+        VStack {
+            Spacer()
+            
+            if isLoading {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Loading LMS Interface...")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .background(Color.black.opacity(0.8))
+                .cornerRadius(8)
+            }
+            
+            if let error = loadError {
+                VStack(spacing: 8) {
+                    HStack {
+                        Image(systemName: "exclamationmark.circle")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                            .lineLimit(2)
+                    }
+                    
+                    Button("Check Settings") {
+                        showingSettings = true
+                    }
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .background(Color.black.opacity(0.8))
+                .cornerRadius(8)
+            }
+            
+            Spacer()
+                .frame(height: 50) // Account for home indicator
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(loadError != nil) // Allow touches only when there's an error
+    }
+    
+    private var settingsButtonOverlay: some View {
+        VStack {
+            HStack {
+                Spacer()
+                
+                Button(action: { showingSettings = true }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.title3)
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(Circle())
+                }
+                .padding(.trailing, 20)
+                .padding(.top, 50) // Account for status bar
+            }
+            
+            Spacer()
+        }
+    }
+    
+    private func connectToLMS() {
+        guard !hasConnected else { return }
+        
+        os_log(.info, log: logger, "Connecting to LMS server: %{public}s", settings.serverHost)
+        
+        // Update SlimProtoClient with current settings
+        slimClient.updateServerSettings(
+            host: settings.serverHost,
+            port: UInt16(settings.serverSlimProtoPort)
+        )
+        
+        slimClient.connect()
+        hasConnected = true
     }
 }
 
@@ -136,9 +229,12 @@ struct WebView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Don't reload unless absolutely necessary
-        // The initial load happens in makeUIView
-        os_log(.debug, log: logger, "updateUIView called - no action needed")
+        // Check if URL has changed and reload if necessary
+        if let currentURL = uiView.url, currentURL.host != url.host || currentURL.port != url.port {
+            os_log(.info, log: logger, "URL changed, reloading WebView")
+            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            uiView.load(request)
+        }
     }
     
     func makeCoordinator() -> Coordinator {

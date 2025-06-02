@@ -7,6 +7,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         os_log(.info, log: logger, "App launching")
+        
+        // Load settings early
+        let settings = SettingsManager.shared
+        os_log(.info, log: logger, "Settings loaded - Configured: %{public}s", settings.isConfigured ? "YES" : "NO")
+        
         // Configure AVAudioSession for background playback
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
@@ -16,6 +21,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         } catch {
             os_log(.error, log: logger, "Audio session setup error: %{public}s", error.localizedDescription)
         }
+        
         os_log(.info, log: logger, "App launch completed")
         return true
     }
