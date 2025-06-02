@@ -73,13 +73,13 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     }
     
     func sendHello() {
-        os_log(.info, log: logger, "Sending HELO message")
+        os_log(.info, log: logger, "Sending enhanced HELO message with iOS-optimized capabilities")
         
         // Create a proper HELO message according to SlimProto spec
-        // DeviceID: '3' = softsqueeze, '8' = squeezeslave (good choice for app)
-        let deviceID: UInt8 = 8  // squeezeslave
+        // Change deviceID to softsqueeze for better app compatibility
+        let deviceID: UInt8 = 12  // softsqueeze (was 8 = squeezeslave)
         let revision: UInt8 = 1
-        let macAddress: [UInt8] = [0x00, 0x04, 0x20, 0x12, 0x34, 0x56] // Fake but valid MAC
+        let macAddress: [UInt8] = [0x00, 0x04, 0x20, 0x12, 0x34, 0x56] // Keep your existing MAC
         
         var helloData = Data()
         
@@ -105,15 +105,16 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // Language (2 bytes) - optional, "en"
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
         
-        // Add capabilities string to tell server what formats we support
-        // FORCE transcoding by only claiming MP3 support
-        let capabilities = "mp3,Model=SqueezeLite,ModelName=LMSStream,MaxSampleRate=48000"
+        // *** REPLACE YOUR OLD CAPABILITIES WITH THIS ***
+        // Declare formats in order of preference - what AVPlayer handles best
+        let capabilities = "aac,alac,mp3,Model=LMSStreamApp,ModelName=LMS Stream for iOS,MaxSampleRate=48000,Channels=2,SampleSize=16"
+        
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
-            os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
+            os_log(.info, log: logger, "Added enhanced capabilities: %{public}s", capabilities)
         }
         
-        // Create the full message with header
+        // Create the full message with header (keep existing code)
         let command = "HELO".data(using: .ascii)!
         let length = UInt32(helloData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }
@@ -124,9 +125,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         fullMessage.append(helloData)    // payload
         
         socket.write(fullMessage, withTimeout: 30, tag: 1)
-        os_log(.info, log: logger, "HELO message sent, total length: %d, payload length: %d", fullMessage.count, helloData.count)
-        os_log(.debug, log: logger, "DeviceID: %d, Revision: %d, MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-               deviceID, revision, macAddress[0], macAddress[1], macAddress[2], macAddress[3], macAddress[4], macAddress[5])
+        os_log(.info, log: logger, "Enhanced HELO message sent - requesting AAC/ALAC with MP3 fallback")
     }
     
     func socket(_ sock: GCDAsyncSocket, didRead data: Data, withTag tag: Int) {
@@ -182,108 +181,129 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 let autostart = payload[1]
                 let format = payload[2]
                 
-                // *** LOG BOTH FORMAT AND COMMAND FOR DEBUGGING ***
                 let commandChar = String(UnicodeScalar(streamCommand) ?? "?")
                 os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
                        commandChar, streamCommand, format, format)
                 
-                // *** CHECK IF SERVER IS SENDING FLAC FORMAT ***
-                if format == 102 { // 'f' = FLAC format
-                    os_log(.error, log: logger, "⚠️ Server wants to send FLAC - will modify URL for transcoding")
-                    // Don't reject - accept it but modify the URL later
+                // *** ENHANCED FORMAT HANDLING ***
+                var formatName = "Unknown"
+                var shouldAccept = false
+                
+                switch format {
+                case 97:  // 'a' = AAC
+                    formatName = "AAC"
+                    shouldAccept = true
+                    os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
+                    
+                case 65:  // 'A' = ALAC
+                    formatName = "ALAC"
+                    shouldAccept = true
+                    os_log(.info, log: logger, "✅ Server offering ALAC - excellent for iOS!")
+                    
+                case 109: // 'm' = MP3
+                    formatName = "MP3"
+                    shouldAccept = true
+                    os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
+                    
+                case 102: // 'f' = FLAC
+                    formatName = "FLAC"
+                    shouldAccept = false
+                    os_log(.info, log: logger, "❌ Server offering FLAC - requesting transcode to AAC")
+                    
+                case 112: // 'p' = PCM
+                    formatName = "PCM"
+                    shouldAccept = true
+                    os_log(.info, log: logger, "✅ Server offering PCM - iOS can handle this")
+                    
+                default:
+                    os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
+                    shouldAccept = false
                 }
                 
-                // *** ACCEPT MP3 FORMAT ***
-                if format == 109 { // 'm' = MP3 format
-                    os_log(.info, log: logger, "✅ Server responding with MP3 format - proceeding")
-                } else if format != 102 { // Not FLAC and not MP3
-                    os_log(.error, log: logger, "⚠️ Unknown format byte: %d (0x%02x)", format, format)
+                if !shouldAccept {
+                    // Reject this format and request transcoding
+                    os_log(.info, log: logger, "🔄 Rejecting %{public}s format, requesting AAC transcode", formatName)
+                    sendStatus("STMn") // Not supported - triggers format renegotiation
+                    return
                 }
                 
-                // *** LOG PAYLOAD SIZE TO UNDERSTAND WHAT WE'RE GETTING ***
-                os_log(.info, log: logger, "🔍 Stream payload size: %d bytes (need >24 for HTTP data)", payload.count)
-                
-                // *** NEW: Extract server timestamp and elapsed time for stream pickup ***
+                // Extract server elapsed time for stream pickup (keep your existing code)
                 let serverElapsedTime = extractServerElapsedTime(from: payload)
-                
-                // *** DEBUG: Log payload bytes for troubleshooting ***
-                if payload.count >= 24 {
-                    let replayGainBytes = payload.subdata(in: 16..<20)
-                    let rawValue = replayGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                    os_log(.debug, log: logger, "🔍 Payload replay_gain bytes 16-19: %02x %02x %02x %02x = %d seconds",
-                           replayGainBytes[0], replayGainBytes[1], replayGainBytes[2], replayGainBytes[3], rawValue)
-                }
                 
                 // Extract HTTP request from remaining payload
                 if payload.count > 24 {
                     let httpData = payload.subdata(in: 24..<payload.count)
                     if let httpRequest = String(data: httpData, encoding: .utf8) {
-                        os_log(.info, log: logger, "HTTP request: %{public}s", httpRequest)
+                        os_log(.info, log: logger, "HTTP request for %{public}s: %{public}s", formatName, httpRequest)
                         
                         // Parse the URL from the HTTP request
                         if let url = extractURLFromHTTPRequest(httpRequest) {
-                            os_log(.info, log: logger, "Extracted stream URL: %{public}s", url)
+                            os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
                             
                             // Handle different stream commands
                             switch streamCommand {
                             case UInt8(ascii: "s"): // start
-                                os_log(.info, log: logger, "Starting stream playback")
-                                // *** CLEAR PAUSE STATE WHEN STARTING NEW STREAM ***
+                                os_log(.info, log: logger, "Starting %{public}s stream playback", formatName)
                                 isPausedByLockScreen = false
                                 currentStreamURL = url
                                 isStreamActive = true
                                 
-                                // *** NEW: Start stream with server elapsed time for sync ***
+                                // Use format-aware playback
                                 if serverElapsedTime > 0 {
                                     os_log(.info, log: logger, "🔄 Picking up existing stream at position: %.2f seconds", serverElapsedTime)
-                                    audioManager.playStreamAtPosition(urlString: url, startTime: serverElapsedTime)
+                                    audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: serverElapsedTime, format: formatName)
                                 } else {
-                                    audioManager.playStream(urlString: url)
+                                    audioManager.playStreamWithFormat(urlString: url, format: formatName)
+                                }
+                                
+                                // *** ADD THIS: Fetch metadata for lock screen ***
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                    self.fetchCurrentTrackMetadata()
                                 }
                                 
                                 sendStatus("STMc") // Connect - acknowledge stream start
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     self.sendStatus("STMs") // Stream started
                                 }
+                                
+                            // Keep all your existing cases for pause, unpause, stop, etc.
                             case UInt8(ascii: "p"): // pause
                                 os_log(.info, log: logger, "⏸️ Server pause command")
-                                // *** CRITICAL: Set pause state for server-initiated pause too ***
                                 isPausedByLockScreen = true
                                 lastKnownPosition = audioManager.getCurrentTime()
                                 audioManager.pause()
                                 sendStatus("STMp") // Paused
+                                
                             case UInt8(ascii: "u"): // unpause
                                 os_log(.info, log: logger, "▶️ Server unpause command")
-                                // *** CLEAR PAUSE STATE WHEN SERVER UNPAUSES ***
                                 isPausedByLockScreen = false
                                 audioManager.play()
                                 sendStatus("STMr") // Resume
+                                
                             case UInt8(ascii: "q"): // stop
                                 os_log(.info, log: logger, "⏹️ Server stop command")
-                                // *** CLEAR PAUSE STATE WHEN STOPPING ***
                                 isPausedByLockScreen = false
                                 audioManager.stop()
                                 isStreamActive = false
                                 currentStreamURL = nil
                                 sendStatus("STMf") // Flushed/stopped
+                                
                             case UInt8(ascii: "t"): // status request
                                 os_log(.debug, log: logger, "🔄 Server status request (with HTTP data)")
-                                
-                                // *** RESPOND BASED ON ACTUAL STATE ***
                                 if isPausedByLockScreen {
                                     sendStatus("STMp") // Pause status
-                                    os_log(.info, log: logger, "📍 Responding with PAUSE status (frozen at %.2f seconds)", lastKnownPosition)
                                 } else {
                                     sendStatus("STMt") // Timer/heartbeat status
                                 }
+                                
                             case UInt8(ascii: "f"): // flush
                                 os_log(.info, log: logger, "🗑️ Server flush command")
-                                // *** CLEAR PAUSE STATE WHEN FLUSHING ***
                                 isPausedByLockScreen = false
                                 audioManager.stop()
                                 isStreamActive = false
                                 currentStreamURL = nil
                                 sendStatus("STMf") // Flushed
+                                
                             default:
                                 sendStatus("STMt") // Generic status
                             }
@@ -293,6 +313,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                     } else {
                         sendStatus("STMn") // Not supported/error
                     }
+
                 } else {
                     // Handle commands that don't need URLs (like pause, stop, status, etc.)
                     os_log(.error, log: logger, "⚠️ Stream command '%{public}s' has no HTTP data - handling as control command", commandChar)
@@ -407,38 +428,101 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         return 0.0
     }
     
-    private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
-        // Parse HTTP request like "GET /stream.mp3?player=xx:xx:xx:xx:xx:xx HTTP/1.0"
-        let lines = httpRequest.components(separatedBy: "\n")
-        guard let firstLine = lines.first else { return nil }
-        
-        let parts = firstLine.components(separatedBy: " ")
-        guard parts.count >= 2 else { return nil }
-        
-        let path = parts[1]
-        
-        os_log(.info, log: logger, "🔍 Original stream path: %{public}s", path)
-        
-        // *** ACKNOWLEDGE THE STREAM FIRST, THEN GET CURRENT TRACK ***
-        // Return the original URL so SlimProto flow continues normally
-        let originalURL = "http://\(host):9000\(path)"
-        
-        // Request the current track info asynchronously to replace the stream
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.requestCurrentTrackURL(originalPath: path)
+    private func parseTrackMetadata(data: Data) {
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = json["result"] as? [String: Any],
+               let loop = result["playlist_loop"] as? [[String: Any]],
+               let firstTrack = loop.first {
+                
+                // Extract basic metadata
+                let trackTitle = firstTrack["title"] as? String ??
+                               firstTrack["track"] as? String ?? "LMS Stream"
+                
+                let trackAlbum = firstTrack["album"] as? String ?? "Lyrion Music Server"
+                
+                // *** NEW: Extract duration information ***
+                let duration = firstTrack["duration"] as? Double ?? 0.0
+                os_log(.info, log: logger, "🔍 Track duration from metadata: %.0f seconds", duration)
+                
+                // Enhanced artist extraction (keep your existing logic)
+                var trackArtist = "Unknown Artist"
+                
+                // Method 1: Direct artist field
+                if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
+                    trackArtist = artist
+                    os_log(.info, log: logger, "✅ Found artist (direct): %{public}s", artist)
+                }
+                // Method 2: Album artist field
+                else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
+                    trackArtist = albumArtist
+                    os_log(.info, log: logger, "✅ Found artist (albumartist): %{public}s", albumArtist)
+                }
+                // Method 3: Track artist field
+                else if let trackArtistField = firstTrack["trackartist"] as? String, !trackArtistField.isEmpty {
+                    trackArtist = trackArtistField
+                    os_log(.info, log: logger, "✅ Found artist (trackartist): %{public}s", trackArtistField)
+                }
+                // Method 4: Check for band field
+                else if let band = firstTrack["band"] as? String, !band.isEmpty {
+                    trackArtist = band
+                    os_log(.info, log: logger, "✅ Found artist (band): %{public}s", band)
+                }
+                // Method 5: Check contributors array (keep your existing logic)
+                else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
+                    for contributor in contributors {
+                        if let role = contributor["role"] as? String,
+                           let name = contributor["name"] as? String {
+                            os_log(.info, log: logger, "🔍 Contributor: %{public}s (role: %{public}s)", name, role)
+                            
+                            // Look for artist roles
+                            if role.lowercased().contains("artist") ||
+                               role.lowercased() == "performer" ||
+                               role.lowercased() == "composer" {
+                                trackArtist = name
+                                os_log(.info, log: logger, "✅ Found artist in contributors: %{public}s (role: %{public}s)", name, role)
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                os_log(.info, log: logger, "🎵 Metadata - Title: '%{public}s', Artist: '%{public}s', Album: '%{public}s', Duration: %.0f sec",
+                       trackTitle, trackArtist, trackAlbum, duration)
+                
+                // Create artwork URL if track ID is available
+                var artworkURL: String? = nil
+                if let trackID = firstTrack["id"] as? Int {
+                    artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
+                    os_log(.info, log: logger, "🖼️ Artwork URL: %{public}s", artworkURL!)
+                } else if let trackIDString = firstTrack["id"] as? String, let trackID = Int(trackIDString) {
+                    artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
+                }
+                
+                // *** UPDATED: Pass duration to metadata update ***
+                DispatchQueue.main.async {
+                    self.audioManager.updateTrackMetadata(
+                        title: trackTitle,
+                        artist: trackArtist,
+                        album: trackAlbum,
+                        artworkURL: artworkURL,
+                        duration: duration  // *** NEW: Include duration ***
+                    )
+                    os_log(.info, log: self.logger, "✅ Updated lock screen metadata with duration: '%{public}s' by %{public}s (%.0f sec)",
+                           trackTitle, trackArtist, duration)
+                }
+                
+            } else {
+                os_log(.error, log: logger, "❌ Failed to parse track metadata response")
+            }
+        } catch {
+            os_log(.error, log: logger, "JSON parsing error for metadata: %{public}s", error.localizedDescription)
         }
-        
-        os_log(.info, log: logger, "⚠️ Returning original URL, will replace with transcoded version shortly")
-        return originalURL
     }
     
-    private func requestCurrentTrackURL(originalPath: String) {
-        // Extract player ID from path
-        var playerID = "00:04:20:12:34:56"
-        if let playerRange = originalPath.range(of: "player=([^&]+)", options: .regularExpression) {
-            let match = String(originalPath[playerRange])
-            playerID = match.replacingOccurrences(of: "player=", with: "")
-        }
+    private func fetchCurrentTrackMetadata() {
+        // Extract player ID (use your existing MAC address)
+        let playerID = "00:04:20:12:34:56"
         
         // Use LMS JSON-RPC API to request current track with comprehensive metadata
         let jsonRPC = [
@@ -448,7 +532,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 playerID,
                 [
                     "status", "-", "1",
-                    // Request comprehensive metadata tags including artist variations
+                    // Request comprehensive metadata tags
                     "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z"
                 ]
             ]
@@ -464,31 +548,47 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = jsonData
+        request.timeoutInterval = 5.0
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                os_log(.error, log: self.logger, "JSON-RPC request failed: %{public}s", error.localizedDescription)
+                os_log(.error, log: self.logger, "JSON-RPC metadata request failed: %{public}s", error.localizedDescription)
                 return
             }
             
             guard let data = data else {
-                os_log(.error, log: self.logger, "No data received from JSON-RPC")
+                os_log(.error, log: self.logger, "No data received from metadata JSON-RPC")
                 return
             }
             
-            // *** DEBUG: Log the raw JSON response ***
-            if let jsonString = String(data: data, encoding: .utf8) {
-                os_log(.debug, log: self.logger, "📄 Raw JSON response: %{public}s", jsonString)
-            }
-            
-            // Parse response to get current track URL
-            self.parseCurrentTrackResponse(data: data)
+            // Parse response to get current track metadata
+            self.parseTrackMetadata(data: data)
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting current track info with comprehensive metadata tags")
+        os_log(.info, log: logger, "🌐 Requesting current track metadata")
+    }
+
+    
+    private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
+        // Parse HTTP request like "GET /stream.mp3?player=xx:xx:xx:xx:xx:xx HTTP/1.0"
+        let lines = httpRequest.components(separatedBy: "\n")
+        guard let firstLine = lines.first else { return nil }
+        
+        let parts = firstLine.components(separatedBy: " ")
+        guard parts.count >= 2 else { return nil }
+        
+        let path = parts[1]
+        let fullURL = "http://\(host):9000\(path)"
+        
+        os_log(.info, log: logger, "🔍 Extracted stream URL: %{public}s", fullURL)
+        
+        // Return the URL directly - server has already provided the right format
+        // based on our capabilities negotiation in sendHello()
+        return fullURL
     }
     
+     
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
@@ -502,23 +602,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Send unpause/resume status to server
             isPausedByLockScreen = false
             sendStatus("STMr") // Resume
-            
-            // *** ALSO NOTIFY VIA JSON-RPC API ***
             sendJSONRPCCommand("play")
-            
             os_log(.info, log: logger, "✅ Sent resume status to LMS server")
             
         case "pause":
-            // *** CRITICAL: Track that we're paused and save position ***
+            // Track that we're paused and save position
             isPausedByLockScreen = true
             lastKnownPosition = audioManager.getCurrentTime()
-            
-            // Send pause status to server
             sendStatus("STMp") // Paused
-            
-            // *** ALSO NOTIFY VIA JSON-RPC API ***
             sendJSONRPCCommand("pause")
-            
             os_log(.info, log: logger, "✅ Sent pause status to LMS server (position: %.2f)", lastKnownPosition)
             
         case "stop":
@@ -526,20 +618,26 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             isPausedByLockScreen = false
             lastKnownPosition = 0.0
             sendStatus("STMf") // Flushed/stopped
-            
-            // *** ALSO NOTIFY VIA JSON-RPC API ***
             sendJSONRPCCommand("stop")
-            
             isStreamActive = false
             currentStreamURL = nil
             os_log(.info, log: logger, "✅ Sent stop status to LMS server")
+            
+        // *** NEW: Handle skip commands ***
+        case "next":
+            sendJSONRPCCommand("playlist", parameters: ["index", "+1"])
+            os_log(.info, log: logger, "✅ Sent next track command to LMS server")
+            
+        case "previous":
+            sendJSONRPCCommand("playlist", parameters: ["index", "-1"])
+            os_log(.info, log: logger, "✅ Sent previous track command to LMS server")
             
         default:
             os_log(.error, log: logger, "Unknown lock screen command: %{public}s", command)
         }
     }
     
-    private func sendJSONRPCCommand(_ command: String) {
+    private func sendJSONRPCCommand(_ command: String, parameters: [String] = []) {
         // Extract player ID from current connection or use default
         let playerID = "00:04:20:12:34:56" // Your MAC address from HELO
         
@@ -563,6 +661,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 "id": 1,
                 "method": "slim.request",
                 "params": [playerID, ["stop"]]
+            ]
+        // *** NEW: Handle playlist navigation ***
+        case "playlist":
+            var commandParams = [command]
+            commandParams.append(contentsOf: parameters)
+            jsonRPCCommand = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, commandParams]
             ]
         default:
             os_log(.error, log: logger, "Unknown JSON-RPC command: %{public}s", command)
@@ -588,9 +695,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 } else {
                     os_log(.info, log: self.logger, "✅ JSON-RPC %{public}s command sent successfully", command)
                     
-                    // Debug: Log the response if available
-                    if let data = data, let responseString = String(data: data, encoding: .utf8) {
-                        os_log(.debug, log: self.logger, "JSON-RPC response: %{public}s", responseString)
+                    // *** NEW: For skip commands, refresh metadata after a delay ***
+                    if command == "playlist" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.fetchCurrentTrackMetadata()
+                        }
                     }
                 }
             }
@@ -602,164 +711,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
 
     
     
-    private func parseCurrentTrackResponse(data: Data) {
-        do {
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let result = json["result"] as? [String: Any],
-               let loop = result["playlist_loop"] as? [[String: Any]],
-               let firstTrack = loop.first {
-                
-                // *** DEBUG: Log ALL available keys in the track data ***
-                let availableKeys = firstTrack.keys.sorted()
-                os_log(.info, log: logger, "🔍 Available track metadata keys: %{public}s", availableKeys.joined(separator: ", "))
-                
-                // *** DEBUG: Log specific values for key fields ***
-                let debugKeys = ["artist", "albumartist", "trackartist", "contributor", "title", "album", "id"]
-                for key in debugKeys {
-                    if let value = firstTrack[key] {
-                        os_log(.info, log: logger, "🔍 Key '%{public}s': %{public}s", key, String(describing: value))
-                    }
-                }
-                
-                // Extract basic metadata
-                let trackTitle = firstTrack["title"] as? String ??
-                               firstTrack["track"] as? String ?? "Unknown Track"
-                
-                let trackAlbum = firstTrack["album"] as? String ?? "Unknown Album"
-                
-                // *** ENHANCED ARTIST EXTRACTION ***
-                var trackArtist = "Unknown Artist"
-                
-                // Method 1: Direct artist field
-                if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                    trackArtist = artist
-                    os_log(.info, log: logger, "✅ Found artist (direct): %{public}s", artist)
-                }
-                // Method 2: Album artist field
-                else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
-                    trackArtist = albumArtist
-                    os_log(.info, log: logger, "✅ Found artist (albumartist): %{public}s", albumArtist)
-                }
-                // Method 3: Track artist field
-                else if let trackArtistField = firstTrack["trackartist"] as? String, !trackArtistField.isEmpty {
-                    trackArtist = trackArtistField
-                    os_log(.info, log: logger, "✅ Found artist (trackartist): %{public}s", trackArtistField)
-                }
-                // Method 4: Check for band field
-                else if let band = firstTrack["band"] as? String, !band.isEmpty {
-                    trackArtist = band
-                    os_log(.info, log: logger, "✅ Found artist (band): %{public}s", band)
-                }
-                // Method 5: Check contributors array (common LMS pattern)
-                else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
-                    for contributor in contributors {
-                        if let role = contributor["role"] as? String,
-                           let name = contributor["name"] as? String {
-                            os_log(.info, log: logger, "🔍 Contributor: %{public}s (role: %{public}s)", name, role)
-                            
-                            // Look for artist roles
-                            if role.lowercased().contains("artist") ||
-                               role.lowercased() == "performer" ||
-                               role.lowercased() == "composer" {
-                                trackArtist = name
-                                os_log(.info, log: logger, "✅ Found artist in contributors: %{public}s (role: %{public}s)", name, role)
-                                break
-                            }
-                        }
-                    }
-                }
-                // Method 6: Look for any field ending with "artist"
-                else {
-                    for (key, value) in firstTrack {
-                        if key.lowercased().hasSuffix("artist"),
-                           let artistValue = value as? String,
-                           !artistValue.isEmpty {
-                            trackArtist = artistValue
-                            os_log(.info, log: logger, "✅ Found artist in field '%{public}s': %{public}s", key, artistValue)
-                            break
-                        }
-                    }
-                }
-                
-                // *** EXTRACT ADDITIONAL METADATA LIKE THE WORKING APP ***
-                let duration = firstTrack["duration"] as? Double ?? 0.0
-                let genre = firstTrack["genre"] as? String ?? ""
-                let trackNumber = firstTrack["tracknum"] as? Int ?? firstTrack["track_number"] as? Int
-                
-                let playlistIndex = firstTrack["playlist index"] as? Int ?? -1
-                
-                os_log(.info, log: logger, "🎵 Final metadata - Title: '%{public}s', Artist: '%{public}s', Album: '%{public}s', Duration: %.1f, Genre: '%{public}s' (index: %d)",
-                       trackTitle, trackArtist, trackAlbum, duration, genre, playlistIndex)
-                
-                // *** USE TRACK ID WITH WORKING DOWNLOAD FORMAT ***
-                if let trackID = firstTrack["id"] as? Int {
-                    let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
-                    
-                    // Create artwork URL
-                    let artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
-                    
-                    os_log(.info, log: logger, "🎵 Stream URL: %{public}s", streamingURL)
-                    os_log(.info, log: logger, "🖼️ Artwork URL: %{public}s", artworkURL)
-                    
-                    // Replace the current stream with the transcoded version
-                    DispatchQueue.main.async {
-                        // Only replace if we're not already playing this exact URL
-                        if self.currentStreamURL != streamingURL {
-                            // Update track metadata first
-                            self.audioManager.updateTrackMetadata(
-                                title: trackTitle,
-                                artist: trackArtist,
-                                album: trackAlbum,
-                                artworkURL: artworkURL
-                            )
-                            
-                            // Then start the stream
-                            self.audioManager.playStream(urlString: streamingURL)
-                            self.currentStreamURL = streamingURL
-                            os_log(.info, log: self.logger, "✅ Switched to transcoded stream: '%{public}s' by %{public}s", trackTitle, trackArtist)
-                        } else {
-                            // Still update metadata even if URL is the same
-                            self.audioManager.updateTrackMetadata(
-                                title: trackTitle,
-                                artist: trackArtist,
-                                album: trackAlbum,
-                                artworkURL: artworkURL
-                            )
-                            os_log(.info, log: self.logger, "ℹ️ Metadata updated: '%{public}s' by %{public}s", trackTitle, trackArtist)
-                        }
-                    }
-                    return
-                } else {
-                    // Try string ID (some LMS configurations use string IDs)
-                    if let trackIDString = firstTrack["id"] as? String, let trackID = Int(trackIDString) {
-                        let streamingURL = "http://\(host):9000/music/\(trackID)/download.mp3?bitrate=320"
-                        let artworkURL = "http://\(host):9000/music/\(trackID)/cover.jpg"
-                        
-                        DispatchQueue.main.async {
-                            self.audioManager.updateTrackMetadata(
-                                title: trackTitle,
-                                artist: trackArtist,
-                                album: trackAlbum,
-                                artworkURL: artworkURL
-                            )
-                            
-                            if self.currentStreamURL != streamingURL {
-                                self.audioManager.playStream(urlString: streamingURL)
-                                self.currentStreamURL = streamingURL
-                            }
-                        }
-                        return
-                    }
-                }
-                
-                os_log(.error, log: logger, "❌ Could not extract track ID from current track info")
-            } else {
-                os_log(.error, log: logger, "❌ Failed to parse current track response")
-            }
-        } catch {
-            os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
-        }
-    }
     
     private func sendFormatRequest() {
         os_log(.info, log: logger, "🎵 Requesting MP3 format from server")
