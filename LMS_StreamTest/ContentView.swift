@@ -286,6 +286,8 @@ struct ContentView: View {
         
         os_log(.info, log: logger, "Connecting to LMS server with Phase 2 enhancements: %{public}s", settings.serverHost)
         
+        audioManager.setSlimClient(slimProtoCoordinator)
+        
         // Update coordinator with current settings
         slimProtoCoordinator.updateServerSettings(
             host: settings.serverHost,
