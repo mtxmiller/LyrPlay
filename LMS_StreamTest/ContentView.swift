@@ -182,7 +182,7 @@ struct ContentView: View {
                         .background(Color.black.opacity(0.6))
                         .clipShape(Circle())
                 }
-                .padding(.trailing, 20)
+                .padding(.trailing, 92)
                 .padding(.top, 50) // Account for status bar
             }
             

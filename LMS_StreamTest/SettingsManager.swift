@@ -15,7 +15,7 @@ class SettingsManager: ObservableObject {
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 10.0
     @Published var preferredFormats: [String] = ["aac", "alac", "mp3"]
-    @Published var bufferSize: Int = 262144  // 256KB
+    @Published var bufferSize: Int = 1048576  // 1MB like Castbridge
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
     
@@ -67,7 +67,7 @@ class SettingsManager: ObservableObject {
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
         preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["aac", "alac", "mp3"]
-        bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 262144
+        bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
         isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
         
@@ -307,8 +307,8 @@ class SettingsManager: ObservableObject {
     var capabilitiesString: String {
         let formats = preferredFormats.joined(separator: ",")
         
-        // Simple, clean capabilities - let SETD handle the player name
-        return "\(formats),Model=squeezelite,ModelName=LMS Stream for iOS,MaxSampleRate=48000,Channels=2,SampleSize=16"
+        // Enhanced capabilities based on Castbridge - no volume control, larger buffers
+        return "\(formats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=0,HasDigitalVolumeControl=0,MaxSampleRate=48000"
     }
 
     var effectivePlayerName: String {

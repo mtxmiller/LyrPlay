@@ -236,17 +236,17 @@ class AudioPlayer: NSObject, ObservableObject {
             switch format.uppercased() {
             case "ALAC", "FLAC":
                 // Lossless optimizations
-                item.preferredForwardBufferDuration = 15.0
+                item.preferredForwardBufferDuration = 30.0
                 item.preferredPeakBitRate = 0
                 
             case "AAC":
                 // AAC optimizations
-                item.preferredForwardBufferDuration = 8.0
+                item.preferredForwardBufferDuration = 20.0
                 item.preferredPeakBitRate = Double(320 * 1024)
                 
             case "MP3":
                 // MP3 live stream optimizations
-                item.preferredForwardBufferDuration = 10.0
+                item.preferredForwardBufferDuration = 25.0
                 item.preferredPeakBitRate = 0
                 
                 if #available(iOS 10.0, *) {

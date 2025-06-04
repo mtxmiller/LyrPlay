@@ -181,7 +181,7 @@ class SlimProtoCommandHandler: ObservableObject {
                 
             case 112: // 'p' = PCM
                 formatName = "PCM"
-                shouldAccept = true
+                shouldAccept = false
                 os_log(.info, log: logger, "✅ Server offering PCM - iOS can handle this")
                 
             default:

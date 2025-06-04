@@ -59,14 +59,14 @@ struct SettingsView: View {
                 
                 // Audio Settings Section
                 Section(header: Text("Audio Settings")) {
-                    NavigationLink(destination: AudioConfigView()) {
+                    /* NavigationLink(destination: AudioConfigView()) {
                         SettingsRow(
                             icon: "waveform",
                             title: "Audio Formats",
                             value: formatsSummary,
                             valueColor: .secondary
                         )
-                    }
+                    } */
                     
                     NavigationLink(destination: BufferConfigView()) {
                         SettingsRow(
@@ -337,7 +337,7 @@ struct PlayerConfigView: View {
 }
 
 // MARK: - Audio Configuration View
-struct AudioConfigView: View {
+/* struct AudioConfigView: View {
     @StateObject private var settings = SettingsManager.shared
     @Environment(\.presentationMode) var presentationMode
     
@@ -415,7 +415,7 @@ struct AudioConfigView: View {
         
         presentationMode.wrappedValue.dismiss()
     }
-}
+} */
 
 struct FormatRow: View {
     let format: (String, String, String)
@@ -466,10 +466,11 @@ struct BufferConfigView: View {
     @State private var hasChanges = false
     
     private let bufferSizes: [(Int, String)] = [
-        (131072, "128 KB - Minimal"),
-        (262144, "256 KB - Default"),
-        (524288, "512 KB - Large"),
-        (1048576, "1 MB - Maximum")
+        (262144, "256 KB - Minimal"),
+        (524288, "512 KB - Small"),
+        (1048576, "1 MB - Default"),  // This is now default
+        (2097152, "2 MB - Large"),
+        (4194304, "4 MB - Maximum")  // Match Castbridge max
     ]
     
     var body: some View {
