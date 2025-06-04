@@ -1,5 +1,5 @@
 // File: AudioSessionManager.swift
-// Audio session configuration and background task management
+// Enhanced with interruption handling integration
 import Foundation
 import AVFoundation
 import UIKit
@@ -8,6 +8,9 @@ import os.log
 protocol AudioSessionManagerDelegate: AnyObject {
     func audioSessionDidEnterBackground()
     func audioSessionDidEnterForeground()
+    func audioSessionWasInterrupted(shouldPause: Bool)
+    func audioSessionInterruptionEnded(shouldResume: Bool)
+    func audioSessionRouteChanged(shouldPause: Bool)
 }
 
 class AudioSessionManager: ObservableObject {
@@ -19,6 +22,9 @@ class AudioSessionManager: ObservableObject {
     // MARK: - Background Management
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     
+    // MARK: - Interruption Integration
+    private var interruptionManager: InterruptionManager?
+    
     // MARK: - Delegation
     weak var delegate: AudioSessionManagerDelegate?
     
@@ -26,7 +32,15 @@ class AudioSessionManager: ObservableObject {
     init() {
         setupInitialAudioSession()
         setupBackgroundObservers()
-        os_log(.info, log: logger, "AudioSessionManager initialized")
+        setupInterruptionManager()
+        os_log(.info, log: logger, "Enhanced AudioSessionManager initialized")
+    }
+    
+    // MARK: - Interruption Manager Setup
+    private func setupInterruptionManager() {
+        interruptionManager = InterruptionManager()
+        interruptionManager?.delegate = self
+        os_log(.info, log: logger, "✅ Interruption manager integrated")
     }
     
     // MARK: - Audio Session Setup
@@ -143,7 +157,7 @@ class AudioSessionManager: ObservableObject {
         }
     }
     
-    // MARK: - Audio Session Control
+    // MARK: - Enhanced Audio Session Control
     func activateAudioSession() {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
@@ -160,6 +174,43 @@ class AudioSessionManager: ObservableObject {
         } catch {
             os_log(.error, log: logger, "❌ Failed to deactivate audio session: %{public}s", error.localizedDescription)
         }
+    }
+    
+    // MARK: - Interruption Recovery
+    func reconfigureAfterInterruption() {
+        os_log(.info, log: logger, "🔄 Reconfiguring audio session after interruption")
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Reactivate the audio session
+            try audioSession.setActive(true)
+            
+            // Verify our category and options are still correct
+            if audioSession.category != .playback {
+                try audioSession.setCategory(
+                    .playback,
+                    mode: .default,
+                    options: [.allowBluetooth, .allowAirPlay, .allowBluetoothA2DP]
+                )
+                os_log(.info, log: logger, "🔧 Restored audio session category after interruption")
+            }
+            
+            os_log(.info, log: logger, "✅ Audio session reconfigured successfully")
+        } catch {
+            os_log(.error, log: logger, "❌ Failed to reconfigure audio session: %{public}s", error.localizedDescription)
+        }
+    }
+    
+    func reconfigureAfterMediaServicesReset() {
+        os_log(.info, log: logger, "🔄 Reconfiguring audio session after media services reset")
+        
+        // Complete reconfiguration is needed after media services reset
+        setupInitialAudioSession()
+        
+        // Apply format-specific settings if we had them
+        // This should be called by the AudioManager based on current format
+        os_log(.info, log: logger, "✅ Audio session fully reconfigured after media services reset")
     }
     
     // MARK: - Background Observers
@@ -191,6 +242,20 @@ class AudioSessionManager: ObservableObject {
         os_log(.info, log: logger, "📱 App entering foreground")
         stopBackgroundTask()
         delegate?.audioSessionDidEnterForeground()
+        
+        // Verify audio session is still properly configured
+        verifyAudioSessionAfterForeground()
+    }
+    
+    private func verifyAudioSessionAfterForeground() {
+        let audioSession = AVAudioSession.sharedInstance()
+        
+        if audioSession.category != .playback {
+            os_log(.error, log: logger, "⚠️ Audio session category changed while backgrounded - reconfiguring")
+            reconfigureAfterInterruption()
+        } else {
+            os_log(.info, log: logger, "✅ Audio session maintained proper configuration in background")
+        }
     }
     
     // MARK: - Background Task Management
@@ -212,14 +277,7 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Audio Session Information
     func getCurrentAudioRoute() -> String {
-        let audioSession = AVAudioSession.sharedInstance()
-        let currentRoute = audioSession.currentRoute
-        
-        if let output = currentRoute.outputs.first {
-            return output.portType.rawValue
-        }
-        
-        return "Unknown"
+        return interruptionManager?.getCurrentAudioRoute() ?? "Unknown"
     }
     
     func isOtherAudioPlaying() -> Bool {
@@ -232,6 +290,10 @@ class AudioSessionManager: ObservableObject {
     
     func getPreferredIOBufferDuration() -> TimeInterval {
         return AVAudioSession.sharedInstance().preferredIOBufferDuration
+    }
+    
+    func getInterruptionStatus() -> String {
+        return interruptionManager?.getInterruptionStatus() ?? "Unknown"
     }
     
     // MARK: - Audio Session State
@@ -248,12 +310,58 @@ class AudioSessionManager: ObservableObject {
         os_log(.info, log: logger, "  Preferred IO Buffer Duration: %.3f ms", audioSession.preferredIOBufferDuration * 1000)
         os_log(.info, log: logger, "  Other Audio Playing: %{public}s", audioSession.isOtherAudioPlaying ? "YES" : "NO")
         os_log(.info, log: logger, "  Current Route: %{public}s", getCurrentAudioRoute())
+        os_log(.info, log: logger, "  Interruption Status: %{public}s", getInterruptionStatus())
     }
     
     // MARK: - Cleanup
     deinit {
         NotificationCenter.default.removeObserver(self)
         stopBackgroundTask()
-        os_log(.info, log: logger, "AudioSessionManager deinitialized")
+        os_log(.info, log: logger, "Enhanced AudioSessionManager deinitialized")
+    }
+}
+
+// MARK: - InterruptionManagerDelegate
+extension AudioSessionManager: InterruptionManagerDelegate {
+    
+    func interruptionDidBegin(type: InterruptionManager.InterruptionType, shouldPause: Bool) {
+        os_log(.info, log: logger, "🚫 Interruption began: %{public}s (shouldPause: %{public}s)",
+               type.description, shouldPause ? "YES" : "NO")
+        
+        if shouldPause {
+            delegate?.audioSessionWasInterrupted(shouldPause: shouldPause)
+        }
+    }
+    
+    func interruptionDidEnd(type: InterruptionManager.InterruptionType, shouldResume: Bool) {
+        os_log(.info, log: logger, "✅ Interruption ended: %{public}s (shouldResume: %{public}s)",
+               type.description, shouldResume ? "YES" : "NO")
+        
+        // Reconfigure audio session after interruption
+        reconfigureAfterInterruption()
+        
+        // Notify delegate about potential resume
+        delegate?.audioSessionInterruptionEnded(shouldResume: shouldResume)
+    }
+    
+    func routeDidChange(type: InterruptionManager.RouteChangeType, shouldPause: Bool) {
+        os_log(.info, log: logger, "🔀 Route changed: %{public}s (shouldPause: %{public}s)",
+               type.description, shouldPause ? "YES" : "NO")
+        
+        // Log the new route for debugging
+        logCurrentAudioSessionState()
+        
+        // Notify delegate
+        delegate?.audioSessionRouteChanged(shouldPause: shouldPause)
+    }
+    
+    func audioSessionWasReset() {
+        os_log(.error, log: logger, "🔄 Media services reset - reconfiguring everything")
+        
+        // Complete reconfiguration needed
+        reconfigureAfterMediaServicesReset()
+        
+        // This is treated as an interruption that requires pause
+        delegate?.audioSessionWasInterrupted(shouldPause: true)
     }
 }

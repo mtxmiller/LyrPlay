@@ -17,6 +17,9 @@ class AudioManager: NSObject, ObservableObject {
     var onTrackEnded: (() -> Void)?
     var slimClient: SlimProtoCoordinator?  // Changed from weak to strong reference
     
+    private var wasPlayingBeforeInterruption: Bool = false
+    private var interruptionPosition: Double = 0.0
+    
     // MARK: - Initialization
     override init() {
         self.audioPlayer = AudioPlayer()
@@ -34,13 +37,13 @@ class AudioManager: NSObject, ObservableObject {
         // Connect AudioPlayer to AudioManager
         audioPlayer.delegate = self
         
-        // Connect AudioSessionManager to AudioManager
+        // Connect AudioSessionManager to AudioManager - ENHANCED
         audioSessionManager.delegate = self
         
         // Connect NowPlayingManager to AudioManager
         nowPlayingManager.delegate = self
         
-        os_log(.info, log: logger, "✅ Component delegation configured")
+        os_log(.info, log: logger, "✅ Component delegation configured with interruption handling")
     }
     
     // MARK: - Public Interface (Exact same as original AudioManager)
@@ -199,24 +202,210 @@ extension AudioManager: AudioPlayerDelegate {
     }
 }
 
+// MARK: - Interruption State Management (ADD THIS SECTION)
+extension AudioManager {
+    
+    // MARK: - Interruption Handling Integration
+    /// Called when audio session is interrupted (phone calls, etc.)
+    func handleAudioInterruption(shouldPause: Bool) {
+        guard shouldPause else { return }
+        
+        let currentState = getPlayerState()
+        wasPlayingBeforeInterruption = (currentState == "Playing")
+        interruptionPosition = getCurrentTime()
+        
+        os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s, position: %.2f",
+               wasPlayingBeforeInterruption ? "YES" : "NO", interruptionPosition)
+        
+        if wasPlayingBeforeInterruption {
+            // Pause playback
+            audioPlayer.pause()
+            
+            // Update now playing to show paused state
+            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: interruptionPosition)
+            
+            // Notify SlimProto coordinator about interruption
+            if let slimClient = slimClient {
+                // Send pause status to server to keep it informed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    // Use a custom method to indicate interruption-based pause
+                    self.notifyServerOfInterruption(isPaused: true)
+                }
+            }
+        }
+    }
+    
+    /// Called when audio interruption ends
+    func handleInterruptionEnded(shouldResume: Bool) {
+        os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s, was playing: %{public}s",
+               shouldResume ? "YES" : "NO", wasPlayingBeforeInterruption ? "YES" : "NO")
+        
+        // Reconfigure audio session for current format if needed
+        let currentFormat = getCurrentAudioFormat()
+        configureAudioSessionForFormat(currentFormat)
+        
+        if shouldResume && wasPlayingBeforeInterruption {
+            // Resume playback
+            audioPlayer.play()
+            
+            // Update now playing to show playing state
+            let currentTime = getCurrentTime()
+            nowPlayingManager.updatePlaybackState(isPlaying: true, currentTime: currentTime)
+            
+            // Notify SlimProto coordinator about resume
+            if let slimClient = slimClient {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    self.notifyServerOfInterruption(isPaused: false)
+                }
+            }
+            
+            os_log(.info, log: logger, "▶️ Automatically resumed playback after interruption")
+        }
+        
+        // Reset interruption state
+        wasPlayingBeforeInterruption = false
+        interruptionPosition = 0.0
+    }
+    
+    /// Called when audio route changes (headphones, CarPlay, etc.)
+    func handleRouteChange(shouldPause: Bool, routeType: String = "Unknown") {
+        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
+               routeType, shouldPause ? "YES" : "NO")
+        
+        if shouldPause {
+            let currentState = getPlayerState()
+            let wasPlaying = (currentState == "Playing")
+            let currentPosition = getCurrentTime()
+            
+            if wasPlaying {
+                // Pause due to route change
+                audioPlayer.pause()
+                
+                // Update now playing
+                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                
+                // For CarPlay disconnect, notify server
+                if routeType.contains("CarPlay") && routeType.contains("Disconnected") {
+                    notifyServerOfCarPlayDisconnect(position: currentPosition)
+                }
+                
+                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeType)
+            }
+        } else if routeType.contains("CarPlay") && routeType.contains("Connected") {
+            // Special handling for CarPlay reconnection
+            handleCarPlayReconnection()
+        }
+    }
+    
+    // MARK: - CarPlay Specific Handling
+    private func handleCarPlayReconnection() {
+        os_log(.info, log: logger, "🚗 CarPlay reconnected - checking for auto-resume")
+        
+        // Check if we should auto-resume (based on server state or last known state)
+        // For now, we'll let the server tell us what to do
+        if let slimClient = slimClient {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.notifyServerOfCarPlayReconnect()
+            }
+        }
+    }
+    
+    // MARK: - Server Communication for Interruptions
+    private func notifyServerOfInterruption(isPaused: Bool) {
+        guard let slimClient = slimClient else { return }
+        
+        if isPaused {
+            // Send pause command to server due to interruption
+            slimClient.sendLockScreenCommand("pause")
+            os_log(.info, log: logger, "📡 Notified server of interruption pause")
+        } else {
+            // Send resume command to server after interruption
+            slimClient.sendLockScreenCommand("play")
+            os_log(.info, log: logger, "📡 Notified server of interruption resume")
+        }
+    }
+    
+    private func notifyServerOfCarPlayDisconnect(position: Double) {
+        guard let slimClient = slimClient else { return }
+        
+        // Send pause command specifically for CarPlay disconnect
+        slimClient.sendLockScreenCommand("pause")
+        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect (position: %.2f)", position)
+    }
+    
+    private func notifyServerOfCarPlayReconnect() {
+        guard let slimClient = slimClient else { return }
+        
+        // Send resume command for CarPlay reconnect
+        slimClient.sendLockScreenCommand("play")
+        os_log(.info, log: logger, "🚗 Notified server of CarPlay reconnect")
+    }
+    
+    // MARK: - Utility Methods
+    private func getCurrentAudioFormat() -> String {
+        // Try to determine current format based on player state
+        // This is a simple heuristic - you might want to track this more explicitly
+        let currentURL = getCurrentStreamURL()
+        
+        if currentURL.contains("format=aac") || currentURL.contains("type=aac") {
+            return "AAC"
+        } else if currentURL.contains("format=alac") || currentURL.contains("type=alac") {
+            return "ALAC"
+        } else if currentURL.contains("format=mp3") || currentURL.contains("type=mp3") {
+            return "MP3"
+        } else {
+            return "AAC" // Default fallback
+        }
+    }
+    
+    private func getCurrentStreamURL() -> String {
+        // This would need to be implemented based on how you track current stream URL
+        // For now, return empty string as fallback
+        return ""
+    }
+    
+    // MARK: - Public Interruption Status
+    func getInterruptionStatus() -> String {
+        return audioSessionManager.getInterruptionStatus()
+    }
+    
+    func isCurrentlyInterrupted() -> Bool {
+        return audioSessionManager.getInterruptionStatus() != "Normal"
+    }
+}
+
 // MARK: - AudioSessionManagerDelegate
 extension AudioManager: AudioSessionManagerDelegate {
     
     func audioSessionDidEnterBackground() {
         os_log(.info, log: logger, "📱 Audio session entered background")
-        
-        // Could add background-specific logic here
-        // For now, the audio session manager handles the background task
+        // Existing background logic...
     }
     
     func audioSessionDidEnterForeground() {
         os_log(.info, log: logger, "📱 Audio session entered foreground")
         
-        // Could add foreground-specific logic here
-        // Update now playing info to ensure it's current
+        // Existing foreground logic...
         let currentTime = audioPlayer.getCurrentTime()
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
+    }
+    
+    // NEW: Handle interruptions
+    func audioSessionWasInterrupted(shouldPause: Bool) {
+        handleAudioInterruption(shouldPause: shouldPause)
+    }
+    
+    // NEW: Handle interruption end
+    func audioSessionInterruptionEnded(shouldResume: Bool) {
+        handleInterruptionEnded(shouldResume: shouldResume)
+    }
+    
+    // NEW: Handle route changes
+    func audioSessionRouteChanged(shouldPause: Bool) {
+        // We need to get the route type from somewhere - let's enhance this
+        let currentRoute = audioSessionManager.getCurrentAudioRoute()
+        handleRouteChange(shouldPause: shouldPause, routeType: currentRoute)
     }
 }
 
@@ -271,7 +460,6 @@ extension AudioManager {
 }
 // MARK: - Server Time Integration
 extension AudioManager {
-    
     /// Sets up server time synchronization for accurate lock screen timing
     /// This method should be called by SlimProtoCoordinator after connection
     func setupServerTimeIntegration(with synchronizer: ServerTimeSynchronizer) {
