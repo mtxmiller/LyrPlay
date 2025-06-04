@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var hasConnected = false
     @State private var showingSettings = false
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
+    @State private var isAppInBackground = false
+
     
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Phase 2 enhancements")
@@ -78,7 +80,7 @@ struct ContentView: View {
                 settingsButtonOverlay
                 
                 // Enhanced debug info overlay (Phase 2)
-                if settings.isDebugModeEnabled {
+                if settings.isDebugModeEnabled && !isAppInBackground {
                     enhancedDebugOverlay
                 }
             }
@@ -88,6 +90,12 @@ struct ContentView: View {
             if !hasConnected {
                 connectToLMS()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            isAppInBackground = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            isAppInBackground = false
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
@@ -182,8 +190,8 @@ struct ContentView: View {
                         .background(Color.black.opacity(0.6))
                         .clipShape(Circle())
                 }
-                .padding(.trailing, 92)
-                .padding(.top, 50) // Account for status bar
+                .padding(.trailing, 100)
+                .padding(.top, 60) // Account for status bar
             }
             
             Spacer()
