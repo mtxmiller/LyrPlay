@@ -1,5 +1,5 @@
 // File: NowPlayingManager.swift
-// Lock screen controls, metadata display, and remote command handling
+// Enhanced to use server time as primary source for lock screen accuracy
 import Foundation
 import MediaPlayer
 import UIKit
@@ -24,17 +24,113 @@ class NowPlayingManager: ObservableObject {
     private var currentArtwork: UIImage?
     private var metadataDuration: TimeInterval = 0.0
     
+    // MARK: - Time Sources
+    private var serverTimeSynchronizer: ServerTimeSynchronizer?
+    private weak var audioManager: AudioManager?
+    private var lastKnownServerTime: Double = 0.0
+    private var lastKnownAudioTime: Double = 0.0
+    private var isUsingServerTime: Bool = false
+    
     // MARK: - Delegation
     weak var delegate: NowPlayingManagerDelegate?
     
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
     
+    // MARK: - Update Timer
+    private var updateTimer: Timer?
+    private let updateInterval: TimeInterval = 1.0
+    
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
         setupRemoteCommandCenter()
-        os_log(.info, log: logger, "NowPlayingManager initialized")
+        startUpdateTimer()
+        os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
+    }
+    
+    // MARK: - Server Time Integration
+    func setServerTimeSynchronizer(_ synchronizer: ServerTimeSynchronizer) {
+        self.serverTimeSynchronizer = synchronizer
+        synchronizer.delegate = self
+        os_log(.info, log: logger, "✅ Server time synchronizer connected")
+    }
+    
+    func setAudioManager(_ audioManager: AudioManager) {
+        self.audioManager = audioManager
+        os_log(.info, log: logger, "✅ Audio manager connected for fallback timing")
+    }
+    
+    // MARK: - Update Timer Management
+    private func startUpdateTimer() {
+        stopUpdateTimer()
+        
+        updateTimer = Timer.scheduledTimer(withTimeInterval: updateInterval, repeats: true) { [weak self] _ in
+            self?.updateNowPlayingTime()
+        }
+        
+        os_log(.debug, log: logger, "🔄 Now playing update timer started")
+    }
+    
+    private func stopUpdateTimer() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+    
+    private func updateNowPlayingTime() {
+        let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
+        
+        // Update now playing info with current time
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+        
+        // Log time source changes
+        let newUsingServerTime = (timeSource == .serverTime)
+        if newUsingServerTime != isUsingServerTime {
+            isUsingServerTime = newUsingServerTime
+            os_log(.info, log: logger, "🔄 Time source changed to: %{public}s",
+                   timeSource.description)
+        }
+    }
+    
+    // MARK: - Time Source Management
+    private enum TimeSource {
+        case serverTime
+        case audioManager
+        case lastKnown
+        
+        var description: String {
+            switch self {
+            case .serverTime: return "Server Time"
+            case .audioManager: return "Audio Manager"
+            case .lastKnown: return "Last Known"
+            }
+        }
+    }
+    
+    private func getCurrentPlaybackInfo() -> (time: Double, isPlaying: Bool, source: TimeSource) {
+        // Try server time first (primary source)
+        if let synchronizer = serverTimeSynchronizer {
+            let serverInfo = synchronizer.getCurrentInterpolatedTime()
+            if serverInfo.isServerTime {
+                lastKnownServerTime = serverInfo.time
+                return (time: serverInfo.time, isPlaying: serverInfo.isPlaying, source: .serverTime)
+            }
+        }
+        
+        // Fall back to audio manager (secondary source)
+        if let audioManager = audioManager {
+            let audioTime = audioManager.getCurrentTime()
+            let isPlaying = audioManager.getPlayerState() == "Playing"
+            
+            if audioTime > 0 || isPlaying {
+                lastKnownAudioTime = audioTime
+                return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
+            }
+        }
+        
+        // Last resort: use last known time
+        let lastKnownTime = max(lastKnownServerTime, lastKnownAudioTime)
+        return (time: lastKnownTime, isPlaying: false, source: .lastKnown)
     }
     
     // MARK: - Now Playing Info Setup
@@ -151,7 +247,9 @@ class NowPlayingManager: ObservableObject {
             loadArtwork(from: url)
         } else {
             currentArtwork = nil
-            updateNowPlayingInfo(isPlaying: false) // Update immediately without artwork
+            // Update immediately without artwork
+            let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         }
     }
     
@@ -172,13 +270,16 @@ class NowPlayingManager: ObservableObject {
                 }
                 
                 // Update now playing info with or without artwork
-                self?.updateNowPlayingInfo(isPlaying: false)
+                if let self = self {
+                    let (currentTime, isPlaying, _) = self.getCurrentPlaybackInfo()
+                    self.updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+                }
             }
         }.resume()
     }
     
     // MARK: - Now Playing Info Updates
-    func updateNowPlayingInfo(isPlaying: Bool, currentTime: Double = 0.0) {
+    private func updateNowPlayingInfo(isPlaying: Bool, currentTime: Double = 0.0) {
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         
         var nowPlayingInfo = nowPlayingInfoCenter.nowPlayingInfo ?? [String: Any]()
@@ -213,13 +314,22 @@ class NowPlayingManager: ObservableObject {
         
         // Debug logging
         if let duration = nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] as? TimeInterval {
-            os_log(.debug, log: logger, "🔍 Now Playing: %.0f/%.0f seconds, rate: %.1f",
-                   currentTime, duration, isPlaying ? 1.0 : 0.0)
+            os_log(.debug, log: logger, "🔍 Now Playing: %.0f/%.0f seconds, rate: %.1f (%{public}s)",
+                   currentTime, duration, isPlaying ? 1.0 : 0.0, isUsingServerTime ? "server" : "local")
         }
     }
     
+    // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
-        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+        // This method is called by AudioManager updates
+        // We'll use it to update our fallback time, but primary source is still server
+        lastKnownAudioTime = currentTime
+        
+        // If we don't have server time, update immediately
+        if serverTimeSynchronizer?.isServerTimeAvailable != true {
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+            os_log(.debug, log: logger, "📍 Updated from audio manager (no server time): %.2f", currentTime)
+        }
     }
     
     // MARK: - Metadata Access
@@ -260,6 +370,8 @@ class NowPlayingManager: ObservableObject {
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
         metadataDuration = 0.0
+        lastKnownServerTime = 0.0
+        lastKnownAudioTime = 0.0
         
         os_log(.info, log: logger, "🗑️ Now playing info cleared")
     }
@@ -276,11 +388,74 @@ class NowPlayingManager: ObservableObject {
         os_log(.info, log: logger, "🎛️ Remote commands %{public}s", enable ? "enabled" : "disabled")
     }
     
-    // MARK: - Cleanup
-    deinit {
-        clearNowPlayingInfo()
-        enableRemoteCommands(false)
-        os_log(.info, log: logger, "NowPlayingManager deinitialized")
+    // MARK: - Debug Information
+    func getTimeSourceInfo() -> String {
+        let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
+        let serverStatus = serverTimeSynchronizer?.syncStatus ?? "No synchronizer"
+        
+        return """
+        Current Time: \(String(format: "%.1f", currentTime))s
+        Playing: \(isPlaying ? "Yes" : "No")
+        Source: \(source.description)
+        Server Sync: \(serverStatus)
+        Last Server: \(String(format: "%.1f", lastKnownServerTime))s
+        Last Audio: \(String(format: "%.1f", lastKnownAudioTime))s
+        """
     }
     
+    // MARK: - Cleanup
+    deinit {
+        stopUpdateTimer()
+        clearNowPlayingInfo()
+        enableRemoteCommands(false)
+        os_log(.info, log: logger, "Enhanced NowPlayingManager deinitialized")
+    }
+}
+
+// MARK: - ServerTimeSynchronizerDelegate
+extension NowPlayingManager: ServerTimeSynchronizerDelegate {
+    
+    func serverTimeDidUpdate(currentTime: Double, duration: Double, isPlaying: Bool) {
+        // Server time is our primary source, so update immediately
+        lastKnownServerTime = currentTime
+        
+        // Update duration if we got one from server and don't have metadata duration
+        if duration > 0 && metadataDuration <= 0 {
+            metadataDuration = duration
+            os_log(.debug, log: logger, "📍 Updated duration from server: %.0f seconds", duration)
+        }
+        
+        // Update now playing info with server time
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+        
+        os_log(.debug, log: logger, "📍 Updated from server time: %.2f/%.2f (%{public}s)",
+               currentTime, duration, isPlaying ? "playing" : "paused")
+    }
+    
+    func serverTimeFetchFailed(error: Error) {
+        os_log(.error, log: logger, "⚠️ Server time fetch failed: %{public}s", error.localizedDescription)
+        
+        // Fall back to audio manager time
+        if let audioManager = audioManager {
+            let audioTime = audioManager.getCurrentTime()
+            let isPlaying = audioManager.getPlayerState() == "Playing"
+            lastKnownAudioTime = audioTime
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: audioTime)
+            os_log(.info, log: logger, "🔄 Fell back to audio manager time: %.2f", audioTime)
+        }
+    }
+    
+    func serverTimeConnectionRestored() {
+        os_log(.info, log: logger, "✅ Server time connection restored")
+        
+        // Immediately request updated time
+        if let synchronizer = serverTimeSynchronizer {
+            let serverInfo = synchronizer.getCurrentInterpolatedTime()
+            if serverInfo.isServerTime {
+                lastKnownServerTime = serverInfo.time
+                updateNowPlayingInfo(isPlaying: serverInfo.isPlaying, currentTime: serverInfo.time)
+                os_log(.info, log: logger, "🔄 Restored to server time: %.2f", serverInfo.time)
+            }
+        }
+    }
 }

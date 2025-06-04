@@ -1,5 +1,5 @@
 // File: SlimProtoCoordinator.swift
-// Phase 2: Updated to work with enhanced connection manager
+// Enhanced with ServerTimeSynchronizer for accurate lock screen timing
 import Foundation
 import os.log
 
@@ -10,6 +10,7 @@ class SlimProtoCoordinator: ObservableObject {
     private let commandHandler: SlimProtoCommandHandler
     private let connectionManager: SlimProtoConnectionManager
     private let audioManager: AudioManager
+    private let serverTimeSynchronizer: ServerTimeSynchronizer
     
     // MARK: - Dependencies
     private let settings = SettingsManager.shared
@@ -25,11 +26,13 @@ class SlimProtoCoordinator: ObservableObject {
         self.client = SlimProtoClient()
         self.commandHandler = SlimProtoCommandHandler()
         self.connectionManager = SlimProtoConnectionManager()
+        self.serverTimeSynchronizer = ServerTimeSynchronizer(connectionManager: connectionManager)
         
         setupDelegation()
         setupAudioCallbacks()
+        setupServerTimeIntegration()
         
-        os_log(.info, log: logger, "SlimProtoCoordinator initialized with Enhanced Connection Manager")
+        os_log(.info, log: logger, "SlimProtoCoordinator initialized with ServerTimeSynchronizer")
     }
     
     // MARK: - Setup
@@ -57,9 +60,24 @@ class SlimProtoCoordinator: ObservableObject {
         audioManager.slimClient = self
     }
     
+    private func setupServerTimeIntegration() {
+        // Connect ServerTimeSynchronizer to audio manager's NowPlayingManager
+        // This will be done when we set the audio manager reference
+        os_log(.info, log: logger, "✅ Server time integration configured")
+    }
+    
+    // MARK: - Audio Manager Integration Enhancement
+    func setupNowPlayingManagerIntegration() {
+        // Use AudioManager's integration method to set up server time sync
+        audioManager.setupServerTimeIntegration(with: serverTimeSynchronizer)
+        serverTimeSynchronizer.setConnectionManager(connectionManager)
+        
+        os_log(.info, log: logger, "✅ Server time synchronizer connected via AudioManager")
+    }
+    
     // MARK: - Public Interface
     func connect() {
-        os_log(.info, log: logger, "Starting connection...")
+        os_log(.info, log: logger, "Starting connection with server time sync...")
         connectionManager.willConnect()
         client.connect()
     }
@@ -68,11 +86,23 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "User requested disconnection")
         connectionManager.userInitiatedDisconnection()
         stopStatusTimer()
+        stopServerTimeSync()
         client.disconnect()
     }
     
     func updateServerSettings(host: String, port: UInt16) {
         client.updateServerSettings(host: host, port: port)
+    }
+    
+    // MARK: - Server Time Sync Management
+    private func startServerTimeSync() {
+        serverTimeSynchronizer.startSyncing()
+        os_log(.info, log: logger, "🔄 Server time synchronization started")
+    }
+    
+    private func stopServerTimeSync() {
+        serverTimeSynchronizer.stopSyncing()
+        os_log(.info, log: logger, "⏹️ Server time synchronization stopped")
     }
     
     // MARK: - Enhanced Status Timer with Background Awareness
@@ -144,8 +174,18 @@ class SlimProtoCoordinator: ObservableObject {
         return connectionManager.backgroundTimeRemaining
     }
     
+    // MARK: - Server Time Debug Info
+    var serverTimeStatus: String {
+        return serverTimeSynchronizer.syncStatus
+    }
+    
+    var timeSourceInfo: String {
+        return audioManager.getTimeSourceInfo()
+    }
+    
     deinit {
         stopStatusTimer()
+        stopServerTimeSync()
         disconnect()
     }
 }
@@ -157,12 +197,21 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         os_log(.info, log: logger, "✅ Connection established")
         connectionManager.didConnect()
         startStatusTimer()
+        
+        // Start server time synchronization once connected
+        startServerTimeSync()
+        
+        // Setup NowPlayingManager integration after connection
+        setupNowPlayingManagerIntegration()
     }
     
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         connectionManager.didDisconnect(error: error)
         stopStatusTimer()
+        
+        // Stop server time sync when disconnected
+        stopServerTimeSync()
     }
     
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {
@@ -205,6 +254,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         if statusTimer != nil {
             startStatusTimer()
         }
+        
+        // Server time sync will automatically adjust to background intervals
+        os_log(.info, log: logger, "📱 Server time sync adjusted for background")
     }
     
     func connectionManagerDidEnterForeground() {
@@ -222,6 +274,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             client.sendStatus("STMt")
             connectionManager.recordHeartbeatResponse()
             
+            // Trigger immediate server time sync
+            serverTimeSynchronizer.performImmediateSync()
+            
             os_log(.info, log: logger, "📱 Sent foreground status - Playing: %{public}s, Position: %.2f",
                    isCurrentlyPlaying ? "YES" : "NO", currentTime)
         } else {
@@ -234,6 +289,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         if statusTimer != nil {
             startStatusTimer()
         }
+        
+        os_log(.info, log: logger, "📱 Server time sync adjusted for foreground")
     }
     
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
@@ -245,10 +302,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             if connectionManager.connectionState.canAttemptConnection {
                 os_log(.info, log: logger, "🌐 Network available - attempting connection")
                 connect()
+            } else if connectionManager.connectionState.isConnected {
+                // Network restored - trigger immediate server time sync
+                serverTimeSynchronizer.performImmediateSync()
             }
         } else {
-            // Network lost - we'll be disconnected soon
-            os_log(.error, log: logger, "🌐 Network lost - connection will be affected")
+            // Network lost - server time sync will automatically handle this
+            os_log(.error, log: logger, "🌐 Network lost - server time sync will fall back to local time")
         }
         
         // Restart status timer with appropriate interval for network type
@@ -271,7 +331,10 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             // Send status - if this fails, we'll get a disconnect event
             client.sendStatus("STMt")
             
-            os_log(.info, log: logger, "💓 Health check status sent")
+            // Also trigger server time sync as a health check
+            serverTimeSynchronizer.performImmediateSync()
+            
+            os_log(.info, log: logger, "💓 Health check status and server time sync sent")
         } else {
             os_log(.error, log: logger, "💓 Health check failed - not connected")
         }
@@ -295,6 +358,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Update the client with stream start
         client.setPlaybackState(isPlaying: true, position: startTime)
         
+        // Trigger immediate server time sync for new stream
+        serverTimeSynchronizer.performImmediateSync()
+        
         // Fetch metadata for lock screen
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.fetchCurrentTrackMetadata()
@@ -308,6 +374,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Update client with actual current position
         client.setPlaybackState(isPlaying: false, position: currentTime)
+        
+        // Trigger server time sync to get accurate pause position
+        serverTimeSynchronizer.performImmediateSync()
     }
     
     func didResumeStream() {
@@ -317,6 +386,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Update client with actual current position
         client.setPlaybackState(isPlaying: true, position: currentTime)
+        
+        // Trigger server time sync for resume
+        serverTimeSynchronizer.performImmediateSync()
     }
     
     func didStopStream() {
@@ -325,6 +397,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Update client with stop state
         client.setPlaybackState(isPlaying: false, position: 0.0)
+        
+        // Server time sync will automatically handle stopped state
     }
     
     func didReceiveStatusRequest() {
@@ -341,6 +415,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Record that we handled a status request (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
+        
+        // Trigger server time sync to stay synchronized
+        serverTimeSynchronizer.performImmediateSync()
     }
 }
 
@@ -379,6 +456,11 @@ extension SlimProtoCoordinator {
             
         default:
             os_log(.error, log: logger, "Unknown lock screen command: %{public}s", command)
+        }
+        
+        // Trigger immediate server time sync after any command
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.serverTimeSynchronizer.performImmediateSync()
         }
     }
     

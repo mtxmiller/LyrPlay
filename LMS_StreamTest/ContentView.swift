@@ -1,5 +1,5 @@
 // File: ContentView.swift
-// Phase 2: Enhanced to show network status and background information
+// Enhanced debug overlay showing server time synchronization status
 import SwiftUI
 import WebKit
 import os.log
@@ -17,20 +17,20 @@ struct ContentView: View {
 
     
     init() {
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Phase 2 enhancements")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Server Time Synchronization")
         
         // Create AudioManager first
         let audioMgr = AudioManager()
         self._audioManager = StateObject(wrappedValue: audioMgr)
         
-        // Create SlimProtoCoordinator with AudioManager
+        // Create SlimProtoCoordinator with AudioManager (includes ServerTimeSynchronizer)
         let coordinator = SlimProtoCoordinator(audioManager: audioMgr)
         self._slimProtoCoordinator = StateObject(wrappedValue: coordinator)
         
         // Connect AudioManager back to coordinator for lock screen support
         audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Phase 2 SlimProto architecture initialized")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Enhanced SlimProto architecture with server time sync initialized")
     }
     
     var body: some View {
@@ -79,7 +79,7 @@ struct ContentView: View {
                 // Settings button overlay
                 settingsButtonOverlay
                 
-                // Enhanced debug info overlay (Phase 2)
+                // Enhanced debug info overlay with server time info
                 if settings.isDebugModeEnabled && !isAppInBackground {
                     enhancedDebugOverlay
                 }
@@ -198,12 +198,12 @@ struct ContentView: View {
         }
     }
     
-    // Enhanced debug overlay showing Phase 2 features
+    // Enhanced debug overlay with server time synchronization info
     private var enhancedDebugOverlay: some View {
         VStack {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Enhanced Debug Info")
+                    Text("Enhanced Debug + Server Time")
                         .font(.caption)
                         .fontWeight(.bold)
                         .foregroundColor(.white)
@@ -220,6 +220,11 @@ struct ContentView: View {
                     Text("Stream: \(slimProtoCoordinator.streamState)")
                         .font(.caption2)
                         .foregroundColor(.blue)
+                    
+                    // Server Time Status (NEW)
+                    Text("Server Time: \(slimProtoCoordinator.serverTimeStatus)")
+                        .font(.caption2)
+                        .foregroundColor(serverTimeStatusColor)
                     
                     Text("Player: \(settings.formattedMACAddress)")
                         .font(.caption2)
@@ -241,6 +246,16 @@ struct ContentView: View {
                             .font(.caption2)
                             .foregroundColor(.green)
                     }
+                    
+                    // Time Source Info (NEW)
+                    Text("Time Source:")
+                        .font(.caption2)
+                        .foregroundColor(.cyan)
+                    
+                    Text(slimProtoCoordinator.timeSourceInfo)
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .lineLimit(3)
                     
                     // Connection summary
                     Text(slimProtoCoordinator.connectionSummary)
@@ -289,10 +304,22 @@ struct ContentView: View {
         }
     }
     
+    // NEW: Server time status color
+    private var serverTimeStatusColor: Color {
+        let status = slimProtoCoordinator.serverTimeStatus
+        if status.contains("Available") {
+            return .green
+        } else if status.contains("Unavailable") {
+            return .red
+        } else {
+            return .yellow
+        }
+    }
+    
     private func connectToLMS() {
         guard !hasConnected else { return }
         
-        os_log(.info, log: logger, "Connecting to LMS server with Phase 2 enhancements: %{public}s", settings.serverHost)
+        os_log(.info, log: logger, "Connecting to LMS server with Server Time Sync: %{public}s", settings.serverHost)
         
         audioManager.setSlimClient(slimProtoCoordinator)
         
@@ -397,3 +424,4 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
+

@@ -8,8 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		6B9C4D7D2DEB820F00D22FD6 /* CocoaAsyncSocket in Frameworks */ = {isa = PBXBuildFile; productRef = 6B9C4D7C2DEB820F00D22FD6 /* CocoaAsyncSocket */; };
-		6B9C4D802DEB821D00D22FD6 /* SwiftAudioEx in Frameworks */ = {isa = PBXBuildFile; productRef = 6B9C4D7F2DEB821D00D22FD6 /* SwiftAudioEx */; };
-		6BC71C572DEB9DB100333C4F /* VLCKitSPM in Frameworks */ = {isa = PBXBuildFile; productRef = 6BC71C562DEB9DB100333C4F /* VLCKitSPM */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
 /* End PBXBuildFile section */
@@ -62,9 +60,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6B9C4D802DEB821D00D22FD6 /* SwiftAudioEx in Frameworks */,
 				6B9C4D7D2DEB820F00D22FD6 /* CocoaAsyncSocket in Frameworks */,
-				6BC71C572DEB9DB100333C4F /* VLCKitSPM in Frameworks */,
 				6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */,
 				6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */,
 			);
@@ -138,8 +134,6 @@
 			name = LMS_StreamTest;
 			packageProductDependencies = (
 				6B9C4D7C2DEB820F00D22FD6 /* CocoaAsyncSocket */,
-				6B9C4D7F2DEB821D00D22FD6 /* SwiftAudioEx */,
-				6BC71C562DEB9DB100333C4F /* VLCKitSPM */,
 			);
 			productName = LMS_StreamTest;
 			productReference = 6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */;
@@ -225,8 +219,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				6B9C4D7B2DEB820F00D22FD6 /* XCRemoteSwiftPackageReference "CocoaAsyncSocket" */,
-				6B9C4D7E2DEB821D00D22FD6 /* XCRemoteSwiftPackageReference "SwiftAudioEx" */,
-				6BC71C552DEB9DB100333C4F /* XCRemoteSwiftPackageReference "vlckit-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 6B9C4D4F2DEB81F500D22FD6 /* Products */;
@@ -603,22 +595,6 @@
 				minimumVersion = 7.6.5;
 			};
 		};
-		6B9C4D7E2DEB821D00D22FD6 /* XCRemoteSwiftPackageReference "SwiftAudioEx" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/doublesymmetry/SwiftAudioEx";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.1.0;
-			};
-		};
-		6BC71C552DEB9DB100333C4F /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/tylerjonesio/vlckit-spm";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 3.6.0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -626,16 +602,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 6B9C4D7B2DEB820F00D22FD6 /* XCRemoteSwiftPackageReference "CocoaAsyncSocket" */;
 			productName = CocoaAsyncSocket;
-		};
-		6B9C4D7F2DEB821D00D22FD6 /* SwiftAudioEx */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 6B9C4D7E2DEB821D00D22FD6 /* XCRemoteSwiftPackageReference "SwiftAudioEx" */;
-			productName = SwiftAudioEx;
-		};
-		6BC71C562DEB9DB100333C4F /* VLCKitSPM */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 6BC71C552DEB9DB100333C4F /* XCRemoteSwiftPackageReference "vlckit-spm" */;
-			productName = VLCKitSPM;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

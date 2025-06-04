@@ -269,3 +269,26 @@ extension AudioManager {
         return audioSessionManager.isOtherAudioPlaying()
     }
 }
+// MARK: - Server Time Integration
+extension AudioManager {
+    
+    /// Sets up server time synchronization for accurate lock screen timing
+    /// This method should be called by SlimProtoCoordinator after connection
+    func setupServerTimeIntegration(with synchronizer: ServerTimeSynchronizer) {
+        // Connect the synchronizer to our NowPlayingManager
+        nowPlayingManager.setServerTimeSynchronizer(synchronizer)
+        nowPlayingManager.setAudioManager(self)
+        
+        os_log(.info, log: logger, "✅ Server time integration configured for AudioManager")
+    }
+    
+    /// Gets time source information for debugging
+    func getTimeSourceInfo() -> String {
+        return nowPlayingManager.getTimeSourceInfo()
+    }
+    
+    /// Gets server time synchronization status for debugging
+    func getServerTimeStatus() -> String {
+        return nowPlayingManager.getTimeSourceInfo()
+    }
+}
