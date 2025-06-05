@@ -321,7 +321,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // Bytes received (8 bytes) - based on YOUR playback time
         let estimatedBitrate: UInt64 = 320000
-        let bytesReceived: UInt64 = UInt64(actualPlaybackTime * Double(estimatedBitrate) / 8.0)
+        let bytesCalculation = max(0, actualPlaybackTime) * Double(estimatedBitrate) / 8.0
+        let bytesReceived: UInt64 = bytesCalculation.isFinite ? UInt64(bytesCalculation) : 0
         statusData.append(withUnsafeBytes(of: bytesReceived.bigEndian) { Data($0) })
         
         // Signal strength (2 bytes) - 0xFFFF for wired
