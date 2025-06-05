@@ -23,7 +23,7 @@ class AudioSessionManager: ObservableObject {
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     
     // MARK: - Interruption Integration
-    private var interruptionManager: InterruptionManager?
+    var interruptionManager: InterruptionManager?
     
     // MARK: - Delegation
     weak var delegate: AudioSessionManagerDelegate?

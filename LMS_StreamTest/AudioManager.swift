@@ -403,9 +403,39 @@ extension AudioManager: AudioSessionManagerDelegate {
     
     // NEW: Handle route changes
     func audioSessionRouteChanged(shouldPause: Bool) {
-        // We need to get the route type from somewhere - let's enhance this
-        let currentRoute = audioSessionManager.getCurrentAudioRoute()
-        handleRouteChange(shouldPause: shouldPause, routeType: currentRoute)
+        // Get the actual route change type from InterruptionManager
+        let routeChangeDescription = audioSessionManager.interruptionManager?.lastRouteChange?.description ?? "Unknown"
+        
+        os_log(.info, log: logger, "🔀 Route change detected: %{public}s (shouldPause: %{public}s)",
+               routeChangeDescription, shouldPause ? "YES" : "NO")
+        
+        if shouldPause {
+            let currentState = getPlayerState()
+            let wasPlaying = (currentState == "Playing")
+            let currentPosition = getCurrentTime()
+            
+            if wasPlaying {
+                // Pause due to route change
+                audioPlayer.pause()
+                
+                // Update now playing
+                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                
+                // Check for CarPlay disconnection using the proper route change type
+                if routeChangeDescription == "CarPlay Disconnected" {
+                    os_log(.info, log: logger, "🚗 CarPlay disconnection detected - notifying server")
+                    notifyServerOfCarPlayDisconnect(position: currentPosition)
+                } else {
+                    os_log(.info, log: logger, "⏸️ Non-CarPlay route change pause: %{public}s", routeChangeDescription)
+                }
+                
+                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
+            }
+        } else if routeChangeDescription == "CarPlay Connected" {
+            // Special handling for CarPlay reconnection
+            os_log(.info, log: logger, "🚗 CarPlay connection detected")
+            handleCarPlayReconnection()
+        }
     }
 }
 
