@@ -11,6 +11,7 @@ protocol SlimProtoConnectionManagerDelegate: AnyObject {
     func connectionManagerDidEnterForeground()
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool)
     func connectionManagerShouldCheckHealth()
+    func connectionManagerWillSleep()  // Add this line
 }
 
 class SlimProtoConnectionManager: ObservableObject {
@@ -351,12 +352,16 @@ class SlimProtoConnectionManager: ObservableObject {
     }
     
     private func prepareForBackgroundSuspension() {
-        os_log(.info, log: logger, "📱 Preparing for background suspension")
+        os_log(.info, log: logger, "📱 Preparing for background suspension - sending sleep signal")
         
-        // If we're connected, we'll likely be disconnected soon
-        // Set state to prepare for reconnection when app becomes active
+        // If we're connected, send a sleep status to keep the player in LMS list
         if connectionState.isConnected {
             lastDisconnectionReason = .appBackgrounded
+            
+            // Notify delegate to send sleep status before we lose connection
+            delegate?.connectionManagerWillSleep()
+            
+            os_log(.info, log: logger, "💤 Sleep signal sent - player should remain in LMS list")
         }
         
         // Stop health monitoring to avoid unnecessary activity

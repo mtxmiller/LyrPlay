@@ -339,6 +339,18 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             os_log(.error, log: logger, "💓 Health check failed - not connected")
         }
     }
+    
+    func connectionManagerWillSleep() {
+        os_log(.info, log: logger, "💤 Connection manager requesting sleep status")
+        
+        // Send sleep status to LMS to keep player in the list
+        client.sendSleepStatus()
+        
+        // Give the message time to be sent before connection dies
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            os_log(.info, log: self.logger, "💤 Sleep status sent, connection will naturally close")
+        }
+    }
 }
 
 // MARK: - SlimProtoCommandHandlerDelegate

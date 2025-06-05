@@ -432,6 +432,18 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         socket.write(fullMessage, withTimeout: 30, tag: 2)
     }
     
+    func sendSleepStatus() {
+        guard isConnected else {
+            os_log(.error, log: logger, "Cannot send sleep status - not connected")
+            return
+        }
+        
+        os_log(.info, log: logger, "💤 Sending proper PAUSE status before sleep")
+        
+        // Just send a standard pause status - don't invent new protocol codes
+        sendStatus("STMp")
+    }
+    
     // MARK: - Playback State Management
     func setServerTimestamp(_ timestamp: UInt32) {
         serverTimestamp = timestamp
