@@ -280,16 +280,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         os_log(.info, log: logger, "Sending STAT: %{public}s", code)
         
-        // Get current time (frozen position when paused)
-        let currentTime: Double
-        if isPaused && (code == "STMp") {
-            currentTime = lastKnownPosition // Use frozen position for pause status
-            os_log(.info, log: logger, "🔒 Using frozen position for PAUSE status: %.2f", currentTime)
-        } else if code == "STMt" && !isPaused {
-            currentTime = getCurrentPlaybackTime() // Live position for timer status
-        } else {
-            currentTime = lastKnownPosition // Default to last known when paused
-        }
+        // PROTOCOL FIX: Use server-provided time, not our calculations
+        let serverProvidedTime = commandHandler?.getServerProvidedTime() ?? 0.0
         
         // Create status message
         var statusData = Data()
@@ -304,123 +296,65 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // MAS Initialized (1 byte)
         statusData.append(UInt8(ascii: "m"))
         
-        // MAS Mode (1 byte) - reflect actual pause state
+        // MAS Mode (1 byte) - 'p' for pause, 0 for play/stop
         if isPaused || code == "STMp" {
-            statusData.append(UInt8(ascii: "p")) // 'p' = paused
-            os_log(.info, log: logger, "🔒 MAS Mode set to PAUSED ('p')")
+            statusData.append(UInt8(ascii: "p"))
         } else {
-            statusData.append(0) // 0 = playing/stopped
-            os_log(.info, log: logger, "▶️ MAS Mode set to PLAYING (0)")
+            statusData.append(0)
         }
         
-        // Buffer size (4 bytes) - from settings
+        // Buffer size (4 bytes)
         let bufferSize = UInt32(settings.bufferSize)
-        statusData.append(Data([
-            UInt8((bufferSize >> 24) & 0xff),
-            UInt8((bufferSize >> 16) & 0xff),
-            UInt8((bufferSize >> 8) & 0xff),
-            UInt8(bufferSize & 0xff)
-        ]))
+        statusData.append(withUnsafeBytes(of: bufferSize.bigEndian) { Data($0) })
         
-        // Buffer fullness (4 bytes) - when paused, show buffer as empty/minimal
+        // Buffer fullness (4 bytes) - show how much is buffered
         let bufferFullness: UInt32 = isPaused ? 0 : bufferSize / 2
-        statusData.append(Data([
-            UInt8((bufferFullness >> 24) & 0xff),
-            UInt8((bufferFullness >> 16) & 0xff),
-            UInt8((bufferFullness >> 8) & 0xff),
-            UInt8(bufferFullness & 0xff)
-        ]))
+        statusData.append(withUnsafeBytes(of: bufferFullness.bigEndian) { Data($0) })
         
-        // Bytes received (8 bytes) - estimate based on time and bitrate
-        let estimatedBitrate: UInt64 = 320000 // 320kbps
-        let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
-        let bytesReceived: UInt64 = UInt64(safeCurrentTime * Double(estimatedBitrate) / 8.0)
-        statusData.append(Data([
-            UInt8((bytesReceived >> 56) & 0xff),
-            UInt8((bytesReceived >> 48) & 0xff),
-            UInt8((bytesReceived >> 40) & 0xff),
-            UInt8((bytesReceived >> 32) & 0xff),
-            UInt8((bytesReceived >> 24) & 0xff),
-            UInt8((bytesReceived >> 16) & 0xff),
-            UInt8((bytesReceived >> 8) & 0xff),
-            UInt8(bytesReceived & 0xff)
-        ]))
+        // Bytes received (8 bytes) - based on server time
+        let estimatedBitrate: UInt64 = 320000 // 320kbps assumption
+        let bytesReceived: UInt64 = UInt64(serverProvidedTime * Double(estimatedBitrate) / 8.0)
+        statusData.append(withUnsafeBytes(of: bytesReceived.bigEndian) { Data($0) })
         
-        // Signal strength (2 bytes) - 0x0000 = wired connection (like real squeezelite)
-        statusData.append(Data([0x00, 0x00]))
+        // Signal strength (2 bytes) - 0xFFFF for wired
+        statusData.append(Data([0xFF, 0xFF]))
         
-        // Jiffies (4 bytes) - simple timestamp counter
+        // Jiffies (4 bytes) - milliseconds since some epoch
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
-        statusData.append(Data([
-            UInt8((jiffies >> 24) & 0xff),
-            UInt8((jiffies >> 16) & 0xff),
-            UInt8((jiffies >> 8) & 0xff),
-            UInt8(jiffies & 0xff)
-        ]))
+        statusData.append(withUnsafeBytes(of: jiffies.bigEndian) { Data($0) })
         
         // Output buffer size (4 bytes)
         let outputBufferSize: UInt32 = 8192
-        statusData.append(Data([
-            UInt8((outputBufferSize >> 24) & 0xff),
-            UInt8((outputBufferSize >> 16) & 0xff),
-            UInt8((outputBufferSize >> 8) & 0xff),
-            UInt8(outputBufferSize & 0xff)
-        ]))
+        statusData.append(withUnsafeBytes(of: outputBufferSize.bigEndian) { Data($0) })
         
         // Output buffer fullness (4 bytes)
         let outputBufferFullness: UInt32 = isPaused ? 0 : 4096
-        statusData.append(Data([
-            UInt8((outputBufferFullness >> 24) & 0xff),
-            UInt8((outputBufferFullness >> 16) & 0xff),
-            UInt8((outputBufferFullness >> 8) & 0xff),
-            UInt8(outputBufferFullness & 0xff)
-        ]))
+        statusData.append(withUnsafeBytes(of: outputBufferFullness.bigEndian) { Data($0) })
         
-        // Timing fields for STMt and STMp messages
+        // TIMING FIELDS - Only for STMt and STMp
         if code == "STMt" || code == "STMp" {
-            // Get stream time from command handler
-            let streamTime = commandHandler?.getCurrentStreamTime() ?? 0.0
-            let safeStreamTime = streamTime.isFinite ? max(0, streamTime) : 0.0
+            // Elapsed seconds (4 bytes) - SERVER'S TIME
+            let elapsedSeconds = UInt32(max(0, serverProvidedTime))
+            statusData.append(withUnsafeBytes(of: elapsedSeconds.bigEndian) { Data($0) })
             
-            // Elapsed seconds (4 bytes) - use STREAM time, not audio time
-            let elapsedSeconds = UInt32(safeStreamTime)
-            statusData.append(Data([
-                UInt8((elapsedSeconds >> 24) & 0xff),
-                UInt8((elapsedSeconds >> 16) & 0xff),
-                UInt8((elapsedSeconds >> 8) & 0xff),
-                UInt8(elapsedSeconds & 0xff)
-            ]))
-            
-            // Voltage (2 bytes)
+            // Voltage (2 bytes) - not used
             statusData.append(Data([0x00, 0x00]))
             
-            // Elapsed milliseconds (4 bytes) - use STREAM time
-            let elapsedMs = UInt32(safeStreamTime * 1000)
-            statusData.append(Data([
-                UInt8((elapsedMs >> 24) & 0xff),
-                UInt8((elapsedMs >> 16) & 0xff),
-                UInt8((elapsedMs >> 8) & 0xff),
-                UInt8(elapsedMs & 0xff)
-            ]))
+            // Elapsed milliseconds (4 bytes) - SERVER'S TIME in ms
+            let elapsedMs = UInt32(max(0, serverProvidedTime) * 1000)
+            statusData.append(withUnsafeBytes(of: elapsedMs.bigEndian) { Data($0) })
             
-            // Server timestamp (4 bytes) - echo back
-            statusData.append(Data([
-                UInt8((serverTimestamp >> 24) & 0xff),
-                UInt8((serverTimestamp >> 16) & 0xff),
-                UInt8((serverTimestamp >> 8) & 0xff),
-                UInt8(serverTimestamp & 0xff)
-            ]))
+            // Server timestamp (4 bytes) - ECHO BACK server's timestamp
+            statusData.append(withUnsafeBytes(of: serverTimestamp.bigEndian) { Data($0) })
             
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT sent - %{public}s with STREAM time: %.2f seconds", code, safeStreamTime)
-        } else {
-            // For other status codes, don't include timing fields
-            os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
+            os_log(.info, log: logger, "STAT %{public}s: server_time=%.2f, timestamp=%d",
+                   code, serverProvidedTime, serverTimestamp)
         }
         
-        // Create full message
+        // Send the message
         let command = "STAT".data(using: .ascii)!
         let length = UInt32(statusData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }

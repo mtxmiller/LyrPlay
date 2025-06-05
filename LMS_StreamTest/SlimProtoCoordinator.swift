@@ -438,17 +438,20 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             actualTime = serverTime.time
             timeSource = "server"
             
-            // SYNC FIX: If audio and server time are way off, sync the audio
-            if timeDifference > 5.0 && audioTime > 0.1 {  // ✅ Valid condition
-                os_log(.error, log: logger, "⚠️ Large time difference detected: audio=%.2f, server=%.2f (diff=%.2f)",
-                       audioTime, serverTime.time, timeDifference)  // ✅ Valid log
+            // Only seek if there's a HUGE difference (like initial sync or major drift)
+            if timeDifference > 30.0 && audioTime > 0.1 {
+                os_log(.error, log: logger, "⚠️ Major time drift detected: audio=%.2f, server=%.2f (diff=%.2f)",
+                       audioTime, serverTime.time, timeDifference)
                 
-                // Sync audio to server position
-                audioManager.seekToPosition(serverTime.time)  // ⚠️ This method doesn't exist yet!
+                // Only seek for major drift, not normal differences
+                audioManager.seekToPosition(serverTime.time)
                 
-                os_log(.info, log: logger, "🔄 Triggered audio sync due to large discrepancy")
+                os_log(.info, log: logger, "🔄 Major audio sync performed")
+            } else {
+                // Normal case - just report server time without seeking
+                os_log(.debug, log: logger, "📊 Using server time %.2f (audio: %.2f, diff: %.2f)",
+                       serverTime.time, audioTime, timeDifference)
             }
-            
         } else {
             actualTime = audioTime
             timeSource = "audio"

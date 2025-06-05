@@ -27,6 +27,8 @@ class SlimProtoCommandHandler: ObservableObject {
     private var streamStartTime: Date?
     private var isStreamPaused: Bool = false
     private var lastStreamUpdate: Date = Date()
+    private var serverStartTime: Date?
+    private var serverStartPosition: Double = 0.0
     
     // MARK: - Delegation
     weak var delegate: SlimProtoCommandHandlerDelegate?
@@ -289,8 +291,11 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream playback from %.2f", format, startTime)
         
-        // Update stream tracking
-        updateStreamPosition(startTime)
+        // PROTOCOL FIX: Track server's time reference
+        serverStartTime = Date()
+        serverStartPosition = startTime
+        lastKnownPosition = startTime
+        
         isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
@@ -302,15 +307,16 @@ class SlimProtoCommandHandler: ObservableObject {
             self.slimProtoClient?.sendStatus("STMs")
         }
     }
+
     
     private func handlePauseCommand() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
-        // Freeze stream time at current position
-        streamPosition = getCurrentStreamTime()
+        // Freeze at current server time
+        lastKnownPosition = getServerProvidedTime()
         isStreamPaused = true
         isPausedByLockScreen = true
-        lastKnownPosition = streamPosition
+        serverStartTime = nil // Stop time progression
         
         delegate?.didPauseStream()
         slimProtoClient?.sendStatus("STMp")
@@ -329,10 +335,11 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
-        // Resume stream time tracking
+        // Resume from current position
+        serverStartTime = Date()
+        serverStartPosition = lastKnownPosition
         isStreamPaused = false
         isPausedByLockScreen = false
-        lastStreamUpdate = Date()
         
         delegate?.didResumeStream()
         slimProtoClient?.sendStatus("STMr")
@@ -394,6 +401,21 @@ class SlimProtoCommandHandler: ObservableObject {
         }
         
         return 0.0
+    }
+    
+    func getServerProvidedTime() -> Double {
+        if isPausedByLockScreen {
+            // When paused, return frozen position
+            return lastKnownPosition
+        }
+        
+        guard let startTime = serverStartTime else {
+            return 0.0
+        }
+        
+        // Calculate elapsed time since server told us to start
+        let elapsed = Date().timeIntervalSince(startTime)
+        return serverStartPosition + elapsed
     }
     
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
