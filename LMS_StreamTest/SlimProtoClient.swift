@@ -280,8 +280,16 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         os_log(.info, log: logger, "Sending STAT: %{public}s", code)
         
-        // PROTOCOL FIX: Use server-provided time, not our calculations
-        let serverProvidedTime = commandHandler?.getServerProvidedTime() ?? 0.0
+        // PROTOCOL FIX: Use YOUR actual playback position, not server timestamp
+        let actualPlaybackTime: Double
+        if isPaused || code == "STMp" {
+            actualPlaybackTime = pausedPosition  // Frozen when paused
+        } else {
+            // Use current playback position from command handler or audio manager
+            actualPlaybackTime = commandHandler?.getServerProvidedTime() ?? getCurrentPlaybackPosition()
+        }
+        
+        os_log(.info, log: logger, "📍 Reporting actual playback time: %.2f (code: %{public}s)", actualPlaybackTime, code)
         
         // Create status message
         var statusData = Data()
@@ -307,19 +315,19 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         let bufferSize = UInt32(settings.bufferSize)
         statusData.append(withUnsafeBytes(of: bufferSize.bigEndian) { Data($0) })
         
-        // Buffer fullness (4 bytes) - show how much is buffered
+        // Buffer fullness (4 bytes)
         let bufferFullness: UInt32 = isPaused ? 0 : bufferSize / 2
         statusData.append(withUnsafeBytes(of: bufferFullness.bigEndian) { Data($0) })
         
-        // Bytes received (8 bytes) - based on server time
-        let estimatedBitrate: UInt64 = 320000 // 320kbps assumption
-        let bytesReceived: UInt64 = UInt64(serverProvidedTime * Double(estimatedBitrate) / 8.0)
+        // Bytes received (8 bytes) - based on YOUR playback time
+        let estimatedBitrate: UInt64 = 320000
+        let bytesReceived: UInt64 = UInt64(actualPlaybackTime * Double(estimatedBitrate) / 8.0)
         statusData.append(withUnsafeBytes(of: bytesReceived.bigEndian) { Data($0) })
         
         // Signal strength (2 bytes) - 0xFFFF for wired
         statusData.append(Data([0xFF, 0xFF]))
         
-        // Jiffies (4 bytes) - milliseconds since some epoch
+        // Jiffies (4 bytes) - system counter
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
         statusData.append(withUnsafeBytes(of: jiffies.bigEndian) { Data($0) })
         
@@ -331,27 +339,27 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         let outputBufferFullness: UInt32 = isPaused ? 0 : 4096
         statusData.append(withUnsafeBytes(of: outputBufferFullness.bigEndian) { Data($0) })
         
-        // TIMING FIELDS - Only for STMt and STMp
+        // TIMING FIELDS - Critical fix here
         if code == "STMt" || code == "STMp" {
-            // Elapsed seconds (4 bytes) - SERVER'S TIME
-            let elapsedSeconds = UInt32(max(0, serverProvidedTime))
+            // FIXED: elapsed_seconds = YOUR playback position (not server timestamp!)
+            let elapsedSeconds = UInt32(max(0, actualPlaybackTime))
             statusData.append(withUnsafeBytes(of: elapsedSeconds.bigEndian) { Data($0) })
             
-            // Voltage (2 bytes) - not used
+            // Voltage (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            // Elapsed milliseconds (4 bytes) - SERVER'S TIME in ms
-            let elapsedMs = UInt32(max(0, serverProvidedTime) * 1000)
+            // FIXED: elapsed_milliseconds = YOUR playback position in ms (not server timestamp!)
+            let elapsedMs = UInt32(max(0, actualPlaybackTime) * 1000)
             statusData.append(withUnsafeBytes(of: elapsedMs.bigEndian) { Data($0) })
             
-            // Server timestamp (4 bytes) - ECHO BACK server's timestamp
+            // CORRECT: server_timestamp = echo back server's timestamp (can be 0)
             statusData.append(withUnsafeBytes(of: serverTimestamp.bigEndian) { Data($0) })
             
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT %{public}s: server_time=%.2f, timestamp=%d",
-                   code, serverProvidedTime, serverTimestamp)
+            os_log(.info, log: logger, "STAT %{public}s: playback_time=%.2f, server_timestamp=%d",
+                   code, actualPlaybackTime, serverTimestamp)
         }
         
         // Send the message
