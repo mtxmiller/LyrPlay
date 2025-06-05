@@ -295,8 +295,14 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - Computed Properties
+    // Basic URL without player parameter (prevents reloads from resetting)
     var webURL: String {
-        "http://\(serverHost):\(serverWebPort)"
+        "http://\(serverHost):\(serverWebPort)/material/"
+    }
+
+    // Initial URL with player parameter (auto-selects player on first load)
+    var initialWebURL: String {
+        "http://\(serverHost):\(serverWebPort)/material/?player=\(playerMACAddress)"
     }
     
     var formattedMACAddress: String {

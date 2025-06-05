@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var showingSettings = false
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     @State private var isAppInBackground = false
+    @State private var hasLoadedInitially = false
 
     
     init() {
@@ -59,7 +60,7 @@ struct ContentView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
                 
-                if let url = URL(string: settings.webURL) {
+                if let url = URL(string: hasLoadedInitially ? settings.webURL : settings.initialWebURL) {
                     WebView(
                         url: url,
                         isLoading: $isLoading,
@@ -67,6 +68,9 @@ struct ContentView: View {
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
+                    .onAppear {
+                        hasLoadedInitially = true
+                    }
                 } else {
                     serverErrorView
                 }
