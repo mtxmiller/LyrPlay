@@ -401,6 +401,11 @@ extension AudioManager: AudioSessionManagerDelegate {
         handleInterruptionEnded(shouldResume: shouldResume)
     }
     
+    func seekToPosition(_ position: Double) {
+        audioPlayer.seekToPosition(position)
+        os_log(.info, log: logger, "🔄 AudioManager seeking to position: %.2f", position)
+    }
+    
     // NEW: Handle route changes
     func audioSessionRouteChanged(shouldPause: Bool) {
         // Get the actual route change type from InterruptionManager

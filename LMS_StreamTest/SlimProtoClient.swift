@@ -61,6 +61,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
+    weak var commandHandler: SlimProtoCommandHandler?
+    
     // MARK: - Initialization
     override init() {
         super.init()
@@ -376,9 +378,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // Timing fields for STMt and STMp messages
         if code == "STMt" || code == "STMp" {
-            // Elapsed seconds (4 bytes)
-            let safeCurrentTime = currentTime.isFinite ? max(0, currentTime) : 0.0
-            let elapsedSeconds = UInt32(safeCurrentTime)
+            // Get stream time from command handler
+            let streamTime = commandHandler?.getCurrentStreamTime() ?? 0.0
+            let safeStreamTime = streamTime.isFinite ? max(0, streamTime) : 0.0
+            
+            // Elapsed seconds (4 bytes) - use STREAM time, not audio time
+            let elapsedSeconds = UInt32(safeStreamTime)
             statusData.append(Data([
                 UInt8((elapsedSeconds >> 24) & 0xff),
                 UInt8((elapsedSeconds >> 16) & 0xff),
@@ -389,8 +394,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Voltage (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            // Elapsed milliseconds (4 bytes)
-            let elapsedMs = UInt32(safeCurrentTime * 1000)
+            // Elapsed milliseconds (4 bytes) - use STREAM time
+            let elapsedMs = UInt32(safeStreamTime * 1000)
             statusData.append(Data([
                 UInt8((elapsedMs >> 24) & 0xff),
                 UInt8((elapsedMs >> 16) & 0xff),
@@ -409,11 +414,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            if code == "STMp" {
-                os_log(.info, log: logger, "STAT sent - PAUSE STATUS with position: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
-            } else {
-                os_log(.info, log: logger, "STAT sent - TIMER STATUS with elapsed time: %.2f seconds (raw: %d ms)", safeCurrentTime, elapsedMs)
-            }
+            os_log(.info, log: logger, "STAT sent - %{public}s with STREAM time: %.2f seconds", code, safeStreamTime)
         } else {
             // For other status codes, don't include timing fields
             os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
@@ -451,26 +452,28 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     }
     
     func setPlaybackState(isPlaying: Bool, position: Double) {
+        os_log(.info, log: logger, "🔍 setPlaybackState called - isPlaying: %{public}s, position: %.2f, current isPaused: %{public}s",
+               isPlaying ? "YES" : "NO", position, isPaused ? "YES" : "NO")
+        
         if isPlaying && isPaused {
             // Resuming from pause
             playbackStartTime = Date().addingTimeInterval(-position)
             isPaused = false
             pausedPosition = 0.0
         } else if !isPlaying && !isPaused {
-            // Pausing
+            // Pausing (was playing, now pausing) OR stopping
             pausedPosition = position
             isPaused = true
             lastKnownPosition = position
         } else if isPlaying && !isPaused {
-            // Starting new track
+            // Starting new track or continuing play
             playbackStartTime = Date().addingTimeInterval(-position)
             pausedPosition = 0.0
             isStreamActive = true
-        } else if !isPlaying {
-            // Stopping
-            isPaused = false
-            isStreamActive = false
-            lastKnownPosition = 0.0
+        } else if !isPlaying && isPaused {
+            // Already paused, just updating the position
+            lastKnownPosition = position
+            pausedPosition = position
         }
         
         os_log(.debug, log: logger, "Playback state updated - Playing: %{public}s, Position: %.2f",

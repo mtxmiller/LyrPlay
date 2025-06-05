@@ -44,6 +44,9 @@ class SlimProtoCoordinator: ObservableObject {
         commandHandler.slimProtoClient = client
         commandHandler.delegate = self
         
+        // ADD THIS LINE:
+        client.commandHandler = commandHandler
+        
         // Connect connection manager to coordinator
         connectionManager.delegate = self
     }
@@ -133,15 +136,18 @@ class SlimProtoCoordinator: ObservableObject {
         
         // Update position from audio manager before sending status
         let currentTime = audioManager.getCurrentTime()
-        commandHandler.updatePlaybackPosition(currentTime)
+        let isPlaying = audioManager.getPlayerState() == "Playing"
         
         // Update client with current position and state
-        let isPlaying = audioManager.getPlayerState() == "Playing"
         client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
         
-        // Only send heartbeat if we have an active stream
+        // FIXED: Send appropriate status based on stream state
         if commandHandler.streamState != "Stopped" {
-            client.sendStatus("STMt")
+            if commandHandler.streamState == "Paused" || !isPlaying {
+                client.sendStatus("STMp")  // Pause status when paused
+            } else {
+                client.sendStatus("STMt")  // Timer status when playing
+            }
             lastStatusSent = Date()
             
             // Record heartbeat for health monitoring
@@ -320,7 +326,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     func connectionManagerShouldCheckHealth() {
         os_log(.info, log: logger, "💓 Connection health check requested")
         
-        // Send a test status to verify connection is alive
         if connectionManager.connectionState.isConnected {
             let currentTime = audioManager.getCurrentTime()
             let isPlaying = audioManager.getPlayerState() == "Playing"
@@ -328,13 +333,19 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             // Update client state
             client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
             
-            // Send status - if this fails, we'll get a disconnect event
-            client.sendStatus("STMt")
+            // FIXED: Send appropriate status based on actual state
+            if commandHandler.streamState == "Paused" || !isPlaying {
+                client.sendStatus("STMp")  // Send pause status when paused
+                os_log(.info, log: logger, "💓 Health check: sending pause status")
+            } else {
+                client.sendStatus("STMt")  // Send timer status when playing
+                os_log(.info, log: logger, "💓 Health check: sending timer status")
+            }
             
             // Also trigger server time sync as a health check
             serverTimeSynchronizer.performImmediateSync()
             
-            os_log(.info, log: logger, "💓 Health check status and server time sync sent")
+            os_log(.info, log: logger, "💓 Health check sent")
         } else {
             os_log(.error, log: logger, "💓 Health check failed - not connected")
         }
@@ -414,16 +425,44 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
     
     func didReceiveStatusRequest() {
-        // Handle status requests - get ACTUAL time from audio manager
-        let currentTime = audioManager.getCurrentTime()
-        os_log(.debug, log: logger, "📊 Status requested - current time: %.2f", currentTime)
+        // ENHANCED: Get the most accurate time available
+        let serverTime = serverTimeSynchronizer.getCurrentInterpolatedTime()
+        let audioTime = audioManager.getCurrentTime()
         
-        // Update command handler with real position
-        commandHandler.updatePlaybackPosition(currentTime)
+        // Use server time if available and reasonable, otherwise fall back to audio time
+        let actualTime: Double
+        let timeSource: String
+        let timeDifference = abs(serverTime.time - audioTime)  // ✅ Valid
         
-        // Update client with real position and state
-        let isPlaying = audioManager.getPlayerState() == "Playing"
-        client.setPlaybackState(isPlaying: isPlaying, position: currentTime)
+        if serverTime.isServerTime {
+            actualTime = serverTime.time
+            timeSource = "server"
+            
+            // SYNC FIX: If audio and server time are way off, sync the audio
+            if timeDifference > 5.0 && audioTime > 0.1 {  // ✅ Valid condition
+                os_log(.error, log: logger, "⚠️ Large time difference detected: audio=%.2f, server=%.2f (diff=%.2f)",
+                       audioTime, serverTime.time, timeDifference)  // ✅ Valid log
+                
+                // Sync audio to server position
+                audioManager.seekToPosition(serverTime.time)  // ⚠️ This method doesn't exist yet!
+                
+                os_log(.info, log: logger, "🔄 Triggered audio sync due to large discrepancy")
+            }
+            
+        } else {
+            actualTime = audioTime
+            timeSource = "audio"
+        }
+        
+        os_log(.debug, log: logger, "📊 Status requested - using %.2f from %{public}s (audio: %.2f, server: %.2f)",
+               actualTime, timeSource, audioTime, serverTime.time)
+        
+        // Update command handler with accurate position
+        commandHandler.updatePlaybackPosition(actualTime)
+        
+        // Update client with accurate position and state
+        let isPlaying = serverTime.isServerTime ? serverTime.isPlaying : (audioManager.getPlayerState() == "Playing")
+        client.setPlaybackState(isPlaying: isPlaying, position: actualTime)
         
         // Record that we handled a status request (shows connection is alive)
         connectionManager.recordHeartbeatResponse()

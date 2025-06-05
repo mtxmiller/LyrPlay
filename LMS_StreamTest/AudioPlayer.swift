@@ -279,7 +279,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    private func seekToPosition(_ time: Double) {
+    func seekToPosition(_ time: Double) {
         let seekTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         
         player.seek(to: seekTime) { [weak self] finished in
