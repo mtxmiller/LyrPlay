@@ -80,8 +80,8 @@ struct ContentView: View {
                     statusOverlay
                 }
                 
-                // Settings button overlay
-                settingsButtonOverlay
+                // Swipe down
+                swipeFromRightSettings
                 
                 // Enhanced debug info overlay with server time info
                 if settings.isDebugModeEnabled && !isAppInBackground {
@@ -181,24 +181,26 @@ struct ContentView: View {
         .allowsHitTesting(loadError != nil) // Allow touches only when there's an error
     }
     
-    private var settingsButtonOverlay: some View {
-        VStack {
-            HStack {
-                Spacer()
-                
-                Button(action: { showingSettings = true }) {
-                    Image(systemName: "gearshape.fill")
-                        .font(.title3)
-                        .foregroundColor(.white)
-                        .padding(12)
-                        .background(Color.black.opacity(0.6))
-                        .clipShape(Circle())
-                }
-                .padding(.trailing, 100)
-                .padding(.top, 60) // Account for status bar
-            }
-            
+    private var swipeFromRightSettings: some View {
+        HStack {
             Spacer()
+            
+            // Invisible swipe area on the right edge
+            Rectangle()
+                .fill(Color.clear)
+                .frame(width: 30)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture()
+                        .onEnded { gesture in
+                            // Detect swipe in from right edge (leftward swipe)
+                            if gesture.translation.width < -40 {
+                                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                                impactFeedback.impactOccurred()
+                                showingSettings = true
+                            }
+                        }
+                )
         }
     }
     
