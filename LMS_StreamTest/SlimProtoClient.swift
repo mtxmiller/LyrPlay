@@ -58,6 +58,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var isStreamActive: Bool = false
     private var lastKnownPosition: Double = 0.0
     
+    private var lastSuccessfulConnection: Date?
+    
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -123,6 +125,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     // MARK: - Socket Delegate Methods
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
+        lastSuccessfulConnection = Date()  // ADD THIS LINE
         isConnected = true
         os_log(.info, log: logger, "✅ Connected to LMS at %{public}s:%d", host, port)
         
@@ -280,17 +283,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         os_log(.info, log: logger, "Sending STAT: %{public}s", code)
         
-        // PROTOCOL FIX: Use YOUR actual playback position, not server timestamp
-        let actualPlaybackTime: Double
-        if isPaused || code == "STMp" {
-            actualPlaybackTime = pausedPosition  // Frozen when paused
-        } else {
-            // Use current playback position from command handler or audio manager
-            actualPlaybackTime = commandHandler?.getServerProvidedTime() ?? getCurrentPlaybackPosition()
-        }
-        
-        os_log(.info, log: logger, "📍 Reporting actual playback time: %.2f (code: %{public}s)", actualPlaybackTime, code)
-        
         // Create status message
         var statusData = Data()
         
@@ -304,66 +296,131 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // MAS Initialized (1 byte)
         statusData.append(UInt8(ascii: "m"))
         
-        // MAS Mode (1 byte) - 'p' for pause, 0 for play/stop
+        // MAS Mode (1 byte) - reflect actual pause state
         if isPaused || code == "STMp" {
-            statusData.append(UInt8(ascii: "p"))
+            statusData.append(UInt8(ascii: "p")) // 'p' = paused
+            os_log(.info, log: logger, "🔒 MAS Mode set to PAUSED ('p')")
         } else {
-            statusData.append(0)
+            statusData.append(0) // 0 = playing/stopped
+            os_log(.info, log: logger, "▶️ MAS Mode set to PLAYING (0)")
         }
         
-        // Buffer size (4 bytes)
+        // Buffer size (4 bytes) - from settings
         let bufferSize = UInt32(settings.bufferSize)
-        statusData.append(withUnsafeBytes(of: bufferSize.bigEndian) { Data($0) })
+        statusData.append(Data([
+            UInt8((bufferSize >> 24) & 0xff),
+            UInt8((bufferSize >> 16) & 0xff),
+            UInt8((bufferSize >> 8) & 0xff),
+            UInt8(bufferSize & 0xff)
+        ]))
         
-        // Buffer fullness (4 bytes)
+        // Buffer fullness (4 bytes) - when paused, show buffer as empty/minimal
         let bufferFullness: UInt32 = isPaused ? 0 : bufferSize / 2
-        statusData.append(withUnsafeBytes(of: bufferFullness.bigEndian) { Data($0) })
+        statusData.append(Data([
+            UInt8((bufferFullness >> 24) & 0xff),
+            UInt8((bufferFullness >> 16) & 0xff),
+            UInt8((bufferFullness >> 8) & 0xff),
+            UInt8(bufferFullness & 0xff)
+        ]))
         
-        // Bytes received (8 bytes) - based on YOUR playback time
-        let estimatedBitrate: UInt64 = 320000
-        let bytesCalculation = max(0, actualPlaybackTime) * Double(estimatedBitrate) / 8.0
-        let bytesReceived: UInt64 = bytesCalculation.isFinite ? UInt64(bytesCalculation) : 0
-        statusData.append(withUnsafeBytes(of: bytesReceived.bigEndian) { Data($0) })
+        // Bytes received (8 bytes) - SIMPLIFIED: Use basic estimation without position calculations
+        let estimatedBitrate: UInt64 = 320000 // 320kbps default
+        let connectionTimeSeconds = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
+        let connectionDuration = abs(connectionTimeSeconds)
+        let bytesReceived: UInt64 = UInt64(connectionDuration * Double(estimatedBitrate) / 8.0)
+        statusData.append(Data([
+            UInt8((bytesReceived >> 56) & 0xff),
+            UInt8((bytesReceived >> 48) & 0xff),
+            UInt8((bytesReceived >> 40) & 0xff),
+            UInt8((bytesReceived >> 32) & 0xff),
+            UInt8((bytesReceived >> 24) & 0xff),
+            UInt8((bytesReceived >> 16) & 0xff),
+            UInt8((bytesReceived >> 8) & 0xff),
+            UInt8(bytesReceived & 0xff)
+        ]))
         
-        // Signal strength (2 bytes) - 0xFFFF for wired
-        statusData.append(Data([0xFF, 0xFF]))
+        // Signal strength (2 bytes) - 0x0000 = wired connection (like real squeezelite)
+        statusData.append(Data([0x00, 0x00]))
         
-        // Jiffies (4 bytes) - system counter
+        // Jiffies (4 bytes) - simple timestamp counter
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
-        statusData.append(withUnsafeBytes(of: jiffies.bigEndian) { Data($0) })
+        statusData.append(Data([
+            UInt8((jiffies >> 24) & 0xff),
+            UInt8((jiffies >> 16) & 0xff),
+            UInt8((jiffies >> 8) & 0xff),
+            UInt8(jiffies & 0xff)
+        ]))
         
         // Output buffer size (4 bytes)
         let outputBufferSize: UInt32 = 8192
-        statusData.append(withUnsafeBytes(of: outputBufferSize.bigEndian) { Data($0) })
+        statusData.append(Data([
+            UInt8((outputBufferSize >> 24) & 0xff),
+            UInt8((outputBufferSize >> 16) & 0xff),
+            UInt8((outputBufferSize >> 8) & 0xff),
+            UInt8(outputBufferSize & 0xff)
+        ]))
         
         // Output buffer fullness (4 bytes)
         let outputBufferFullness: UInt32 = isPaused ? 0 : 4096
-        statusData.append(withUnsafeBytes(of: outputBufferFullness.bigEndian) { Data($0) })
+        statusData.append(Data([
+            UInt8((outputBufferFullness >> 24) & 0xff),
+            UInt8((outputBufferFullness >> 16) & 0xff),
+            UInt8((outputBufferFullness >> 8) & 0xff),
+            UInt8(outputBufferFullness & 0xff)
+        ]))
         
-        // TIMING FIELDS - Critical fix here
+        // *** PROTOCOL FIX: Include timing fields when server explicitly requests status ***
         if code == "STMt" || code == "STMp" {
-            // FIXED: elapsed_seconds = YOUR playback position (not server timestamp!)
-            let elapsedSeconds = UInt32(max(0, actualPlaybackTime))
-            statusData.append(withUnsafeBytes(of: elapsedSeconds.bigEndian) { Data($0) })
+            // When server requests status, provide actual position
+            let actualPosition: Double
+            if let commandHandler = commandHandler {
+                actualPosition = commandHandler.getServerProvidedTime()
+            } else {
+                actualPosition = getCurrentPlaybackPosition()
+            }
+            
+            // Clamp position to reasonable bounds
+            let clampedPosition = max(0, min(actualPosition, 86400)) // Max 24 hours
+            
+            // Elapsed seconds (4 bytes) - ACTUAL position when server requests it
+            let elapsedSeconds = UInt32(clampedPosition)
+            statusData.append(Data([
+                UInt8((elapsedSeconds >> 24) & 0xff),
+                UInt8((elapsedSeconds >> 16) & 0xff),
+                UInt8((elapsedSeconds >> 8) & 0xff),
+                UInt8(elapsedSeconds & 0xff)
+            ]))
             
             // Voltage (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            // FIXED: elapsed_milliseconds = YOUR playback position in ms (not server timestamp!)
-            let elapsedMs = UInt32(max(0, actualPlaybackTime) * 1000)
-            statusData.append(withUnsafeBytes(of: elapsedMs.bigEndian) { Data($0) })
+            // Elapsed milliseconds (4 bytes) - ACTUAL position in milliseconds
+            let elapsedMs = UInt32(clampedPosition * 1000)
+            statusData.append(Data([
+                UInt8((elapsedMs >> 24) & 0xff),
+                UInt8((elapsedMs >> 16) & 0xff),
+                UInt8((elapsedMs >> 8) & 0xff),
+                UInt8(elapsedMs & 0xff)
+            ]))
             
-            // CORRECT: server_timestamp = echo back server's timestamp (can be 0)
-            statusData.append(withUnsafeBytes(of: serverTimestamp.bigEndian) { Data($0) })
+            // Server timestamp (4 bytes) - ECHO BACK EXACTLY AS RECEIVED
+            statusData.append(Data([
+                UInt8((serverTimestamp >> 24) & 0xff),
+                UInt8((serverTimestamp >> 16) & 0xff),
+                UInt8((serverTimestamp >> 8) & 0xff),
+                UInt8(serverTimestamp & 0xff)
+            ]))
             
             // Error code (2 bytes)
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT %{public}s: playback_time=%.2f, server_timestamp=%d",
-                   code, actualPlaybackTime, serverTimestamp)
+            os_log(.info, log: logger, "STAT sent - %{public}s with actual position %.2f (server requested)", code, clampedPosition)
+        } else {
+            // For other status codes, don't include timing fields
+            os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
         }
         
-        // Send the message
+        // Create full message
         let command = "STAT".data(using: .ascii)!
         let length = UInt32(statusData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }

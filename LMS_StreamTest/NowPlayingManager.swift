@@ -111,7 +111,9 @@ class NowPlayingManager: ObservableObject {
         // Try server time first (primary source)
         if let synchronizer = serverTimeSynchronizer {
             let serverInfo = synchronizer.getCurrentInterpolatedTime()
-            if serverInfo.isServerTime {
+            
+            // FIXED: Only use server time if it's valid AND greater than 0.1 seconds
+            if serverInfo.isServerTime && serverInfo.time > 0.1 {
                 lastKnownServerTime = serverInfo.time
                 return (time: serverInfo.time, isPlaying: serverInfo.isPlaying, source: .serverTime)
             }
@@ -122,9 +124,18 @@ class NowPlayingManager: ObservableObject {
             let audioTime = audioManager.getCurrentTime()
             let isPlaying = audioManager.getPlayerState() == "Playing"
             
-            if audioTime > 0 || isPlaying {
+            if audioTime > 0.0 {
                 lastKnownAudioTime = audioTime
                 return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
+            }
+        }
+        
+        // Server time fallback (even if zero) - but mark as less reliable
+        if let synchronizer = serverTimeSynchronizer {
+            let serverInfo = synchronizer.getCurrentInterpolatedTime()
+            if serverInfo.isServerTime {
+                lastKnownServerTime = serverInfo.time
+                return (time: serverInfo.time, isPlaying: serverInfo.isPlaying, source: .serverTime)
             }
         }
         

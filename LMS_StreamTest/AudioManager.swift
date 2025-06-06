@@ -10,6 +10,11 @@ class AudioManager: NSObject, ObservableObject {
     private let audioSessionManager: AudioSessionManager
     private let nowPlayingManager: NowPlayingManager
     
+    // NEW: Expose NowPlayingManager for coordinator access
+    func getNowPlayingManager() -> NowPlayingManager {
+        return nowPlayingManager
+    }
+    
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
     
@@ -245,12 +250,18 @@ extension AudioManager {
         configureAudioSessionForFormat(currentFormat)
         
         if shouldResume && wasPlayingBeforeInterruption {
+            // INTERRUPTION FIX: Restore to saved position before resuming
+            if interruptionPosition > 0 {
+                audioPlayer.seekToPosition(interruptionPosition)
+                os_log(.info, log: logger, "🔄 Restored to interruption position: %.2f", interruptionPosition)
+            }
+            
             // Resume playback
             audioPlayer.play()
             
-            // Update now playing to show playing state
-            let currentTime = getCurrentTime()
-            nowPlayingManager.updatePlaybackState(isPlaying: true, currentTime: currentTime)
+            // Update now playing with the restored position
+            let restoredTime = interruptionPosition > 0 ? interruptionPosition : getCurrentTime()
+            nowPlayingManager.updatePlaybackState(isPlaying: true, currentTime: restoredTime)
             
             // Notify SlimProto coordinator about resume
             if let slimClient = slimClient {
@@ -259,7 +270,7 @@ extension AudioManager {
                 }
             }
             
-            os_log(.info, log: logger, "▶️ Automatically resumed playback after interruption")
+            os_log(.info, log: logger, "▶️ Automatically resumed playback after interruption at position %.2f", restoredTime)
         }
         
         // Reset interruption state

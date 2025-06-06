@@ -31,7 +31,7 @@ class ServerTimeSynchronizer: ObservableObject {
     private var lastSuccessfulSync: Date?
     private var consecutiveFailures: Int = 0
     private var isInBackground: Bool = false
-    private var currentSyncInterval: TimeInterval = 10.0
+    private var currentSyncInterval: TimeInterval = 5.0
     
     // MARK: - Background Strategy Integration
     private weak var connectionManager: SlimProtoConnectionManager?
@@ -41,8 +41,8 @@ class ServerTimeSynchronizer: ObservableObject {
     
     // MARK: - Constants
     private let maxConsecutiveFailures = 3
-    private let minSyncInterval: TimeInterval = 5.0
-    private let maxSyncInterval: TimeInterval = 60.0
+    private let minSyncInterval: TimeInterval = 3.0      // CHANGED from 5.0
+    private let maxSyncInterval: TimeInterval = 30.0     // CHANGED from 60.0
     private let requestTimeout: TimeInterval = 5.0
     
     // MARK: - Initialization
@@ -88,22 +88,22 @@ class ServerTimeSynchronizer: ObservableObject {
     private func adjustSyncIntervalForBackground() {
         // Use connection manager's background strategy if available
         if let connectionManager = connectionManager {
-            currentSyncInterval = connectionManager.backgroundConnectionStrategy.statusInterval
+            currentSyncInterval = min(connectionManager.backgroundConnectionStrategy.statusInterval, 15.0)  // CAP at 15s
         } else {
             // Fallback to conservative background interval
-            currentSyncInterval = 30.0
+            currentSyncInterval = 15.0  // CHANGED from 30.0
         }
         
         restartSyncTimer()
     }
     
     private func adjustSyncIntervalForForeground() {
-        // Use connection manager's strategy or default to 10 seconds
+        // Use connection manager's strategy or default to 5 seconds (CHANGED from 10)
         if let connectionManager = connectionManager {
             let strategy = connectionManager.backgroundConnectionStrategy
-            currentSyncInterval = strategy == .normal ? 10.0 : strategy.statusInterval
+            currentSyncInterval = strategy == .normal ? 5.0 : strategy.statusInterval  // CHANGED
         } else {
-            currentSyncInterval = 10.0
+            currentSyncInterval = 5.0  // CHANGED from 10.0
         }
         
         restartSyncTimer()
