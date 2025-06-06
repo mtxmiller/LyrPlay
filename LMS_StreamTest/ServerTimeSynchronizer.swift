@@ -86,26 +86,14 @@ class ServerTimeSynchronizer: ObservableObject {
     
     // MARK: - Sync Interval Management
     private func adjustSyncIntervalForBackground() {
-        // Use connection manager's background strategy if available
-        if let connectionManager = connectionManager {
-            currentSyncInterval = min(connectionManager.backgroundConnectionStrategy.statusInterval, 15.0)  // CAP at 15s
-        } else {
-            // Fallback to conservative background interval
-            currentSyncInterval = 15.0  // CHANGED from 30.0
-        }
-        
+        // Simplified: Use consistent 15-second interval for background
+        currentSyncInterval = 15.0
         restartSyncTimer()
     }
     
     private func adjustSyncIntervalForForeground() {
-        // Use connection manager's strategy or default to 5 seconds (CHANGED from 10)
-        if let connectionManager = connectionManager {
-            let strategy = connectionManager.backgroundConnectionStrategy
-            currentSyncInterval = strategy == .normal ? 5.0 : strategy.statusInterval  // CHANGED
-        } else {
-            currentSyncInterval = 5.0  // CHANGED from 10.0
-        }
-        
+        // Simplified: Use consistent 10-second interval for foreground
+        currentSyncInterval = 10.0
         restartSyncTimer()
     }
     
@@ -315,9 +303,11 @@ class ServerTimeSynchronizer: ObservableObject {
         // Notify delegate
         delegate?.serverTimeDidUpdate(currentTime: currentTime, duration: duration, isPlaying: isPlaying)
         
-        // Log success
-        os_log(.info, log: logger, "✅ Server time updated: %.2f/%.2f (%{public}s)",
-               currentTime, duration, isPlaying ? "playing" : "paused")
+        // Only log server time updates when there are significant changes or issues
+        if hadFailures || abs(currentTime - lastServerTime) > 30.0 {
+            os_log(.info, log: logger, "✅ Server time updated: %.1f/%.1f (%{public}s)",
+                   currentTime, duration, isPlaying ? "playing" : "paused")
+        }
         
         // Notify of connection restoration if we had failures
         if hadFailures {
@@ -358,7 +348,11 @@ class ServerTimeSynchronizer: ObservableObject {
         
         // If too much time has passed since last sync, don't interpolate
         guard timeSinceSync < currentSyncInterval * 2 else {
-            os_log(.error, log: logger, "⚠️ Server time too stale (%.1fs since last sync)", timeSinceSync)
+            // Only log staleness warning once per sync interval to avoid spam
+            let shouldLogStaleness = timeSinceSync.truncatingRemainder(dividingBy: currentSyncInterval) < 1.0
+            if shouldLogStaleness {
+                os_log(.error, log: logger, "⚠️ Server time too stale (%.1fs since last sync)", timeSinceSync)
+            }
             return (time: lastServerTime, isPlaying: lastServerIsPlaying, isServerTime: false)
         }
         

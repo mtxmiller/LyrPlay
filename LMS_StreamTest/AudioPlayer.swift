@@ -336,7 +336,11 @@ class AudioPlayer: NSObject, ObservableObject {
         if !loadedRanges.isEmpty {
             let timeRange = loadedRanges[0].timeRangeValue
             let loadedDuration = CMTimeGetSeconds(timeRange.duration)
-            os_log(.info, log: logger, "🎵 Loaded time range: %.2f seconds", loadedDuration)
+            
+            // Only log significant buffer changes (not every small update)
+            if loadedDuration > 10.0 && loadedDuration.truncatingRemainder(dividingBy: 10.0) < 1.0 {
+                os_log(.info, log: logger, "🎵 Buffer: %.1f seconds loaded", loadedDuration)
+            }
             
             // Start playback when sufficient buffer for live streams
             if loadedDuration > 2.0 && self.player.rate == 0 && !self.isIntentionallyPaused {
@@ -399,8 +403,11 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     func setMetadataDuration(_ duration: TimeInterval) {
+        // Only log if duration actually changes to avoid spam
+        if abs(metadataDuration - duration) > 1.0 {
+            os_log(.info, log: logger, "🎵 Metadata duration updated: %.0f seconds", duration)
+        }
         metadataDuration = duration
-        os_log(.info, log: logger, "🎵 Metadata duration set: %.0f seconds", duration)
     }
     
     // MARK: - Cleanup

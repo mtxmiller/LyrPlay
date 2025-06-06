@@ -314,20 +314,13 @@ class NowPlayingManager: ObservableObject {
         // Set duration using metadata duration for progress display
         if metadataDuration > 0 {
             nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = metadataDuration
-            os_log(.debug, log: logger, "🔍 Setting playback duration to %.0f seconds from metadata", metadataDuration)
         } else {
             // For live streams, remove duration info
             nowPlayingInfo.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
-            os_log(.debug, log: logger, "🔍 Live stream detected - removing duration info")
         }
         
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
         
-        // Debug logging
-        if let duration = nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] as? TimeInterval {
-            os_log(.debug, log: logger, "🔍 Now Playing: %.0f/%.0f seconds, rate: %.1f (%{public}s)",
-                   currentTime, duration, isPlaying ? 1.0 : 0.0, isUsingServerTime ? "server" : "local")
-        }
     }
     
     // MARK: - Backward Compatibility Methods (keeping existing interface)
@@ -404,13 +397,11 @@ class NowPlayingManager: ObservableObject {
         let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
         let serverStatus = serverTimeSynchronizer?.syncStatus ?? "No synchronizer"
         
+        // Simplified debug info - only show key information
         return """
-        Current Time: \(String(format: "%.1f", currentTime))s
+        Time: \(String(format: "%.1f", currentTime))s (\(source.description))
         Playing: \(isPlaying ? "Yes" : "No")
-        Source: \(source.description)
-        Server Sync: \(serverStatus)
-        Last Server: \(String(format: "%.1f", lastKnownServerTime))s
-        Last Audio: \(String(format: "%.1f", lastKnownAudioTime))s
+        Server: \(serverStatus)
         """
     }
     
@@ -433,7 +424,8 @@ extension NowPlayingManager: ServerTimeSynchronizerDelegate {
         // Update duration if we got one from server and don't have metadata duration
         if duration > 0 && metadataDuration <= 0 {
             metadataDuration = duration
-            os_log(.debug, log: logger, "📍 Updated duration from server: %.0f seconds", duration)
+            // Only log when we first get the duration, not every update
+            os_log(.info, log: logger, "📍 Track duration set from server: %.0f seconds", duration)
         }
         
         // Update now playing info with server time

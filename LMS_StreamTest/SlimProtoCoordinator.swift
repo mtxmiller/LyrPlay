@@ -20,10 +20,6 @@ class SlimProtoCoordinator: ObservableObject {
     private var statusTimer: Timer?
     private var lastStatusSent: Date?
     
-    // NEW: Lock screen specific timing
-    private var lockScreenUpdateTimer: Timer?
-    private var isStreamActive: Bool = false
-    
     // MARK: - Initialization
     init(audioManager: AudioManager) {
         self.audioManager = audioManager
@@ -123,8 +119,6 @@ class SlimProtoCoordinator: ObservableObject {
             self?.sendPeriodicStatus()
         }
         
-        // NEW: Also start lock screen timer
-        startLockScreenUpdateTimer()
         
         os_log(.info, log: logger, "Status timer started with %.1f second interval (%{public}s strategy)",
                interval, connectionManager.backgroundConnectionStrategy.description)
@@ -135,77 +129,14 @@ class SlimProtoCoordinator: ObservableObject {
         statusTimer = nil
         
         // NEW: Also stop lock screen timer
-        stopLockScreenUpdateTimer()
     }
-    
-    private func startLockScreenUpdateTimer() {
-        stopLockScreenUpdateTimer()
-        
-        // Use a fast timer for lock screen updates (every 1 second)
-        // This is separate from server communication
-        lockScreenUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateLockScreenTiming()
-        }
-        
-        os_log(.info, log: logger, "🔒 Lock screen update timer started (1 second interval)")
-    }
-    
-    private func stopLockScreenUpdateTimer() {
-        lockScreenUpdateTimer?.invalidate()
-        lockScreenUpdateTimer = nil
-    }
-    
-    // MARK: - NEW: Lock Screen Timing Updates
-    private func updateLockScreenTiming() {
-        guard isStreamActive else { return }
-        
-        // Get current timing from both sources
-        let serverTime = serverTimeSynchronizer.getCurrentInterpolatedTime()
-        let audioTime = audioManager.getCurrentTime()
-        let isPlaying = audioManager.getPlayerState() == "Playing"
-        
-        // FIXED: Smart time source selection
-        let currentTime: Double
-        let timeSource: String
-        
-        if serverTime.isServerTime && serverTime.time > 0.1 {
-            // Use server time only if it's valid AND greater than 0.1 seconds
-            // (This avoids the stuck-at-zero problem)
-            currentTime = serverTime.time
-            timeSource = "server"
-        } else if audioTime > 0.0 {
-            // Use audio time if it's available and positive
-            currentTime = audioTime
-            timeSource = "audio"
-        } else if serverTime.isServerTime {
-            // Fallback to server time even if it's zero (better than nothing)
-            currentTime = serverTime.time
-            timeSource = "server-fallback"
-        } else {
-            // Last resort: use zero
-            currentTime = 0.0
-            timeSource = "none"
-        }
-        
-        // Update now playing manager directly (this goes to lock screen)
-        let nowPlayingManager = audioManager.getNowPlayingManager()
-        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
-        
-        os_log(.debug, log: logger, "🔒 Lock screen updated - time: %.2f, playing: %{public}s, source: %{public}s (server: %.2f, audio: %.2f)",
-               currentTime, isPlaying ? "YES" : "NO", timeSource, serverTime.time, audioTime)
-    }
+
     
     private func sendPeriodicStatus() {
         // Don't send if we just sent one recently (avoid spam)
         if let lastSent = lastStatusSent, Date().timeIntervalSince(lastSent) < 5.0 {
             return
         }
-        
-        // PHASE 2 FIX: Don't update position from audio manager before sending status
-        // Remove these problematic lines:
-        // let currentTime = audioManager.getCurrentTime()  // REMOVED
-        // let isPlaying = audioManager.getPlayerState() == "Playing"  // REMOVED
-        // client.setPlaybackState(isPlaying: isPlaying, position: currentTime)  // REMOVED
         
         // Send appropriate status based on stream state
         if commandHandler.streamState != "Stopped" {
@@ -219,7 +150,7 @@ class SlimProtoCoordinator: ObservableObject {
             // Record heartbeat for health monitoring
             connectionManager.recordHeartbeatResponse()
             
-            os_log(.debug, log: logger, "📡 Periodic status sent without position override")
+            // Removed: excessive debug logging
         }
     }
     
@@ -393,12 +324,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.info, log: logger, "💓 Connection health check requested")
         
         if connectionManager.connectionState.isConnected {
-            // PHASE 2 FIX: Don't send position data during health checks
-            // Remove these problematic lines:
-            // let currentTime = audioManager.getCurrentTime()  // REMOVED
-            // let isPlaying = audioManager.getPlayerState() == "Playing"  // REMOVED
-            // client.setPlaybackState(isPlaying: isPlaying, position: currentTime)  // REMOVED
-            
             // Send appropriate status based on stream state (not audio manager state)
             if commandHandler.streamState == "Paused" {
                 client.sendStatus("STMp")  // Send pause status when paused
@@ -408,8 +333,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 os_log(.info, log: logger, "💓 Health check: sending timer status")
             }
             
-            // Also trigger server time sync as a health check
-            serverTimeSynchronizer.performImmediateSync()
+            // REMOVED: redundant server time sync during health checks
+            // serverTimeSynchronizer.performImmediateSync()
             
             os_log(.info, log: logger, "💓 Health check sent without position data")
         } else {
@@ -434,20 +359,15 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
 extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double) {
-        os_log(.info, log: logger, "🎵 Starting audio stream: %{public}s (%{public}s)", url, format)
+        os_log(.info, log: logger, "🎵 Starting audio stream: %{public}s (%{public}s) from %.2f", url, format, startTime)
         
-        // Use format-aware playback
+        // Use format-aware playback with proper positioning
         if startTime > 0 {
-            os_log(.info, log: logger, "🔄 Picking up existing stream at position: %.2f seconds", startTime)
+            os_log(.info, log: logger, "🔄 Joining stream in progress at position: %.2f seconds", startTime)
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
         } else {
             audioManager.playStreamWithFormat(urlString: url, format: format)
         }
-        
-        // PHASE 3 FIX: Don't report position back to server - it just told us the position!
-        // Remove these problematic lines:
-        // client.setPlaybackState(isPlaying: true, position: startTime)  // REMOVED
-        // serverTimeSynchronizer.performImmediateSync()  // REMOVED - creates conflicts
         
         // Just acknowledge the stream start - no position data
         client.sendStatus("STMc")  // Connecting
@@ -462,12 +382,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.fetchCurrentTrackMetadata()
         }
         
-        isStreamActive = true // Enable lock screen updates
-         
-         // Immediate lock screen update
-         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-             self.updateLockScreenTiming()
-         }
+        // IMPORTANT: Give audio player time to start, then sync with server
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.serverTimeSynchronizer.performImmediateSync()
+            os_log(.info, log: self.logger, "🔄 Requested server sync after stream start")
+        }
         
         os_log(.info, log: logger, "✅ Stream start acknowledged - server maintains position authority")
     }
@@ -488,7 +407,6 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         client.sendStatus("STMp")  // Paused acknowledgment
         
         os_log(.info, log: logger, "✅ Pause acknowledged - server maintains position authority")
-        updateLockScreenTiming()
     }
     
     func didResumeStream() {
@@ -507,7 +425,6 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         client.sendStatus("STMr")  // Resumed acknowledgment
         
         os_log(.info, log: logger, "✅ Resume acknowledged - server maintains position authority")
-        updateLockScreenTiming()
     }
     
     func didStopStream() {
@@ -524,8 +441,6 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         client.sendStatus("STMf")  // Stopped/Flushed acknowledgment
         
         os_log(.info, log: logger, "✅ Stop acknowledged")
-        isStreamActive = false // Disable lock screen updates
-        updateLockScreenTiming() // Final update
     }
     
     func didReceiveStatusRequest() {
@@ -533,39 +448,27 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let serverTime = serverTimeSynchronizer.getCurrentInterpolatedTime()
         let audioTime = audioManager.getCurrentTime()
         
-        // Log the time sources for debugging
-        os_log(.debug, log: logger, "📊 Status requested - server: %.2f, audio: %.2f",
-               serverTime.time, audioTime)
-        
-        // PHASE 3 FIX: Don't send position data back to server during status requests
-        // Remove these problematic lines:
-        // let actualTime: Double = ...  // REMOVED
-        // client.setPlaybackState(isPlaying: isPlaying, position: actualTime)  // REMOVED
+        // Check for large time differences and auto-correct them
+        let timeDifference = abs(serverTime.time - audioTime)
+        if timeDifference > 10.0 && audioTime > 0.1 && serverTime.isServerTime {
+            os_log(.info, log: logger, "🔄 Large time difference detected: audio=%.1f, server=%.1f (diff=%.1f) - syncing",
+                   audioTime, serverTime.time, timeDifference)
+            
+            // Auto-sync to server time when difference is large
+            DispatchQueue.main.async {
+                self.audioManager.seekToPosition(serverTime.time)
+            }
+        }
         
         // Only update command handler's internal tracking (not sent to server)
         if serverTime.isServerTime {
             commandHandler.updatePlaybackPosition(serverTime.time)
-            
-            // If there's a large discrepancy, log it but don't auto-correct
-            let timeDifference = abs(serverTime.time - audioTime)
-            if timeDifference > 5.0 && audioTime > 0.1 {
-                os_log(.info, log: logger, "ℹ️ Time difference noted: audio=%.2f, server=%.2f (diff=%.2f)",
-                       audioTime, serverTime.time, timeDifference)
-                // Note: We don't auto-seek anymore - let server control this
-            }
         } else {
             commandHandler.updatePlaybackPosition(audioTime)
         }
         
         // Record that we handled a status request (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
-        
-        // PHASE 3 FIX: Don't trigger immediate server sync during status requests
-        // Remove this line:
-        // serverTimeSynchronizer.performImmediateSync()  // REMOVED - creates timing loops
-        
-        os_log(.debug, log: logger, "📊 Status request handled - no position sent back to server")
-        updateLockScreenTiming()
     }
 }
 
@@ -606,11 +509,6 @@ extension SlimProtoCoordinator {
             os_log(.error, log: logger, "Unknown lock screen command: %{public}s", command)
         }
         
-        // Trigger immediate server time sync after any command
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            self.serverTimeSynchronizer.performImmediateSync()
-            self.updateLockScreenTiming()
-        }
     }
     
     private func sendJSONRPCCommand(_ command: String, parameters: [String] = []) {

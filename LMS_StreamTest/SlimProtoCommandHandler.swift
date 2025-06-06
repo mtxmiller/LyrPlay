@@ -291,10 +291,10 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream playback from %.2f", format, startTime)
         
-        // PROTOCOL FIX: Track server's time reference
+        // PROTOCOL FIX: Track server's time reference properly
         serverStartTime = Date()
-        serverStartPosition = startTime
-        lastKnownPosition = startTime
+        serverStartPosition = startTime  // Use the actual start time from server
+        lastKnownPosition = startTime    // Initialize to server's position
         
         isStreamPaused = false
         isPausedByLockScreen = false
