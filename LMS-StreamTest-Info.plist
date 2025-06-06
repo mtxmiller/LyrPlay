@@ -8,6 +8,8 @@
 		<string>com.lmsstream.background</string>
 		<string>com.lmsstream.slimproto</string>
 	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

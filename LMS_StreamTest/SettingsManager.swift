@@ -14,10 +14,11 @@ class SettingsManager: ObservableObject {
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 10.0
-    @Published var preferredFormats: [String] = ["aac", "alac", "mp3"]
+    @Published var preferredFormats: [String] = ["alc", "aac", "mp3"]
     @Published var bufferSize: Int = 1048576  // 1MB like Castbridge
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
+    @Published var showFallbackSettingsButton: Bool = true
     
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
@@ -37,6 +38,7 @@ class SettingsManager: ObservableObject {
         static let isDebugModeEnabled = "IsDebugModeEnabled"
         static let isConfigured = "IsConfigured"
         static let settingsVersion = "SettingsVersion"
+        static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
     }
     
     private let currentSettingsVersion = 1
@@ -52,6 +54,11 @@ class SettingsManager: ObservableObject {
         if playerName.isEmpty {
             playerName = "iOS Player"
         }
+        
+        // Force update to ALAC-first priority order
+        UserDefaults.standard.set(["alc", "aac", "mp3"], forKey: Keys.preferredFormats)
+        preferredFormats = ["alc", "aac", "mp3"]
+        saveSettings()
     }
     
     // MARK: - Settings Persistence
@@ -66,10 +73,11 @@ class SettingsManager: ObservableObject {
         playerName = UserDefaults.standard.string(forKey: Keys.playerName) ?? ""
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
-        preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["aac", "alac", "mp3"]
+        preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["alc", "aac", "mp3"]
         bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
         isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
+        showFallbackSettingsButton = UserDefaults.standard.object(forKey: Keys.showFallbackSettingsButton) as? Bool ?? true
         
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO")
@@ -89,6 +97,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(isDebugModeEnabled, forKey: Keys.isDebugModeEnabled)
         UserDefaults.standard.set(isConfigured, forKey: Keys.isConfigured)
         UserDefaults.standard.set(currentSettingsVersion, forKey: Keys.settingsVersion)
+        UserDefaults.standard.set(showFallbackSettingsButton, forKey: Keys.showFallbackSettingsButton)
         
         UserDefaults.standard.synchronize()
         
@@ -261,7 +270,7 @@ class SettingsManager: ObservableObject {
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
-        preferredFormats = ["aac", "alac", "mp3"]
+        preferredFormats = ["alc", "aac", "mp3"]
         bufferSize = 262144
         
         saveSettings()
@@ -311,10 +320,20 @@ class SettingsManager: ObservableObject {
     
     // MARK: - CLEAN: Simple capabilities string (SETD will handle the player name)
     var capabilitiesString: String {
-        let formats = preferredFormats.joined(separator: ",")
+        // Convert format names to proper SlimProto abbreviations
+        let convertedFormats = preferredFormats.map { format in
+            switch format.lowercased() {
+            case "alac":
+                return "alc"  // FIXED: Use correct ALAC abbreviation
+            case "flac":
+                return "flc"  // FIXED: Use correct FLAC abbreviation
+            default:
+                return format // aac, mp3, etc. stay the same
+            }
+        }.joined(separator: ",")
         
-        // Enhanced capabilities based on Castbridge - no volume control, larger buffers
-        return "\(formats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=0,HasDigitalVolumeControl=0,MaxSampleRate=48000"
+        // Enhanced capabilities based on Squeezelite format
+        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=0,HasDigitalVolumeControl=0,MaxSampleRate=48000"
     }
 
     var effectivePlayerName: String {

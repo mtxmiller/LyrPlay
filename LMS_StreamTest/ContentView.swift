@@ -1,5 +1,5 @@
 // File: ContentView.swift
-// Enhanced debug overlay showing server time synchronization status
+// Enhanced with Material skin settings integration
 import SwiftUI
 import WebKit
 import os.log
@@ -15,10 +15,11 @@ struct ContentView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     @State private var isAppInBackground = false
     @State private var hasLoadedInitially = false
+    @State private var webView: WKWebView? // Add reference to webview
 
     
     init() {
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Server Time Synchronization")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
         
         // Create AudioManager first
         let audioMgr = AudioManager()
@@ -31,7 +32,7 @@ struct ContentView: View {
         // Connect AudioManager back to coordinator for lock screen support
         audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Enhanced SlimProto architecture with server time sync initialized")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Enhanced SlimProto architecture with Material integration initialized")
     }
     
     var body: some View {
@@ -60,11 +61,15 @@ struct ContentView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
                 
-                if let url = URL(string: hasLoadedInitially ? settings.webURL : settings.initialWebURL) {
+                if let url = URL(string: materialWebURL) {
                     WebView(
                         url: url,
                         isLoading: $isLoading,
-                        loadError: $loadError
+                        loadError: $loadError,
+                        webViewReference: $webView,
+                        onSettingsPressed: {
+                            showingSettings = true
+                        }
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .ignoresSafeArea(.all)
@@ -80,8 +85,6 @@ struct ContentView: View {
                     statusOverlay
                 }
                 
-                // Swipe down
-                swipeFromRightSettings
                 
                 // Enhanced debug info overlay with server time info
                 if settings.isDebugModeEnabled && !isAppInBackground {
@@ -103,6 +106,27 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+        }
+    }
+    
+    // MARK: - Material Integration URL
+    private var materialWebURL: String {
+        if hasLoadedInitially {
+            // Return to base URL after initial load to prevent reloads
+            return settings.webURL
+        } else {
+            // Initial load with Material settings integration
+            let baseURL = settings.webURL
+            let settingsURL = "lmsstream://settings"
+            let settingsName = "iOS App Settings" // This will appear in Material's menu
+            let playerParam = "player=\(settings.playerMACAddress)"
+            
+            // URL encode both the settings URL and name
+            let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
+            let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
+            
+            // Construct Material URL with both appSettings and appSettingsName parameters
+            return "\(baseURL)?\(playerParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
     
@@ -141,7 +165,7 @@ struct ContentView: View {
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
-                    Text("Loading LMS Interface...")
+                    Text("Loading Material Interface...")
                         .font(.caption)
                         .foregroundColor(.white)
                 }
@@ -181,35 +205,12 @@ struct ContentView: View {
         .allowsHitTesting(loadError != nil) // Allow touches only when there's an error
     }
     
-    private var swipeFromRightSettings: some View {
-        HStack {
-            Spacer()
-            
-            // Invisible swipe area on the right edge
-            Rectangle()
-                .fill(Color.clear)
-                .frame(width: 30)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture()
-                        .onEnded { gesture in
-                            // Detect swipe in from right edge (leftward swipe)
-                            if gesture.translation.width < -40 {
-                                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                                impactFeedback.impactOccurred()
-                                showingSettings = true
-                            }
-                        }
-                )
-        }
-    }
-    
     // Enhanced debug overlay with server time synchronization info
     private var enhancedDebugOverlay: some View {
         VStack {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Enhanced Debug + Server Time")
+                    Text("Debug + Material Integration")
                         .font(.caption)
                         .fontWeight(.bold)
                         .foregroundColor(.white)
@@ -227,10 +228,15 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundColor(.blue)
                     
-                    // Server Time Status (NEW)
+                    // Server Time Status
                     Text("Server Time: \(slimProtoCoordinator.serverTimeStatus)")
                         .font(.caption2)
                         .foregroundColor(serverTimeStatusColor)
+                    
+                    // Material Integration Status
+                    Text("Material: \(settings.showFallbackSettingsButton ? "Fallback" : "Integrated")")
+                        .font(.caption2)
+                        .foregroundColor(settings.showFallbackSettingsButton ? .orange : .green)
                     
                     Text("Player: \(settings.formattedMACAddress)")
                         .font(.caption2)
@@ -253,7 +259,7 @@ struct ContentView: View {
                             .foregroundColor(.green)
                     }
                     
-                    // Time Source Info (NEW)
+                    // Time Source Info
                     Text("Time Source:")
                         .font(.caption2)
                         .foregroundColor(.cyan)
@@ -310,7 +316,7 @@ struct ContentView: View {
         }
     }
     
-    // NEW: Server time status color
+    // Server time status color
     private var serverTimeStatusColor: Color {
         let status = slimProtoCoordinator.serverTimeStatus
         if status.contains("Available") {
@@ -325,7 +331,7 @@ struct ContentView: View {
     private func connectToLMS() {
         guard !hasConnected else { return }
         
-        os_log(.info, log: logger, "Connecting to LMS server with Server Time Sync: %{public}s", settings.serverHost)
+        os_log(.info, log: logger, "Connecting to LMS server with Material Integration: %{public}s", settings.serverHost)
         
         audioManager.setSlimClient(slimProtoCoordinator)
         
@@ -344,14 +350,22 @@ struct WebView: UIViewRepresentable {
     let url: URL
     @Binding var isLoading: Bool
     @Binding var loadError: String?
+    @Binding var webViewReference: WKWebView?
+    let onSettingsPressed: () -> Void
+    
     private let logger = OSLog(subsystem: "com.lmsstream", category: "WebView")
     
     func makeUIView(context: Context) -> WKWebView {
-        os_log(.info, log: logger, "Creating WKWebView for URL: %{public}s", url.absoluteString)
+        os_log(.info, log: logger, "Creating WKWebView with Material Integration for URL: %{public}s", url.absoluteString)
         
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        
+        // CRITICAL: Enable custom URL scheme handling for Material integration
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator, name: "lmsStreamHandler")
+        configuration.userContentController = contentController
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -361,39 +375,63 @@ struct WebView: UIViewRepresentable {
         webView.backgroundColor = UIColor.black
         webView.scrollView.backgroundColor = UIColor.black
         
+        // Store reference for external access
+        DispatchQueue.main.async {
+            webViewReference = webView
+        }
+        
         let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         webView.load(request)
         
-        os_log(.info, log: logger, "WKWebView load request started")
+        os_log(.info, log: logger, "WKWebView load request started with Material appSettings integration")
         return webView
     }
     
     func updateUIView(_ uiView: WKWebView, context: Context) {
         // Check if URL has changed and reload if necessary
         if let currentURL = uiView.url, currentURL.host != url.host || currentURL.port != url.port {
-            os_log(.info, log: logger, "URL changed, reloading WebView")
+            os_log(.info, log: logger, "URL changed, reloading WebView with Material integration")
             let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
             uiView.load(request)
         }
     }
     
     func makeCoordinator() -> Coordinator {
-        os_log(.info, log: logger, "Creating WebView Coordinator")
+        os_log(.info, log: logger, "Creating WebView Coordinator with Material integration")
         return Coordinator(self)
     }
     
-    class Coordinator: NSObject, WKNavigationDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: WebView
         private let logger = OSLog(subsystem: "com.lmsstream", category: "WebViewCoordinator")
         
         init(_ parent: WebView) {
             self.parent = parent
             super.init()
-            os_log(.info, log: logger, "Coordinator initialized")
+            os_log(.info, log: logger, "Coordinator initialized with Material settings handler")
+        }
+        
+        // MARK: - Material Settings Integration Handler
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            os_log(.info, log: logger, "📱 Received message from Material: %{public}s", message.name)
+            
+            if message.name == "lmsStreamHandler" {
+                if let body = message.body as? String {
+                    os_log(.info, log: logger, "📱 Material message body: %{public}s", body)
+                    
+                    // Handle the settings URL from Material
+                    if body.contains("lmsstream://settings") {
+                        os_log(.info, log: logger, "✅ Material settings button pressed - opening app settings")
+                        DispatchQueue.main.async {
+                            self.parent.onSettingsPressed()
+                        }
+                    }
+                }
+            }
         }
         
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-            os_log(.info, log: logger, "Started loading LMS interface")
+            os_log(.info, log: logger, "Started loading Material interface")
             DispatchQueue.main.async {
                 self.parent.isLoading = true
                 self.parent.loadError = nil
@@ -401,17 +439,81 @@ struct WebView: UIViewRepresentable {
         }
         
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            os_log(.info, log: logger, "Finished loading LMS interface")
+            os_log(.info, log: logger, "Finished loading Material interface")
+            
+            // CRITICAL: Inject JavaScript to handle Material's appSettings integration
+            let settingsHandlerScript = """
+            (function() {
+                console.log('LMS Stream: Injecting Material settings handler...');
+                
+                // Override window.open to catch the appSettings URL
+                const originalOpen = window.open;
+                window.open = function(url, name, specs) {
+                    console.log('LMS Stream: window.open called with URL:', url);
+                    
+                    if (url && url.startsWith('lmsstream://')) {
+                        console.log('LMS Stream: Handling settings URL:', url);
+                        // Send message to Swift
+                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
+                            window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
+                        }
+                        return null; // Prevent actual navigation
+                    }
+                    
+                    // For other URLs, use original behavior
+                    return originalOpen.call(this, url, name, specs);
+                };
+                
+                // Also handle direct location changes
+                const originalLocation = window.location;
+                Object.defineProperty(window, 'location', {
+                    get: function() {
+                        return originalLocation;
+                    },
+                    set: function(url) {
+                        if (typeof url === 'string' && url.startsWith('lmsstream://')) {
+                            console.log('LMS Stream: Handling location change to:', url);
+                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
+                                window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
+                            }
+                            return;
+                        }
+                        originalLocation.href = url;
+                    }
+                });
+                
+                console.log('LMS Stream: Material settings handler injected successfully');
+            })();
+            """
+            
+            webView.evaluateJavaScript(settingsHandlerScript) { result, error in
+                if let error = error {
+                    os_log(.error, log: self.logger, "❌ Failed to inject settings handler: %{public}s", error.localizedDescription)
+                    // Enable fallback settings button
+                    DispatchQueue.main.async {
+                        SettingsManager.shared.showFallbackSettingsButton = true
+                    }
+                } else {
+                    os_log(.info, log: self.logger, "✅ Material settings handler injected successfully")
+                    // Disable fallback settings button
+                    DispatchQueue.main.async {
+                        SettingsManager.shared.showFallbackSettingsButton = false
+                    }
+                }
+            }
+            
             DispatchQueue.main.async {
                 self.parent.isLoading = false
             }
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            os_log(.error, log: logger, "Failed to load LMS: %{public}s", error.localizedDescription)
+            os_log(.error, log: logger, "Failed to load Material interface: %{public}s", error.localizedDescription)
             DispatchQueue.main.async {
                 self.parent.isLoading = false
-                self.parent.loadError = "Failed to load LMS: \(error.localizedDescription)"
+                self.parent.loadError = "Failed to load Material: \(error.localizedDescription)"
+                // Enable fallback settings button on error
+                SettingsManager.shared.showFallbackSettingsButton = true
             }
         }
         
@@ -420,7 +522,36 @@ struct WebView: UIViewRepresentable {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
                 self.parent.loadError = "Connection failed: \(error.localizedDescription)"
+                // Enable fallback settings button on error
+                SettingsManager.shared.showFallbackSettingsButton = true
             }
+        }
+        
+        // MARK: - Handle Direct URL Navigation (Alternative Method)
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            
+            if let url = navigationAction.request.url {
+                let urlString = url.absoluteString
+                
+                os_log(.info, log: logger, "🔍 Navigation decision for URL: %{public}s", urlString)
+                
+                // Check for our custom settings URL scheme
+                if urlString.hasPrefix("lmsstream://settings") {
+                    os_log(.info, log: logger, "✅ Intercepted Material settings URL: %{public}s", urlString)
+                    
+                    // Handle the settings navigation
+                    DispatchQueue.main.async {
+                        self.parent.onSettingsPressed()
+                    }
+                    
+                    // Cancel the navigation
+                    decisionHandler(.cancel)
+                    return
+                }
+            }
+            
+            // Allow normal navigation
+            decisionHandler(.allow)
         }
     }
 }
@@ -430,4 +561,5 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
+
 
