@@ -22,11 +22,16 @@ class AudioPlayer: NSObject, ObservableObject {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
     private let settings = SettingsManager.shared
     
-    // MARK: - State Management
+    // MARK: - State Management (UPDATED with track end protection)
     private var lastReportedTime: Double = 0
     private var isIntentionallyPaused = false
     private var isIntentionallyStopped = false
     private var metadataDuration: TimeInterval = 0.0
+    
+    // CRITICAL: Track end detection protection from REFERENCE
+    private var trackEndDetectionEnabled = false
+    private var trackStartTime: Date = Date()
+    private let minimumTrackDuration: TimeInterval = 5.0 // Minimum 5 seconds before allowing track end detection
     
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
@@ -59,6 +64,16 @@ class AudioPlayer: NSObject, ObservableObject {
         
         prepareForNewStream()
         
+        // CRITICAL: Reset track end detection protection from REFERENCE
+        trackEndDetectionEnabled = false
+        trackStartTime = Date()
+        
+        // Enable track end detection after minimum duration
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumTrackDuration) {
+            self.trackEndDetectionEnabled = true
+            os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
+        }
+        
         // SIMPLE: StreamingKit handles everything
         audioPlayer.play(url)
         
@@ -74,6 +89,16 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s", format, urlString)
         
         prepareForNewStream()
+        
+        // CRITICAL: Reset track end detection protection from REFERENCE
+        trackEndDetectionEnabled = false
+        trackStartTime = Date()
+        
+        // Enable track end detection after minimum duration
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumTrackDuration) {
+            self.trackEndDetectionEnabled = true
+            os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
+        }
         
         // StreamingKit handles the format automatically
         audioPlayer.play(url)
@@ -169,6 +194,10 @@ class AudioPlayer: NSObject, ObservableObject {
         isIntentionallyPaused = false
         isIntentionallyStopped = false
         lastReportedTime = 0
+        
+        // CRITICAL: Reset track end detection protection
+        trackEndDetectionEnabled = false
+        trackStartTime = Date()
     }
     
     // MARK: - Metadata
@@ -204,23 +233,40 @@ extension AudioPlayer: STKAudioPlayerDelegate {
         let reasonString = stopReasonDescription(stopReason)
         os_log(.info, log: logger, "🎵 StreamingKit finished playing - Reason: %{public}s, Progress: %.2f/%.2f", reasonString, progress, duration)
         
-        // SIMPLIFIED: Trust StreamingKit's stop reason (from reference)
+        // FIXED: Enhanced track end detection based on REFERENCE implementation
         switch stopReason {
-        case .eof: // Natural track end
+        case .eof: // End of file - natural track end
             if !isIntentionallyPaused && !isIntentionallyStopped {
                 os_log(.info, log: logger, "🎵 Track ended naturally (EOF)")
                 DispatchQueue.main.async {
                     self.delegate?.audioPlayerDidReachEnd()
                 }
+            } else {
+                os_log(.info, log: logger, "🎵 Track EOF but end detection disabled or intentional stop")
+            }
+        case .none:
+            // CRITICAL: StreamingKit sometimes reports "none" for natural track ends
+            // Check if we have reasonable progress to determine if this was a natural end
+            if progress > 10.0 && !isIntentionallyPaused && !isIntentionallyStopped {
+                os_log(.info, log: logger, "🎵 Track ended naturally (None reason but good progress: %.2f)", progress)
+                DispatchQueue.main.async {
+                    self.delegate?.audioPlayerDidReachEnd()
+                }
+            } else {
+                os_log(.info, log: logger, "🎵 Track stopped with 'None' reason but insufficient progress: %.2f", progress)
             }
         case .userAction: // User stopped
             os_log(.info, log: logger, "👤 Track stopped by user action")
-            delegate?.audioPlayerDidStop()
         case .error: // Error occurred
             os_log(.error, log: logger, "❌ Track stopped due to error")
-            delegate?.audioPlayerDidStall()
+            // Only trigger on error if enough time has passed (real error, not startup issue)
+            if !isIntentionallyPaused && !isIntentionallyStopped && progress > 5.0 {
+                DispatchQueue.main.async {
+                    self.delegate?.audioPlayerDidReachEnd()
+                }
+            }
         default:
-            os_log(.info, log: logger, "🎵 Track stopped with reason: %{public}s", stopReasonDescription(stopReason))
+            os_log(.info, log: logger, "🎵 Track stopped with reason: %{public}s, progress: %.2f", stopReasonDescription(stopReason), progress)
             break
         }
     }
