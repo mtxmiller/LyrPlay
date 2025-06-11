@@ -1,0 +1,20 @@
+PODS:
+  - CocoaAsyncSocket (7.6.5)
+  - StreamingKit (0.1.30)
+
+DEPENDENCIES:
+  - CocoaAsyncSocket (~> 7.6)
+  - StreamingKit
+
+SPEC REPOS:
+  trunk:
+    - CocoaAsyncSocket
+    - StreamingKit
+
+SPEC CHECKSUMS:
+  CocoaAsyncSocket: 065fd1e645c7abab64f7a6a2007a48038fdc6a99
+  StreamingKit: 70ca8608c206864b4d54a577eacb3c8bf7c72209
+
+PODFILE CHECKSUM: f645989cd07b9e4ace600efc4bc13fabfd60c4b7
+
+COCOAPODS: 1.16.2

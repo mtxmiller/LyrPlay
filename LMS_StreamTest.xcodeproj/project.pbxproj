@@ -7,9 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		6B9C4D7D2DEB820F00D22FD6 /* CocoaAsyncSocket in Frameworks */ = {isa = PBXBuildFile; productRef = 6B9C4D7C2DEB820F00D22FD6 /* CocoaAsyncSocket */; };
+		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
+		78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */; };
+		B32290575451A047EBC5FB56 /* Pods_LMS_StreamTestUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,11 +32,20 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		073519E6407F6C79CA0220C3 /* Pods-LMS_StreamTestTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.debug.xcconfig"; sourceTree = "<group>"; };
+		323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTestUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.debug.xcconfig"; sourceTree = "<group>"; };
+		479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.release.xcconfig"; sourceTree = "<group>"; };
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		6BF8457C2DEB86D000C2BB2A /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		874333B1449148BC67AF774C /* Pods-LMS_StreamTest.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.release.xcconfig"; sourceTree = "<group>"; };
+		9C6738F5DE86726D912883A7 /* Pods-LMS_StreamTestUITests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.debug.xcconfig"; sourceTree = "<group>"; };
+		EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTestTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -60,9 +71,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6B9C4D7D2DEB820F00D22FD6 /* CocoaAsyncSocket in Frameworks */,
 				6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */,
 				6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */,
+				78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -70,6 +81,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,12 +89,26 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B32290575451A047EBC5FB56 /* Pods_LMS_StreamTestUITests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		320BF7DFBD3CADF66E446357 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */,
+				874333B1449148BC67AF774C /* Pods-LMS_StreamTest.release.xcconfig */,
+				073519E6407F6C79CA0220C3 /* Pods-LMS_StreamTestTests.debug.xcconfig */,
+				EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */,
+				9C6738F5DE86726D912883A7 /* Pods-LMS_StreamTestUITests.debug.xcconfig */,
+				479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		6B9C4D452DEB81F500D22FD6 = {
 			isa = PBXGroup;
 			children = (
@@ -91,6 +117,7 @@
 				6B9C4D6B2DEB81F600D22FD6 /* LMS_StreamTestUITests */,
 				6BF845792DEB86CA00C2BB2A /* Frameworks */,
 				6B9C4D4F2DEB81F500D22FD6 /* Products */,
+				320BF7DFBD3CADF66E446357 /* Pods */,
 			);
 			sourceTree = "<group>";
 		};
@@ -109,6 +136,9 @@
 			children = (
 				6BF8457C2DEB86D000C2BB2A /* WebKit.framework */,
 				6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */,
+				016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */,
+				EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */,
+				323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -120,9 +150,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6B9C4D722DEB81F600D22FD6 /* Build configuration list for PBXNativeTarget "LMS_StreamTest" */;
 			buildPhases = (
+				790397749005A6865F1B2887 /* [CP] Check Pods Manifest.lock */,
 				6B9C4D4A2DEB81F500D22FD6 /* Sources */,
 				6B9C4D4B2DEB81F500D22FD6 /* Frameworks */,
 				6B9C4D4C2DEB81F500D22FD6 /* Resources */,
+				F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -133,7 +165,6 @@
 			);
 			name = LMS_StreamTest;
 			packageProductDependencies = (
-				6B9C4D7C2DEB820F00D22FD6 /* CocoaAsyncSocket */,
 			);
 			productName = LMS_StreamTest;
 			productReference = 6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */;
@@ -143,6 +174,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6B9C4D752DEB81F600D22FD6 /* Build configuration list for PBXNativeTarget "LMS_StreamTestTests" */;
 			buildPhases = (
+				72F8206890725D915803646B /* [CP] Check Pods Manifest.lock */,
 				6B9C4D5A2DEB81F600D22FD6 /* Sources */,
 				6B9C4D5B2DEB81F600D22FD6 /* Frameworks */,
 				6B9C4D5C2DEB81F600D22FD6 /* Resources */,
@@ -156,8 +188,6 @@
 				6B9C4D612DEB81F600D22FD6 /* LMS_StreamTestTests */,
 			);
 			name = LMS_StreamTestTests;
-			packageProductDependencies = (
-			);
 			productName = LMS_StreamTestTests;
 			productReference = 6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -166,6 +196,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6B9C4D782DEB81F600D22FD6 /* Build configuration list for PBXNativeTarget "LMS_StreamTestUITests" */;
 			buildPhases = (
+				3E975533B7CD519DA634BDAA /* [CP] Check Pods Manifest.lock */,
 				6B9C4D642DEB81F600D22FD6 /* Sources */,
 				6B9C4D652DEB81F600D22FD6 /* Frameworks */,
 				6B9C4D662DEB81F600D22FD6 /* Resources */,
@@ -179,8 +210,6 @@
 				6B9C4D6B2DEB81F600D22FD6 /* LMS_StreamTestUITests */,
 			);
 			name = LMS_StreamTestUITests;
-			packageProductDependencies = (
-			);
 			productName = LMS_StreamTestUITests;
 			productReference = 6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
@@ -218,7 +247,6 @@
 			mainGroup = 6B9C4D452DEB81F500D22FD6;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				6B9C4D7B2DEB820F00D22FD6 /* XCRemoteSwiftPackageReference "CocoaAsyncSocket" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 6B9C4D4F2DEB81F500D22FD6 /* Products */;
@@ -255,6 +283,92 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		3E975533B7CD519DA634BDAA /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTestUITests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		72F8206890725D915803646B /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTestTests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		790397749005A6865F1B2887 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTest-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		6B9C4D4A2DEB81F500D22FD6 /* Sources */ = {
@@ -415,6 +529,7 @@
 		};
 		6B9C4D732DEB81F600D22FD6 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -423,6 +538,7 @@
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "LMS-StreamTest-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -445,6 +561,7 @@
 		};
 		6B9C4D742DEB81F600D22FD6 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 874333B1449148BC67AF774C /* Pods-LMS_StreamTest.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -453,6 +570,7 @@
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "LMS-StreamTest-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -475,6 +593,7 @@
 		};
 		6B9C4D762DEB81F600D22FD6 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 073519E6407F6C79CA0220C3 /* Pods-LMS_StreamTestTests.debug.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -494,6 +613,7 @@
 		};
 		6B9C4D772DEB81F600D22FD6 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -513,6 +633,7 @@
 		};
 		6B9C4D792DEB81F600D22FD6 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9C6738F5DE86726D912883A7 /* Pods-LMS_StreamTestUITests.debug.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -530,6 +651,7 @@
 		};
 		6B9C4D7A2DEB81F600D22FD6 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -585,25 +707,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		6B9C4D7B2DEB820F00D22FD6 /* XCRemoteSwiftPackageReference "CocoaAsyncSocket" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/robbiehanson/CocoaAsyncSocket";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 7.6.5;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		6B9C4D7C2DEB820F00D22FD6 /* CocoaAsyncSocket */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 6B9C4D7B2DEB820F00D22FD6 /* XCRemoteSwiftPackageReference "CocoaAsyncSocket" */;
-			productName = CocoaAsyncSocket;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 6B9C4D462DEB81F500D22FD6 /* Project object */;
 }
