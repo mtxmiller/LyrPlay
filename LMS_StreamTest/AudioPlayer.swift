@@ -1,7 +1,7 @@
 // File: AudioPlayer.swift
-// Core AVPlayer management and streaming functionality
+// Updated to use StreamingKit for native FLAC support
 import Foundation
-import AVFoundation
+import StreamingKit
 import os.log
 
 protocol AudioPlayerDelegate: AnyObject {
@@ -15,10 +15,8 @@ protocol AudioPlayerDelegate: AnyObject {
 
 class AudioPlayer: NSObject, ObservableObject {
     
-    // MARK: - Core Components
-    private var player: AVPlayer!
-    private var playerItem: AVPlayerItem?
-    private var timeObserver: Any?
+    // MARK: - Core Components (UPDATED)
+    private var audioPlayer: STKAudioPlayer!
     
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
@@ -36,125 +34,35 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Initialization
     override init() {
         super.init()
-        setupAVPlayer()
-        os_log(.info, log: logger, "AudioPlayer initialized")
+        setupStreamingKit()
+        os_log(.info, log: logger, "AudioPlayer initialized with StreamingKit")
     }
     
-    // MARK: - Core Setup
-    private func setupAVPlayer() {
-        player = AVPlayer()
-        player.automaticallyWaitsToMinimizeStalling = false
-        player.allowsExternalPlayback = true
+    // MARK: - Core Setup (UPDATED)
+    private func setupStreamingKit() {
+        audioPlayer = STKAudioPlayer()
+        audioPlayer.delegate = self
+        audioPlayer.meteringEnabled = false // Better performance
+        audioPlayer.volume = 1.0
         
-        os_log(.info, log: logger, "✅ AVPlayer initialized")
-        
-        setupTimeObserver()
-        setupPlayerItemObservers()
+        os_log(.info, log: logger, "✅ StreamingKit AudioPlayer initialized")
     }
     
-    private func setupTimeObserver() {
-        let interval = CMTime(seconds: 0.25, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            self?.updatePlaybackTime(time)
-        }
-        
-        os_log(.info, log: logger, "✅ Time observer configured (0.25s intervals)")
-    }
-    
-    private func setupPlayerItemObservers() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerItemDidReachEnd),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: nil
-        )
-        
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerItemFailedToPlayToEnd),
-            name: .AVPlayerItemFailedToPlayToEndTime,
-            object: nil
-        )
-        
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerItemStalled),
-            name: .AVPlayerItemPlaybackStalled,
-            object: nil
-        )
-        
-        os_log(.info, log: logger, "✅ Player item observers configured")
-    }
-    
-    // MARK: - Time Tracking
-    private func updatePlaybackTime(_ time: CMTime) {
-        let timeInSeconds = CMTimeGetSeconds(time)
-        
-        guard timeInSeconds.isFinite && timeInSeconds >= 0 else { return }
-        
-        // Notify delegate of time update
-        delegate?.audioPlayerTimeDidUpdate(timeInSeconds)
-        
-        // Check for track end using metadata duration
-        if let item = playerItem,
-           item.status == .readyToPlay,
-           metadataDuration > 0 {
-            
-            let remainingTime = metadataDuration - timeInSeconds
-            
-            if remainingTime <= 1.0 && !isIntentionallyPaused && !isIntentionallyStopped {
-                os_log(.info, log: logger, "🎵 Track ending (%.1f seconds remaining)", remainingTime)
-                
-                if remainingTime <= 0.5 && lastReportedTime > 0 {
-                    os_log(.info, log: logger, "🎵 Track ended - notifying delegate")
-                    delegate?.audioPlayerDidReachEnd()
-                    lastReportedTime = 0
-                    return
-                }
-            }
-        }
-        
-        if timeInSeconds >= 0 {
-            lastReportedTime = timeInSeconds
-        }
-    }
-    
-    // MARK: - Notification Handlers
-    @objc private func playerItemDidReachEnd() {
-        os_log(.info, log: logger, "🎵 AVPlayer item reached end")
-        
-        if !isIntentionallyPaused && !isIntentionallyStopped {
-            os_log(.info, log: logger, "🎵 Natural track end - notifying delegate")
-            DispatchQueue.main.async {
-                self.delegate?.audioPlayerDidReachEnd()
-            }
-        }
-    }
-    
-    @objc private func playerItemFailedToPlayToEnd(_ notification: Notification) {
-        if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
-            os_log(.error, log: logger, "❌ Player item failed to play to end: %{public}s", error.localizedDescription)
-        }
-    }
-    
-    @objc private func playerItemStalled() {
-        os_log(.error, log: logger, "⚠️ Player item playback stalled")
-        delegate?.audioPlayerDidStall()
-    }
-    
-    // MARK: - Stream Playback
+    // MARK: - Stream Playback (SIMPLIFIED)
     func playStream(urlString: String) {
         guard let url = URL(string: urlString) else {
             os_log(.error, log: logger, "Invalid URL: %{public}s", urlString)
             return
         }
         
-        os_log(.info, log: logger, "🎵 Playing stream: %{public}s", urlString)
+        os_log(.info, log: logger, "🎵 Playing stream with StreamingKit: %{public}s", urlString)
         
         prepareForNewStream()
-        createPlayerItem(with: url)
-        startPlayback()
+        
+        // SIMPLE: StreamingKit handles everything
+        audioPlayer.play(url)
+        
+        os_log(.info, log: logger, "✅ StreamingKit playback started")
     }
     
     func playStreamWithFormat(urlString: String, format: String) {
@@ -166,8 +74,11 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s", format, urlString)
         
         prepareForNewStream()
-        createPlayerItemWithOptimizations(url: url, format: format)
-        startPlayback()
+        
+        // StreamingKit handles the format automatically
+        audioPlayer.play(url)
+        
+        os_log(.info, log: logger, "✅ StreamingKit %{public}s playback started", format)
     }
     
     func playStreamAtPosition(urlString: String, startTime: Double) {
@@ -186,28 +97,71 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Playback Control
+    // MARK: - Playback Control (UPDATED)
     func play() {
         isIntentionallyPaused = false
-        player.play()
+        audioPlayer.resume()
         delegate?.audioPlayerDidStartPlaying()
-        os_log(.info, log: logger, "▶️ Resumed playback")
+        os_log(.info, log: logger, "▶️ StreamingKit resumed playback")
     }
     
     func pause() {
         isIntentionallyPaused = true
-        player.pause()
+        audioPlayer.pause()
         delegate?.audioPlayerDidPause()
-        os_log(.info, log: logger, "⏸️ Paused playback")
+        os_log(.info, log: logger, "⏸️ StreamingKit paused playback")
     }
     
     func stop() {
         isIntentionallyStopped = true
         isIntentionallyPaused = false
-        player.pause()
-        player.replaceCurrentItem(with: nil)
+        audioPlayer.stop()
         delegate?.audioPlayerDidStop()
-        os_log(.info, log: logger, "⏹️ Stopped playback")
+        os_log(.info, log: logger, "⏹️ StreamingKit stopped playback")
+    }
+    
+    // MARK: - Time and State (UPDATED)
+    func getCurrentTime() -> Double {
+        return audioPlayer.progress  // StreamingKit provides this
+    }
+    
+    func getDuration() -> Double {
+        // Prefer metadata duration, fallback to StreamingKit
+        if metadataDuration > 0 {
+            return metadataDuration
+        }
+        return audioPlayer.duration
+    }
+    
+    func getPosition() -> Float {
+        let duration = getDuration()
+        let currentTime = getCurrentTime()
+        return duration > 0 ? Float(currentTime / duration) : 0.0
+    }
+    
+    func getPlayerState() -> String {
+        let state = audioPlayer.state
+        
+        if state.contains(.error) { return "Failed" }
+        if state.contains(.playing) { return "Playing" }
+        if state.contains(.paused) { return "Paused" }
+        if state.contains(.stopped) { return "Stopped" }
+        if state.contains(.buffering) { return "Buffering" }
+        
+        return "Ready"
+    }
+    
+    func seekToPosition(_ time: Double) {
+        audioPlayer.seek(toTime: time)
+        lastReportedTime = time
+        os_log(.info, log: logger, "🔄 StreamingKit seeked to position: %.2f seconds", time)
+    }
+    
+    // MARK: - Track End Detection (SIMPLIFIED)
+    func checkIfTrackEnded() -> Bool {
+        // FROM REFERENCE: Remove manual track end checking entirely
+        // StreamingKit delegate handles this properly
+        return false
     }
     
     // MARK: - Private Helpers
@@ -215,193 +169,9 @@ class AudioPlayer: NSObject, ObservableObject {
         isIntentionallyPaused = false
         isIntentionallyStopped = false
         lastReportedTime = 0
-        
-        // Clean up old observers
-        if let oldItem = playerItem {
-            oldItem.removeObserver(self, forKeyPath: "status")
-            oldItem.removeObserver(self, forKeyPath: "loadedTimeRanges")
-        }
     }
     
-    private func createPlayerItem(with url: URL) {
-        playerItem = AVPlayerItem(url: url)
-        addKVOObservers()
-        player.replaceCurrentItem(with: playerItem)
-    }
-    
-    private func createPlayerItemWithOptimizations(url: URL, format: String) {
-        playerItem = AVPlayerItem(url: url)
-        
-        if let item = playerItem {
-            switch format.uppercased() {
-            case "ALAC", "FLAC":
-                // Lossless optimizations
-                item.preferredForwardBufferDuration = 30.0
-                item.preferredPeakBitRate = 0
-                
-            case "AAC":
-                // AAC optimizations
-                item.preferredForwardBufferDuration = 20.0
-                item.preferredPeakBitRate = Double(320 * 1024)
-                
-            case "MP3":
-                // MP3 live stream optimizations
-                item.preferredForwardBufferDuration = 25.0
-                item.preferredPeakBitRate = 0
-                
-                if #available(iOS 10.0, *) {
-                    item.automaticallyPreservesTimeOffsetFromLive = false
-                }
-                
-            default:
-                // Default optimizations
-                item.preferredForwardBufferDuration = 8.0
-            }
-            
-            item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
-            os_log(.info, log: logger, "🎵 Configured AVPlayerItem for %{public}s streaming", format)
-        }
-        
-        addKVOObservers()
-        player.replaceCurrentItem(with: playerItem)
-    }
-    
-    private func addKVOObservers() {
-        playerItem?.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
-        playerItem?.addObserver(self, forKeyPath: "loadedTimeRanges", options: [.new], context: nil)
-        os_log(.info, log: logger, "🔍 Added KVO observers to new AVPlayerItem")
-    }
-    
-    private func startPlayback() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.player.play()
-            os_log(.info, log: self.logger, "🎵 Playback started - AVPlayer.rate: %.2f", self.player.rate)
-        }
-    }
-    
-    func seekToPosition(_ time: Double) {
-        let seekTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        
-        player.seek(to: seekTime) { [weak self] finished in
-            if finished {
-                self?.lastReportedTime = time
-                os_log(.info, log: self?.logger ?? OSLog.disabled, "🔄 Seeked to position: %.2f seconds", time)
-            }
-        }
-    }
-    
-    // MARK: - KVO Observer
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-        
-        os_log(.info, log: logger, "🔍 KVO triggered for keyPath: %{public}s", keyPath ?? "nil")
-        
-        if keyPath == "status", let item = object as? AVPlayerItem {
-            handlePlayerItemStatusChange(item)
-        } else if keyPath == "loadedTimeRanges", let item = object as? AVPlayerItem {
-            handleLoadedTimeRangesChange(item)
-        } else {
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
-        }
-    }
-    
-    private func handlePlayerItemStatusChange(_ item: AVPlayerItem) {
-        switch item.status {
-        case .unknown:
-            os_log(.info, log: logger, "🎵 AVPlayerItem status: Unknown")
-        case .readyToPlay:
-            os_log(.info, log: logger, "🎵 AVPlayerItem status: Ready to Play")
-            logPlayerItemInfo(item)
-            
-            // Auto-start for live streams
-            DispatchQueue.main.async {
-                if self.player.rate == 0 {
-                    os_log(.info, log: self.logger, "🎵 Auto-starting playback")
-                    self.player.play()
-                }
-            }
-            
-        case .failed:
-            if let error = item.error {
-                os_log(.error, log: logger, "❌ AVPlayerItem failed: %{public}s", error.localizedDescription)
-            } else {
-                os_log(.error, log: logger, "❌ AVPlayerItem failed: Unknown error")
-            }
-        @unknown default:
-            os_log(.info, log: logger, "🎵 AVPlayerItem status: Unknown case")
-        }
-    }
-    
-    private func handleLoadedTimeRangesChange(_ item: AVPlayerItem) {
-        let loadedRanges = item.loadedTimeRanges
-        if !loadedRanges.isEmpty {
-            let timeRange = loadedRanges[0].timeRangeValue
-            let loadedDuration = CMTimeGetSeconds(timeRange.duration)
-            
-            // Only log significant buffer changes (not every small update)
-            if loadedDuration > 10.0 && loadedDuration.truncatingRemainder(dividingBy: 10.0) < 1.0 {
-                os_log(.info, log: logger, "🎵 Buffer: %.1f seconds loaded", loadedDuration)
-            }
-            
-            // Start playback when sufficient buffer for live streams
-            if loadedDuration > 2.0 && self.player.rate == 0 && !self.isIntentionallyPaused {
-                os_log(.info, log: logger, "🎵 Sufficient buffer loaded, starting playback")
-                DispatchQueue.main.async {
-                    self.player.play()
-                }
-            }
-        }
-    }
-    
-    private func logPlayerItemInfo(_ item: AVPlayerItem) {
-        let duration = CMTimeGetSeconds(item.duration)
-        if duration.isFinite && duration > 0 {
-            os_log(.info, log: logger, "🎵 Duration: %.2f seconds", duration)
-        } else {
-            os_log(.info, log: logger, "🎵 Duration: Invalid or infinite (live stream detected)")
-        }
-    }
-    
-    // MARK: - Public Interface
-    func getCurrentTime() -> Double {
-        let time = player.currentTime()
-        return CMTimeGetSeconds(time)
-    }
-    
-    func getDuration() -> Double {
-        // First try metadata duration
-        if metadataDuration > 0 {
-            return metadataDuration
-        }
-        
-        // Fallback to player item duration
-        guard let item = playerItem, item.duration.isValid else { return 0.0 }
-        let duration = CMTimeGetSeconds(item.duration)
-        return duration.isFinite && duration > 0 ? duration : 0.0
-    }
-    
-    func getPosition() -> Float {
-        let duration = getDuration()
-        let currentTime = getCurrentTime()
-        
-        if duration > 0 {
-            let position = Float(currentTime / duration)
-            return min(max(position, 0.0), 1.0)
-        }
-        
-        return 0.0
-    }
-    
-    func getPlayerState() -> String {
-        guard let item = playerItem else { return "No Item" }
-        
-        switch item.status {
-        case .unknown: return "Unknown"
-        case .readyToPlay: return player.rate > 0 ? "Playing" : "Paused"
-        case .failed: return "Failed"
-        @unknown default: return "Unknown State"
-        }
-    }
-    
+    // MARK: - Metadata
     func setMetadataDuration(_ duration: TimeInterval) {
         // Only log if duration actually changes to avoid spam
         if abs(metadataDuration - duration) > 1.0 {
@@ -412,18 +182,99 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Cleanup
     deinit {
-        NotificationCenter.default.removeObserver(self)
-        
-        if let oldItem = playerItem {
-            oldItem.removeObserver(self, forKeyPath: "status")
-            oldItem.removeObserver(self, forKeyPath: "loadedTimeRanges")
-        }
-        
-        if let observer = timeObserver {
-            player.removeTimeObserver(observer)
-        }
-        
         stop()
         os_log(.info, log: logger, "AudioPlayer deinitialized")
+    }
+}
+
+// MARK: - STKAudioPlayerDelegate (NEW)
+extension AudioPlayer: STKAudioPlayerDelegate {
+    
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, didStartPlayingQueueItemId queueItemId: NSObject) {
+        os_log(.info, log: logger, "▶️ StreamingKit started playing item")
+        delegate?.audioPlayerDidStartPlaying()
+    }
+    
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, didFinishBufferingSourceWithQueueItemId queueItemId: NSObject) {
+        os_log(.info, log: logger, "📡 StreamingKit finished buffering")
+    }
+    
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, didFinishPlayingQueueItemId queueItemId: NSObject, with stopReason: STKAudioPlayerStopReason, andProgress progress: Double, andDuration duration: Double) {
+        
+        let reasonString = stopReasonDescription(stopReason)
+        os_log(.info, log: logger, "🎵 StreamingKit finished playing - Reason: %{public}s, Progress: %.2f/%.2f", reasonString, progress, duration)
+        
+        // SIMPLIFIED: Trust StreamingKit's stop reason (from reference)
+        switch stopReason {
+        case .eof: // Natural track end
+            if !isIntentionallyPaused && !isIntentionallyStopped {
+                os_log(.info, log: logger, "🎵 Track ended naturally (EOF)")
+                DispatchQueue.main.async {
+                    self.delegate?.audioPlayerDidReachEnd()
+                }
+            }
+        case .userAction: // User stopped
+            os_log(.info, log: logger, "👤 Track stopped by user action")
+            delegate?.audioPlayerDidStop()
+        case .error: // Error occurred
+            os_log(.error, log: logger, "❌ Track stopped due to error")
+            delegate?.audioPlayerDidStall()
+        default:
+            os_log(.info, log: logger, "🎵 Track stopped with reason: %{public}s", stopReasonDescription(stopReason))
+            break
+        }
+    }
+    
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, stateChanged state: STKAudioPlayerState, previousState: STKAudioPlayerState) {
+        let stateString = playerStateDescription(state)
+        let previousStateString = playerStateDescription(previousState)
+        os_log(.debug, log: logger, "🔄 StreamingKit state changed: %{public}s → %{public}s", previousStateString, stateString)
+        
+        // Handle state changes for time updates
+        let currentTime = getCurrentTime()
+        delegate?.audioPlayerTimeDidUpdate(currentTime)
+    }
+    
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, unexpectedError errorCode: STKAudioPlayerErrorCode) {
+        os_log(.error, log: logger, "❌ StreamingKit unexpected error: %d", errorCode.rawValue)
+        delegate?.audioPlayerDidStall()
+    }
+    
+    // MARK: - Helper Methods
+    private func stopReasonDescription(_ reason: STKAudioPlayerStopReason) -> String {
+        switch reason {
+        case .none:
+            return "None"
+        case .eof:
+            return "End of File"
+        case .userAction:
+            return "User Action"
+        case .pendingNext:
+            return "Pending Next"
+        case .disposed:
+            return "Disposed"
+        case .error:
+            return "Error"
+        @unknown default:
+            return "Unknown(\(reason.rawValue))"
+        }
+    }
+    
+    private func playerStateDescription(_ state: STKAudioPlayerState) -> String {
+        var states: [String] = []
+        
+        if state.contains(.running) { states.append("Running") }
+        if state.contains(.playing) { states.append("Playing") }
+        if state.contains(.buffering) { states.append("Buffering") }
+        if state.contains(.paused) { states.append("Paused") }
+        if state.contains(.stopped) { states.append("Stopped") }
+        if state.contains(.error) { states.append("Error") }
+        if state.contains(.disposed) { states.append("Disposed") }
+        
+        if states.isEmpty {
+            return "Ready"
+        }
+        
+        return states.joined(separator: ", ")
     }
 }

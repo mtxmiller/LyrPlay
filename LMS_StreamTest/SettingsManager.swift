@@ -1,5 +1,5 @@
 // File: SettingsManager.swift
-// Cleaned up - removed failed Name= parameter, keeping what works
+// UPDATED: Native FLAC support with StreamingKit
 import Foundation
 import Network
 import os.log
@@ -14,8 +14,8 @@ class SettingsManager: ObservableObject {
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 10.0
-    @Published var preferredFormats: [String] = ["alc", "aac", "mp3"]
-    @Published var bufferSize: Int = 1048576  // 1MB like Castbridge
+    @Published var preferredFormats: [String] = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
+    @Published var bufferSize: Int = 1048576  // 1MB
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
@@ -41,7 +41,7 @@ class SettingsManager: ObservableObject {
         static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
     }
     
-    private let currentSettingsVersion = 1
+    private let currentSettingsVersion = 2 // UPDATED: Increment for FLAC support
     
     // MARK: - Singleton
     static let shared = SettingsManager()
@@ -55,9 +55,9 @@ class SettingsManager: ObservableObject {
             playerName = "iOS Player"
         }
         
-        // Force update to ALAC-first priority order
-        UserDefaults.standard.set(["alc", "aac", "mp3"], forKey: Keys.preferredFormats)
-        preferredFormats = ["alc", "aac", "mp3"]
+        // UPDATED: Set FLAC-first priority order with StreamingKit
+        UserDefaults.standard.set(["flac", "alc", "aac", "mp3"], forKey: Keys.preferredFormats)
+        preferredFormats = ["flac", "alc", "aac", "mp3"]
         saveSettings()
     }
     
@@ -73,7 +73,7 @@ class SettingsManager: ObservableObject {
         playerName = UserDefaults.standard.string(forKey: Keys.playerName) ?? ""
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
-        preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["alc", "aac", "mp3"]
+        preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["flac", "alc", "aac", "mp3"]
         bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
         isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
@@ -111,6 +111,12 @@ class SettingsManager: ObservableObject {
             os_log(.info, log: logger, "First launch or no previous settings version")
         } else if savedVersion < currentSettingsVersion {
             os_log(.info, log: logger, "Migrating settings from version %d to %d", savedVersion, currentSettingsVersion)
+            
+            // MIGRATION: Update format preferences to include FLAC first
+            if savedVersion < 2 {
+                os_log(.info, log: logger, "🎵 Migrating to FLAC-first format preferences")
+                UserDefaults.standard.set(["flac", "alc", "aac", "mp3"], forKey: Keys.preferredFormats)
+            }
         }
     }
     
@@ -270,7 +276,7 @@ class SettingsManager: ObservableObject {
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
-        preferredFormats = ["alc", "aac", "mp3"]
+        preferredFormats = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
         bufferSize = 262144
         
         saveSettings()
@@ -304,12 +310,10 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - Computed Properties
-    // Basic URL without player parameter (prevents reloads from resetting)
     var webURL: String {
         "http://\(serverHost):\(serverWebPort)/material/"
     }
 
-    // Initial URL with player parameter (auto-selects player on first load)
     var initialWebURL: String {
         "http://\(serverHost):\(serverWebPort)/material/?player=\(playerMACAddress)"
     }
@@ -318,21 +322,21 @@ class SettingsManager: ObservableObject {
         playerMACAddress.uppercased()
     }
     
-    // MARK: - CLEAN: Simple capabilities string (SETD will handle the player name)
+    // MARK: - UPDATED: Enhanced capabilities string with FLAC support
     var capabilitiesString: String {
         // Convert format names to proper SlimProto abbreviations
         let convertedFormats = preferredFormats.map { format in
             switch format.lowercased() {
-            case "alac":
-                return "alc"  // FIXED: Use correct ALAC abbreviation
             case "flac":
-                return "flc"  // FIXED: Use correct FLAC abbreviation
+                return "flc"  // FLAC uses "flc" in SlimProto
+            case "alac":
+                return "alc"  // ALAC abbreviation
             default:
                 return format // aac, mp3, etc. stay the same
             }
         }.joined(separator: ",")
         
-        // Enhanced capabilities based on Squeezelite format
+        // UPDATED: Enhanced capabilities with FLAC support
         return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=0,HasDigitalVolumeControl=0,MaxSampleRate=48000"
     }
 

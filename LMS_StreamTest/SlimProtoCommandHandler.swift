@@ -1,5 +1,5 @@
 // File: SlimProtoCommandHandler.swift
-// FINAL FIX: Add SETD command handler to properly report player name to LMS
+// UPDATED: Native FLAC support enabled with StreamingKit
 import Foundation
 import os.log
 
@@ -36,7 +36,7 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        os_log(.info, log: logger, "SlimProtoCommandHandler initialized with SETD support")
+        os_log(.info, log: logger, "SlimProtoCommandHandler initialized with FLAC support")
     }
     
     // MARK: - Command Processing (ENHANCED with SETD support)
@@ -45,7 +45,7 @@ class SlimProtoCommandHandler: ObservableObject {
         case "strm":
             processServerCommand(command.type, payload: command.payload)
         case "setd":
-            // *** CRITICAL FIX: Handle SETD commands for player name ***
+            // Handle SETD commands for player name
             processSetdCommand(command.payload)
         case "audg", "aude":
             slimProtoClient?.sendStatus("STMt") // Acknowledge with heartbeat
@@ -75,14 +75,14 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     func getCurrentStreamTime() -> Double {
-            guard !isStreamPaused, let startTime = streamStartTime else {
-                return streamPosition // Return frozen position when paused
-            }
-            
-            // Calculate elapsed time since last update
-            let elapsed = Date().timeIntervalSince(lastStreamUpdate)
-            return streamPosition + elapsed
+        guard !isStreamPaused, let startTime = streamStartTime else {
+            return streamPosition // Return frozen position when paused
         }
+        
+        // Calculate elapsed time since last update
+        let elapsed = Date().timeIntervalSince(lastStreamUpdate)
+        return streamPosition + elapsed
+    }
     
     private func updateStreamPosition(_ position: Double) {
         streamPosition = position
@@ -92,7 +92,7 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "📍 Stream position updated: %.2f", position)
     }
     
-    // MARK: - SETD Command Processing (NEW - CRITICAL FIX)
+    // MARK: - SETD Command Processing
     private func processSetdCommand(_ payload: Data) {
         guard payload.count >= 1 else {
             os_log(.error, log: logger, "SETD command payload too short")
@@ -132,7 +132,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    // MARK: - Send SETD Player Name Response (NEW - CRITICAL FIX)
+    // MARK: - Send SETD Player Name Response
     private func sendSetdPlayerName(_ playerName: String) {
         guard let slimProtoClient = slimProtoClient else {
             os_log(.error, log: logger, "Cannot send SETD - no client reference")
@@ -166,7 +166,7 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "✅ SETD player name sent: '%{public}s' (%d bytes)", playerName, setdData.count)
     }
     
-    // MARK: - Stream Command Processing (existing code...)
+    // MARK: - Stream Command Processing (UPDATED for FLAC)
     private func processServerCommand(_ command: String, payload: Data) {
         guard command == "strm" else { return }
         
@@ -179,7 +179,7 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
                    commandChar, streamCommand, format, format)
             
-            // Enhanced format handling
+            // UPDATED: Enhanced format handling with FLAC support
             var formatName = "Unknown"
             var shouldAccept = false
             
@@ -199,15 +199,15 @@ class SlimProtoCommandHandler: ObservableObject {
                 shouldAccept = true
                 os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
                 
-            case 102: // 'f' = FLAC
+            case 102: // 'f' = FLAC - UPDATED: Now accept native FLAC
                 formatName = "FLAC"
-                shouldAccept = false
-                os_log(.info, log: logger, "❌ Server offering FLAC - requesting transcode to AAC")
+                shouldAccept = true // CHANGED: Now accept native FLAC
+                os_log(.info, log: logger, "✅ Server offering FLAC - native playback with StreamingKit!")
                 
             case 112: // 'p' = PCM
                 formatName = "PCM"
-                shouldAccept = false
-                os_log(.info, log: logger, "✅ Server offering PCM - iOS can handle this")
+                shouldAccept = true
+                os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
                 
             default:
                 os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
@@ -291,10 +291,10 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream playback from %.2f", format, startTime)
         
-        // PROTOCOL FIX: Track server's time reference properly
+        // Track server's time reference properly
         serverStartTime = Date()
-        serverStartPosition = startTime  // Use the actual start time from server
-        lastKnownPosition = startTime    // Initialize to server's position
+        serverStartPosition = startTime
+        lastKnownPosition = startTime
         
         isStreamPaused = false
         isPausedByLockScreen = false
@@ -307,7 +307,6 @@ class SlimProtoCommandHandler: ObservableObject {
             self.slimProtoClient?.sendStatus("STMs")
         }
     }
-
     
     private func handlePauseCommand() {
         os_log(.info, log: logger, "⏸️ Server pause command")
@@ -316,7 +315,7 @@ class SlimProtoCommandHandler: ObservableObject {
         lastKnownPosition = getServerProvidedTime()
         isStreamPaused = true
         isPausedByLockScreen = true
-        serverStartTime = nil // Stop time progression
+        serverStartTime = nil
         
         delegate?.didPauseStream()
         slimProtoClient?.sendStatus("STMp")
@@ -386,7 +385,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    // MARK: - Utility Methods (existing code...)
+    // MARK: - Utility Methods
     private func extractServerElapsedTime(from payload: Data) -> Double {
         guard payload.count >= 24 else { return 0.0 }
         
@@ -405,7 +404,6 @@ class SlimProtoCommandHandler: ObservableObject {
     
     func getServerProvidedTime() -> Double {
         if isPausedByLockScreen {
-            // When paused, return frozen position
             return lastKnownPosition
         }
         
@@ -413,7 +411,6 @@ class SlimProtoCommandHandler: ObservableObject {
             return 0.0
         }
         
-        // Calculate elapsed time since server told us to start
         let elapsed = Date().timeIntervalSince(startTime)
         return serverStartPosition + elapsed
     }
@@ -456,9 +453,5 @@ class SlimProtoCommandHandler: ObservableObject {
         } else {
             return "Playing"
         }
-    }
-    
-    private func getCurrentPlaybackTime() -> Double? {
-        return lastKnownPosition
     }
 }
