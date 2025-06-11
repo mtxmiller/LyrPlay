@@ -325,14 +325,15 @@ class NowPlayingManager: ObservableObject {
     
     // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
-        // This method is called by AudioManager updates
-        // We'll use it to update our fallback time, but primary source is still server
-        lastKnownAudioTime = currentTime
+        // SIMPLIFIED: Always update but with throttling
+        let timeDifference = abs(currentTime - lastKnownAudioTime)
         
-        // If we don't have server time, update immediately
-        if serverTimeSynchronizer?.isServerTimeAvailable != true {
+        // Only update if there's a meaningful time change (2+ seconds)
+        if timeDifference > 2.0 {
+            lastKnownAudioTime = currentTime
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-            os_log(.debug, log: logger, "📍 Updated from audio manager (no server time): %.2f", currentTime)
+            os_log(.debug, log: logger, "📍 Updated from audio manager: %.2f (state: %{public}s)",
+                   currentTime, isPlaying ? "playing" : "paused")
         }
     }
     

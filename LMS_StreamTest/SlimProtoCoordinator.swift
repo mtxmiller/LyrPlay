@@ -130,27 +130,35 @@ class SlimProtoCoordinator: ObservableObject {
         
         // NEW: Also stop lock screen timer
     }
-
     
     private func sendPeriodicStatus() {
-        // Don't send if we just sent one recently (avoid spam)
-        if let lastSent = lastStatusSent, Date().timeIntervalSince(lastSent) < 5.0 {
+        // ENHANCED: More aggressive spam prevention
+        if let lastSent = lastStatusSent, Date().timeIntervalSince(lastSent) < 8.0 {  // Increased from 5s to 8s
             return
         }
         
-        // Send appropriate status based on stream state
-        if commandHandler.streamState != "Stopped" {
-            if commandHandler.streamState == "Paused" {
-                client.sendStatus("STMp")  // Pause status when paused
+        // Only send status during active streaming
+        let streamState = commandHandler.streamState
+        
+        if streamState != "Stopped" {
+            let statusCode: String
+            
+            if streamState == "Paused" {
+                statusCode = "STMp"  // Pause status when paused
             } else {
-                client.sendStatus("STMt")  // Timer status when playing
+                statusCode = "STMt"  // Timer status when playing
             }
+            
+            // Send the status
+            client.sendStatus(statusCode)
             lastStatusSent = Date()
             
             // Record heartbeat for health monitoring
             connectionManager.recordHeartbeatResponse()
             
-            // Removed: excessive debug logging
+            os_log(.debug, log: logger, "📊 Periodic status sent: %{public}s", statusCode)
+        } else {
+            os_log(.debug, log: logger, "📊 Skipping periodic status - stream stopped")
         }
     }
     
@@ -373,8 +381,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         client.sendStatus("STMc")  // Connecting
         
         // Send started status after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {  // Increased delay
             self.client.sendStatus("STMs")  // Started - let server track position from here
+            os_log(.info, log: self.logger, "✅ Sent STMs after stream connection established")
         }
         
         // Fetch metadata for lock screen (after longer delay to avoid conflicts)

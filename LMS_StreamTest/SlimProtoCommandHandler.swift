@@ -301,11 +301,13 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamActive = true
         
         delegate?.didStartStream(url: url, format: format, startTime: startTime)
-        slimProtoClient?.sendStatus("STMc")
+        //slimProtoClient?.sendStatus("STMc")
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.slimProtoClient?.sendStatus("STMs")
-        }
+        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        //    self.slimProtoClient?.sendStatus("STMs")
+        //}
+        
+        os_log(.info, log: logger, "✅ Stream start delegated to coordinator - no duplicate commands")
     }
     
     private func handlePauseCommand() {
@@ -433,10 +435,20 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - Public Interface
     func notifyTrackEnded() {
-        os_log(.info, log: logger, "🎵 Track ended - sending STMd to request next track")
+        os_log(.info, log: logger, "🎵 Track ended - sending STMd (decoder ready) to server")
+        
+        // CRITICAL: Reset all tracking state first
         isStreamActive = false
+        isStreamPaused = false
+        isPausedByLockScreen = false
         lastKnownPosition = 0.0
+        serverStartTime = nil
+        serverStartPosition = 0.0
+        
+        // Send STMd (decoder ready) - this tells LMS we finished the track and are ready for next
         slimProtoClient?.sendStatus("STMd")
+        
+        os_log(.info, log: logger, "✅ STMd sent - server should initiate next track")
     }
     
     func updatePlaybackPosition(_ position: Double) {

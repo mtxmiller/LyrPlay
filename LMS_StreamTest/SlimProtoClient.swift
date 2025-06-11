@@ -11,6 +11,11 @@ protocol SlimProtoClientDelegate: AnyObject {
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand)
 }
 
+// MARK: - Command Deduplication (ADD THESE LINES)
+private var lastSentCommand: String = ""
+private var lastSentTime: Date = Date()
+private let minimumCommandInterval: TimeInterval = 0.2  // 200ms minimum between commands
+
 // MARK: - Command Structure
 struct SlimProtoCommand {
     let type: String
@@ -281,7 +286,22 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             return
         }
         
-        os_log(.info, log: logger, "Sending STAT: %{public}s", code)
+        // CRITICAL: Prevent command spam
+        let now = Date()
+        let timeSinceLastCommand = now.timeIntervalSince(lastSentTime)
+        
+        // Check for duplicate commands sent too quickly
+        if lastSentCommand == code && timeSinceLastCommand < minimumCommandInterval {
+            os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s (%.3fs since last)",
+                   code, timeSinceLastCommand)
+            return
+        }
+        
+        // Update tracking
+        lastSentCommand = code
+        lastSentTime = now
+        
+        os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
         
         // Create status message
         var statusData = Data()

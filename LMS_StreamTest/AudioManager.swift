@@ -10,6 +10,10 @@ class AudioManager: NSObject, ObservableObject {
     private let audioSessionManager: AudioSessionManager
     private let nowPlayingManager: NowPlayingManager
     
+    // MARK: - Time Update Throttling (ADD THIS LINE)
+    private var lastTimeUpdateReport: Date = Date()
+    private let minimumTimeUpdateInterval: TimeInterval = 2.0  // Max update every 2 seconds
+    
     // NEW: Expose NowPlayingManager for coordinator access
     func getNowPlayingManager() -> NowPlayingManager {
         return nowPlayingManager
@@ -167,9 +171,8 @@ extension AudioManager: AudioPlayerDelegate {
     func audioPlayerDidStartPlaying() {
         os_log(.info, log: logger, "▶️ Audio player started playing")
         
-        // Update now playing info
-        let currentTime = audioPlayer.getCurrentTime()
-        nowPlayingManager.updatePlaybackState(isPlaying: true, currentTime: currentTime)
+        // SIMPLIFIED: Just log the event, let the existing timer/update mechanisms handle position updates
+        os_log(.debug, log: logger, "📍 Audio start event logged")
     }
     
     func audioPlayerDidPause() {
@@ -195,9 +198,20 @@ extension AudioManager: AudioPlayerDelegate {
     }
     
     func audioPlayerTimeDidUpdate(_ time: Double) {
+        // CRITICAL: Throttle time updates to prevent spam
+        let now = Date()
+        
+        guard now.timeIntervalSince(lastTimeUpdateReport) >= minimumTimeUpdateInterval else {
+            return  // Suppress rapid updates
+        }
+        
+        lastTimeUpdateReport = now
+        
         // Update now playing info with current time
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
+        
+        os_log(.debug, log: logger, "📍 Time update: %.2f (%{public}s)", time, isPlaying ? "playing" : "paused")
     }
     
     func audioPlayerDidStall() {

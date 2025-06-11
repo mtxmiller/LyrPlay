@@ -36,6 +36,11 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
     
+    // MARK: - State Tracking
+    private var lastReportedState: STKAudioPlayerState = []
+    private var lastTimeUpdateReport: Date = Date()
+    private let minimumTimeUpdateInterval: TimeInterval = 1.0  // Max 1 update per second
+    
     // MARK: - Initialization
     override init() {
         super.init()
@@ -221,7 +226,17 @@ extension AudioPlayer: STKAudioPlayerDelegate {
     
     func audioPlayer(_ audioPlayer: STKAudioPlayer, didStartPlayingQueueItemId queueItemId: NSObject) {
         os_log(.info, log: logger, "▶️ StreamingKit started playing item")
-        delegate?.audioPlayerDidStartPlaying()
+        
+        // CRITICAL: Only report if this is a new start, not a resume/seek
+        let currentState = audioPlayer.state
+        
+        if !lastReportedState.contains(.playing) {
+            delegate?.audioPlayerDidStartPlaying()
+            lastReportedState = currentState
+            os_log(.info, log: logger, "✅ Reported start playing to delegate")
+        } else {
+            os_log(.debug, log: logger, "🔄 Suppressed duplicate start playing event")
+        }
     }
     
     func audioPlayer(_ audioPlayer: STKAudioPlayer, didFinishBufferingSourceWithQueueItemId queueItemId: NSObject) {
@@ -276,9 +291,26 @@ extension AudioPlayer: STKAudioPlayerDelegate {
         let previousStateString = playerStateDescription(previousState)
         os_log(.debug, log: logger, "🔄 StreamingKit state changed: %{public}s → %{public}s", previousStateString, stateString)
         
-        // Handle state changes for time updates
-        let currentTime = getCurrentTime()
-        delegate?.audioPlayerTimeDidUpdate(currentTime)
+        // CRITICAL: Only report time updates for significant state changes
+        // Don't spam time updates during constant buffering state changes
+        let shouldReportTimeUpdate: Bool
+        
+        switch state {
+        case let newState where newState.contains(.playing):
+            shouldReportTimeUpdate = !previousState.contains(.playing)  // Only when starting to play
+        case let newState where newState.contains(.paused):
+            shouldReportTimeUpdate = !previousState.contains(.paused)   // Only when starting to pause
+        case let newState where newState.contains(.stopped):
+            shouldReportTimeUpdate = !previousState.contains(.stopped) // Only when stopping
+        default:
+            shouldReportTimeUpdate = false  // Don't report during buffering/transitioning
+        }
+        
+        if shouldReportTimeUpdate {
+            let currentTime = getCurrentTime()
+            delegate?.audioPlayerTimeDidUpdate(currentTime)
+            os_log(.debug, log: logger, "📍 Reported time update: %.2f", currentTime)
+        }
     }
     
     func audioPlayer(_ audioPlayer: STKAudioPlayer, unexpectedError errorCode: STKAudioPlayerErrorCode) {
