@@ -369,6 +369,7 @@ struct WebView: UIViewRepresentable {
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         
         // Set background color to match LMS skin
@@ -401,7 +402,7 @@ struct WebView: UIViewRepresentable {
         return Coordinator(self)
     }
     
-    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         var parent: WebView
         private let logger = OSLog(subsystem: "com.lmsstream", category: "WebViewCoordinator")
         
@@ -535,7 +536,7 @@ struct WebView: UIViewRepresentable {
                 
                 os_log(.info, log: logger, "🔍 Navigation decision for URL: %{public}s", urlString)
                 
-                // Check for our custom settings URL scheme
+                // ONLY intercept our custom settings URL scheme
                 if urlString.hasPrefix("lmsstream://settings") {
                     os_log(.info, log: logger, "✅ Intercepted Material settings URL: %{public}s", urlString)
                     
@@ -548,10 +549,71 @@ struct WebView: UIViewRepresentable {
                     decisionHandler(.cancel)
                     return
                 }
+                
+                // Check if this is a link to the same server (allow these to load in WebView)
+                if let host = url.host {
+                    let serverHost = SettingsManager.shared.serverHost
+                    
+                    // Allow navigation within the same LMS server
+                    if host == serverHost || host.hasSuffix(".\(serverHost)") {
+                        os_log(.info, log: logger, "✅ Allowing navigation within LMS server: %{public}s", urlString)
+                        decisionHandler(.allow)
+                        return
+                    }
+                    
+                    // Allow localhost and local network addresses
+                    if host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("172.") ||
+                       host == "localhost" || host.hasSuffix(".local") {
+                        os_log(.info, log: logger, "✅ Allowing local network navigation: %{public}s", urlString)
+                        decisionHandler(.allow)
+                        return
+                    }
+                }
+                
+                // For external links, only open in Safari if it's a user-initiated link click
+                if navigationAction.navigationType == .linkActivated {
+                    os_log(.info, log: logger, "🌐 Opening external link in Safari: %{public}s", urlString)
+                    
+                    // Open in Safari
+                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                    
+                    // Cancel the navigation in WebView
+                    decisionHandler(.cancel)
+                    return
+                }
             }
             
-            // Allow normal navigation
+            // Allow all other navigation (page loads, redirects, etc.)
             decisionHandler(.allow)
+        }
+        
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            
+            if let url = navigationAction.request.url {
+                let urlString = url.absoluteString
+                os_log(.info, log: logger, "📄 Material requesting iframe/popup for: %{public}s", urlString)
+                
+                // Check if this is a server administration page (like server.log)
+                if let host = url.host {
+                    let serverHost = SettingsManager.shared.serverHost
+                    
+                    // If it's from our LMS server, load it in the main WebView
+                    if host == serverHost || host.hasSuffix(".\(serverHost)") {
+                        os_log(.info, log: logger, "✅ Loading LMS admin page in main WebView: %{public}s", urlString)
+                        
+                        // Load the URL in the main WebView instead of creating a new one
+                        webView.load(navigationAction.request)
+                        return nil
+                    }
+                }
+                
+                // For external URLs, open in Safari
+                os_log(.info, log: logger, "🌐 Opening external URL in Safari: %{public}s", urlString)
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
+            
+            // Return nil to prevent creating a new WebView
+            return nil
         }
     }
 }

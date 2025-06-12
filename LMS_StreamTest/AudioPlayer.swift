@@ -50,13 +50,51 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Core Setup (UPDATED)
     private func setupStreamingKit() {
-        audioPlayer = STKAudioPlayer()
+        let userBufferSize = settings.bufferSize
+        let bufferSeconds = Float32(bufferSizeToSeconds(userBufferSize))
+        let readBufferSize = UInt32(max(userBufferSize / 4, 262144)) // At least 256KB
+        
+        // CORRECT: Using the actual struct from your header file
+        var options = STKAudioPlayerOptions()
+        options.flushQueueOnSeek = true
+        options.enableVolumeMixer = false  // We handle volume elsewhere
+        options.readBufferSize = readBufferSize
+        options.bufferSizeInSeconds = bufferSeconds
+        options.secondsRequiredToStartPlaying = Float32(min(Double(bufferSeconds) * 0.3, 2.0)) // Start at 30% or 2s max
+        options.gracePeriodAfterSeekInSeconds = 1.0
+        options.secondsRequiredToStartPlayingAfterBufferUnderun = Float32(min(Double(bufferSeconds) * 0.5, 3.0)) // Resume at 50% or 3s max
+        
+        // Create player with properly configured options
+        audioPlayer = STKAudioPlayer(options: options)
         audioPlayer.delegate = self
-        audioPlayer.meteringEnabled = false // Better performance
+        audioPlayer.meteringEnabled = false
         audioPlayer.volume = 1.0
         
-        os_log(.info, log: logger, "✅ StreamingKit AudioPlayer initialized")
+        os_log(.info, log: logger, "✅ StreamingKit configured - Read Buffer: %dKB, Buffer Time: %.1fs, Start: %.1fs",
+               readBufferSize / 1024, bufferSeconds, options.secondsRequiredToStartPlaying)
     }
+
+    
+    private func bufferSizeToSeconds(_ bufferSizeBytes: Int) -> TimeInterval {
+        // FLAC-aware calculation based on actual bitrates
+        let estimatedBitrate: Double
+        
+        // Use higher bitrate estimate since FLAC is prioritized
+        if bufferSizeBytes >= 2_097_152 { // 2MB+
+            estimatedBitrate = 1_200_000 // 1.2 Mbps - high quality FLAC
+        } else if bufferSizeBytes >= 1_048_576 { // 1MB+
+            estimatedBitrate = 900_000 // 900 kbps - mixed FLAC/AAC
+        } else {
+            estimatedBitrate = 600_000 // 600 kbps - mostly compressed
+        }
+        
+        let bytesPerSecond = estimatedBitrate / 8.0
+        let bufferSeconds = Double(bufferSizeBytes) / bytesPerSecond
+        
+        // FLAC needs longer buffer times, minimum 2 seconds
+        return max(2.0, min(30.0, bufferSeconds))
+    }
+
     
     // MARK: - Stream Playback (SIMPLIFIED)
     func playStream(urlString: String) {

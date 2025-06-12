@@ -15,7 +15,7 @@ class SettingsManager: ObservableObject {
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 10.0
     @Published var preferredFormats: [String] = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
-    @Published var bufferSize: Int = 1048576  // 1MB
+    @Published var bufferSize: Int = 2097152  // 2MB
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
