@@ -478,41 +478,49 @@ struct BufferConfigView: View {
         Form {
             Section(header: Text("Buffer Size")) {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Current: \(Int(bufferSize / 1024)) KB")
+                    Text("Current: \(formatBufferSize(Int(bufferSize)))")  // ← Use the helper function
                         .font(.headline)
                     
                     Slider(
                         value: $bufferSize,
-                        in: 131072...1048576,
-                        step: 131072
+                        in: 262144...8388608,  // ← Update range: 256KB to 8MB
+                        step: 262144           // ← Update step: 256KB increments
                     ) {
                         Text("Buffer Size")
                     }
                     .onChange(of: bufferSize) { _ in hasChanges = true }
                 }
                 
-                Text("Larger buffers provide more stable playback but use more memory. The default 256KB works well for most connections.")
+                Text("Larger buffers provide smoother FLAC playback but use more memory. 2MB+ recommended for FLAC streaming.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             
             Section(header: Text("Presets")) {
-                ForEach(bufferSizes, id: \.0) { size, description in
+                ForEach(bufferSizes, id: \.0) { size, title, description in
                     Button(action: {
                         bufferSize = Double(size)
                         hasChanges = true
                     }) {
-                        HStack {
-                            Text(description)
-                                .foregroundColor(.primary)
-                            
-                            Spacer()
-                            
-                            if Int(bufferSize) == size {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(.blue)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(title)  // ← Use title instead of description
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                if Int(bufferSize) == size {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
                             }
+                            
+                            Text(description)  // ← Add the description below
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
+                        .padding(.vertical, 2)
                     }
                 }
             }
@@ -538,6 +546,14 @@ struct BufferConfigView: View {
         hasChanges = false
         
         presentationMode.wrappedValue.dismiss()
+    }
+    
+    private func formatBufferSize(_ bytes: Int) -> String {
+        if bytes >= 1048576 {
+            return "\(bytes / 1048576) MB"
+        } else {
+            return "\(bytes / 1024) KB"
+        }
     }
 }
 
