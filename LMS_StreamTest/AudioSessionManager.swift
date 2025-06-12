@@ -98,12 +98,13 @@ class AudioSessionManager: ObservableObject {
                 os_log(.info, log: logger, "🔧 Updated buffer duration to 15ms")
             }
             
-            if !audioSession.isOtherAudioPlaying {
-                try audioSession.setActive(true)
-                os_log(.info, log: logger, "🔧 Activated audio session")
-            }
+            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
+            // if !audioSession.isOtherAudioPlaying {
+            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
+            //     os_log(.info, log: logger, "🔧 Activated audio session")
+            // }
             
-            os_log(.info, log: logger, "✅ Lossless audio session configured successfully")
+            os_log(.info, log: logger, "✅ Lossless audio session configured (StreamingKit handles activation)")
         } catch {
             os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
         }
@@ -145,13 +146,13 @@ class AudioSessionManager: ObservableObject {
                 os_log(.info, log: logger, "🔧 Updated buffer duration to 20ms")
             }
             
-            // Only activate if not already active
-            if !audioSession.isOtherAudioPlaying {
-                try audioSession.setActive(true)
-                os_log(.info, log: logger, "🔧 Activated audio session")
-            }
+            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
+            // if !audioSession.isOtherAudioPlaying {
+            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
+            //     os_log(.info, log: logger, "🔧 Activated audio session")
+            // }
             
-            os_log(.info, log: logger, "✅ Compressed audio session configured successfully")
+            os_log(.info, log: logger, "✅ Compressed audio session configured (StreamingKit handles activation)")
         } catch {
             os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
         }
