@@ -465,12 +465,13 @@ struct BufferConfigView: View {
     @State private var bufferSize: Double = 262144
     @State private var hasChanges = false
     
-    private let bufferSizes: [(Int, String)] = [
-        (262144, "256 KB - Minimal"),
-        (524288, "512 KB - Small"),
-        (1048576, "1 MB - Default"),  // This is now default
-        (2097152, "2 MB - Large"),
-        (4194304, "4 MB - Maximum")  // Match Castbridge max
+    private let bufferSizes: [(Int, String, String)] = [
+        (262144, "256 KB", "Minimum - AAC/MP3 only"),
+        (524288, "512 KB", "Small - Good for AAC"),
+        (1048576, "1 MB", "Standard - Mixed content"),        // Remove "Default"
+        (2097152, "2 MB", "Default - Optimal for FLAC"),     // Add "Default" here
+        (4194304, "4 MB", "Large - High bitrate FLAC"),
+        (8388608, "8 MB", "Maximum - Studio quality")
     ]
     
     var body: some View {
