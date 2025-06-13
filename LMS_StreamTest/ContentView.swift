@@ -231,7 +231,7 @@ struct ContentView: View {
                     // Only handle the error ONCE
                     hasHandledError = true
                     hasConnectionError = true
-                    slimProtoCoordinator.disconnect()
+                    //slimProtoCoordinator.disconnect()
                     
                     // Auto-show settings after 10 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
