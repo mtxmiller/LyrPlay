@@ -16,6 +16,16 @@ struct ContentView: View {
     @State private var isAppInBackground = false
     @State private var hasLoadedInitially = false
     @State private var webView: WKWebView? // Add reference to webview
+    @State private var failureTimer: Timer?
+    
+    @State private var hasConnectionError = false
+    @State private var hasHandledError = false
+
+    
+    @State private var hasShownError = false
+
+
+
 
     
     init() {
@@ -47,54 +57,71 @@ struct ContentView: View {
         }
         .onReceive(settings.$isConfigured) { isConfigured in
             if isConfigured && !hasConnected {
-                // Connect to LMS when configuration is complete
+                hasShownError = false  // Reset error flag
+                hasConnectionError = false
                 connectToLMS()
             }
         }
+        // ADD THE .sheet MODIFIER HERE (after .onReceive):
+        .sheet(isPresented: $showingSettings, onDismiss: {
+            hasConnectionError = false
+            hasShownError = false
+            hasHandledError = false
+            loadError = nil
+            
+            // ADD THESE LINES - Reconnect SlimProto with new settings:
+            hasConnected = false  // Reset connection flag
+            
+            // Update coordinator with new settings
+            slimProtoCoordinator.updateServerSettings(
+                host: settings.serverHost,
+                port: UInt16(settings.serverSlimProtoPort)
+            )
+            
+            // Reconnect after a short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.connectToLMS()
+            }
+        }) {
+            SettingsView()
+        }
+
     }
     
     private var mainAppView: some View {
-        GeometryReader { geometry in
-            ZStack {
-                // Set background color to match your LMS skin (dark gray/black)
-                Color.black
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .ignoresSafeArea(.all)
-                
-                if let url = URL(string: materialWebURL) {
-                    WebView(
-                        url: url,
-                        isLoading: $isLoading,
-                        loadError: $loadError,
-                        webViewReference: $webView,
-                        onSettingsPressed: {
-                            showingSettings = true
-                        }
-                    )
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .ignoresSafeArea(.all)
-                    .onAppear {
-                        hasLoadedInitially = true
+        ZStack {
+            // Background that fills everything
+            Color(red: 0.25, green: 0.25, blue: 0.25) // Dark gray like Material
+                .ignoresSafeArea(.all)
+            
+            // WebView that respects TOP safe area but ignores bottom
+            if let url = URL(string: materialWebURL), !hasConnectionError {
+                WebView(
+                    url: url,
+                    isLoading: $isLoading,
+                    loadError: $loadError,
+                    webViewReference: $webView,
+                    onSettingsPressed: {
+                        showingSettings = true
                     }
-                } else {
-                    serverErrorView
-                }
-                
-                // Status bar - overlay style so it doesn't take up space
-                if isLoading || loadError != nil {
-                    statusOverlay
-                }
-                
-                
-                // Enhanced debug info overlay with server time info
-                if settings.isDebugModeEnabled && !isAppInBackground {
-                    enhancedDebugOverlay
-                }
+                )
+                .ignoresSafeArea(.container, edges: .bottom)
+            } else {
+                serverErrorView
+            }
+            
+            // Status overlay
+            if isLoading || loadError != nil {
+                statusOverlay
+            }
+            
+            // Debug overlay
+            if settings.isDebugModeEnabled && !isAppInBackground {
+                enhancedDebugOverlay
             }
         }
-        .ignoresSafeArea(.all)
         .onAppear {
-            if !hasConnected {
+            if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
         }
@@ -104,31 +131,35 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
         }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
+    }
+    
+    private func handleLoadFailure() {
+        // Auto-show settings after 10 seconds of failure
+        failureTimer?.invalidate()
+        failureTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
+            if self.loadError != nil {
+                self.showingSettings = true
+            }
         }
     }
     
     // MARK: - Material Integration URL
     private var materialWebURL: String {
-        if hasLoadedInitially {
-            // Return to base URL after initial load to prevent reloads
-            return settings.webURL
-        } else {
-            // Initial load with Material settings integration
-            let baseURL = settings.webURL
-            let settingsURL = "lmsstream://settings"
-            let settingsName = "iOS App Settings" // This will appear in Material's menu
-            let playerParam = "player=\(settings.playerMACAddress)"
-            
-            // URL encode both the settings URL and name
-            let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
-            let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
-            
-            // Construct Material URL with both appSettings and appSettingsName parameters
-            return "\(baseURL)?\(playerParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
-        }
+        let baseURL = settings.webURL
+        let settingsURL = "lmsstream://settings"
+        let settingsName = "iOS App Settings"
+        let playerParam = "player=\(settings.playerMACAddress)"
+        
+        let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
+        let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
+        
+        // ADD THIS LINE - cache busting timestamp:
+        let timestamp = Int(Date().timeIntervalSince1970)
+        
+        // CHANGE THIS LINE - add timestamp:
+        return "\(baseURL)?\(playerParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
     }
+
     
     private var serverErrorView: some View {
         VStack(spacing: 20) {
@@ -175,7 +206,7 @@ struct ContentView: View {
                 .cornerRadius(8)
             }
             
-            if let error = loadError {
+            if let error = loadError, !hasHandledError {
                 VStack(spacing: 8) {
                     HStack {
                         Image(systemName: "exclamationmark.circle")
@@ -196,6 +227,19 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .background(Color.black.opacity(0.8))
                 .cornerRadius(8)
+                .onAppear {
+                    // Only handle the error ONCE
+                    hasHandledError = true
+                    hasConnectionError = true
+                    slimProtoCoordinator.disconnect()
+                    
+                    // Auto-show settings after 10 seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+                        if self.loadError != nil && !self.showingSettings {
+                            self.showingSettings = true
+                        }
+                    }
+                }
             }
             
             Spacer()
@@ -344,6 +388,7 @@ struct ContentView: View {
         slimProtoCoordinator.connect()
         hasConnected = true
     }
+
 }
 
 struct WebView: UIViewRepresentable {
@@ -357,6 +402,7 @@ struct WebView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> WKWebView {
         os_log(.info, log: logger, "Creating WKWebView with Material Integration for URL: %{public}s", url.absoluteString)
+        
         
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -376,31 +422,40 @@ struct WebView: UIViewRepresentable {
         webView.backgroundColor = UIColor.black
         webView.scrollView.backgroundColor = UIColor.black
         
+        // ADD THESE CRITICAL LINES:
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = false
+        
         // Store reference for external access
         DispatchQueue.main.async {
             webViewReference = webView
         }
         
-        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        request.timeoutInterval = 10.0  // Now you can add this line
+        
         webView.load(request)
+
         
         os_log(.info, log: logger, "WKWebView load request started with Material appSettings integration")
         return webView
     }
     
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Check if URL has changed and reload if necessary
-        if let currentURL = uiView.url, currentURL.host != url.host || currentURL.port != url.port {
-            os_log(.info, log: logger, "URL changed, reloading WebView with Material integration")
-            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        // ADD THIS - check if host changed:
+        if let currentURL = uiView.url, currentURL.host != url.host {
+            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
             uiView.load(request)
         }
     }
+    
+    
     
     func makeCoordinator() -> Coordinator {
         os_log(.info, log: logger, "Creating WebView Coordinator with Material integration")
         return Coordinator(self)
     }
+    
     
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         var parent: WebView
@@ -623,5 +678,3 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
-
-

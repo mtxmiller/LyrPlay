@@ -115,7 +115,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.info, log: logger, "Attempting to connect to %{public}s:%d", host, port)
         
         do {
-            try socket.connect(toHost: host, onPort: port, withTimeout: 30)
+            try socket.connect(toHost: host, onPort: port, withTimeout: 10)
         } catch {
             os_log(.error, log: logger, "Connection error: %{public}s", error.localizedDescription)
         }

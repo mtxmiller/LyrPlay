@@ -13,7 +13,7 @@ class SettingsManager: ObservableObject {
     @Published var serverWebPort: Int = 9000
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
-    @Published var connectionTimeout: TimeInterval = 10.0
+    @Published var connectionTimeout: TimeInterval = 8.0
     @Published var preferredFormats: [String] = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
     @Published var bufferSize: Int = 2097152  // 2MB
     @Published var isDebugModeEnabled: Bool = false
