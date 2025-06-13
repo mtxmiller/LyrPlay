@@ -72,8 +72,7 @@ class AudioSessionManager: ObservableObject {
             let desiredOptions: AVAudioSession.CategoryOptions = [
                 .allowBluetooth,
                 .allowAirPlay,
-                .allowBluetoothA2DP,
-                .defaultToSpeaker
+                .allowBluetoothA2DP
             ]
             
             // Only change if different
