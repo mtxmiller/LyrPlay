@@ -289,9 +289,9 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - Individual Command Handlers (existing code...)
     private func handleStartCommand(url: String, format: String, startTime: Double) {
-        os_log(.info, log: logger, "▶️ Starting %{public}s stream playback from %.2f", format, startTime)
+        os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f", format, startTime)
         
-        // Track server's time reference properly
+        // Track server's time reference but don't try to maintain it locally
         serverStartTime = Date()
         serverStartPosition = startTime
         lastKnownPosition = startTime
@@ -301,49 +301,56 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamActive = true
         
         delegate?.didStartStream(url: url, format: format, startTime: startTime)
-        //slimProtoClient?.sendStatus("STMc")
         
-        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-        //    self.slimProtoClient?.sendStatus("STMs")
-        //}
-        
-        os_log(.info, log: logger, "✅ Stream start delegated to coordinator - no duplicate commands")
+        // REMOVED: All the STMc/STMs sending - let coordinator handle it
+        os_log(.info, log: logger, "✅ Stream start delegated - server manages position")
     }
     
     private func handlePauseCommand() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
-        // Freeze at current server time
-        lastKnownPosition = getServerProvidedTime()
+        // Don't track position - server knows where we are
         isStreamPaused = true
         isPausedByLockScreen = true
-        serverStartTime = nil
         
         delegate?.didPauseStream()
-        slimProtoClient?.sendStatus("STMp")
+        // REMOVED: client status sending - let coordinator handle it
+    }
+    
+    func getCurrentAudioTime() -> Double {
+        // Access audio manager through the coordinator delegate
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            // We need to add a public method to get audio time from coordinator
+            return coordinator.getCurrentAudioTime()
+        }
+        return lastKnownPosition
     }
     
     func syncWithServerPosition(_ serverPosition: Double, isPlaying: Bool) {
-        streamPosition = serverPosition
+        // Just update our tracking variables
+        lastKnownPosition = serverPosition
         isStreamPaused = !isPlaying
-        lastStreamUpdate = Date()
-        streamStartTime = isPlaying ? Date() : nil
         
-        os_log(.info, log: logger, "🔄 Synced stream time to server position: %.2f (playing: %{public}s)",
-               serverPosition, isPlaying ? "YES" : "NO")
+        // Update server reference time
+        if isPlaying {
+            serverStartTime = Date()
+            serverStartPosition = serverPosition
+        } else {
+            serverStartTime = nil
+        }
+        
+        os_log(.info, log: logger, "🔄 Synced to server position: %.2f", serverPosition)
     }
     
     private func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
-        // Resume from current position
-        serverStartTime = Date()
-        serverStartPosition = lastKnownPosition
+        // Don't track position - server will tell us if we need to seek
         isStreamPaused = false
         isPausedByLockScreen = false
         
         delegate?.didResumeStream()
-        slimProtoClient?.sendStatus("STMr")
+        // REMOVED: client status sending - let coordinator handle it
     }
     
     private func handleStopCommand() {
@@ -405,17 +412,26 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     func getServerProvidedTime() -> Double {
+        // Always prefer server position when paused
         if isPausedByLockScreen {
             return lastKnownPosition
         }
         
+        // For playing state, only calculate if we have a recent server reference
         guard let startTime = serverStartTime else {
-            return 0.0
+            return lastKnownPosition
         }
         
+        // Only trust local calculation for short periods (< 30 seconds)
         let elapsed = Date().timeIntervalSince(startTime)
-        return serverStartPosition + elapsed
+        if elapsed < 30.0 {
+            return serverStartPosition + elapsed
+        } else {
+            // Older than 30 seconds - don't trust local calculation
+            return lastKnownPosition
+        }
     }
+
     
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
         let lines = httpRequest.components(separatedBy: "\n")
@@ -452,9 +468,8 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     func updatePlaybackPosition(_ position: Double) {
-        if !isPausedByLockScreen {
-            lastKnownPosition = position
-        }
+        lastKnownPosition = position
+        // REMOVED: All the complex state management
     }
     
     var streamState: String {

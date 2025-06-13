@@ -198,21 +198,17 @@ extension AudioManager: AudioPlayerDelegate {
     }
     
     func audioPlayerTimeDidUpdate(_ time: Double) {
-        // CRITICAL: Throttle time updates to prevent spam
-        let now = Date()
+        // REMOVED: All time update reporting and throttling
+        // The server is the master - don't spam it with position updates
         
-        guard now.timeIntervalSince(lastTimeUpdateReport) >= minimumTimeUpdateInterval else {
-            return  // Suppress rapid updates
-        }
-        
-        lastTimeUpdateReport = now
-        
-        // Update now playing info with current time
+        // Only update now playing info locally, don't send to server
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
         
-        os_log(.debug, log: logger, "📍 Time update: %.2f (%{public}s)", time, isPlaying ? "playing" : "paused")
+        // REMOVED: All the complicated throttling and server communication
+        os_log(.debug, log: logger, "📍 Local time update only: %.2f", time)
     }
+
     
     func audioPlayerDidStall() {
         os_log(.error, log: logger, "⚠️ Audio player stalled")
@@ -231,65 +227,33 @@ extension AudioManager {
         
         let currentState = getPlayerState()
         wasPlayingBeforeInterruption = (currentState == "Playing")
-        interruptionPosition = getCurrentTime()
+        // REMOVED: interruptionPosition = getCurrentTime() - don't track position
         
-        os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s, position: %.2f",
-               wasPlayingBeforeInterruption ? "YES" : "NO", interruptionPosition)
+        os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s",
+               wasPlayingBeforeInterruption ? "YES" : "NO")
         
         if wasPlayingBeforeInterruption {
-            // Pause playback
             audioPlayer.pause()
-            
-            // Update now playing to show paused state
-            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: interruptionPosition)
-            
-            // Notify SlimProto coordinator about interruption
-            if let slimClient = slimClient {
-                // Send pause status to server to keep it informed
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    // Use a custom method to indicate interruption-based pause
-                    self.notifyServerOfInterruption(isPaused: true)
-                }
-            }
+            // REMOVED: position tracking and server notification
+            // Let the server handle position management
         }
     }
     
     /// Called when audio interruption ends
     func handleInterruptionEnded(shouldResume: Bool) {
-        os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s, was playing: %{public}s",
-               shouldResume ? "YES" : "NO", wasPlayingBeforeInterruption ? "YES" : "NO")
-        
-        // Reconfigure audio session for current format if needed
-        let currentFormat = getCurrentAudioFormat()
-        configureAudioSessionForFormat(currentFormat)
+        os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s",
+               shouldResume ? "YES" : "NO")
         
         if shouldResume && wasPlayingBeforeInterruption {
-            // INTERRUPTION FIX: Restore to saved position before resuming
-            if interruptionPosition > 0 {
-                audioPlayer.seekToPosition(interruptionPosition)
-                os_log(.info, log: logger, "🔄 Restored to interruption position: %.2f", interruptionPosition)
-            }
-            
-            // Resume playback
+            // REMOVED: Position restoration - let server tell us where to go
             audioPlayer.play()
             
-            // Update now playing with the restored position
-            let restoredTime = interruptionPosition > 0 ? interruptionPosition : getCurrentTime()
-            nowPlayingManager.updatePlaybackState(isPlaying: true, currentTime: restoredTime)
-            
-            // Notify SlimProto coordinator about resume
-            if let slimClient = slimClient {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    self.notifyServerOfInterruption(isPaused: false)
-                }
-            }
-            
-            os_log(.info, log: logger, "▶️ Automatically resumed playback after interruption at position %.2f", restoredTime)
+            // REMOVED: All server communication - let SlimProto handle it
+            os_log(.info, log: logger, "▶️ Resumed playback - server maintains position")
         }
         
-        // Reset interruption state
         wasPlayingBeforeInterruption = false
-        interruptionPosition = 0.0
+        // REMOVED: interruptionPosition = 0.0
     }
     
     /// Called when audio route changes (headphones, CarPlay, etc.)
@@ -424,11 +388,6 @@ extension AudioManager: AudioSessionManagerDelegate {
     // NEW: Handle interruption end
     func audioSessionInterruptionEnded(shouldResume: Bool) {
         handleInterruptionEnded(shouldResume: shouldResume)
-    }
-    
-    func seekToPosition(_ position: Double) {
-        audioPlayer.seekToPosition(position)
-        os_log(.info, log: logger, "🔄 AudioManager seeking to position: %.2f", position)
     }
     
     // NEW: Handle route changes

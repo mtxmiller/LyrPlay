@@ -286,46 +286,36 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             return
         }
         
-        // CRITICAL: Prevent command spam
+        // Anti-spam protection (keep this)
         let now = Date()
         let timeSinceLastCommand = now.timeIntervalSince(lastSentTime)
         
-        // Check for duplicate commands sent too quickly
         if lastSentCommand == code && timeSinceLastCommand < minimumCommandInterval {
-            os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s (%.3fs since last)",
-                   code, timeSinceLastCommand)
+            os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s", code)
             return
         }
         
-        // Update tracking
         lastSentCommand = code
         lastSentTime = now
         
         os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
         
-        // Create status message
         var statusData = Data()
         
-        // Event Code (4 bytes)
+        // Basic fields
         let eventCode = code.padding(toLength: 4, withPad: " ", startingAt: 0)
         statusData.append(eventCode.data(using: .ascii) ?? Data())
+        statusData.append(0) // CRLF
+        statusData.append(UInt8(ascii: "m")) // MAS Initialized
         
-        // Number of consecutive CRLF (1 byte)
-        statusData.append(0)
-        
-        // MAS Initialized (1 byte)
-        statusData.append(UInt8(ascii: "m"))
-        
-        // MAS Mode (1 byte) - reflect actual pause state
-        if isPaused || code == "STMp" {
-            statusData.append(UInt8(ascii: "p")) // 'p' = paused
-            os_log(.info, log: logger, "🔒 MAS Mode set to PAUSED ('p')")
+        // MAS Mode based on code
+        if code == "STMp" {
+            statusData.append(UInt8(ascii: "p")) // Paused
         } else {
-            statusData.append(0) // 0 = playing/stopped
-            os_log(.info, log: logger, "▶️ MAS Mode set to PLAYING (0)")
+            statusData.append(0) // Playing/other
         }
         
-        // Buffer size (4 bytes) - from settings
+        // Buffer info
         let bufferSize = UInt32(settings.bufferSize)
         statusData.append(Data([
             UInt8((bufferSize >> 24) & 0xff),
@@ -334,8 +324,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bufferSize & 0xff)
         ]))
         
-        // Buffer fullness (4 bytes) - when paused, show buffer as empty/minimal
-        let bufferFullness: UInt32 = isPaused ? 0 : bufferSize / 2
+        let bufferFullness: UInt32 = code == "STMp" ? 0 : bufferSize / 2
         statusData.append(Data([
             UInt8((bufferFullness >> 24) & 0xff),
             UInt8((bufferFullness >> 16) & 0xff),
@@ -343,11 +332,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bufferFullness & 0xff)
         ]))
         
-        // Bytes received (8 bytes) - SIMPLIFIED: Use basic estimation without position calculations
-        let estimatedBitrate: UInt64 = 320000 // 320kbps default
-        let connectionTimeSeconds = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
-        let connectionDuration = abs(connectionTimeSeconds)
-        let bytesReceived: UInt64 = UInt64(connectionDuration * Double(estimatedBitrate) / 8.0)
+        // Connection info
+        let connectionDuration = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
+        let bytesReceived: UInt64 = UInt64(abs(connectionDuration) * 40000)
         statusData.append(Data([
             UInt8((bytesReceived >> 56) & 0xff),
             UInt8((bytesReceived >> 48) & 0xff),
@@ -359,10 +346,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bytesReceived & 0xff)
         ]))
         
-        // Signal strength (2 bytes) - 0x0000 = wired connection (like real squeezelite)
-        statusData.append(Data([0x00, 0x00]))
+        // Signal strength, jiffies, output buffer
+        statusData.append(Data([0x00, 0x00])) // Signal strength
         
-        // Jiffies (4 bytes) - simple timestamp counter
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
         statusData.append(Data([
             UInt8((jiffies >> 24) & 0xff),
@@ -371,7 +357,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(jiffies & 0xff)
         ]))
         
-        // Output buffer size (4 bytes)
         let outputBufferSize: UInt32 = 8192
         statusData.append(Data([
             UInt8((outputBufferSize >> 24) & 0xff),
@@ -380,8 +365,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferSize & 0xff)
         ]))
         
-        // Output buffer fullness (4 bytes)
-        let outputBufferFullness: UInt32 = isPaused ? 0 : 4096
+        let outputBufferFullness: UInt32 = code == "STMp" ? 0 : 4096
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
             UInt8((outputBufferFullness >> 16) & 0xff),
@@ -389,21 +373,21 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferFullness & 0xff)
         ]))
         
-        // *** PROTOCOL FIX: Include timing fields when server explicitly requests status ***
-        if code == "STMt" || code == "STMp" {
-            // When server requests status, provide actual position
-            let actualPosition: Double
+        // CRITICAL FIX: Always include timing fields for STMt responses
+        if code == "STMt" {
+            // Get actual audio player position (not server position)
+            let position: Double
             if let commandHandler = commandHandler {
-                actualPosition = commandHandler.getServerProvidedTime()
+                // Use audio manager's current time as the authoritative source
+                position = commandHandler.getCurrentAudioTime() // We need to add this method
             } else {
-                actualPosition = getCurrentPlaybackPosition()
+                position = 0.0
             }
             
-            // Clamp position to reasonable bounds
-            let clampedPosition = max(0, min(actualPosition, 86400)) // Max 24 hours
-            
-            // Elapsed seconds (4 bytes) - ACTUAL position when server requests it
+            let clampedPosition = max(0, min(position, 86400))
             let elapsedSeconds = UInt32(clampedPosition)
+            
+            // Elapsed seconds
             statusData.append(Data([
                 UInt8((elapsedSeconds >> 24) & 0xff),
                 UInt8((elapsedSeconds >> 16) & 0xff),
@@ -411,10 +395,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 UInt8(elapsedSeconds & 0xff)
             ]))
             
-            // Voltage (2 bytes)
+            // Voltage
             statusData.append(Data([0x00, 0x00]))
             
-            // Elapsed milliseconds (4 bytes) - ACTUAL position in milliseconds
+            // Elapsed milliseconds
             let elapsedMs = UInt32(clampedPosition * 1000)
             statusData.append(Data([
                 UInt8((elapsedMs >> 24) & 0xff),
@@ -423,7 +407,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 UInt8(elapsedMs & 0xff)
             ]))
             
-            // Server timestamp (4 bytes) - ECHO BACK EXACTLY AS RECEIVED
+            // Echo back server timestamp
             statusData.append(Data([
                 UInt8((serverTimestamp >> 24) & 0xff),
                 UInt8((serverTimestamp >> 16) & 0xff),
@@ -431,16 +415,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                 UInt8(serverTimestamp & 0xff)
             ]))
             
-            // Error code (2 bytes)
+            // Error code
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT sent - %{public}s with actual position %.2f (server requested)", code, clampedPosition)
+            os_log(.info, log: logger, "STAT with timing - audio position %.2f", clampedPosition)
         } else {
-            // For other status codes, don't include timing fields
-            os_log(.info, log: logger, "STAT sent with code: %{public}s (no timing)", code)
+            os_log(.info, log: logger, "STAT without timing - %{public}s", code)
         }
         
-        // Create full message
+        // Send the message
         let command = "STAT".data(using: .ascii)!
         let length = UInt32(statusData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }
@@ -452,6 +435,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         socket.write(fullMessage, withTimeout: 30, tag: 2)
     }
+
     
     func sendSleepStatus() {
         guard isConnected else {
@@ -469,56 +453,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     func setServerTimestamp(_ timestamp: UInt32) {
         serverTimestamp = timestamp
         os_log(.debug, log: logger, "Server timestamp set: %d", timestamp)
-    }
-    
-    func setPlaybackState(isPlaying: Bool, position: Double) {
-        os_log(.info, log: logger, "🔍 setPlaybackState called - isPlaying: %{public}s, position: %.2f, current isPaused: %{public}s",
-               isPlaying ? "YES" : "NO", position, isPaused ? "YES" : "NO")
-        
-        if isPlaying && isPaused {
-            // Resuming from pause
-            playbackStartTime = Date().addingTimeInterval(-position)
-            isPaused = false
-            pausedPosition = 0.0
-        } else if !isPlaying && !isPaused {
-            // Pausing (was playing, now pausing) OR stopping
-            pausedPosition = position
-            isPaused = true
-            lastKnownPosition = position
-        } else if isPlaying && !isPaused {
-            // Starting new track or continuing play
-            playbackStartTime = Date().addingTimeInterval(-position)
-            pausedPosition = 0.0
-            isStreamActive = true
-        } else if !isPlaying && isPaused {
-            // Already paused, just updating the position
-            lastKnownPosition = position
-            pausedPosition = position
-        }
-        
-        os_log(.debug, log: logger, "Playback state updated - Playing: %{public}s, Position: %.2f",
-               isPlaying ? "YES" : "NO", position)
-    }
-    
-    func getCurrentPlaybackPosition() -> Double {
-        if isPaused {
-            return pausedPosition
-        } else if let startTime = playbackStartTime {
-            return Date().timeIntervalSince(startTime)
-        } else {
-            return 0.0
-        }
-    }
-    
-    private func getCurrentPlaybackTime() -> Double {
-        let currentTime = getCurrentPlaybackPosition()
-        
-        // Add bounds checking
-        if currentTime < 0 || currentTime > 86400 { // Max 24 hours
-            return 0.0
-        }
-        
-        return currentTime
     }
     
     // MARK: - Public Interface

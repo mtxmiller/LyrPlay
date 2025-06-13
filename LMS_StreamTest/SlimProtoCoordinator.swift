@@ -245,63 +245,42 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerDidEnterBackground() {
-        os_log(.info, log: logger, "📱 Coordinator handling enhanced background transition")
+        os_log(.info, log: logger, "📱 Coordinator handling background transition")
         
-        // Send immediate status to keep connection alive
         if connectionManager.connectionState.isConnected {
-            // PHASE 2 FIX: Don't send position data - just report we're alive
-            // Remove these problematic lines:
-            // let currentTime = audioManager.getCurrentTime()  // REMOVED
-            // let isCurrentlyPlaying = audioManager.getPlayerState() == "Playing"  // REMOVED
-            // client.setPlaybackState(isPlaying: isCurrentlyPlaying, position: currentTime)  // REMOVED
-            
-            // Send basic "I'm alive" status without position data
+            // REMOVED: All position tracking and reporting
+            // Just send "I'm alive" status
             client.sendStatus("STMt")
             connectionManager.recordHeartbeatResponse()
             
-            os_log(.info, log: logger, "📱 Sent background 'alive' status - server maintains position")
+            os_log(.info, log: logger, "📱 Sent background alive status")
         }
         
-        // Restart timer with background strategy interval
         if statusTimer != nil {
             startStatusTimer()
         }
-        
-        // Server time sync will automatically adjust to background intervals
-        os_log(.info, log: logger, "📱 Server time sync adjusted for background")
     }
     
     func connectionManagerDidEnterForeground() {
-        os_log(.info, log: logger, "📱 Coordinator handling enhanced foreground transition")
+        os_log(.info, log: logger, "📱 Coordinator handling foreground transition")
         
-        // Check if connection is still alive
         if connectionManager.connectionState.isConnected {
-            // PHASE 2 FIX: Don't send position data - just report we're alive
-            // Remove these problematic lines:
-            // let currentTime = audioManager.getCurrentTime()  // REMOVED
-            // let isCurrentlyPlaying = audioManager.getPlayerState() == "Playing"  // REMOVED
-            // client.setPlaybackState(isPlaying: isCurrentlyPlaying, position: currentTime)  // REMOVED
-            
-            // Send basic "I'm alive" status without position data
+            // REMOVED: All position tracking and reporting
+            // Just send "I'm alive" status
             client.sendStatus("STMt")
             connectionManager.recordHeartbeatResponse()
             
-            // Trigger immediate server time sync to GET position from server
+            // Let server time sync get the actual position FROM the server
             serverTimeSynchronizer.performImmediateSync()
             
-            os_log(.info, log: logger, "📱 Sent foreground 'alive' status - letting server provide position")
+            os_log(.info, log: logger, "📱 Sent foreground alive status")
         } else {
-            // Connection lost in background - try to reconnect
-            os_log(.error, log: logger, "📱 Connection lost in background - attempting reconnection")
             connect()
         }
         
-        // Restart timer with normal interval
         if statusTimer != nil {
             startStatusTimer()
         }
-        
-        os_log(.info, log: logger, "📱 Server time sync adjusted for foreground")
     }
     
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
@@ -332,21 +311,14 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.info, log: logger, "💓 Connection health check requested")
         
         if connectionManager.connectionState.isConnected {
-            // Send appropriate status based on stream state (not audio manager state)
+            // Send health check based on stream state (not audio state)
             if commandHandler.streamState == "Paused" {
-                client.sendStatus("STMp")  // Send pause status when paused
-                os_log(.info, log: logger, "💓 Health check: sending pause status")
+                client.sendStatus("STMp")
             } else {
-                client.sendStatus("STMt")  // Send timer status when playing
-                os_log(.info, log: logger, "💓 Health check: sending timer status")
+                client.sendStatus("STMt")
             }
             
-            // REMOVED: redundant server time sync during health checks
-            // serverTimeSynchronizer.performImmediateSync()
-            
-            os_log(.info, log: logger, "💓 Health check sent without position data")
-        } else {
-            os_log(.error, log: logger, "💓 Health check failed - not connected")
+            os_log(.info, log: logger, "💓 Health check sent")
         }
     }
     
@@ -367,106 +339,80 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
 extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double) {
-        os_log(.info, log: logger, "🎵 Starting audio stream: %{public}s (%{public}s) from %.2f", url, format, startTime)
+        os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f", format, startTime)
         
-        // Use format-aware playback with proper positioning
         if startTime > 0 {
-            os_log(.info, log: logger, "🔄 Joining stream in progress at position: %.2f seconds", startTime)
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
         } else {
             audioManager.playStreamWithFormat(urlString: url, format: format)
         }
         
-        // Just acknowledge the stream start - no position data
-        client.sendStatus("STMc")  // Connecting
+        // REMOVED: All position tracking and reporting
+        // Just acknowledge the stream
+        client.sendStatus("STMc") // Connecting
         
-        // Send started status after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {  // Increased delay
-            self.client.sendStatus("STMs")  // Started - let server track position from here
-            os_log(.info, log: self.logger, "✅ Sent STMs after stream connection established")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.client.sendStatus("STMs") // Started
         }
         
-        // Fetch metadata for lock screen (after longer delay to avoid conflicts)
+        // Get metadata after longer delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.fetchCurrentTrackMetadata()
         }
         
-        // IMPORTANT: Give audio player time to start, then sync with server
+        // Sync with server after audio starts
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.serverTimeSynchronizer.performImmediateSync()
-            os_log(.info, log: self.logger, "🔄 Requested server sync after stream start")
         }
-        
-        os_log(.info, log: logger, "✅ Stream start acknowledged - server maintains position authority")
     }
     
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
-        // Just pause the audio - don't report position back
         audioManager.pause()
         
-        // PHASE 3 FIX: Don't report position back to server - it knows we're pausing
-        // Remove these problematic lines:
-        // let currentTime = audioManager.getCurrentTime()  // REMOVED
-        // client.setPlaybackState(isPlaying: false, position: currentTime)  // REMOVED
-        // serverTimeSynchronizer.performImmediateSync()  // REMOVED - creates conflicts
-        
-        // Just acknowledge the pause - no position data
-        client.sendStatus("STMp")  // Paused acknowledgment
-        
-        os_log(.info, log: logger, "✅ Pause acknowledged - server maintains position authority")
+        // REMOVED: All position tracking and reporting
+        // Just acknowledge the pause
+        client.sendStatus("STMp")
     }
     
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
-        // Just resume the audio - don't report position back
         audioManager.play()
         
-        // PHASE 3 FIX: Don't report position back to server - it knows we're resuming
-        // Remove these problematic lines:
-        // let currentTime = audioManager.getCurrentTime()  // REMOVED
-        // client.setPlaybackState(isPlaying: true, position: currentTime)  // REMOVED
-        // serverTimeSynchronizer.performImmediateSync()  // REMOVED - creates conflicts
-        
-        // Just acknowledge the resume - no position data
-        client.sendStatus("STMr")  // Resumed acknowledgment
-        
-        os_log(.info, log: logger, "✅ Resume acknowledged - server maintains position authority")
+        // REMOVED: All position tracking and reporting
+        // Just acknowledge the resume
+        client.sendStatus("STMr")
     }
     
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
         
-        // Just stop the audio
         audioManager.stop()
         
-        // PHASE 3 FIX: Don't report position back to server
-        // Remove these problematic lines:
-        // client.setPlaybackState(isPlaying: false, position: 0.0)  // REMOVED
-        
+        // REMOVED: All position tracking and reporting
         // Just acknowledge the stop
-        client.sendStatus("STMf")  // Stopped/Flushed acknowledgment
-        
-        os_log(.info, log: logger, "✅ Stop acknowledged")
+        client.sendStatus("STMf")
     }
     
+    func getCurrentAudioTime() -> Double {
+        return audioManager.getCurrentTime()
+    }
+
     func didReceiveStatusRequest() {
-        // Get timing information for comparison but don't immediately send it back
+        // Get timing information for comparison and logging only
         let serverTime = serverTimeSynchronizer.getCurrentInterpolatedTime()
         let audioTime = audioManager.getCurrentTime()
         
-        // Check for large time differences and auto-correct them
+        // Log time differences for debugging but DON'T auto-correct
         let timeDifference = abs(serverTime.time - audioTime)
         if timeDifference > 10.0 && audioTime > 0.1 && serverTime.isServerTime {
-            os_log(.info, log: logger, "🔄 Large time difference detected: audio=%.1f, server=%.1f (diff=%.1f) - syncing",
+            os_log(.info, log: logger, "ℹ️ Time difference noted: audio=%.1f, server=%.1f (diff=%.1f) - letting server handle",
                    audioTime, serverTime.time, timeDifference)
             
-            // Auto-sync to server time when difference is large
-            DispatchQueue.main.async {
-                self.audioManager.seekToPosition(serverTime.time)
-            }
+            // REMOVED: All seeking logic - let the server tell us if we need to seek
+            // The server is the master and knows the correct position
         }
         
         // Only update command handler's internal tracking (not sent to server)
