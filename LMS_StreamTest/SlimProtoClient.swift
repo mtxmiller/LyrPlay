@@ -104,6 +104,21 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             return
         }
         
+        // CRITICAL FIX: Clean up any existing connection first
+        if isConnected || socket.isConnected {
+            os_log(.info, log: logger, "Cleaning up existing connection before reconnecting")
+            disconnect()
+            
+            // Wait a moment for cleanup
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.attemptConnection()
+            }
+        } else {
+            attemptConnection()
+        }
+    }
+    
+    private func attemptConnection() {
         guard !isConnected else {
             os_log(.info, log: logger, "Already connected")
             return
@@ -115,17 +130,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.info, log: logger, "Attempting to connect to %{public}s:%d", host, port)
         
         do {
-            try socket.connect(toHost: host, onPort: port, withTimeout: 10)
+            // CRITICAL FIX: Use longer timeout for more reliable connections
+            try socket.connect(toHost: host, onPort: port, withTimeout: 15)
         } catch {
             os_log(.error, log: logger, "Connection error: %{public}s", error.localizedDescription)
         }
     }
     
     func disconnect() {
-        socket.disconnect()
+        if socket.isConnected {
+            socket.disconnect()
+        }
         isConnected = false
         hasRequestedInitialStatus = false
-        os_log(.info, log: logger, "Disconnected")
+        os_log(.info, log: logger, "Disconnected and reset connection state")
     }
     
     // MARK: - Socket Delegate Methods

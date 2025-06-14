@@ -427,97 +427,68 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 }
 
-// MARK: - Lock Screen Integration
+// MARK: - Enhanced Lock Screen Integration with SlimProto Connection Fix
 extension SlimProtoCoordinator {
     
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
+        // CRITICAL FIX: Always ensure SlimProto connection for audio streaming
         if !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "❌ No connection - using CarPlay-style recovery")
-            
-            // Step 1: Reconnect SlimProto
-            connect()
-            
-            // Step 2: Wait for connection, then force server to restart stream
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                if command.lowercased() == "play" && self.connectionManager.connectionState.isConnected {
-                    self.forceServerStreamRestart()
-                }
-            }
+            os_log(.info, log: logger, "❌ No SlimProto connection - starting full reconnection sequence")
+            handleDisconnectedLockScreenCommand(command)
             return
         }
         
-        // Normal commands when connected
-        switch command.lowercased() {
-        case "play":
-            sendJSONRPCCommand("play")
-        case "pause":
-            sendJSONRPCCommand("pause")
-        case "stop":
-            sendJSONRPCCommand("stop")
-        case "next":
-            sendJSONRPCCommand("playlist", parameters: ["index", "+1"])
-        case "previous":
-            sendJSONRPCCommand("playlist", parameters: ["index", "-1"])
-        default:
-            os_log(.error, log: logger, "Unknown command: %{public}s", command)
-        }
-    }
-
-    // Try the CarPlay approach - force server to send new stream
-    private func forceServerStreamRestart() {
-        os_log(.info, log: logger, "🚗 Using CarPlay-style server restart")
-        
-        let playerID = settings.playerMACAddress
-        
-        // Send multiple commands like CarPlay does:
-        // 1. Stop current stream
-        let stopCommand = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["stop"]]
-        ] as [String: Any]
-        
-        // 2. Then start playing
-        let playCommand = [
-            "id": 2,
-            "method": "slim.request",
-            "params": [playerID, ["play"]]
-        ] as [String: Any]
-        
-        // Send stop first
-        sendJSONCommand(stopCommand) {
-            // Then send play after a brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.sendJSONCommand(playCommand) {
-                    os_log(.info, log: self.logger, "✅ CarPlay-style restart sequence completed")
-                }
-            }
-        }
-    }
-
-    // Helper to send JSON commands with completion
-    private func sendJSONCommand(_ jsonRPC: [String: Any], completion: @escaping () -> Void = {}) {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            completion()
-            return
-        }
-        
-        var request = URLRequest(url: URL(string: "http://\(settings.serverHost):\(settings.serverWebPort)/jsonrpc.js")!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = jsonData
-        request.timeoutInterval = 5.0
-        
-        URLSession.shared.dataTask(with: request) { _, _, _ in
-            DispatchQueue.main.async {
-                completion()
-            }
-        }.resume()
+        // If connected, send command via JSON-RPC (faster) but ensure SlimProto stays connected
+        sendJSONRPCCommand(command)
     }
     
-    private func sendJSONRPCCommand(_ command: String, parameters: [String] = []) {
+    private func handleDisconnectedLockScreenCommand(_ command: String) {
+        os_log(.info, log: logger, "🔄 Starting FULL reconnection sequence for: %{public}s", command)
+        
+        // Step 1: Force stop any existing broken connections
+        disconnect()
+        
+        // Step 2: Wait a moment for cleanup
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // Step 3: Start fresh connection
+            self.connectionManager.resetReconnectionAttempts()
+            self.connect()
+            
+            // Step 4: Monitor connection and send command
+            self.waitForConnectionAndExecute(command: command)
+        }
+    }
+    
+    private func waitForConnectionAndExecute(command: String, attempt: Int = 0) {
+        let maxAttempts = 20 // 20 seconds total wait
+        
+        if connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "✅ SlimProto reconnected after %d seconds", attempt)
+            
+            // Send the command via JSON-RPC (faster response)
+            sendJSONRPCCommand(command)
+            
+            // CRITICAL: Also send a SlimProto status to ensure the connection works
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.client.sendStatus("STMt")
+                os_log(.info, log: self.logger, "📡 Sent SlimProto heartbeat to verify connection")
+            }
+            
+        } else if attempt < maxAttempts {
+            // Keep waiting
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.waitForConnectionAndExecute(command: command, attempt: attempt + 1)
+            }
+        } else {
+            // Timeout - try JSON-RPC only as fallback
+            os_log(.error, log: logger, "⏰ SlimProto connection timeout - using JSON-RPC fallback")
+            sendJSONRPCCommand(command)
+        }
+    }
+    
+    private func sendJSONRPCCommand(_ command: String, retryCount: Int = 0) {
         let playerID = settings.playerMACAddress
         
         var jsonRPCCommand: [String: Any]
@@ -541,43 +512,66 @@ extension SlimProtoCoordinator {
                 "method": "slim.request",
                 "params": [playerID, ["stop"]]
             ]
-        case "playlist":
-            var commandParams = [command]
-            commandParams.append(contentsOf: parameters)
+        case "next":
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
-                "params": [playerID, commandParams]
+                "params": [playerID, ["playlist", "index", "+1"]]
+            ]
+        case "previous":
+            jsonRPCCommand = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "index", "-1"]]
             ]
         default:
             os_log(.error, log: logger, "Unknown JSON-RPC command: %{public}s", command)
             return
         }
         
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPCCommand) else {
+        sendJSONCommand(jsonRPCCommand, command: command, retryCount: retryCount)
+    }
+    
+    private func sendJSONCommand(_ jsonRPC: [String: Any], command: String, retryCount: Int = 0) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
             os_log(.error, log: logger, "Failed to create JSON-RPC command for %{public}s", command)
             return
         }
         
-        // Send API request to LMS
         let webPort = settings.serverWebPort
         let host = settings.serverHost
-        var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
+        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
+            os_log(.error, log: logger, "Invalid server URL for JSON-RPC")
+            return
+        }
+        
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = jsonData
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = 10.0
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    os_log(.error, log: self.logger, "JSON-RPC %{public}s command failed: %{public}s", command, error.localizedDescription)
+                    os_log(.error, log: self.logger, "JSON-RPC %{public}s failed: %{public}s", command, error.localizedDescription)
+                    
+                    if retryCount < 2 && (command.lowercased() == "play" || command.lowercased() == "pause") {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self.sendJSONRPCCommand(command, retryCount: retryCount + 1)
+                        }
+                    }
                 } else {
                     os_log(.info, log: self.logger, "✅ JSON-RPC %{public}s command sent successfully", command)
                     
-                    // For skip commands, refresh metadata after a delay
-                    if command == "playlist" {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    // CRITICAL: For play commands, ensure we have a working SlimProto connection
+                    if command.lowercased() == "play" {
+                        self.ensureSlimProtoConnection()
+                    }
+                    
+                    // For skip commands, refresh metadata
+                    if command == "next" || command == "previous" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             self.fetchCurrentTrackMetadata()
                         }
                     }
@@ -588,7 +582,51 @@ extension SlimProtoCoordinator {
         task.resume()
         os_log(.info, log: logger, "🌐 Sent JSON-RPC %{public}s command to LMS", command)
     }
+    
+    // CRITICAL: Ensure SlimProto connection for audio streaming
+    private func ensureSlimProtoConnection() {
+        os_log(.info, log: logger, "🔧 Ensuring SlimProto connection for audio streaming...")
+        
+        if !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "🔄 SlimProto not connected - reconnecting for audio stream")
+            connect()
+            
+            // Monitor connection establishment
+            var waitTime = 0
+            let connectionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+                waitTime += 1
+                
+                if self.connectionManager.connectionState.isConnected {
+                    os_log(.info, log: self.logger, "✅ SlimProto connection established for audio stream")
+                    timer.invalidate()
+                    
+                    // Send status to activate audio streaming
+                    self.client.sendStatus("STMt")
+                    
+                    // Start server time sync for position tracking
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.serverTimeSynchronizer.performImmediateSync()
+                    }
+                    
+                } else if waitTime >= 15 {
+                    os_log(.error, log: self.logger, "❌ SlimProto connection failed - audio may not work")
+                    timer.invalidate()
+                }
+            }
+        } else {
+            os_log(.info, log: logger, "✅ SlimProto already connected")
+            
+            // Send heartbeat to ensure connection is working
+            client.sendStatus("STMt")
+            
+            // Trigger server time sync
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.serverTimeSynchronizer.performImmediateSync()
+            }
+        }
+    }
 }
+
 
 // MARK: - Metadata Integration
 extension SlimProtoCoordinator {
