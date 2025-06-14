@@ -195,6 +195,7 @@ struct ContentView: View {
             if isLoading {
                 HStack {
                     ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(0.8)
                     Text("Loading Material Interface...")
                         .font(.caption)

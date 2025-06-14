@@ -433,37 +433,88 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        guard connectionManager.connectionState.isConnected else {
-            os_log(.error, log: logger, "Cannot send lock screen command - not connected to server")
+        if !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "❌ No connection - using CarPlay-style recovery")
+            
+            // Step 1: Reconnect SlimProto
+            connect()
+            
+            // Step 2: Wait for connection, then force server to restart stream
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                if command.lowercased() == "play" && self.connectionManager.connectionState.isConnected {
+                    self.forceServerStreamRestart()
+                }
+            }
             return
         }
         
+        // Normal commands when connected
         switch command.lowercased() {
         case "play":
             sendJSONRPCCommand("play")
-            os_log(.info, log: logger, "✅ Sent resume command to LMS server")
-            
         case "pause":
-            let currentTime = audioManager.getCurrentTime()
             sendJSONRPCCommand("pause")
-            os_log(.info, log: logger, "✅ Sent pause command to LMS server (position: %.2f)", currentTime)
-            
         case "stop":
             sendJSONRPCCommand("stop")
-            os_log(.info, log: logger, "✅ Sent stop command to LMS server")
-            
         case "next":
             sendJSONRPCCommand("playlist", parameters: ["index", "+1"])
-            os_log(.info, log: logger, "✅ Sent next track command to LMS server")
-            
         case "previous":
             sendJSONRPCCommand("playlist", parameters: ["index", "-1"])
-            os_log(.info, log: logger, "✅ Sent previous track command to LMS server")
-            
         default:
-            os_log(.error, log: logger, "Unknown lock screen command: %{public}s", command)
+            os_log(.error, log: logger, "Unknown command: %{public}s", command)
+        }
+    }
+
+    // Try the CarPlay approach - force server to send new stream
+    private func forceServerStreamRestart() {
+        os_log(.info, log: logger, "🚗 Using CarPlay-style server restart")
+        
+        let playerID = settings.playerMACAddress
+        
+        // Send multiple commands like CarPlay does:
+        // 1. Stop current stream
+        let stopCommand = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["stop"]]
+        ] as [String: Any]
+        
+        // 2. Then start playing
+        let playCommand = [
+            "id": 2,
+            "method": "slim.request",
+            "params": [playerID, ["play"]]
+        ] as [String: Any]
+        
+        // Send stop first
+        sendJSONCommand(stopCommand) {
+            // Then send play after a brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.sendJSONCommand(playCommand) {
+                    os_log(.info, log: self.logger, "✅ CarPlay-style restart sequence completed")
+                }
+            }
+        }
+    }
+
+    // Helper to send JSON commands with completion
+    private func sendJSONCommand(_ jsonRPC: [String: Any], completion: @escaping () -> Void = {}) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            completion()
+            return
         }
         
+        var request = URLRequest(url: URL(string: "http://\(settings.serverHost):\(settings.serverWebPort)/jsonrpc.js")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        request.timeoutInterval = 5.0
+        
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async {
+                completion()
+            }
+        }.resume()
     }
     
     private func sendJSONRPCCommand(_ command: String, parameters: [String] = []) {
