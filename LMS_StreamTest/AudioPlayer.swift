@@ -57,7 +57,7 @@ class AudioPlayer: NSObject, ObservableObject {
         // CORRECT: Using the actual struct from your header file
         var options = STKAudioPlayerOptions()
         options.flushQueueOnSeek = true
-        options.enableVolumeMixer = false  // We handle volume elsewhere
+        options.enableVolumeMixer = true  // We handle volume elsewhere
         options.readBufferSize = readBufferSize
         options.bufferSizeInSeconds = bufferSeconds
         options.secondsRequiredToStartPlaying = Float32(min(Double(bufferSeconds) * 0.3, 2.0)) // Start at 30% or 2s max
@@ -217,6 +217,17 @@ class AudioPlayer: NSObject, ObservableObject {
         if state.contains(.buffering) { return "Buffering" }
         
         return "Ready"
+    }
+    
+    // MARK: - Volume Control
+    func setVolume(_ volume: Float) {
+        let clampedVolume = max(0.0, min(1.0, volume))
+        audioPlayer.volume = clampedVolume
+        os_log(.info, log: logger, "🔊 Volume set to: %.2f", clampedVolume)
+    }
+
+    func getVolume() -> Float {
+        return audioPlayer.volume
     }
     
     func seekToPosition(_ time: Double) {

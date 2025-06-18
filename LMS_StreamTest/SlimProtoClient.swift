@@ -416,6 +416,17 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Voltage
             statusData.append(Data([0x00, 0x00]))
             
+            // Volume information (for status responses that include it)
+            if code == "STMt" {
+                let currentVolume = UInt32(getVolumeForStatus() * 65536.0) // Convert 0.0-1.0 to 16.16 fixed point
+                statusData.append(Data([
+                    UInt8((currentVolume >> 24) & 0xff),
+                    UInt8((currentVolume >> 16) & 0xff),
+                    UInt8((currentVolume >> 8) & 0xff),
+                    UInt8(currentVolume & 0xff)
+                ]))
+            }
+            
             // Elapsed milliseconds
             let elapsedMs = UInt32(clampedPosition * 1000)
             statusData.append(Data([
@@ -487,6 +498,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         socket.write(message, withTimeout: 30, tag: 3)
         os_log(.debug, log: logger, "📤 Raw message sent (%d bytes)", message.count)
+    }
+    
+    private func getVolumeForStatus() -> Float {
+        // Get volume from command handler if available
+        if let handler = commandHandler as? SlimProtoCommandHandler,
+           let coordinator = handler.delegate as? SlimProtoCoordinator {
+            return coordinator.getPlayerVolume()
+        }
+        return 1.0 // Default to full volume
     }
     
     deinit {

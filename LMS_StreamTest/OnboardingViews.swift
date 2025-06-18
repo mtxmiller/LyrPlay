@@ -492,6 +492,7 @@ struct ServerSetupView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 2.0
         

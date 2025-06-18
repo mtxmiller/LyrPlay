@@ -124,6 +124,15 @@ class AudioManager: NSObject, ObservableObject {
         return false
     }
     
+    // MARK: - Volume Control
+    func setVolume(_ volume: Float) {
+        audioPlayer.setVolume(volume)
+    }
+
+    func getVolume() -> Float {
+        return audioPlayer.getVolume()
+    }
+    
     // Metadata management
     func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval = 0.0) {
         // Update both the player and now playing manager

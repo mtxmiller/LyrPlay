@@ -570,6 +570,7 @@ extension SlimProtoCoordinator {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 10.0
         
@@ -678,6 +679,7 @@ extension SlimProtoCoordinator {
         var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         
@@ -756,6 +758,16 @@ extension SlimProtoCoordinator {
         } catch {
             os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
         }
+    }
+    
+    // MARK: - Volume Control
+    func setPlayerVolume(_ volume: Float) {
+        os_log(.info, log: logger, "🔊 Setting player volume: %.2f", volume)
+        audioManager.setVolume(volume)
+    }
+
+    func getPlayerVolume() -> Float {
+        return audioManager.getVolume()
     }
 }
 

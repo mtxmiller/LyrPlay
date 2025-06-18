@@ -62,6 +62,20 @@ class SettingsManager: ObservableObject {
         saveSettings()
     }
     
+    // MARK: - User-Agent for Web Requests
+    var customUserAgent: String {
+        return "iPeng Safari"
+    }
+    
+    // MARK: - URL Session Configuration with Custom User-Agent
+    func createCustomURLSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = [
+            "User-Agent": customUserAgent
+        ]
+        return URLSession(configuration: config)
+    }
+    
     // MARK: - Settings Persistence
     private func loadSettings() {
         os_log(.info, log: logger, "Loading settings from UserDefaults")
@@ -192,6 +206,7 @@ class SettingsManager: ObservableObject {
         
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
+        request.setValue(customUserAgent, forHTTPHeaderField: "User-Agent")  // ADD THIS
         request.timeoutInterval = connectionTimeout
         
         do {
@@ -338,7 +353,7 @@ class SettingsManager: ObservableObject {
         }.joined(separator: ",")
         
         // UPDATED: Enhanced capabilities with FLAC support
-        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=0,HasDigitalVolumeControl=0,MaxSampleRate=48000"
+        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=1,HasDigitalVolumeControl=1,MaxSampleRate=48000"
     }
 
     var effectivePlayerName: String {

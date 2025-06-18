@@ -49,7 +49,11 @@ class SlimProtoCommandHandler: ObservableObject {
         case "setd":
             // Handle SETD commands for player name
             processSetdCommand(command.payload)
-        case "audg", "aude":
+        case "audg":
+            // Handle volume command
+            processVolumeCommand(command.payload)
+            slimProtoClient?.sendStatus("STMt")
+        case "aude":
             slimProtoClient?.sendStatus("STMt") // Acknowledge with heartbeat
         case "stat":
             // Respond to STAT requests based on actual state
@@ -507,6 +511,43 @@ class SlimProtoCommandHandler: ObservableObject {
             return "Paused"
         } else {
             return "Playing"
+        }
+    }
+    
+    // MARK: - Volume Command Processing
+    private func processVolumeCommand(_ payload: Data) {
+        guard payload.count >= 18 else {
+            os_log(.error, log: logger, "Volume command payload too short: %d bytes", payload.count)
+            return
+        }
+        
+        // Parse as old format first (more common for squeezelite players)
+        // Old format: 0-128 range in first 4 bytes each for L/R
+        let leftGainBytes = payload.subdata(in: 0..<4)
+        let rightGainBytes = payload.subdata(in: 4..<8)
+        
+        let leftGain = leftGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let rightGain = rightGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        
+        let normalizedVolume: Float
+        
+        // Detect format: if values are <= 128, it's old format (0-128)
+        // If values are much larger (like 65536), it's new format (16.16 fixed point)
+        if leftGain <= 128 && rightGain <= 128 {
+            // Old format: 0-128 range
+            normalizedVolume = Float(leftGain) / 128.0
+            os_log(.info, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+        } else {
+            // New format: 16.16 fixed point where 65536 = 100%
+            normalizedVolume = Float(leftGain) / 65536.0
+            os_log(.info, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+        }
+        
+        let clampedVolume = max(0.0, min(1.0, normalizedVolume))
+        
+        // Apply volume through coordinator
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            coordinator.setPlayerVolume(clampedVolume)
         }
     }
 }
