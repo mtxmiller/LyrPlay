@@ -1,6 +1,8 @@
 // File: SettingsViews.swift
 import SwiftUI
 import os.log
+import WebKit
+
 
 // MARK: - Main Settings View
 struct SettingsView: View {
@@ -9,6 +11,9 @@ struct SettingsView: View {
     @State private var showingConnectionTest = false
     @State private var showingResetAlert = false
     @State private var showingMACInfo = false
+    //cache clear
+    @State private var showingCacheClearAlert = false
+    @State private var isClearingCache = false
     
     var body: some View {
         NavigationView {
@@ -100,6 +105,17 @@ struct SettingsView: View {
                     .onChange(of: settings.isDebugModeEnabled) { _ in
                         settings.saveSettings()
                     }
+                    
+                    Button(action: { showingCacheClearAlert = true }) {
+                        SettingsRow(
+                            icon: "trash.slash",
+                            title: "Clear Material Cache",
+                            value: isClearingCache ? "Clearing..." : "Tap to clear",
+                            valueColor: isClearingCache ? .orange : .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    .disabled(isClearingCache)
                 }
                 
                 // Reset Section
@@ -139,6 +155,14 @@ struct SettingsView: View {
         } message: {
             Text("This will reset all settings to defaults and mark the app as unconfigured. You'll need to go through setup again.")
         }
+        .alert("Clear Material Cache?", isPresented: $showingCacheClearAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear Cache") {
+                clearMaterialCache()
+            }
+        } message: {
+            Text("This will clear Material's web cache and reload the interface. This often fixes UI display issues.")
+        }
     }
     
     private var formatsSummary: String {
@@ -149,6 +173,28 @@ struct SettingsView: View {
     private var bufferSummary: String {
         let bufferKB = settings.bufferSize / 1024
         return "\(bufferKB)KB"
+    }
+    
+    private func clearMaterialCache() {
+        print("🗑️ Starting cache clear...")
+        isClearingCache = true
+        
+        let websiteDataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        let date = Date(timeIntervalSince1970: 0)
+        
+        WKWebsiteDataStore.default().removeData(ofTypes: websiteDataTypes, modifiedSince: date) {
+            DispatchQueue.main.async {
+                print("🗑️ Cache cleared, setting reload trigger...")
+                self.isClearingCache = false
+                
+                // Trigger WebView reload
+                self.settings.shouldReloadWebView = true
+                print("🗑️ shouldReloadWebView set to true")
+                
+                // Dismiss settings - WebView will reload when we return
+                self.presentationMode.wrappedValue.dismiss()
+            }
+        }
     }
 }
 

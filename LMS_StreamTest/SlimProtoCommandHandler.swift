@@ -29,6 +29,8 @@ class SlimProtoCommandHandler: ObservableObject {
     private var lastStreamUpdate: Date = Date()
     private var serverStartTime: Date?
     private var serverStartPosition: Double = 0.0
+    private var isManualSkipInProgress = false
+    private var skipProtectionTimer: Timer?
     
     // MARK: - Delegation
     weak var delegate: SlimProtoCommandHandlerDelegate?
@@ -451,9 +453,15 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - Public Interface
     func notifyTrackEnded() {
+        // CRITICAL: Don't send track end signals during manual skips
+        if isManualSkipInProgress {
+            os_log(.info, log: logger, "🛡️ Track end blocked - manual skip in progress")
+            return
+        }
+        
         os_log(.info, log: logger, "🎵 Track ended - sending STMd (decoder ready) to server")
         
-        // CRITICAL: Reset all tracking state first
+        // Reset all tracking state first
         isStreamActive = false
         isStreamPaused = false
         isPausedByLockScreen = false
@@ -461,7 +469,7 @@ class SlimProtoCommandHandler: ObservableObject {
         serverStartTime = nil
         serverStartPosition = 0.0
         
-        // Send STMd (decoder ready) - this tells LMS we finished the track and are ready for next
+        // Send STMd (decoder ready)
         slimProtoClient?.sendStatus("STMd")
         
         os_log(.info, log: logger, "✅ STMd sent - server should initiate next track")
@@ -470,6 +478,26 @@ class SlimProtoCommandHandler: ObservableObject {
     func updatePlaybackPosition(_ position: Double) {
         lastKnownPosition = position
         // REMOVED: All the complex state management
+    }
+    
+    func startSkipProtection() {
+        os_log(.info, log: logger, "🛡️ Starting skip protection - blocking track end detection")
+        isManualSkipInProgress = true
+        
+        // Clear any existing timer
+        skipProtectionTimer?.invalidate()
+        
+        // Protect for 5 seconds (enough time for the skip to complete)
+        skipProtectionTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            self?.endSkipProtection()
+        }
+    }
+
+    private func endSkipProtection() {
+        os_log(.info, log: logger, "🛡️ Ending skip protection")
+        isManualSkipInProgress = false
+        skipProtectionTimer?.invalidate()
+        skipProtectionTimer = nil
     }
     
     var streamState: String {

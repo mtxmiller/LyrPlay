@@ -21,12 +21,7 @@ struct ContentView: View {
     @State private var hasConnectionError = false
     @State private var hasHandledError = false
 
-    
     @State private var hasShownError = false
-
-
-
-
     
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
@@ -149,6 +144,25 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
+        }
+        .onReceive(settings.$shouldReloadWebView) { shouldReload in
+            print("🔄 shouldReloadWebView changed to: \(shouldReload)")
+            if shouldReload {
+                print("🔄 Attempting to reload WebView...")
+                // Reset the trigger
+                settings.shouldReloadWebView = false
+                
+                // Force WebView reload by updating the URL with a new timestamp
+                if let webView = webView {
+                    print("🔄 WebView found, reloading...")
+                    let newURL = URL(string: materialWebURL)!
+                    let request = URLRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+                    webView.load(request)
+                    print("🔄 WebView reload requested")
+                } else {
+                    print("❌ WebView is nil!")
+                }
+            }
         }
     }
     
@@ -274,70 +288,52 @@ struct ContentView: View {
         VStack {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Debug + Material Integration")
+                    Text("Debug Info")
                         .font(.caption)
                         .fontWeight(.bold)
                         .foregroundColor(.white)
                     
                     // Connection status with network info
-                    Text("Connection: \(slimProtoCoordinator.connectionState)")
-                        .font(.caption2)
-                        .foregroundColor(connectionStateColor)
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(connectionStateColor)
+                            .frame(width: 8, height: 8)
+                        Text("\(slimProtoCoordinator.connectionState) • \(slimProtoCoordinator.networkStatus)")
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                    }
                     
-                    Text("Network: \(slimProtoCoordinator.networkStatus)")
-                        .font(.caption2)
-                        .foregroundColor(networkStatusColor)
-                    
+                    // Stream status
                     Text("Stream: \(slimProtoCoordinator.streamState)")
                         .font(.caption2)
                         .foregroundColor(.blue)
                     
-                    // Server Time Status
-                    Text("Server Time: \(slimProtoCoordinator.serverTimeStatus)")
-                        .font(.caption2)
-                        .foregroundColor(serverTimeStatusColor)
+                    // Server Time Status with dynamic info
+                    HStack(spacing: 4) {
+                        Image(systemName: serverTimeStatusIcon)
+                            .font(.caption2)
+                            .foregroundColor(serverTimeStatusColor)
+                        Text(serverTimeStatusText)
+                            .font(.caption2)
+                            .foregroundColor(serverTimeStatusColor)
+                    }
                     
-                    // Material Integration Status
-                    Text("Material: \(settings.showFallbackSettingsButton ? "Fallback" : "Integrated")")
-                        .font(.caption2)
-                        .foregroundColor(settings.showFallbackSettingsButton ? .orange : .green)
-                    
+                    // Player ID
                     Text("Player: \(settings.formattedMACAddress)")
                         .font(.caption2)
                         .foregroundColor(.gray)
                     
-                    // Enhanced background state info
-                    if slimProtoCoordinator.isInBackground {
-                        Text("Background: YES")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
-                        
-                        if slimProtoCoordinator.backgroundTimeRemaining > 0 {
-                            Text("Time: \(Int(slimProtoCoordinator.backgroundTimeRemaining))s")
+                    // Background time only when relevant
+                    if slimProtoCoordinator.isInBackground && slimProtoCoordinator.backgroundTimeRemaining > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "moon.fill")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                            Text("Background: \(Int(slimProtoCoordinator.backgroundTimeRemaining))s")
                                 .font(.caption2)
                                 .foregroundColor(.orange)
                         }
-                    } else {
-                        Text("Background: NO")
-                            .font(.caption2)
-                            .foregroundColor(.green)
                     }
-                    
-                    // Time Source Info
-                    Text("Time Source:")
-                        .font(.caption2)
-                        .foregroundColor(.cyan)
-                    
-                    Text(slimProtoCoordinator.timeSourceInfo)
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-                        .lineLimit(3)
-                    
-                    // Connection summary
-                    Text(slimProtoCoordinator.connectionSummary)
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-                        .lineLimit(2)
                 }
                 .padding(8)
                 .background(Color.black.opacity(0.7))
@@ -351,6 +347,7 @@ struct ContentView: View {
             Spacer()
         }
     }
+
     
     private var connectionStateColor: Color {
         switch slimProtoCoordinator.connectionState {
@@ -389,6 +386,45 @@ struct ContentView: View {
             return .red
         } else {
             return .yellow
+        }
+    }
+    
+    private var serverTimeStatusIcon: String {
+        let status = slimProtoCoordinator.serverTimeStatus
+        if status.contains("Available") {
+            return "clock.fill"
+        } else if status.contains("Unavailable") {
+            return "clock.badge.xmark"
+        } else {
+            return "clock"
+        }
+    }
+
+    private var serverTimeStatusText: String {
+        let status = slimProtoCoordinator.serverTimeStatus
+        // Extract just the key info, not the full verbose status
+        if status.contains("Available") {
+            // Extract the "last sync: Xs ago" part if present
+            if let range = status.range(of: "last sync: ") {
+                let remaining = String(status[range.upperBound...])
+                if let endRange = remaining.range(of: ")") {
+                    let syncInfo = String(remaining[..<endRange.lowerBound])
+                    return "Server: \(syncInfo)"
+                }
+            }
+            return "Server: Active"
+        } else if status.contains("failures") {
+            // Extract failure count
+            if let range = status.range(of: "(") {
+                let remaining = String(status[range.upperBound...])
+                if let endRange = remaining.range(of: " failures") {
+                    let failureCount = String(remaining[..<endRange.lowerBound])
+                    return "Server: \(failureCount) fails"
+                }
+            }
+            return "Server: Failed"
+        } else {
+            return "Server: Unknown"
         }
     }
     

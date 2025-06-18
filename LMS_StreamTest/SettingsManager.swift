@@ -19,6 +19,7 @@ class SettingsManager: ObservableObject {
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
+    @Published var shouldReloadWebView: Bool = false
     
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
@@ -277,7 +278,7 @@ class SettingsManager: ObservableObject {
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
         preferredFormats = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
-        bufferSize = 262144
+        bufferSize = 2097152
         
         saveSettings()
     }

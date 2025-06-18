@@ -529,12 +529,18 @@ extension SlimProtoCoordinator {
                 "params": [playerID, ["stop"]]
             ]
         case "next":
+            // CRITICAL: Prevent track end detection during manual skip
+            commandHandler.startSkipProtection()
+            
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
                 "params": [playerID, ["playlist", "index", "+1"]]
             ]
         case "previous":
+            // CRITICAL: Prevent track end detection during manual skip
+            commandHandler.startSkipProtection()
+            
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
