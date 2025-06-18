@@ -1,12 +1,15 @@
 // File: OnboardingViews.swift
 import SwiftUI
 import os.log
+import Network
+
 
 // MARK: - Main Onboarding Container
 struct OnboardingFlow: View {
     @StateObject private var settings = SettingsManager.shared
     @State private var currentStep: OnboardingStep = .welcome
     @State private var isAnimating = false
+
     
     enum OnboardingStep: CaseIterable {
         case welcome
@@ -17,7 +20,7 @@ struct OnboardingFlow: View {
         
         var title: String {
             switch self {
-            case .welcome: return "Welcome to LMS Stream"
+            case .welcome: return "Welcome to SlimAMP"
             case .serverSetup: return "Server Setup"
             case .connectionTest: return "Testing Connection"
             case .playerSetup: return "Player Setup"
@@ -112,15 +115,27 @@ struct WelcomeView: View {
         VStack(spacing: 30) {
             Spacer()
             
-            // App icon/logo area
-            Image(systemName: "hifispeaker.fill")
-                .font(.system(size: 80))
-                .foregroundColor(.blue)
-                .scaleEffect(isAnimating ? 1.1 : 1.0)
-                .animation(.easeInOut(duration: 2).repeatForever(autoreverses: true), value: isAnimating)
+            Group {
+                if let uiImage = UIImage(named: "iconm") {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 80, height: 80)
+                } else {
+                    // Shows this if image file can't be found
+                    VStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 40))
+                            .foregroundColor(.red)
+                        Text("Icon file not found")
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+                }
+            }
             
-            VStack(spacing: 16) {
-                Text("LMS Stream")
+            VStack(spacing: 30) {
+                Text("SlimAMP")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                     .foregroundColor(.white)
@@ -132,9 +147,9 @@ struct WelcomeView: View {
                     .padding(.horizontal)
             }
             
-            VStack(spacing: 16) {
+            VStack(spacing: 40) {
                 FeatureRow(icon: "wifi", title: "Stream from LMS", description: "Connect to your music server")
-                FeatureRow(icon: "speaker.wave.3", title: "High Quality Audio", description: "AAC, ALAC, and MP3 support")
+                FeatureRow(icon: "speaker.wave.3", title: "High Quality Audio", description: "FLAC, AAC, and MP3 support")
                 FeatureRow(icon: "lock.shield", title: "Background Playback", description: "Control from lock screen")
             }
             
@@ -180,6 +195,17 @@ struct FeatureRow: View {
     }
 }
 
+struct DiscoveredServer: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let host: String
+    let port: Int
+    
+    var displayName: String {
+        return "\(name) (\(host))"
+    }
+}
+
 // MARK: - Server Setup View
 struct ServerSetupView: View {
     @StateObject private var settings = SettingsManager.shared
@@ -190,22 +216,61 @@ struct ServerSetupView: View {
     @State private var webPort = "9000"
     @State private var slimProtoPort = "3483"
     @State private var validationErrors: [String] = []
+    @State private var isDiscovering = false
+    @State private var discoveredServers: [DiscoveredServer] = []
+    @State private var hasChanges = false
+    
     
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                VStack(spacing: 16) {
-                    Text("Server Configuration")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.white)
-                    
-                    Text("Enter your LMS server details. You can find the IP address in your LMS web interface under Settings → Network.")
-                        .font(.body)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
+                // Discovery button section
+                VStack(spacing: 12) {
+                    Button(action: { startServerDiscovery() }) {
+                        HStack {
+                            Image(systemName: "magnifyingglass")
+                            Text(isDiscovering ? "Discovering..." : "Find LMS Servers")
+                        }
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(isDiscovering)
                 }
-                .padding(.top, 20)
+
+                // Discovered servers section
+                if !discoveredServers.isEmpty {
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Discovered Servers")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            
+                            Spacer()
+                            
+                            if isDiscovering {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                            }
+                        }
+                        
+                        LazyVGrid(columns: [
+                            GridItem(.flexible()),
+                            GridItem(.flexible())
+                        ], spacing: 8) {
+                            ForEach(discoveredServers) { server in
+                                Button(server.displayName) {
+                                    serverHost = server.host
+                                    webPort = String(server.port)
+                                    hasChanges = true
+                                }
+                                .buttonStyle(SecondaryButtonStyle())
+                                .lineLimit(2)
+                                .font(.caption)
+                            }
+                        }
+                    }
+                    .padding(.top)
+                }
                 
                 VStack(spacing: 20) {
                     FormField(
@@ -288,13 +353,163 @@ struct ServerSetupView: View {
         }
         .onAppear {
             loadCurrentSettings()
+            
+            // Auto-start discovery after a brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                startServerDiscovery()
+            }
         }
+    }
+    
+    private func startServerDiscovery() {
+        guard !isDiscovering else { return }
+        
+        isDiscovering = true
+        discoveredServers.removeAll()
+        
+        // Start discovery on background queue
+        DispatchQueue.global(qos: .userInitiated).async {
+            discoverLMSServers()
+        }
+    }
+
+    private func discoverLMSServers() {
+        let semaphore = DispatchSemaphore(value: 0)
+        var foundServers: [DiscoveredServer] = []
+        
+        // Get current network info
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "network.discovery")
+        
+        monitor.pathUpdateHandler = { path in
+            defer { semaphore.signal() }
+            
+            guard path.status == .satisfied else { return }
+            
+            // Try common LMS ports and hostnames
+            let commonHosts = [
+                "lms.local", "squeezebox.local", "logitechmediaserver.local",
+                "slimserver.local", "musicserver.local"
+            ]
+            
+            // Also try local network scanning for common addresses
+            let baseAddresses = [
+                "192.168.1.", "192.168.0.", "10.0.0.", "172.16.0."
+            ]
+            
+            let group = DispatchGroup()
+            
+            // Check common hostnames first
+            for host in commonHosts {
+                group.enter()
+                checkLMSServer(host: host, port: 9000) { server in
+                    if let server = server {
+                        foundServers.append(server)
+                    }
+                    group.leave()
+                }
+            }
+            
+            // Quick scan of common IP ranges (first 10 addresses only to avoid spam)
+            for baseAddr in baseAddresses {
+                for i in 1...10 {
+                    let host = "\(baseAddr)\(i)"
+                    group.enter()
+                    checkLMSServer(host: host, port: 9000) { server in
+                        if let server = server {
+                            foundServers.append(server)
+                        }
+                        group.leave()
+                    }
+                }
+            }
+            
+            // Wait for all checks to complete (max 10 seconds)
+            _ = group.wait(timeout: .now() + 10)
+        }
+        
+        monitor.start(queue: queue)
+        
+        // Wait for network check
+        _ = semaphore.wait(timeout: .now() + 15)
+        monitor.cancel()
+        
+        // Update UI on main thread
+        DispatchQueue.main.async {
+            self.discoveredServers = Array(Set(foundServers)).sorted { $0.name < $1.name }
+            self.isDiscovering = false
+            
+            if foundServers.isEmpty {
+                // Could show an alert here
+                print("No LMS servers found")
+            }
+        }
+    }
+
+    private func checkLMSServer(host: String, port: Int, completion: @escaping (DiscoveredServer?) -> Void) {
+        guard let url = URL(string: "http://\(host):\(port)/") else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 3.0  // Quick timeout
+        
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode < 400,
+               error == nil {
+                
+                // Try to get server name from a quick JSON-RPC call
+                self.getLMSServerName(host: host, port: port) { serverName in
+                    let name = serverName ?? "LMS Server"
+                    completion(DiscoveredServer(name: name, host: host, port: port))
+                }
+            } else {
+                completion(nil)
+            }
+        }.resume()
+    }
+
+    private func getLMSServerName(host: String, port: Int, completion: @escaping (String?) -> Void) {
+        guard let url = URL(string: "http://\(host):\(port)/jsonrpc.js") else {
+            completion(nil)
+            return
+        }
+        
+        let jsonRPC: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["serverstatus", "0", "0"]]
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        request.timeoutInterval = 2.0
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = json["result"] as? [String: Any],
+               let serverName = result["hostname"] as? String {
+                completion(serverName)
+            } else {
+                completion(nil)
+            }
+        }.resume()
     }
     
     private let commonAddresses = [
         "lms.local", "squeezebox.local",
-        "192.168.1.100", "192.168.1.101",
-        "192.168.0.100", "192.168.0.101"
+        "192.168.1.100", "192.168.1.101"
     ]
     
     private func loadCurrentSettings() {
@@ -578,7 +793,7 @@ struct PlayerSetupView: View {
     
     var body: some View {
         ScrollView {
-            VStack(spacing: 30) {
+            VStack(spacing: 15) {
                 VStack(spacing: 16) {
                     Text("Player Setup")
                         .font(.title2)
@@ -655,7 +870,7 @@ struct PlayerSetupView: View {
     
     private let suggestedNames = [
         "iPhone", "iPad", "Living Room", "Bedroom",
-        "Kitchen", "Office", "iOS Player", "Mobile"
+        "Kitchen", "Office"
     ]
     
     private func finishSetup() {
