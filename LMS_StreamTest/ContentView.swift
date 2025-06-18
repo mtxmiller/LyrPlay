@@ -64,23 +64,42 @@ struct ContentView: View {
         }
         // ADD THE .sheet MODIFIER HERE (after .onReceive):
         .sheet(isPresented: $showingSettings, onDismiss: {
+            // Reset error states when dismissing settings
             hasConnectionError = false
             hasShownError = false
             hasHandledError = false
             loadError = nil
             
-            // ADD THESE LINES - Reconnect SlimProto with new settings:
-            hasConnected = false  // Reset connection flag
+            // FIXED: Only reconnect if server settings actually changed
+            let currentHost = settings.serverHost
+            let currentWebPort = settings.serverWebPort
+            let currentSlimPort = settings.serverSlimProtoPort
             
-            // Update coordinator with new settings
-            slimProtoCoordinator.updateServerSettings(
-                host: settings.serverHost,
-                port: UInt16(settings.serverSlimProtoPort)
-            )
+            // Check if any critical settings changed
+            let hostChanged = currentHost != slimProtoCoordinator.lastKnownHost
+            let portChanged = currentSlimPort != Int(slimProtoCoordinator.lastKnownPort)
             
-            // Reconnect after a short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.connectToLMS()
+            if hostChanged || portChanged {
+                os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
+                       "🔄 Server settings changed - reconnecting (host: %{public}s, port: %d)",
+                       currentHost, currentSlimPort)
+                
+                // Reset connection flag
+                hasConnected = false
+                
+                // Update coordinator with new settings
+                slimProtoCoordinator.updateServerSettings(
+                    host: currentHost,
+                    port: UInt16(currentSlimPort)
+                )
+                
+                // Reconnect after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.connectToLMS()
+                }
+            } else {
+                os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
+                       "✅ No server changes detected - keeping existing connection")
             }
         }) {
             SettingsView()

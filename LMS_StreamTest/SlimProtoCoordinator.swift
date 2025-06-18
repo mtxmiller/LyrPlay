@@ -20,6 +20,10 @@ class SlimProtoCoordinator: ObservableObject {
     private var statusTimer: Timer?
     private var lastStatusSent: Date?
     
+    // MARK: - Settings Tracking (ADD THESE LINES)
+    private(set) var lastKnownHost: String = ""
+    private(set) var lastKnownPort: UInt16 = 3483
+    
     // MARK: - Initialization
     init(audioManager: AudioManager) {
         self.audioManager = audioManager
@@ -81,6 +85,11 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Public Interface
     func connect() {
         os_log(.info, log: logger, "Starting connection with server time sync...")
+        
+        // ADDED: Initialize tracking with current settings
+        lastKnownHost = settings.serverHost
+        lastKnownPort = UInt16(settings.serverSlimProtoPort)
+        
         connectionManager.willConnect()
         client.connect()
     }
@@ -94,7 +103,14 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     func updateServerSettings(host: String, port: UInt16) {
+        // Store current settings for change detection
+        lastKnownHost = host
+        lastKnownPort = port
+        
+        // Update the client
         client.updateServerSettings(host: host, port: port)
+        
+        os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
     }
     
     // MARK: - Server Time Sync Management
