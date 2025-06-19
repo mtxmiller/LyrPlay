@@ -353,7 +353,7 @@ class SettingsManager: ObservableObject {
         }.joined(separator: ",")
         
         // UPDATED: Enhanced capabilities with FLAC support
-        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=1,HasDigitalVolumeControl=1,MaxSampleRate=48000"
+        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=1,HasDigitalVolumeControl=1,MaxSampleRate=44000"
     }
 
     var effectivePlayerName: String {
