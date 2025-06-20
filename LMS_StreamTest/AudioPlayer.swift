@@ -223,7 +223,7 @@ class AudioPlayer: NSObject, ObservableObject {
     func setVolume(_ volume: Float) {
         let clampedVolume = max(0.0, min(1.0, volume))
         audioPlayer.volume = clampedVolume
-        os_log(.info, log: logger, "🔊 Volume set to: %.2f", clampedVolume)
+        os_log(.debug, log: logger, "🔊 Volume set to: %.2f", clampedVolume)
     }
 
     func getVolume() -> Float {

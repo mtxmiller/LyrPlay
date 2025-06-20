@@ -56,7 +56,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var hasRequestedInitialStatus = false
     
     // MARK: - Time Reporting State
-    private var serverTimestamp: UInt32 = 0
     private var playbackStartTime: Date?
     private var pausedPosition: Double = 0.0
     private var isPaused: Bool = false
@@ -197,7 +196,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             
             // Parse 2-byte length in network order
             let messageLength = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-            os_log(.info, log: logger, "Server message length: %d bytes", messageLength)
+            os_log(.debug, log: logger, "Server message length: %d bytes", messageLength)
             
             if messageLength > 0 && messageLength < 10000 {
                 socket.readData(toLength: UInt(messageLength), withTimeout: 30, tag: 1)
@@ -226,7 +225,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             // Create command structure
             let command = SlimProtoCommand(type: commandString, payload: payloadData)
             
-            os_log(.info, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
+            os_log(.debug, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
             
             // Notify delegate
             delegate?.slimProtoDidReceiveCommand(command)
@@ -316,7 +315,17 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         lastSentCommand = code
         lastSentTime = now
         
-        os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
+        switch code {
+        case "STMt", "STMp":
+            // These are routine heartbeat responses - make them debug level
+            os_log(.debug, log: logger, "📤 Sending STAT: %{public}s", code)
+        case "STMc", "STMs", "STMr", "STMf", "STMd", "STMn":
+            // These are important state changes - keep as info level
+            os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
+        default:
+            // Unknown codes - log as info
+            os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
+        }
         
         var statusData = Data()
         
@@ -393,11 +402,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // CRITICAL FIX: Always include timing fields for STMt responses
         if code == "STMt" {
-            // Get actual audio player position (not server position)
+            // Get position from server time synchronizer (the master time source)
             let position: Double
             if let commandHandler = commandHandler {
-                // Use audio manager's current time as the authoritative source
-                position = commandHandler.getCurrentAudioTime() // We need to add this method
+                // NEW: Get server-provided position instead of local audio time
+                position = commandHandler.getServerProvidedTime()
             } else {
                 position = 0.0
             }
@@ -427,17 +436,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             ]))
             
             // Echo back server timestamp
-            statusData.append(Data([
-                UInt8((serverTimestamp >> 24) & 0xff),
-                UInt8((serverTimestamp >> 16) & 0xff),
-                UInt8((serverTimestamp >> 8) & 0xff),
-                UInt8(serverTimestamp & 0xff)
-            ]))
+            statusData.append(Data([0x00, 0x00, 0x00, 0x00]))
             
             // Error code
             statusData.append(Data([0x00, 0x00]))
             
-            os_log(.info, log: logger, "STAT with timing - audio position %.2f", clampedPosition)
+            os_log(.debug, log: logger, "STAT with timing - audio position %.2f", clampedPosition)
         } else {
             os_log(.info, log: logger, "STAT without timing - %{public}s", code)
         }
@@ -466,12 +470,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // Just send a standard pause status - don't invent new protocol codes
         sendStatus("STMp")
-    }
-    
-    // MARK: - Playback State Management
-    func setServerTimestamp(_ timestamp: UInt32) {
-        serverTimestamp = timestamp
-        os_log(.debug, log: logger, "Server timestamp set: %d", timestamp)
     }
     
     // MARK: - Public Interface

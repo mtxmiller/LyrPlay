@@ -20,7 +20,6 @@ class SlimProtoCommandHandler: ObservableObject {
     // MARK: - State
     private var isStreamActive = false
     private var isPausedByLockScreen = false
-    private var serverTimestamp: UInt32 = 0
     private var lastKnownPosition: Double = 0.0
     private var streamPosition: Double = 0.0
     private var streamDuration: Double = 0.0
@@ -182,8 +181,12 @@ class SlimProtoCommandHandler: ObservableObject {
             let format = payload[2]
             
             let commandChar = String(UnicodeScalar(streamCommand) ?? "?")
-            os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
-                   commandChar, streamCommand, format, format)
+            
+            // NEW CODE (only log for non-status commands):
+            if streamCommand != UInt8(ascii: "t") {  // 't' = status request
+                os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
+                       commandChar, streamCommand, format, format)
+            }
             
             // UPDATED: Enhanced format handling with FLAC support
             var formatName = "Unknown"
@@ -193,30 +196,49 @@ class SlimProtoCommandHandler: ObservableObject {
             case 97:  // 'a' = AAC
                 formatName = "AAC"
                 shouldAccept = true
-                os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
+                // OLD: Always logged
+                // os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
+                // NEW: Only log for non-status commands
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
+                }
                 
             case 65:  // 'A' = ALAC
                 formatName = "ALAC"
                 shouldAccept = true
-                os_log(.info, log: logger, "✅ Server offering ALAC - excellent for iOS!")
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering ALAC - excellent for iOS!")
+                }
                 
             case 109: // 'm' = MP3
                 formatName = "MP3"
                 shouldAccept = true
-                os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
+                // OLD: Always logged (causing spam)
+                // os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
+                // NEW: Only log for non-status commands
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
+                }
                 
-            case 102: // 'f' = FLAC - UPDATED: Now accept native FLAC
+            case 102: // 'f' = FLAC
                 formatName = "FLAC"
-                shouldAccept = true // CHANGED: Now accept native FLAC
-                os_log(.info, log: logger, "✅ Server offering FLAC - native playback with StreamingKit!")
+                shouldAccept = true
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering FLAC - native playback with StreamingKit!")
+                }
                 
             case 112: // 'p' = PCM
                 formatName = "PCM"
                 shouldAccept = true
-                os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
+                }
                 
             default:
-                os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
+                // Only log unknown formats for non-status commands
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
+                }
                 shouldAccept = false
             }
             
@@ -225,9 +247,7 @@ class SlimProtoCommandHandler: ObservableObject {
                 slimProtoClient?.sendStatus("STMn")
                 return
             }
-            
-            let serverElapsedTime = extractServerElapsedTime(from: payload)
-            
+                        
             if payload.count > 24 {
                 let httpData = payload.subdata(in: 24..<payload.count)
                 if let httpRequest = String(data: httpData, encoding: .utf8) {
@@ -238,7 +258,7 @@ class SlimProtoCommandHandler: ObservableObject {
                         
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
-                            handleStartCommand(url: url, format: formatName, startTime: serverElapsedTime)
+                            handleStartCommand(url: url, format: formatName, startTime: 0.0)
                         case UInt8(ascii: "p"): // pause
                             handlePauseCommand()
                         case UInt8(ascii: "u"): // unpause
@@ -260,13 +280,9 @@ class SlimProtoCommandHandler: ObservableObject {
                 }
             } else {
                 // Handle commands without HTTP data
-                os_log(.error, log: logger, "⚠️ Stream command '%{public}s' has no HTTP data - handling as control command", commandChar)
-                
-                if streamCommand == UInt8(ascii: "t") && payload.count >= 24 {
-                    let timestampData = payload.subdata(in: 16..<20)
-                    serverTimestamp = timestampData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                    slimProtoClient?.setServerTimestamp(serverTimestamp)
-                    os_log(.debug, log: logger, "Extracted server timestamp: %d", serverTimestamp)
+                if streamCommand != UInt8(ascii: "t") {
+                    // Only log for unexpected commands without HTTP data
+                    os_log(.error, log: logger, "⚠️ Stream command '%{public}s' has no HTTP data - handling as control command", commandChar)
                 }
                 
                 switch streamCommand {
@@ -380,14 +396,6 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     private func handleStatusRequest(_ payload: Data) {
-        os_log(.debug, log: logger, "🔄 Server status request")
-        
-        if payload.count >= 24 {
-            let timestampData = payload.subdata(in: 16..<20)
-            serverTimestamp = timestampData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            slimProtoClient?.setServerTimestamp(serverTimestamp)
-            os_log(.debug, log: logger, "Extracted server timestamp: %d", serverTimestamp)
-        }
         
         delegate?.didReceiveStatusRequest()
         
@@ -401,21 +409,6 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Utility Methods
-    private func extractServerElapsedTime(from payload: Data) -> Double {
-        guard payload.count >= 24 else { return 0.0 }
-        
-        let elapsedData = payload.subdata(in: 16..<20)
-        let elapsedSeconds = elapsedData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        
-        if elapsedSeconds > 0 && elapsedSeconds < 3600 {
-            os_log(.info, log: logger, "🔄 Extracted valid server elapsed time: %d seconds", elapsedSeconds)
-            return Double(elapsedSeconds)
-        } else if elapsedSeconds > 0 {
-            os_log(.error, log: logger, "⚠️ Server elapsed time seems too high: %d seconds - ignoring", elapsedSeconds)
-        }
-        
-        return 0.0
-    }
     
     func getServerProvidedTime() -> Double {
         // Always prefer server position when paused
@@ -514,6 +507,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
+    
     // MARK: - Volume Command Processing
     private func processVolumeCommand(_ payload: Data) {
         guard payload.count >= 18 else {
@@ -536,11 +530,11 @@ class SlimProtoCommandHandler: ObservableObject {
         if leftGain <= 128 && rightGain <= 128 {
             // Old format: 0-128 range
             normalizedVolume = Float(leftGain) / 128.0
-            os_log(.info, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+            os_log(.debug, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
         } else {
             // New format: 16.16 fixed point where 65536 = 100%
             normalizedVolume = Float(leftGain) / 65536.0
-            os_log(.info, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+            os_log(.debug, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
         }
         
         let clampedVolume = max(0.0, min(1.0, normalizedVolume))

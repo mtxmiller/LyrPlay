@@ -350,7 +350,7 @@ class ServerTimeSynchronizer: ObservableObject {
         // If too much time has passed since last sync, don't interpolate
         guard timeSinceSync < currentSyncInterval * 2 else {
             // Only log staleness warning once per sync interval to avoid spam
-            let shouldLogStaleness = timeSinceSync.truncatingRemainder(dividingBy: currentSyncInterval) < 1.0
+            let shouldLogStaleness = timeSinceSync.truncatingRemainder(dividingBy: 60.0) < 1.0  // Only every 60 seconds
             if shouldLogStaleness {
                 os_log(.error, log: logger, "⚠️ Server time too stale (%.1fs since last sync)", timeSinceSync)
             }

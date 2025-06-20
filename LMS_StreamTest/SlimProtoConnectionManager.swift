@@ -419,7 +419,6 @@ class SlimProtoConnectionManager: ObservableObject {
     
     func recordHeartbeatResponse() {
         lastHeartbeatResponse = Date()
-        os_log(.debug, log: logger, "💓 Heartbeat response recorded")
     }
     
     // MARK: - Connection State Management

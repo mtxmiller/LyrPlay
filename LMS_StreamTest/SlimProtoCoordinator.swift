@@ -172,7 +172,6 @@ class SlimProtoCoordinator: ObservableObject {
             // Record heartbeat for health monitoring
             connectionManager.recordHeartbeatResponse()
             
-            os_log(.debug, log: logger, "📊 Periodic status sent: %{public}s", statusCode)
         } else {
             os_log(.debug, log: logger, "📊 Skipping periodic status - stream stopped")
         }
@@ -762,7 +761,7 @@ extension SlimProtoCoordinator {
     
     // MARK: - Volume Control
     func setPlayerVolume(_ volume: Float) {
-        os_log(.info, log: logger, "🔊 Setting player volume: %.2f", volume)
+        os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
         audioManager.setVolume(volume)
     }
 
