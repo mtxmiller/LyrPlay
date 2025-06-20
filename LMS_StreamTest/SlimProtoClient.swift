@@ -402,11 +402,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         
         // CRITICAL FIX: Always include timing fields for STMt responses
         if code == "STMt" {
-            // Get position from server time synchronizer (the master time source)
+            // Get actual audio player position (not server position)
             let position: Double
             if let commandHandler = commandHandler {
-                // NEW: Get server-provided position instead of local audio time
-                position = commandHandler.getServerProvidedTime()
+                // Use audio manager's current time as the authoritative source
+                position = commandHandler.getCurrentAudioTime() // We need to add this method
             } else {
                 position = 0.0
             }
