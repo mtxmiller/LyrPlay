@@ -335,6 +335,16 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamPaused = true
         isPausedByLockScreen = true
         
+        // CRITICAL FIX: Only update playing state, NOT position when pausing
+        // The pause command doesn't include accurate position data
+        if let synchronizer = serverTimeSynchronizer {
+            // Only update the playing state, preserve the current server time
+            synchronizer.updatePlaybackState(isPlaying: false)
+            
+            os_log(.info, log: logger, "🔄 Updated pause state only - preserved server time: %.2f",
+                   synchronizer.lastServerTime)
+        }
+        
         delegate?.didPauseStream()
         // REMOVED: client status sending - let coordinator handle it
     }
@@ -430,8 +440,30 @@ class SlimProtoCommandHandler: ObservableObject {
             return lastKnownPosition
         }
     }
-
     
+    weak var serverTimeSynchronizer: ServerTimeSynchronizer?
+
+    func updateServerTimeFromSlimProto(_ position: Double, isPlaying: Bool) {
+        // CRITICAL FIX: Only update position if it's a meaningful value (> 0.1 seconds)
+        // SlimProto pause commands often send position 0.00 which is wrong
+        
+        if position > 0.1 || isPlaying {
+            // Valid position or we're playing - update everything
+            lastKnownPosition = position
+            isStreamPaused = !isPlaying
+            
+            serverTimeSynchronizer?.updateFromSlimProtoPosition(position, isPlaying: isPlaying)
+            
+            os_log(.info, log: logger, "🔄 Updated both SlimProto and ServerTime with position: %.2f", position)
+        } else {
+            // Invalid/zero position during pause - only update playing state
+            isStreamPaused = !isPlaying
+            
+            serverTimeSynchronizer?.updatePlaybackState(isPlaying: isPlaying)
+            
+            os_log(.info, log: logger, "🔄 Updated playing state only (position %.2f ignored), preserved server time", position)
+        }
+    }
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
         let lines = httpRequest.components(separatedBy: "\n")
         guard let firstLine = lines.first else { return nil }

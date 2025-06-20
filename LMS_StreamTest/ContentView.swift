@@ -6,7 +6,7 @@ import os.log
 
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
-    @StateObject private var audioManager = AudioManager()
+    @StateObject private var audioManager = AudioManager.shared  // ← CHANGE THIS LINE
     @StateObject private var slimProtoCoordinator: SlimProtoCoordinator
     @State private var isLoading = true
     @State private var loadError: String?
@@ -15,26 +15,24 @@ struct ContentView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     @State private var isAppInBackground = false
     @State private var hasLoadedInitially = false
-    @State private var webView: WKWebView? // Add reference to webview
+    @State private var webView: WKWebView?
     @State private var failureTimer: Timer?
-    
     @State private var hasConnectionError = false
     @State private var hasHandledError = false
-
     @State private var hasShownError = false
     
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
         
-        // Create AudioManager first
-        let audioMgr = AudioManager()
+        // ✅ Use the same singleton instance
+        let audioMgr = AudioManager.shared  // ← CHANGE THIS LINE
         self._audioManager = StateObject(wrappedValue: audioMgr)
         
-        // Create SlimProtoCoordinator with AudioManager (includes ServerTimeSynchronizer)
+        // ✅ Create SlimProtoCoordinator ONCE with the SAME AudioManager
         let coordinator = SlimProtoCoordinator(audioManager: audioMgr)
         self._slimProtoCoordinator = StateObject(wrappedValue: coordinator)
         
-        // Connect AudioManager back to coordinator for lock screen support
+        // ✅ Connect them using the SAME instances
         audioMgr.slimClient = coordinator
         
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Enhanced SlimProto architecture with Material integration initialized")

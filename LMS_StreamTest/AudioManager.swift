@@ -5,6 +5,8 @@ import os.log
 
 class AudioManager: NSObject, ObservableObject {
     
+    static let shared = AudioManager()  // ← ADD THIS LINE
+    
     // MARK: - Components
     private let audioPlayer: AudioPlayer
     private let audioSessionManager: AudioSessionManager
@@ -30,7 +32,7 @@ class AudioManager: NSObject, ObservableObject {
     private var interruptionPosition: Double = 0.0
     
     // MARK: - Initialization
-    override init() {
+    private override init() {
         self.audioPlayer = AudioPlayer()
         self.audioSessionManager = AudioSessionManager()
         self.nowPlayingManager = NowPlayingManager()

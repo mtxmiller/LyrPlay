@@ -48,7 +48,9 @@ class SlimProtoCoordinator: ObservableObject {
         commandHandler.slimProtoClient = client
         commandHandler.delegate = self
         
-        // ADD THIS LINE:
+        // ADD THIS LINE - Connect ServerTimeSynchronizer to command handler
+        commandHandler.serverTimeSynchronizer = serverTimeSynchronizer
+        
         client.commandHandler = commandHandler
         
         // Connect connection manager to coordinator
@@ -378,20 +380,20 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             audioManager.playStreamWithFormat(urlString: url, format: format)
         }
         
-        // REMOVED: All position tracking and reporting
-        // Just acknowledge the stream
+        // IMPORTANT: Tell server time synchronizer we're starting to play
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
         client.sendStatus("STMc") // Connecting
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.client.sendStatus("STMs") // Started
         }
         
-        // Get metadata after longer delay
+        // Get metadata and sync with server
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.fetchCurrentTrackMetadata()
         }
         
-        // Sync with server after audio starts
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.serverTimeSynchronizer.performImmediateSync()
         }
@@ -402,18 +404,24 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         audioManager.pause()
         
-        // REMOVED: All position tracking and reporting
-        // Just acknowledge the pause
+        // IMPORTANT: Tell server time synchronizer we're paused
+        //let currentTime = audioManager.getCurrentTime()
+        //serverTimeSynchronizer.updatePlaybackState(isPlaying: false, currentTime: currentTime)
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
         client.sendStatus("STMp")
     }
+
     
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
         audioManager.play()
         
-        // REMOVED: All position tracking and reporting
-        // Just acknowledge the resume
+        // IMPORTANT: Tell server time synchronizer we're playing
+        let currentTime = audioManager.getCurrentTime()
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
         client.sendStatus("STMr")
     }
     
@@ -422,8 +430,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         audioManager.stop()
         
-        // REMOVED: All position tracking and reporting
-        // Just acknowledge the stop
+        // IMPORTANT: Tell server time synchronizer we're stopped
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
         client.sendStatus("STMf")
     }
     
@@ -432,30 +440,25 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func didReceiveStatusRequest() {
-        // Get timing information for comparison and logging only
-        let serverTime = serverTimeSynchronizer.getCurrentInterpolatedTime()
-        let audioTime = audioManager.getCurrentTime()
+        // Server is asking "are you alive?" - just confirm we're here
+        // Don't confuse it with local player timing information
         
-        // Log time differences for debugging but DON'T auto-correct
-        let timeDifference = abs(serverTime.time - audioTime)
-        if timeDifference > 10.0 && audioTime > 0.1 && serverTime.isServerTime {
-            os_log(.info, log: logger, "ℹ️ Time difference noted: audio=%.1f, server=%.1f (diff=%.1f) - letting server handle",
-                   audioTime, serverTime.time, timeDifference)
-            
-            // REMOVED: All seeking logic - let the server tell us if we need to seek
-            // The server is the master and knows the correct position
-        }
-        
-        // Only update command handler's internal tracking (not sent to server)
-        if serverTime.isServerTime {
-            commandHandler.updatePlaybackPosition(serverTime.time)
+        let statusCode: String
+        if commandHandler.streamState == "Paused" {
+            statusCode = "STMp"  // We're paused
         } else {
-            commandHandler.updatePlaybackPosition(audioTime)
+            statusCode = "STMt"  // We're playing/ready
         }
         
-        // Record that we handled a status request (shows connection is alive)
+        client.sendStatus(statusCode)
+        
+        // Record that we responded (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
+        
+        os_log(.debug, log: logger, "📍 Responded to server status request with %{public}s", statusCode)
     }
+    
+    
 }
 
 // MARK: - Enhanced Lock Screen Integration with SlimProto Connection Fix
@@ -520,6 +523,25 @@ extension SlimProtoCoordinator {
     }
     
     private func sendJSONRPCCommand(_ command: String, retryCount: Int = 0) {
+        // CRITICAL FIX: For pause commands, get current server position FIRST
+        if command.lowercased() == "pause" {
+            os_log(.info, log: logger, "🔒 Pause command - getting current server position first")
+            serverTimeSynchronizer.forceImmediateSync()
+            
+            // Wait a moment for sync to complete, then continue with normal pause logic
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                // Now do the normal pause command processing
+                self.sendNormalJSONRPCCommand("pause", retryCount: retryCount)
+            }
+            return
+        }
+        
+        // For non-pause commands, process normally
+        sendNormalJSONRPCCommand(command, retryCount: retryCount)
+    }
+
+    // ADD this new method right after the sendJSONRPCCommand method:
+    private func sendNormalJSONRPCCommand(_ command: String, retryCount: Int = 0) {
         let playerID = settings.playerMACAddress
         
         var jsonRPCCommand: [String: Any]
@@ -773,6 +795,126 @@ extension SlimProtoCoordinator {
         } catch {
             os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
         }
+    }
+    
+    // Add to SlimProtoConnectionManagerDelegate extension
+    func connectionManagerShouldStorePosition() {
+        os_log(.info, log: logger, "🔒 Connection lost - storing current position for recovery")
+        
+        // Store position through NowPlayingManager
+        let nowPlayingManager = audioManager.getNowPlayingManager()
+        nowPlayingManager.storeLockScreenPosition()
+    }
+
+    func connectionManagerDidReconnectAfterTimeout() {
+        os_log(.info, log: logger, "🔒 Reconnected after timeout - checking for position recovery")
+        
+        // Wait a moment for connection to stabilize
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.attemptPositionRecovery()
+        }
+    }
+
+    // Add this new method for position recovery
+    private func attemptPositionRecovery() {
+        let nowPlayingManager = audioManager.getNowPlayingManager()
+        let recoveryInfo = nowPlayingManager.getStoredPositionWithTimeOffset()
+        
+        guard recoveryInfo.isValid else {
+            os_log(.info, log: logger, "🔒 No valid stored position for recovery")
+            return
+        }
+        
+        os_log(.info, log: logger, "🔒 Performing position recovery to %.2f seconds", recoveryInfo.position)
+        
+        // Wait a moment for connection to stabilize, then seek
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.sendSeekCommand(to: recoveryInfo.position) { success in
+                if success {
+                    os_log(.info, log: self.logger, "✅ Position recovery successful")
+                    
+                    // If we were playing before, resume playback
+                    if recoveryInfo.wasPlaying {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            self.sendJSONRPCCommand("play")
+                        }
+                    }
+                } else {
+                    os_log(.error, log: self.logger, "❌ Position recovery failed")
+                }
+                
+                // Clear stored position
+                nowPlayingManager.clearStoredPosition()
+            }
+        }
+    }
+    
+    private func performFallbackRecovery(recoveryInfo: (position: Double, wasPlaying: Bool, isValid: Bool), nowPlayingManager: NowPlayingManager) {
+        // First, try to restart the current track from beginning
+        sendJSONRPCCommand("play")
+        
+        // Then seek to stored position
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.sendSeekCommand(to: recoveryInfo.position) { success in
+                if success {
+                    os_log(.info, log: self.logger, "✅ Fallback recovery successful")
+                }
+                nowPlayingManager.clearStoredPosition()
+            }
+        }
+    }
+
+
+    // Add this new method for seeking via JSON-RPC
+    private func sendSeekCommand(to position: Double, completion: @escaping (Bool) -> Void) {
+        let playerID = settings.playerMACAddress
+        let clampedPosition = max(0, position)
+        
+        // FIXED: Use correct JSON-RPC format for time seeking
+        let jsonRPC = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["time", clampedPosition]]  // ✅ Pass number directly, not as string
+        ] as [String : Any]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            os_log(.error, log: logger, "Failed to create seek JSON-RPC command")
+            completion(false)
+            return
+        }
+        
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
+        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
+            os_log(.error, log: logger, "Invalid server URL for seek command")
+            completion(false)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = jsonData
+        request.timeoutInterval = 8.0
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    os_log(.error, log: self.logger, "Seek command failed: %{public}s", error.localizedDescription)
+                    completion(false)
+                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    os_log(.info, log: self.logger, "✅ Seek command sent successfully to %.2f", clampedPosition)
+                    completion(true)
+                } else {
+                    os_log(.error, log: self.logger, "Seek command failed with HTTP error")
+                    completion(false)
+                }
+            }
+        }
+        
+        task.resume()
+        os_log(.info, log: logger, "🌐 Sending seek command to %.2f seconds", clampedPosition)
     }
     
     // MARK: - Volume Control

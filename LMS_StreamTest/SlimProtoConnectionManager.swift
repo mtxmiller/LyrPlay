@@ -12,6 +12,8 @@ protocol SlimProtoConnectionManagerDelegate: AnyObject {
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool)
     func connectionManagerShouldCheckHealth()
     func connectionManagerWillSleep()  // Add this line
+    func connectionManagerShouldStorePosition()
+    func connectionManagerDidReconnectAfterTimeout()
 }
 
 class SlimProtoConnectionManager: ObservableObject {
@@ -46,6 +48,10 @@ class SlimProtoConnectionManager: ObservableObject {
     private let baseReconnectionDelay: TimeInterval = 2.0
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
+    
+    private var wasConnectedBeforeTimeout: Bool = false
+    private var disconnectionDuration: TimeInterval = 0
+    
     
     // MARK: - Health Monitoring
     private var healthCheckTimer: Timer?
@@ -423,6 +429,8 @@ class SlimProtoConnectionManager: ObservableObject {
     
     // MARK: - Connection State Management
     func didConnect() {
+        let wasReconnectionAfterTimeout = wasConnectedBeforeTimeout &&
+        connectionState != .connected
         os_log(.info, log: logger, "✅ Connection established")
         connectionState = .connected
         lastSuccessfulConnection = Date()
@@ -435,10 +443,22 @@ class SlimProtoConnectionManager: ObservableObject {
         
         // Record initial heartbeat
         recordHeartbeatResponse()
+        
+        if wasReconnectionAfterTimeout {
+            delegate?.connectionManagerDidReconnectAfterTimeout()
+        }
+        
+        wasConnectedBeforeTimeout = false
     }
     
     func didDisconnect(error: Error?) {
         let wasConnected = connectionState.isConnected
+        wasConnectedBeforeTimeout = wasConnected
+        
+        // Attempt reconnection based on conditions
+        if wasConnected && shouldStorePosition(error: error) {
+            delegate?.connectionManagerShouldStorePosition()
+        }
         
         // Stop health monitoring
         stopHealthMonitoring()
@@ -458,10 +478,20 @@ class SlimProtoConnectionManager: ObservableObject {
             os_log(.info, log: logger, "🔌 Disconnected gracefully")
         }
         
-        // Attempt reconnection based on conditions
-        if wasConnected && lastDisconnectionReason.shouldAutoReconnect && isNetworkAvailable {
-            scheduleReconnectionIfNeeded()
+
+    }
+    
+    // Add this method to detect timeout scenarios
+    private func shouldStorePosition(error: Error?) -> Bool {
+        // Store position for any unexpected disconnection during active connection
+        // Only skip storage for graceful/intentional disconnections
+        if let error = error {
+            // Any error during disconnection suggests unexpected loss
+            return true
         }
+        
+        // For graceful disconnections (no error), only store if we had a recent connection
+        return lastSuccessfulConnection != nil
     }
     
     func willConnect() {

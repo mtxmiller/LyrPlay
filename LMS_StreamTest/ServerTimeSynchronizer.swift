@@ -281,12 +281,26 @@ class ServerTimeSynchronizer: ObservableObject {
     // MARK: - Success/Failure Handling
     private func handleSyncSuccess(currentTime: Double, duration: Double, isPlaying: Bool) {
         // Update state
+        let oldTime = lastServerTime
+        let oldPlaying = lastServerIsPlaying
+        
+        // CRITICAL FIX: Always update to the actual server time, don't preserve old values
         lastServerTime = currentTime
         lastServerDuration = duration
         lastServerIsPlaying = isPlaying
         isServerTimeAvailable = true
         lastSuccessfulSync = Date()
         timeSinceLastUpdate = 0
+        
+        // ENHANCED LOGGING: Show when server time changes significantly
+        let timeDifference = abs(currentTime - oldTime)
+        if timeDifference > 2.0 {
+            os_log(.info, log: logger, "📡 MAJOR SERVER TIME UPDATE: %.2f → %.2f (diff: %.2f), playing=%{public}s → %{public}s",
+                   oldTime, currentTime, timeDifference, oldPlaying ? "YES" : "NO", isPlaying ? "YES" : "NO")
+        } else {
+            os_log(.debug, log: logger, "📡 Server time update: %.2f (playing: %{public}s)",
+                   currentTime, isPlaying ? "YES" : "NO")
+        }
         
         // Reset failure count
         let hadFailures = consecutiveFailures > 0
@@ -304,78 +318,124 @@ class ServerTimeSynchronizer: ObservableObject {
         // Notify delegate
         delegate?.serverTimeDidUpdate(currentTime: currentTime, duration: duration, isPlaying: isPlaying)
         
-        // Only log server time updates when there are significant changes or issues
-        if hadFailures || abs(currentTime - lastServerTime) > 30.0 {
-            os_log(.info, log: logger, "✅ Server time updated: %.1f/%.1f (%{public}s)",
-                   currentTime, duration, isPlaying ? "playing" : "paused")
-        }
-        
-        // Notify of connection restoration if we had failures
         if hadFailures {
             delegate?.serverTimeConnectionRestored()
             os_log(.info, log: logger, "🔄 Server time connection restored after %d failures", hadFailures)
         }
     }
     
+    func forceImmediateSync() {
+        os_log(.info, log: logger, "🔄 Forcing immediate server time sync to get current position")
+        
+        // Cancel any existing sync
+        cancelCurrentSyncTask()
+        
+        // Perform immediate sync
+        fetchServerTime()
+    }
+    
     private func handleSyncFailure(_ error: Error) {
         consecutiveFailures += 1
-        isServerTimeAvailable = (consecutiveFailures <= maxConsecutiveFailures)
         
-        os_log(.error, log: logger, "❌ Server time sync failed (%d/%d): %{public}s",
-               consecutiveFailures, maxConsecutiveFailures, error.localizedDescription)
+        // DON'T mark server time as unavailable due to temporary failures
+        // Only mark unavailable if we have MANY consecutive failures (20+)
+        isServerTimeAvailable = (consecutiveFailures <= 20)  // Was 3, now 20
         
-        // Adjust sync interval for failures
+        os_log(.info, log: logger, "📡 Server time sync failed (%d/20): %{public}s - still trusting server time",
+               consecutiveFailures, error.localizedDescription)
+        
+        // Adjust sync interval for failures but keep trying
         adjustSyncIntervalForFailures()
         restartSyncTimer()
         
-        // Notify delegate
-        delegate?.serverTimeFetchFailed(error: error)
+        // Only notify delegate of "real" failures after many attempts
+        if consecutiveFailures > 10 {
+            delegate?.serverTimeFetchFailed(error: error)
+        }
         
-        // If we've exceeded max failures, stop considering server time available
-        if consecutiveFailures > maxConsecutiveFailures {
-            os_log(.error, log: logger, "🚨 Server time unavailable after %d consecutive failures", consecutiveFailures)
+        // Don't mark as unavailable unless we're really having problems
+        if consecutiveFailures > 20 {
+            os_log(.error, log: logger, "🚨 Server time marked unavailable after %d consecutive failures", consecutiveFailures)
         }
     }
     
+    func updatePlaybackState(isPlaying: Bool) {
+        // ONLY update the playing state - never overwrite server time with audio time
+        lastServerIsPlaying = isPlaying
+        
+        os_log(.info, log: logger, "🔄 Playback state updated: playing=%{public}s, server time preserved: %.2f",
+               isPlaying ? "YES" : "NO", lastServerTime)
+    }
+    
+    func updateFromSlimProtoPosition(_ position: Double, isPlaying: Bool) {
+        // CRITICAL: Update our stored server time with the actual server position
+        lastServerTime = position
+        lastServerIsPlaying = isPlaying
+        lastSuccessfulSync = Date()
+        timeSinceLastUpdate = 0
+        isServerTimeAvailable = true
+        
+        os_log(.info, log: logger, "📡 SLIMPROTO SERVER UPDATE: %.2f (playing: %{public}s) - overriding previous server time",
+               position, isPlaying ? "YES" : "NO")
+        
+        // Reset consecutive failures since we got valid data
+        consecutiveFailures = 0
+        
+        // Notify delegate of the server update
+        delegate?.serverTimeDidUpdate(currentTime: position, duration: lastServerDuration, isPlaying: isPlaying)
+    }
+
+    
     // MARK: - Time Interpolation
     func getCurrentInterpolatedTime() -> (time: Double, isPlaying: Bool, isServerTime: Bool) {
-        guard isServerTimeAvailable,
-              let lastSync = lastSuccessfulSync else {
+        // If we have ANY server time data, use it - don't be picky about "staleness"
+        guard lastServerTime > 0, let lastSync = lastSuccessfulSync else {
+            os_log(.debug, log: logger, "🔒 NO SERVER DATA - returning 0.0")
             return (time: 0.0, isPlaying: false, isServerTime: false)
         }
         
         let timeSinceSync = Date().timeIntervalSince(lastSync)
         timeSinceLastUpdate = timeSinceSync
         
-        // If too much time has passed since last sync, don't interpolate
-        guard timeSinceSync < currentSyncInterval * 2 else {
-            // Only log staleness warning once per sync interval to avoid spam
-            let shouldLogStaleness = timeSinceSync.truncatingRemainder(dividingBy: 60.0) < 1.0  // Only every 60 seconds
-            if shouldLogStaleness {
-                os_log(.error, log: logger, "⚠️ Server time too stale (%.1fs since last sync)", timeSinceSync)
+        // MUCH MORE LENIENT: Only invalidate server time if it's REALLY old (10 minutes)
+        let maxStaleTime: TimeInterval = 600.0  // 10 minutes instead of 60 seconds
+        
+        if timeSinceSync > maxStaleTime {
+            let shouldLog = timeSinceSync.truncatingRemainder(dividingBy: 3600.0) < 60.0
+            if shouldLog {
+                os_log(.error, log: logger, "⚠️ Server time REALLY stale (%.0f minutes) - but still trusting it", timeSinceSync / 60.0)
             }
-            return (time: lastServerTime, isPlaying: lastServerIsPlaying, isServerTime: false)
         }
         
         // Interpolate time if playing
         let interpolatedTime: Double
         if lastServerIsPlaying {
             interpolatedTime = lastServerTime + timeSinceSync
+            os_log(.debug, log: logger, "🔒 INTERPOLATING: base=%.2f + elapsed=%.2f = %.2f",
+                   lastServerTime, timeSinceSync, interpolatedTime)
         } else {
             interpolatedTime = lastServerTime
+            os_log(.debug, log: logger, "🔒 NOT INTERPOLATING (paused): returning base=%.2f", lastServerTime)
         }
         
         // Clamp to duration if we have it
         let clampedTime: Double
         if lastServerDuration > 0 {
             clampedTime = min(interpolatedTime, lastServerDuration)
+            if clampedTime != interpolatedTime {
+                os_log(.debug, log: logger, "🔒 CLAMPED to duration: %.2f → %.2f", interpolatedTime, clampedTime)
+            }
         } else {
             clampedTime = max(0, interpolatedTime)
         }
         
+        os_log(.debug, log: logger, "🔒 RETURNING: time=%.2f, playing=%{public}s, lastSync=%.1fs ago",
+               clampedTime, lastServerIsPlaying ? "YES" : "NO", timeSinceSync)
+        
+        // ALWAYS return isServerTime=true if we have server data
         return (time: clampedTime, isPlaying: lastServerIsPlaying, isServerTime: true)
     }
-    
+
     // MARK: - Connection Manager Integration
     func setConnectionManager(_ connectionManager: SlimProtoConnectionManager) {
         self.connectionManager = connectionManager
