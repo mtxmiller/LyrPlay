@@ -109,7 +109,7 @@ class ServerTimeSynchronizer: ObservableObject {
     
     // MARK: - Public Interface
     func startSyncing() {
-        guard !settings.serverHost.isEmpty else {
+        guard !settings.activeServerHost.isEmpty else {
             os_log(.error, log: logger, "Cannot start syncing - no server configured")
             return
         }
@@ -166,7 +166,7 @@ class ServerTimeSynchronizer: ObservableObject {
     // MARK: - Server Time Fetching
     private func fetchServerTime() {
         // Don't fetch if we don't have a configured server
-        guard !settings.serverHost.isEmpty else {
+        guard !settings.activeServerHost.isEmpty else {
             handleSyncFailure(ServerTimeSyncError.noServerConfigured)
             return
         }
@@ -195,8 +195,8 @@ class ServerTimeSynchronizer: ObservableObject {
         }
         
         // Create request
-        let webPort = settings.serverWebPort
-        let host = settings.serverHost
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
         guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
             handleSyncFailure(ServerTimeSyncError.invalidURL)
             return

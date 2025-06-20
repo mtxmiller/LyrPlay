@@ -440,8 +440,8 @@ class SlimProtoCommandHandler: ObservableObject {
         guard parts.count >= 2 else { return nil }
         
         let path = parts[1]
-        let webPort = settings.serverWebPort
-        let host = settings.serverHost
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
         let fullURL = "http://\(host):\(webPort)\(path)"
         
         os_log(.info, log: logger, "🔍 Extracted stream URL: %{public}s", fullURL)

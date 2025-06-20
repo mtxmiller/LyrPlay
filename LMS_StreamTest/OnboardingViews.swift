@@ -514,9 +514,9 @@ struct ServerSetupView: View {
     ]
     
     private func loadCurrentSettings() {
-        serverHost = settings.serverHost
-        webPort = String(settings.serverWebPort)
-        slimProtoPort = String(settings.serverSlimProtoPort)
+        serverHost = settings.activeServerHost
+        webPort = String(settings.activeServerWebPort)
+        slimProtoPort = String(settings.activeServerSlimProtoPort)
     }
     
     private func validateAndProceed() {
@@ -586,7 +586,7 @@ struct ConnectionTestView: View {
                     .fontWeight(.semibold)
                     .foregroundColor(.white)
                 
-                Text("Verifying connection to \(settings.serverHost)")
+                Text("Verifying connection to \(settings.activeServerHost)")
                     .font(.body)
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)
@@ -670,8 +670,8 @@ struct ConnectionTestView: View {
     private func runConnectionTest() {
         testState = .testing
         testDetails = [
-            TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .testing, message: "Testing..."),
-            TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .testing, message: "Testing...")
+            TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .testing, message: "Testing..."),
+            TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Testing...")
         ]
         
         Task {
@@ -695,32 +695,32 @@ struct ConnectionTestView: View {
         switch result {
         case .success:
             testDetails = [
-                TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .success, message: "Connected"),
-                TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .success, message: "Connected")
+                TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
+                TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .success, message: "Connected")
             ]
             
         case .webPortFailure(let error):
             testDetails = [
-                TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: error),
-                TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .testing, message: "Skipped")
+                TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
+                TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Skipped")
             ]
             
         case .slimProtoPortFailure(let error):
             testDetails = [
-                TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .success, message: "Connected"),
-                TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: error)
+                TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
+                TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
             ]
             
         case .invalidHost(let error):
             testDetails = [
-                TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: error),
-                TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: error)
+                TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
+                TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
             ]
             
         default:
             testDetails = [
-                TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: "Failed"),
-                TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: "Failed")
+                TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: "Failed"),
+                TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: "Failed")
             ]
         }
     }

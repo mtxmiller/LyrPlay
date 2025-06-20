@@ -66,9 +66,9 @@ struct ContentView: View {
             loadError = nil
             
             // FIXED: Only reconnect if server settings actually changed
-            let currentHost = settings.serverHost
-            let currentWebPort = settings.serverWebPort
-            let currentSlimPort = settings.serverSlimProtoPort
+            let currentHost = settings.activeServerHost
+            let currentWebPort = settings.activeServerWebPort
+            let currentSlimPort = settings.activeServerSlimProtoPort
             
             // Check if any critical settings changed
             let hostChanged = currentHost != slimProtoCoordinator.lastKnownHost
@@ -204,7 +204,7 @@ struct ContentView: View {
                 .font(.headline)
                 .foregroundColor(.red)
             
-            Text("Server: \(settings.serverHost)")
+            Text("Server: \(settings.activeServerHost)")
                 .font(.body)
                 .foregroundColor(.white)
             
@@ -316,6 +316,16 @@ struct ContentView: View {
                         Text(serverTimeStatusText)
                             .font(.caption2)
                             .foregroundColor(serverTimeStatusColor)
+                    }
+                    
+                    // Connection status with server info
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(connectionStateColor)
+                            .frame(width: 8, height: 8)
+                        Text("\(slimProtoCoordinator.connectionState) • \(settings.currentActiveServer.displayName)")
+                            .font(.caption2)
+                            .foregroundColor(.white)
                     }
                     
                     // Player ID
@@ -431,14 +441,14 @@ struct ContentView: View {
     private func connectToLMS() {
         guard !hasConnected else { return }
         
-        os_log(.info, log: logger, "Connecting to LMS server with Material Integration: %{public}s", settings.serverHost)
+        os_log(.info, log: logger, "Connecting to LMS server with Material Integration: %{public}s", settings.activeServerHost)
         
         audioManager.setSlimClient(slimProtoCoordinator)
         
         // Update coordinator with current settings
         slimProtoCoordinator.updateServerSettings(
-            host: settings.serverHost,
-            port: UInt16(settings.serverSlimProtoPort)
+            host: settings.activeServerHost,
+            port: UInt16(settings.activeServerSlimProtoPort)
         )
         
         slimProtoCoordinator.connect()

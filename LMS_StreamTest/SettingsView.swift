@@ -24,8 +24,8 @@ struct SettingsView: View {
                         SettingsRow(
                             icon: "server.rack",
                             title: "Server Address",
-                            value: settings.serverHost.isEmpty ? "Not Set" : settings.serverHost,
-                            valueColor: settings.serverHost.isEmpty ? .red : .secondary
+                            value: settings.activeServerHost.isEmpty ? "Not Set" : settings.activeServerHost,
+                            valueColor: settings.activeServerHost.isEmpty ? .red : .secondary
                         )
                     }
                     
@@ -38,6 +38,49 @@ struct SettingsView: View {
                         )
                     }
                     .foregroundColor(.primary)
+                }
+                
+                // Backup Server Section
+                Section(header: Text("Backup Server")) {
+                    Toggle(isOn: $settings.isBackupServerEnabled) {
+                        SettingsRow(
+                            icon: "server.rack.fill",
+                            title: "Enable Backup Server",
+                            value: settings.isBackupServerEnabled ? "Enabled" : "Disabled",
+                            valueColor: settings.isBackupServerEnabled ? .green : .secondary
+                        )
+                    }
+                    .onChange(of: settings.isBackupServerEnabled) { _ in
+                        settings.saveSettings()
+                    }
+                    
+                    if settings.isBackupServerEnabled {
+                        NavigationLink(destination: BackupServerConfigView()) {
+                            SettingsRow(
+                                icon: "server.rack",
+                                title: "Backup Server Address",
+                                value: settings.backupServerHost.isEmpty ? "Not Set" : settings.backupServerHost,
+                                valueColor: settings.backupServerHost.isEmpty ? .red : .secondary
+                            )
+                        }
+                        
+                        HStack {
+                            SettingsRow(
+                                icon: "switch.2",
+                                title: "Active Server",
+                                value: settings.currentActiveServer.displayName,
+                                valueColor: .blue
+                            )
+                            
+                            Spacer()
+                            
+                            Button("Switch") {
+                                settings.switchToOtherServer()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!settings.isBackupServerEnabled || settings.backupServerHost.isEmpty)
+                        }
+                    }
                 }
                 
                 // Player Identity Section
@@ -275,7 +318,7 @@ struct ServerConfigView: View {
             }
         }
         .onAppear {
-            serverHost = settings.serverHost
+            serverHost = settings.activeServerHost
         }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet()
@@ -712,8 +755,8 @@ struct AdvancedConfigView: View {
     }
     
     private func loadCurrentSettings() {
-        webPort = String(settings.serverWebPort)
-        slimProtoPort = String(settings.serverSlimProtoPort)
+        webPort = String(settings.activeServerWebPort)
+        slimProtoPort = String(settings.activeServerSlimProtoPort)
         connectionTimeout = settings.connectionTimeout
     }
     
@@ -772,7 +815,7 @@ struct ConnectionTestSheet: View {
                         .font(.title2)
                         .fontWeight(.semibold)
                     
-                    Text("Server: \(settings.serverHost)")
+                    Text("Server: \(settings.activeServerHost)")
                         .font(.body)
                         .foregroundColor(.secondary)
                 }
@@ -881,8 +924,8 @@ struct ConnectionTestSheet: View {
     private func runConnectionTest() {
         testState = .testing
         testDetails = [
-            ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .testing, message: "Testing..."),
-            ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .testing, message: "Testing...")
+            ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .testing, message: "Testing..."),
+            ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Testing...")
         ]
         
         Task {
@@ -900,32 +943,32 @@ struct ConnectionTestSheet: View {
         switch result {
         case .success:
             testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .success, message: "Connected"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .success, message: "Connected")
+                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
+                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .success, message: "Connected")
             ]
             
         case .webPortFailure(let error):
             testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: error),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .testing, message: "Skipped")
+                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
+                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Skipped")
             ]
             
         case .slimProtoPortFailure(let error):
             testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .success, message: "Connected"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: error)
+                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
+                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
             ]
             
         case .invalidHost(let error):
             testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: error),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: error)
+                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
+                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
             ]
             
         default:
             testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.serverWebPort))", status: .failure, message: "Failed"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.serverSlimProtoPort))", status: .failure, message: "Failed")
+                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: "Failed"),
+                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: "Failed")
             ]
         }
     }
@@ -952,5 +995,113 @@ struct ConnectionTestSheet: View {
 struct SettingsView_Previews: PreviewProvider {
     static var previews: some View {
         SettingsView()
+    }
+}
+
+// MARK: - Backup Server Configuration View
+struct BackupServerConfigView: View {
+    @StateObject private var settings = SettingsManager.shared
+    @Environment(\.presentationMode) var presentationMode
+    
+    @State private var backupHost: String = ""
+    @State private var backupWebPort: String = "9000"
+    @State private var backupSlimPort: String = "3483"
+    @State private var hasChanges = false
+    @State private var validationErrors: [String] = []
+    
+    var body: some View {
+        Form {
+            Section(header: Text("Backup Server Address")) {
+                TextField("192.168.1.101 or backup.local", text: $backupHost)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .onChange(of: backupHost) { _ in hasChanges = true }
+                
+                Text("Enter the IP address or hostname of your backup LMS server.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Section(header: Text("Backup Server Ports")) {
+                HStack {
+                    Text("Web Port:")
+                    Spacer()
+                    TextField("9000", text: $backupWebPort)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .keyboardType(.numberPad)
+                        .frame(width: 80)
+                        .onChange(of: backupWebPort) { _ in hasChanges = true }
+                }
+                
+                HStack {
+                    Text("Stream Port:")
+                    Spacer()
+                    TextField("3483", text: $backupSlimPort)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .keyboardType(.numberPad)
+                        .frame(width: 80)
+                        .onChange(of: backupSlimPort) { _ in hasChanges = true }
+                }
+            }
+            
+            if !validationErrors.isEmpty {
+                Section(header: Text("Validation Errors")) {
+                    ForEach(validationErrors, id: \.self) { error in
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Backup Server")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Save") {
+                    saveSettings()
+                }
+                .disabled(!hasChanges)
+            }
+        }
+        .onAppear {
+            loadCurrentSettings()
+        }
+    }
+    
+    private func loadCurrentSettings() {
+        backupHost = settings.backupServerHost
+        backupWebPort = String(settings.backupServerWebPort)
+        backupSlimPort = String(settings.backupServerSlimProtoPort)
+    }
+    
+    private func saveSettings() {
+        validationErrors.removeAll()
+        
+        let trimmedHost = backupHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if trimmedHost.isEmpty {
+            validationErrors.append("Backup server address is required")
+            return
+        }
+        
+        guard let webPortInt = Int(backupWebPort), webPortInt > 0, webPortInt < 65536 else {
+            validationErrors.append("Web port must be between 1 and 65535")
+            return
+        }
+        
+        guard let slimPortInt = Int(backupSlimPort), slimPortInt > 0, slimPortInt < 65536 else {
+            validationErrors.append("Stream port must be between 1 and 65535")
+            return
+        }
+        
+        settings.backupServerHost = trimmedHost
+        settings.backupServerWebPort = webPortInt
+        settings.backupServerSlimProtoPort = slimPortInt
+        settings.saveSettings()
+        hasChanges = false
+        
+        presentationMode.wrappedValue.dismiss()
     }
 }

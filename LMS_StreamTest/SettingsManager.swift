@@ -20,11 +20,31 @@ class SettingsManager: ObservableObject {
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
     @Published var shouldReloadWebView: Bool = false
+    @Published var backupServerHost: String = ""
+    @Published var backupServerWebPort: Int = 9000
+    @Published var backupServerSlimProtoPort: Int = 3483
+    @Published var isBackupServerEnabled: Bool = false
+    @Published var currentActiveServer: ServerType = .primary
+    
     
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
     private(set) var deviceModel: String = "squeezelite"
     private(set) var deviceModelName: String = "LMS Stream for iOS"
+    
+    
+    // MARK: - Server Type Enum
+    enum ServerType {
+        case primary
+        case backup
+        
+        var displayName: String {
+            switch self {
+            case .primary: return "Primary"
+            case .backup: return "Backup"
+            }
+        }
+    }
     
     // MARK: - UserDefaults Keys
     private enum Keys {
@@ -40,6 +60,11 @@ class SettingsManager: ObservableObject {
         static let isConfigured = "IsConfigured"
         static let settingsVersion = "SettingsVersion"
         static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
+        static let backupServerHost = "BackupServerHost"
+        static let backupServerWebPort = "BackupServerWebPort"
+        static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
+        static let isBackupServerEnabled = "IsBackupServerEnabled"
+        static let currentActiveServer = "CurrentActiveServer"
     }
     
     private let currentSettingsVersion = 2 // UPDATED: Increment for FLAC support
@@ -93,6 +118,12 @@ class SettingsManager: ObservableObject {
         isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
         showFallbackSettingsButton = UserDefaults.standard.object(forKey: Keys.showFallbackSettingsButton) as? Bool ?? true
+        backupServerHost = UserDefaults.standard.string(forKey: Keys.backupServerHost) ?? ""
+        backupServerWebPort = UserDefaults.standard.object(forKey: Keys.backupServerWebPort) as? Int ?? 9000
+        backupServerSlimProtoPort = UserDefaults.standard.object(forKey: Keys.backupServerSlimProtoPort) as? Int ?? 3483
+        isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
+        let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
+        currentActiveServer = activeServerRaw == 1 ? .backup : .primary
         
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO")
@@ -113,6 +144,11 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(isConfigured, forKey: Keys.isConfigured)
         UserDefaults.standard.set(currentSettingsVersion, forKey: Keys.settingsVersion)
         UserDefaults.standard.set(showFallbackSettingsButton, forKey: Keys.showFallbackSettingsButton)
+        UserDefaults.standard.set(backupServerHost, forKey: Keys.backupServerHost)
+        UserDefaults.standard.set(backupServerWebPort, forKey: Keys.backupServerWebPort)
+        UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
+        UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
+        UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         
         UserDefaults.standard.synchronize()
         
@@ -370,5 +406,38 @@ class SettingsManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         
         return cleanName.isEmpty ? "iOS Player" : cleanName
+    }
+    
+    // MARK: - Active Server Properties
+    var activeServerHost: String {
+        return currentActiveServer == .primary ? serverHost : backupServerHost
+    }
+
+    var activeServerWebPort: Int {
+        return currentActiveServer == .primary ? serverWebPort : backupServerWebPort
+    }
+
+    var activeServerSlimProtoPort: Int {
+        return currentActiveServer == .primary ? serverSlimProtoPort : backupServerSlimProtoPort
+    }
+
+    // MARK: - Server Switching
+    func switchToBackupServer() {
+        guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
+        currentActiveServer = .backup
+        saveSettings()
+    }
+
+    func switchToPrimaryServer() {
+        currentActiveServer = .primary
+        saveSettings()
+    }
+
+    func switchToOtherServer() {
+        if currentActiveServer == .primary && isBackupServerEnabled && !backupServerHost.isEmpty {
+            switchToBackupServer()
+        } else {
+            switchToPrimaryServer()
+        }
     }
 }

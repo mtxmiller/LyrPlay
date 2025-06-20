@@ -84,13 +84,13 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Public Interface
     func connect() {
-        os_log(.info, log: logger, "Starting connection with server time sync...")
+        os_log(.info, log: logger, "Starting connection to %{public}s server...", settings.currentActiveServer.displayName)
         
-        // ADDED: Initialize tracking with current settings
-        lastKnownHost = settings.serverHost
-        lastKnownPort = UInt16(settings.serverSlimProtoPort)
+        lastKnownHost = settings.activeServerHost
+        lastKnownPort = UInt16(settings.activeServerSlimProtoPort)
         
         connectionManager.willConnect()
+        client.updateServerSettings(host: settings.activeServerHost, port: UInt16(settings.activeServerSlimProtoPort))
         client.connect()
     }
     
@@ -256,6 +256,22 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerShouldReconnect() {
         os_log(.info, log: logger, "🔄 Connection manager requesting reconnection")
+        
+        // Try backup server if primary fails and backup is available
+        if settings.currentActiveServer == .primary &&
+           settings.isBackupServerEnabled &&
+           !settings.backupServerHost.isEmpty {
+            
+            os_log(.info, log: logger, "🔄 Primary server failed - trying backup server")
+            settings.switchToBackupServer()
+            
+            // Update client with backup server settings
+            client.updateServerSettings(
+                host: settings.activeServerHost,
+                port: UInt16(settings.activeServerSlimProtoPort)
+            )
+        }
+        
         client.connect()
     }
     
@@ -559,8 +575,8 @@ extension SlimProtoCoordinator {
             return
         }
         
-        let webPort = settings.serverWebPort
-        let host = settings.serverHost
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
         guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
             os_log(.error, log: logger, "Invalid server URL for JSON-RPC")
             return
@@ -673,8 +689,8 @@ extension SlimProtoCoordinator {
             return
         }
         
-        let webPort = settings.serverWebPort
-        let host = settings.serverHost
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
         var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -734,8 +750,8 @@ extension SlimProtoCoordinator {
                 // Create artwork URL
                 var artworkURL: String? = nil
                 if let trackID = firstTrack["id"] as? Int {
-                    let webPort = settings.serverWebPort
-                    let host = settings.serverHost
+                    let webPort = settings.activeServerWebPort
+                    let host = settings.activeServerHost
                     artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
                 }
                 

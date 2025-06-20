@@ -79,8 +79,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     // MARK: - Settings Integration
     private func loadSettings() {
-        host = settings.serverHost
-        port = UInt16(settings.serverSlimProtoPort)
+        host = settings.activeServerHost
+        port = UInt16(settings.activeServerSlimProtoPort)
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Port: %d", host, port)
     }
     
