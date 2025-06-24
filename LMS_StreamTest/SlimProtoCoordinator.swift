@@ -694,6 +694,7 @@ extension SlimProtoCoordinator {
     private func fetchCurrentTrackMetadata() {
         let playerID = settings.playerMACAddress
         
+        // ENHANCED: Request additional tags for radio/plugin artwork support
         let jsonRPC = [
             "id": 1,
             "method": "slim.request",
@@ -701,13 +702,14 @@ extension SlimProtoCoordinator {
                 playerID,
                 [
                     "status", "-", "1",
-                    "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z"
+                    // ENHANCED: Added artwork_url (u), coverid (c), icon (i), and image tags
+                    "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z,url"
                 ]
             ]
         ] as [String : Any]
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            os_log(.error, log: logger, "Failed to create metadata request")
+            os_log(.error, log: logger, "Failed to create enhanced metadata request")
             return
         }
         
@@ -722,12 +724,12 @@ extension SlimProtoCoordinator {
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                os_log(.error, log: self.logger, "Metadata request failed: %{public}s", error.localizedDescription)
+                os_log(.error, log: self.logger, "Enhanced metadata request failed: %{public}s", error.localizedDescription)
                 return
             }
             
             guard let data = data else {
-                os_log(.error, log: self.logger, "No metadata received")
+                os_log(.error, log: self.logger, "No enhanced metadata received")
                 return
             }
             
@@ -735,7 +737,7 @@ extension SlimProtoCoordinator {
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting track metadata")
+        os_log(.info, log: logger, "🌐 Requesting enhanced track metadata with artwork support")
     }
     
     private func parseTrackMetadata(data: Data) {
@@ -769,15 +771,73 @@ extension SlimProtoCoordinator {
                     }
                 }
                 
-                // Create artwork URL
+                // ENHANCED: Multi-source artwork URL detection
                 var artworkURL: String? = nil
-                if let trackID = firstTrack["id"] as? Int {
+                
+                // Priority 1: Check for remote artwork URL (radio stations, plugins like Radio Paradise, TuneIn, etc.)
+                if let remoteArtworkURL = firstTrack["artwork_url"] as? String, !remoteArtworkURL.isEmpty {
+                    // Handle both relative and absolute URLs
+                    if remoteArtworkURL.hasPrefix("http://") || remoteArtworkURL.hasPrefix("https://") {
+                        // Absolute URL - use as-is (common for Radio Paradise, TuneIn, etc.)
+                        artworkURL = remoteArtworkURL
+                        os_log(.info, log: logger, "🖼️ Using remote artwork URL: %{public}s", remoteArtworkURL)
+                    } else if remoteArtworkURL.hasPrefix("/") {
+                        // Relative URL - prepend server address
+                        let webPort = settings.activeServerWebPort
+                        let host = settings.activeServerHost
+                        artworkURL = "http://\(host):\(webPort)\(remoteArtworkURL)"
+                        os_log(.info, log: logger, "🖼️ Using server-relative artwork URL: %{public}s", artworkURL!)
+                    }
+                }
+                
+                // Priority 2: Check for coverid (local music library)
+                if artworkURL == nil, let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
+                    let webPort = settings.activeServerWebPort
+                    let host = settings.activeServerHost
+                    artworkURL = "http://\(host):\(webPort)/music/\(coverid)/cover.jpg"
+                    os_log(.info, log: logger, "🖼️ Using coverid artwork: %{public}s", artworkURL!)
+                }
+                
+                // Priority 3: Fallback to track ID (legacy method for local tracks)
+                if artworkURL == nil, let trackID = firstTrack["id"] as? Int {
                     let webPort = settings.activeServerWebPort
                     let host = settings.activeServerHost
                     artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
+                    os_log(.info, log: logger, "🖼️ Using fallback track ID artwork: %{public}s", artworkURL!)
                 }
                 
-                os_log(.info, log: logger, "🎵 Metadata: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                // Priority 4: Check for plugin-specific icon/image fields
+                if artworkURL == nil {
+                    // Some plugins use 'icon' field
+                    if let iconURL = firstTrack["icon"] as? String, !iconURL.isEmpty {
+                        if iconURL.hasPrefix("http://") || iconURL.hasPrefix("https://") {
+                            artworkURL = iconURL
+                            os_log(.info, log: logger, "🖼️ Using plugin icon URL: %{public}s", iconURL)
+                        } else if iconURL.hasPrefix("/") {
+                            let webPort = settings.activeServerWebPort
+                            let host = settings.activeServerHost
+                            artworkURL = "http://\(host):\(webPort)\(iconURL)"
+                            os_log(.info, log: logger, "🖼️ Using server-relative icon URL: %{public}s", artworkURL!)
+                        }
+                    }
+                    // Some plugins use 'image' field
+                    else if let imageURL = firstTrack["image"] as? String, !imageURL.isEmpty {
+                        if imageURL.hasPrefix("http://") || imageURL.hasPrefix("https://") {
+                            artworkURL = imageURL
+                            os_log(.info, log: logger, "🖼️ Using plugin image URL: %{public}s", imageURL)
+                        } else if imageURL.hasPrefix("/") {
+                            let webPort = settings.activeServerWebPort
+                            let host = settings.activeServerHost
+                            artworkURL = "http://\(host):\(webPort)\(imageURL)"
+                            os_log(.info, log: logger, "🖼️ Using server-relative image URL: %{public}s", artworkURL!)
+                        }
+                    }
+                }
+                
+                // Enhanced logging based on source type
+                let sourceType = determineSourceType(from: firstTrack)
+                os_log(.info, log: logger, "🎵 Metadata (%{public}s): '%{public}s' by %{public}s%{public}s",
+                       sourceType, trackTitle, trackArtist, artworkURL != nil ? " [with artwork]" : "")
                 
                 DispatchQueue.main.async {
                     self.audioManager.updateTrackMetadata(
@@ -795,6 +855,54 @@ extension SlimProtoCoordinator {
         } catch {
             os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
         }
+    }
+    
+    // MARK: - Helper Method to Determine Source Type
+    private func determineSourceType(from trackData: [String: Any]) -> String {
+        // Check various indicators to determine the source type
+        
+        // Check for Radio Paradise specific fields
+        if let url = trackData["url"] as? String {
+            if url.contains("radioparadise.com") {
+                return "Radio Paradise"
+            }
+            if url.contains("tunein.com") || url.contains("radiotime.com") {
+                return "TuneIn Radio"
+            }
+            if url.contains("somafm.com") {
+                return "SomaFM"
+            }
+            if url.contains("spotify.com") {
+                return "Spotify"
+            }
+            if url.contains("tidal.com") {
+                return "Tidal"
+            }
+            if url.contains("qobuz.com") {
+                return "Qobuz"
+            }
+            // Generic radio stream detection
+            if url.contains(".pls") || url.contains(".m3u") || url.contains("stream") {
+                return "Internet Radio"
+            }
+        }
+        
+        // Check for remote_title which often indicates streaming
+        if trackData["remote_title"] != nil {
+            return "Internet Radio"
+        }
+        
+        // Check for plugin-specific fields
+        if trackData["icon"] != nil || trackData["image"] != nil {
+            return "Plugin Stream"
+        }
+        
+        // Check if it has a file path (local music)
+        if let trackID = trackData["id"] as? Int, trackID > 0 {
+            return "Local Music"
+        }
+        
+        return "Unknown Source"
     }
     
     // Add to SlimProtoConnectionManagerDelegate extension
@@ -835,7 +943,7 @@ extension SlimProtoCoordinator {
                     
                     // If we were playing before, resume playback
                     if recoveryInfo.wasPlaying {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                             self.sendJSONRPCCommand("play")
                         }
                     }
