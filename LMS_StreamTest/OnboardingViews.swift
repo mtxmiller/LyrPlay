@@ -2,6 +2,7 @@
 import SwiftUI
 import os.log
 import Network
+import Foundation
 
 
 // MARK: - Main Onboarding Container
@@ -352,310 +353,280 @@ struct ServerSetupView: View {
             .padding(.horizontal)
         }
         .onAppear {
+            print("🔧 ServerSetupView appeared")
             loadCurrentSettings()
+            print("🔧 Settings loaded, scheduling auto-discovery")
             
             // Auto-start discovery after a brief delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                print("🔧 Auto-discovery timer fired")
                 startServerDiscovery()
             }
         }
     }
     
     private func startServerDiscovery() {
-        guard !isDiscovering else { return }
+        print("🔧 startServerDiscovery() called")
+        print("🔧 isDiscovering state: \(isDiscovering)")
         
-        isDiscovering = true
+        guard !isDiscovering else {
+            print("🔧 Discovery already in progress - returning")
+            return
+        }
+        
+        print("🔧 Starting discovery without setting flag here")
         discoveredServers.removeAll()
         
         // Start discovery on background queue
         DispatchQueue.global(qos: .userInitiated).async {
-            discoverLMSServers()
+            print("🔧 Background queue started, calling discoverLMSServers")
+            self.discoverLMSServers()
         }
     }
 
     private func discoverLMSServers() {
-        guard !isDiscovering else { return }
+        print("🚨 discoverLMSServers() ENTERED - FIRST LINE")
+        
+        guard !isDiscovering else {
+            print("❌ Discovery already in progress - skipping")
+            return
+        }
         
         isDiscovering = true
         discoveredServers.removeAll()
         
-        // Start multiple discovery methods concurrently
+        print("🔍 Starting real LMS discovery using UDP broadcast...")
+        
+        // Start discovery methods concurrently
         DispatchQueue.global(qos: .userInitiated).async {
             let group = DispatchGroup()
             var foundServers: Set<DiscoveredServer> = []
             let lock = NSLock()
             
-            // Method 1: Bonjour/mDNS Discovery (most reliable)
+            // Method 1: Real LMS UDP Discovery Protocol (primary)
             group.enter()
-            self.discoverViaMDNS { servers in
+            self.discoverViaUDPBroadcast { servers in
                 lock.lock()
                 foundServers.formUnion(servers)
+                print("📡 UDP discovery found: \(servers.count) servers")
                 lock.unlock()
                 group.leave()
             }
             
-            // Method 2: Network broadcast scanning
-            group.enter()
-            self.discoverViaBroadcast { servers in
-                lock.lock()
-                foundServers.formUnion(servers)
-                lock.unlock()
-                group.leave()
-            }
-            
-            // Method 3: Common hostnames (fastest)
+            // Method 2: Fallback - Common hostnames
             group.enter()
             self.discoverViaCommonNames { servers in
                 lock.lock()
                 foundServers.formUnion(servers)
+                print("🏠 Common names found: \(servers.count) servers")
                 lock.unlock()
                 group.leave()
             }
             
-            // Method 4: Smart network scanning (improved)
+            // Method 3: Fallback - Local network scan
             group.enter()
-            self.discoverViaSmartScan { servers in
+            self.discoverViaLocalNetwork { servers in
                 lock.lock()
                 foundServers.formUnion(servers)
+                print("🌐 Network scan found: \(servers.count) servers")
                 lock.unlock()
                 group.leave()
             }
             
-            // Wait for all methods to complete (max 30 seconds)
-            _ = group.wait(timeout: .now() + 30)
+            // Wait for all methods to complete (max 15 seconds)
+            _ = group.wait(timeout: .now() + 15)
             
             // Update UI on main thread
             DispatchQueue.main.async {
                 self.discoveredServers = Array(foundServers).sorted { $0.name < $1.name }
                 self.isDiscovering = false
                 
-                print("Discovery complete: Found \(foundServers.count) servers")
+                print("🎯 Discovery complete: Found \(foundServers.count) servers")
+                
+                if foundServers.isEmpty {
+                    print("❌ No servers found - check network and firewall settings")
+                    print("💡 Try manual entry or check if LMS is running on port 9000")
+                }
             }
         }
     }
     
-    // MARK: - Method 1: Bonjour/mDNS Discovery
-    private func discoverViaMDNS(completion: @escaping (Set<DiscoveredServer>) -> Void) {
+    // MARK: - Method 1: Real LMS UDP Discovery Protocol
+    private func discoverViaUDPBroadcast(completion: @escaping (Set<DiscoveredServer>) -> Void) {
+        print("📡 discoverViaUDPBroadcast() called")
         var foundServers: Set<DiscoveredServer> = []
         
-        // Create a browser for HTTP services (LMS web interface)
-        let httpBrowser = NWBrowser(for: .bonjour(type: "_http._tcp", domain: "local"), using: .udp)
+        print("📡 Starting UDP broadcast discovery...")
         
-        var discoveryComplete = false
-        let discoveryTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
-            if !discoveryComplete {
-                discoveryComplete = true
-                httpBrowser.cancel()
-                completion(foundServers)
-            }
-        }
-        
-        httpBrowser.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                print("mDNS browser ready")
-            case .failed(let error):
-                print("mDNS browser failed: \(error)")
-                if !discoveryComplete {
-                    discoveryComplete = true
-                    discoveryTimer.invalidate()
-                    completion(foundServers)
-                }
-            default:
-                break
-            }
-        }
-        
-        httpBrowser.browseResultsChangedHandler = { results, changes in
-            for result in results {
-                switch result.endpoint {
-                case .service(let name, let type, let domain, _):
-                    // Check if this might be LMS by testing the service
-                    self.validatePotentialLMSService(name: name, type: type, domain: domain) { server in
-                        if let server = server {
-                            foundServers.insert(server)
-                        }
-                    }
-                default:
-                    break
-                }
-            }
-        }
-        
-        httpBrowser.start(queue: DispatchQueue.global())
-        
-        // Also try to find services advertised as _squeezebox._tcp or _slimserver._tcp
-        self.discoverSpecificMDNSTypes { specificServers in
-            foundServers.formUnion(specificServers)
-        }
-    }
-
-    private func discoverSpecificMDNSTypes(completion: @escaping (Set<DiscoveredServer>) -> Void) {
-        var foundServers: Set<DiscoveredServer> = []
-        let serviceTypes = ["_squeezebox._tcp", "_slimserver._tcp", "_lms._tcp"]
-        
-        let group = DispatchGroup()
-        
-        for serviceType in serviceTypes {
-            group.enter()
-            
-            let browser = NWBrowser(for: .bonjour(type: serviceType, domain: "local"), using: .udp)
-            
-            var typeDiscoveryComplete = false
-            let typeTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
-                if !typeDiscoveryComplete {
-                    typeDiscoveryComplete = true
-                    browser.cancel()
-                    group.leave()
-                }
-            }
-            
-            browser.browseResultsChangedHandler = { results, changes in
-                for result in results {
-                    switch result.endpoint {
-                    case .service(let name, let type, let domain, _):
-                        // Try to resolve this service
-                        self.resolveMDNSService(name: name, type: type, domain: domain) { server in
-                            if let server = server {
-                                foundServers.insert(server)
-                            }
-                        }
-                    default:
-                        break
-                    }
-                }
-            }
-            
-            browser.start(queue: DispatchQueue.global())
-        }
-        
-        group.notify(queue: DispatchQueue.global()) {
-            completion(foundServers)
-        }
-    }
-
-    private func validatePotentialLMSService(name: String, type: String, domain: String, completion: @escaping (DiscoveredServer?) -> Void) {
-        // Extract host information and test if it's actually LMS
-        let serviceName = name.lowercased()
-        
-        // Look for LMS-related names
-        let lmsKeywords = ["lms", "squeezebox", "slimserver", "lyrion", "logitech"]
-        let isLikely = lmsKeywords.contains { serviceName.contains($0) }
-        
-        if isLikely {
-            // Try to resolve and test
-            resolveMDNSService(name: name, type: type, domain: domain, completion: completion)
-        } else {
-            completion(nil)
-        }
-    }
-
-    private func resolveMDNSService(name: String, type: String, domain: String, completion: @escaping (DiscoveredServer?) -> Void) {
-        // This is a simplified version - in practice you'd need to use lower-level DNS resolution
-        // For now, extract any IP information we can and test common ports
-        
-        // Try common local domain patterns
-        let possibleHosts = [
-            name.components(separatedBy: ".").first ?? name,
-            "\(name).local",
-            name
-        ]
-        
-        for host in possibleHosts {
-            self.checkLMSServer(host: host, port: 9000) { server in
-                completion(server)
-                return
-            }
-        }
-    }
-
-    // MARK: - Method 2: Network Broadcast Discovery
-    private func discoverViaBroadcast(completion: @escaping (Set<DiscoveredServer>) -> Void) {
-        var foundServers: Set<DiscoveredServer> = []
-        
-        // Use SLIMP3 discovery protocol on port 1069
+        // Create UDP socket for discovery
         let socket = socket(AF_INET, SOCK_DGRAM, 0)
+        print("📡 Created socket: \(socket)")
         guard socket >= 0 else {
+            print("❌ Failed to create UDP socket, errno: \(errno)")
             completion(foundServers)
             return
         }
         
         // Enable broadcast
         var broadcast = 1
-        setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int>.size))
-        
-        // Create discovery packet (simplified SLIMP3 format)
-        var packet = Data()
-        packet.append(UInt8(ascii: "d"))  // Discovery
-        packet.append(0)  // Reserved
-        packet.append(9)  // Device ID (squeezelite)
-        packet.append(0x11)  // Firmware version
-        packet.append(Data(repeating: 0, count: 8))  // Reserved
-        
-        // Add MAC address
-        let macString = settings.playerMACAddress
-        let macComponents = macString.components(separatedBy: ":")
-        for component in macComponents {
-            if let byte = UInt8(component, radix: 16) {
-                packet.append(byte)
-            }
+        let broadcastResult = setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int>.size))
+        guard broadcastResult == 0 else {
+            print("❌ Failed to enable broadcast on socket")
+            close(socket)
+            completion(foundServers)
+            return
         }
         
-        // Send to broadcast addresses
-        let broadcastAddresses = ["255.255.255.255", "192.168.1.255", "192.168.0.255", "10.0.0.255"]
+        // Set socket timeout for receiving responses
+        var timeout = timeval()
+        timeout.tv_sec = 3  // 3 second timeout
+        timeout.tv_usec = 0
+        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        
+        // Create discovery packet based on LMS protocol
+        var discoveryPacket = Data()
+        
+        // LMS discovery protocol: send "eIPAD\0" followed by device info
+        discoveryPacket.append("eIPAD".data(using: .ascii)!)
+        discoveryPacket.append(0) // null terminator
+        
+        // Add device identifier
+        discoveryPacket.append("SlimAMP".data(using: .ascii)!)
+        discoveryPacket.append(0) // null terminator
+        
+        print("📡 Sending UDP discovery packets...")
+        
+        // Send discovery packet to broadcast addresses
+        let broadcastAddresses = [
+            "255.255.255.255",  // Global broadcast
+            "192.168.1.255",    // Common home network
+            "192.168.0.255",    // Common home network
+            "10.0.0.255",       // Common private network
+            "172.16.255.255"    // Private network range
+        ]
         
         for address in broadcastAddresses {
             var addr = sockaddr_in()
             addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = UInt16(1069).bigEndian
+            addr.sin_port = UInt16(9090).bigEndian  // LMS CLI port for discovery
             inet_pton(AF_INET, address, &addr.sin_addr)
             
-            withUnsafePointer(to: &addr) { ptr in
+            let sendResult = withUnsafePointer(to: &addr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    packet.withUnsafeBytes { bytes in
-                        sendto(socket, bytes.bindMemory(to: UInt8.self).baseAddress, packet.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    discoveryPacket.withUnsafeBytes { bytes in
+                        sendto(socket, bytes.bindMemory(to: UInt8.self).baseAddress, discoveryPacket.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
                     }
                 }
+            }
+            
+            if sendResult > 0 {
+                print("📡 Sent discovery to \(address)")
+            }
+        }
+        
+        // Listen for responses
+        print("👂 Listening for LMS responses...")
+        
+        var responseBuffer = [UInt8](repeating: 0, count: 1024)
+        var senderAddr = sockaddr_in()
+        var senderAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        
+        let startTime = Date()
+        let maxWaitTime: TimeInterval = 5.0
+        
+        while Date().timeIntervalSince(startTime) < maxWaitTime {
+            let bytesReceived = withUnsafeMutablePointer(to: &senderAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    recvfrom(socket, &responseBuffer, responseBuffer.count, 0, sockPtr, &senderAddrLen)
+                }
+            }
+            
+            if bytesReceived > 0 {
+                // Parse response
+                let responseData = Data(responseBuffer.prefix(Int(bytesReceived)))
+                
+                // Convert sender address to string
+                var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let result = withUnsafePointer(to: &senderAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                        getnameinfo(sockPtr, senderAddrLen, &hostBuffer, socklen_t(hostBuffer.count), nil, 0, NI_NUMERICHOST)
+                    }
+                }
+                
+                if result == 0 {
+                    let serverIP = String(cString: hostBuffer)
+                    print("📡 Got response from \(serverIP)")
+                    
+                    // Parse the response to extract server info
+                    if let serverInfo = parseLMSDiscoveryResponse(responseData, serverIP: serverIP) {
+                        foundServers.insert(serverInfo)
+                        print("✅ Found LMS server: \(serverInfo.name) at \(serverIP)")
+                    } else {
+                        // Even if we can't parse the response, we know there's a server there
+                        // Validate it's actually LMS
+                        validateLMSServerQuick(host: serverIP, port: 9000) { server in
+                            if let server = server {
+                                foundServers.insert(server)
+                                print("✅ Validated LMS server at \(serverIP)")
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No more responses, small delay before checking again
+                usleep(100000) // 100ms
             }
         }
         
         close(socket)
         
-        // Wait a moment for responses, then complete
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) {
-            completion(foundServers)
-        }
+        print("📡 UDP discovery complete, found \(foundServers.count) servers")
+        completion(foundServers)
     }
 
-    // MARK: - Method 3: Common Hostnames (Enhanced)
+    
+    private func parseLMSDiscoveryResponse(_ data: Data, serverIP: String) -> DiscoveredServer? {
+        // LMS discovery responses vary, but typically contain server info
+        // Convert to string and look for patterns
+        guard let responseString = String(data: data, encoding: .ascii) ?? String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        
+        print("📡 Response from \(serverIP): \(responseString)")
+        
+        // Look for server name patterns in response
+        var serverName = "LMS Server"
+        
+        // Try to extract server name from various response formats
+        if responseString.contains("LMS") || responseString.contains("Lyrion") {
+            serverName = "Lyrion Music Server"
+        } else if responseString.contains("Squeezebox") || responseString.contains("Slim") {
+            serverName = "Logitech Media Server"
+        }
+        
+        return DiscoveredServer(name: serverName, host: serverIP, port: 9000)
+    }
+
+    // MARK: - Method 2: Common Hostnames (Fallback)
     private func discoverViaCommonNames(completion: @escaping (Set<DiscoveredServer>) -> Void) {
         var foundServers: Set<DiscoveredServer> = []
         let group = DispatchGroup()
         
-        // Enhanced list of common LMS hostnames
         let commonHosts = [
-            // Standard LMS names
-            "lms.local", "squeezebox.local", "logitechmediaserver.local",
-            "slimserver.local", "musicserver.local", "lyrion.local",
-            
-            // NAS-specific names
-            "synology.local", "qnap.local", "readynas.local",
-            "diskstation.local", "nas.local",
-            
-            // Generic server names
-            "server.local", "mediaserver.local", "music.local",
-            "home.local", "homeserver.local",
-            
-            // Raspberry Pi names
-            "picore.local", "picoreplayer.local", "pi.local",
-            "raspberry.local", "raspberrypi.local"
+            "lms.local", "squeezebox.local", "lyrion.local",
+            "logitechmediaserver.local", "slimserver.local",
+            "musicserver.local", "nas.local", "synology.local",
+            "pi.local", "raspberry.local", "picore.local"
         ]
+        
+        print("🏠 Checking common hostnames...")
         
         for host in commonHosts {
             group.enter()
-            checkLMSServer(host: host, port: 9000) { server in
+            validateLMSServerQuick(host: host, port: 9000) { server in
                 if let server = server {
                     foundServers.insert(server)
+                    print("✅ Found LMS via hostname: \(host)")
                 }
                 group.leave()
             }
@@ -665,70 +636,220 @@ struct ServerSetupView: View {
             completion(foundServers)
         }
     }
-
-    // MARK: - Method 4: Smart Network Scanning (Much Improved)
-    private func discoverViaSmartScan(completion: @escaping (Set<DiscoveredServer>) -> Void) {
+    
+    // MARK: - Method 3: Local Network Discovery
+    private func discoverViaLocalNetwork(completion: @escaping (Set<DiscoveredServer>) -> Void) {
         var foundServers: Set<DiscoveredServer> = []
         
-        // Get current network info to scan intelligently
-        let networkPaths = NWPathMonitor().currentPath
-        
-        var baseAddresses: [String] = []
-        
-        // Extract network ranges from current interfaces
-        if networkPaths.availableInterfaces.count > 0 {
-            // In a real implementation, you'd get the actual network ranges
-            // For now, use common ranges but scan more intelligently
-            baseAddresses = ["192.168.1.", "192.168.0.", "10.0.0.", "172.16.0."]
+        guard let currentIP = getCurrentDeviceIP() else {
+            print("❌ Could not determine device IP for network scan")
+            completion(foundServers)
+            return
         }
+        
+        print("📱 Device IP: \(currentIP)")
+        
+        let ipComponents = currentIP.components(separatedBy: ".")
+        guard ipComponents.count == 4 else {
+            completion(foundServers)
+            return
+        }
+        
+        let networkPrefix = "\(ipComponents[0]).\(ipComponents[1]).\(ipComponents[2])."
+        print("🌐 Scanning local network: \(networkPrefix)x")
         
         let group = DispatchGroup()
         
-        // Smart scanning - check common server IPs first, then expand
-        let commonServerIPs = [1, 2, 10, 100, 101, 200, 254]  // Common server IPs
-        let additionalIPs = Array(3...20) + Array(50...60)     // Additional range if needed
+        // Scan common server IPs in local network
+        let commonIPs = [1, 2, 10, 50, 100, 101, 200, 254]
+        
+        for ip in commonIPs {
+            group.enter()
+            let host = "\(networkPrefix)\(ip)"
+            
+            validateLMSServerQuick(host: host, port: 9000) { server in
+                if let server = server {
+                    foundServers.insert(server)
+                    print("✅ Found LMS on local network: \(host)")
+                }
+                group.leave()
+            }
+        }
+        
+        group.notify(queue: DispatchQueue.global()) {
+            completion(foundServers)
+        }
+    }
+    
+    // MARK: - Helper Methods
+
+    private func validateLMSServerQuick(host: String, port: Int, completion: @escaping (DiscoveredServer?) -> Void) {
+        // Quick validation - just check if port 9000 responds
+        guard let url = URL(string: "http://\(host):\(port)/") else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 2.0
+        request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
+        
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode < 400,
+               error == nil {
+                
+                // Try to get server name via quick JSON-RPC call
+                self.getLMSServerNameQuick(host: host, port: port) { serverName in
+                    let name = serverName ?? "LMS Server"
+                    completion(DiscoveredServer(name: name, host: host, port: port))
+                }
+            } else {
+                completion(nil)
+            }
+        }.resume()
+    }
+    
+    private func getLMSServerNameQuick(host: String, port: Int, completion: @escaping (String?) -> Void) {
+        guard let url = URL(string: "http://\(host):\(port)/jsonrpc.js") else {
+            completion(nil)
+            return
+        }
+        
+        let jsonRPC: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["version", "?"]]
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
+        request.httpBody = jsonData
+        request.timeoutInterval = 2.0
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            var serverName: String? = nil
+            
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = json["result"] as? [String: Any] {
+                
+                if let version = result["_version"] as? String {
+                    serverName = "LMS \(version)"
+                } else {
+                    serverName = "Lyrion Music Server"
+                }
+            } else {
+                serverName = "LMS Server"
+            }
+            
+            completion(serverName)
+        }.resume()
+    }
+
+    
+    private func checkLMSServerFast(host: String, port: Int, completion: @escaping (DiscoveredServer?) -> Void) {
+        guard let url = URL(string: "http://\(host):\(port)/") else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 1.0  // Faster timeout for network scanning
+        request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
+        
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode < 400,
+               error == nil {
+                
+                // For fast scanning, just check if it responds to basic LMS paths
+                self.quickValidateLMSServer(host: host, port: port) { serverName in
+                    let name = serverName ?? "LMS Server"
+                    completion(DiscoveredServer(name: name, host: host, port: port))
+                }
+            } else {
+                completion(nil)
+            }
+        }.resume()
+    }
+
+
+    
+    private func discoverViaSmartScan(completion: @escaping (Set<DiscoveredServer>) -> Void) {
+        var foundServers: Set<DiscoveredServer> = []
+        let group = DispatchGroup()
+        
+        // Common network ranges
+        let baseAddresses = ["192.168.1.", "192.168.0.", "10.0.0.", "172.16.0.", "192.168.2."]
+        
+        // Smart scanning - check most common server IPs first
+        let commonServerIPs = [1, 2, 10, 50, 100, 101, 150, 200, 254]
+        
+        print("🌐 Scanning common network addresses...")
         
         for baseAddr in baseAddresses {
-            // First pass - check common server IPs
             for ip in commonServerIPs {
                 group.enter()
                 let host = "\(baseAddr)\(ip)"
                 checkLMSServer(host: host, port: 9000) { server in
                     if let server = server {
                         foundServers.insert(server)
+                        print("✅ Found LMS at: \(host)")
                     }
                     group.leave()
                 }
             }
         }
         
-        // Second pass - if we found something, scan more broadly in that network
         group.notify(queue: DispatchQueue.global()) {
-            if foundServers.isEmpty {
-                // No servers found in first pass, try additional IPs
-                let secondGroup = DispatchGroup()
+            completion(foundServers)
+        }
+    }
+
+    private func getCurrentDeviceIP() -> String? {
+        var address: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        
+        if getifaddrs(&ifaddr) == 0 {
+            var ptr = ifaddr
+            while ptr != nil {
+                defer { ptr = ptr?.pointee.ifa_next }
                 
-                for baseAddr in baseAddresses.prefix(2) {  // Limit to first 2 networks
-                    for ip in additionalIPs {
-                        secondGroup.enter()
-                        let host = "\(baseAddr)\(ip)"
-                        self.checkLMSServer(host: host, port: 9000) { server in
-                            if let server = server {
-                                foundServers.insert(server)
-                            }
-                            secondGroup.leave()
+                guard let interface = ptr?.pointee else { continue }
+                let addrFamily = interface.ifa_addr.pointee.sa_family
+                
+                if addrFamily == UInt8(AF_INET) {
+                    let name = String(cString: interface.ifa_name)
+                    
+                    if name == "en0" || name == "en1" || name.hasPrefix("en") {
+                        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                        getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
+                                   &hostname, socklen_t(hostname.count),
+                                   nil, socklen_t(0), NI_NUMERICHOST)
+                        address = String(cString: hostname)
+                        
+                        if address != "127.0.0.1" && address?.hasPrefix("169.254") == false {
+                            break
                         }
                     }
                 }
-                
-                secondGroup.notify(queue: DispatchQueue.global()) {
-                    completion(foundServers)
-                }
-            } else {
-                completion(foundServers)
             }
+            freeifaddrs(ifaddr)
         }
+        
+        return address
     }
+
 
     // MARK: - Enhanced LMS Server Validation
     private func checkLMSServer(host: String, port: Int, completion: @escaping (DiscoveredServer?) -> Void) {
@@ -739,7 +860,7 @@ struct ServerSetupView: View {
         
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        request.timeoutInterval = 2.0  // Faster timeout for discovery
+        request.timeoutInterval = 3.0
         request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
         
         URLSession.shared.dataTask(with: request) { _, response, error in
@@ -803,37 +924,24 @@ struct ServerSetupView: View {
             completion(serverName)
         }.resume()
     }
-
-    private func getLMSServerName(host: String, port: Int, completion: @escaping (String?) -> Void) {
-        guard let url = URL(string: "http://\(host):\(port)/jsonrpc.js") else {
-            completion(nil)
-            return
-        }
-        
-        let jsonRPC: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["serverstatus", "0", "0"]]
-        ]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+    
+    private func quickValidateLMSServer(host: String, port: Int, completion: @escaping (String?) -> Void) {
+        // Quick check - just verify it has LMS-like paths
+        guard let url = URL(string: "http://\(host):\(port)/material/") else {
             completion(nil)
             return
         }
         
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = jsonData
+        request.httpMethod = "HEAD"
         request.timeoutInterval = 2.0
+        request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
         
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            if let data = data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let result = json["result"] as? [String: Any],
-               let serverName = result["hostname"] as? String {
-                completion(serverName)
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode < 400,
+               error == nil {
+                completion("LMS Server")
             } else {
                 completion(nil)
             }
