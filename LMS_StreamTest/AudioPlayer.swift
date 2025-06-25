@@ -11,6 +11,7 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerDidReachEnd()
     func audioPlayerTimeDidUpdate(_ time: Double)
     func audioPlayerDidStall()
+    func audioPlayerDidReceiveMetadataUpdate()
 }
 
 class AudioPlayer: NSObject, ObservableObject {
@@ -285,6 +286,31 @@ extension AudioPlayer: STKAudioPlayerDelegate {
             os_log(.info, log: logger, "✅ Reported start playing to delegate")
         } else {
             os_log(.debug, log: logger, "🔄 Suppressed duplicate start playing event")
+        }
+    }
+    
+    // Add this method to the STKAudioPlayerDelegate extension in AudioPlayer.swift
+    func audioPlayer(_ audioPlayer: STKAudioPlayer, didReceiveRawAudioData audioData: Data, audioDescription: AudioStreamBasicDescription) {
+        // Check for ICY metadata in the stream
+        checkForICYMetadata(in: audioData)
+    }
+
+    // Add this method to the AudioPlayer class
+    private func checkForICYMetadata(in data: Data) {
+        // Look for ICY metadata patterns in the audio data
+        // This is a simplified implementation - StreamingKit might have better hooks
+        
+        // Convert data to string to look for metadata
+        if let dataString = String(data: data, encoding: .utf8) {
+            // Look for common ICY metadata patterns
+            if dataString.contains("StreamTitle=") {
+                os_log(.info, log: logger, "🎵 ICY metadata detected in stream")
+                
+                // Notify delegate that metadata might have changed
+                DispatchQueue.main.async {
+                    self.delegate?.audioPlayerDidReceiveMetadataUpdate()
+                }
+            }
         }
     }
     

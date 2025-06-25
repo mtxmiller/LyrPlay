@@ -16,6 +16,7 @@ class AudioManager: NSObject, ObservableObject {
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 2.0  // Max update every 2 seconds
     
+    
     // NEW: Expose NowPlayingManager for coordinator access
     func getNowPlayingManager() -> NowPlayingManager {
         return nowPlayingManager
@@ -225,6 +226,18 @@ extension AudioManager: AudioPlayerDelegate {
         os_log(.error, log: logger, "⚠️ Audio player stalled")
         
         // Could add retry logic here in the future
+    }
+    
+    func audioPlayerDidReceiveMetadataUpdate() {
+        os_log(.info, log: logger, "🎵 Audio player detected metadata update - requesting fresh metadata")
+        
+        // Notify the coordinator to fetch fresh metadata
+        if let slimClient = slimClient {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                // Request fresh metadata from server
+                slimClient.requestFreshMetadata()
+            }
+        }
     }
 }
 
