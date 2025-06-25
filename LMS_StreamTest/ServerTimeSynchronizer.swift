@@ -390,7 +390,7 @@ class ServerTimeSynchronizer: ObservableObject {
     func getCurrentInterpolatedTime() -> (time: Double, isPlaying: Bool, isServerTime: Bool) {
         // If we have ANY server time data, use it - don't be picky about "staleness"
         guard lastServerTime > 0, let lastSync = lastSuccessfulSync else {
-            os_log(.debug, log: logger, "🔒 NO SERVER DATA - returning 0.0")
+           // os_log(.debug, log: logger, "🔒 NO SERVER DATA - returning 0.0")
             return (time: 0.0, isPlaying: false, isServerTime: false)
         }
         
@@ -411,11 +411,11 @@ class ServerTimeSynchronizer: ObservableObject {
         let interpolatedTime: Double
         if lastServerIsPlaying {
             interpolatedTime = lastServerTime + timeSinceSync
-            os_log(.debug, log: logger, "🔒 INTERPOLATING: base=%.2f + elapsed=%.2f = %.2f",
-                   lastServerTime, timeSinceSync, interpolatedTime)
+           // os_log(.debug, log: logger, "🔒 INTERPOLATING: base=%.2f + elapsed=%.2f = %.2f",
+          //         lastServerTime, timeSinceSync, interpolatedTime)
         } else {
             interpolatedTime = lastServerTime
-            os_log(.debug, log: logger, "🔒 NOT INTERPOLATING (paused): returning base=%.2f", lastServerTime)
+           // os_log(.debug, log: logger, "🔒 NOT INTERPOLATING (paused): returning base=%.2f", lastServerTime)
         }
         
         // Clamp to duration if we have it
@@ -423,14 +423,14 @@ class ServerTimeSynchronizer: ObservableObject {
         if lastServerDuration > 0 {
             clampedTime = min(interpolatedTime, lastServerDuration)
             if clampedTime != interpolatedTime {
-                os_log(.debug, log: logger, "🔒 CLAMPED to duration: %.2f → %.2f", interpolatedTime, clampedTime)
+              //  os_log(.debug, log: logger, "🔒 CLAMPED to duration: %.2f → %.2f", interpolatedTime, clampedTime)
             }
         } else {
             clampedTime = max(0, interpolatedTime)
         }
         
-        os_log(.debug, log: logger, "🔒 RETURNING: time=%.2f, playing=%{public}s, lastSync=%.1fs ago",
-               clampedTime, lastServerIsPlaying ? "YES" : "NO", timeSinceSync)
+       // os_log(.debug, log: logger, "🔒 RETURNING: time=%.2f, playing=%{public}s, lastSync=%.1fs ago",
+       //        clampedTime, lastServerIsPlaying ? "YES" : "NO", timeSinceSync)
         
         // ALWAYS return isServerTime=true if we have server data
         return (time: clampedTime, isPlaying: lastServerIsPlaying, isServerTime: true)

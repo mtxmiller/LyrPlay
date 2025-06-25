@@ -51,19 +51,19 @@ class NowPlayingManager: ObservableObject {
         setupNowPlayingInfo()
         setupRemoteCommandCenter()
         startUpdateTimer()
-        os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
+        //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
     }
     
     // MARK: - Server Time Integration
     func setServerTimeSynchronizer(_ synchronizer: ServerTimeSynchronizer) {
         self.serverTimeSynchronizer = synchronizer
         synchronizer.delegate = self
-        os_log(.info, log: logger, "✅ Server time synchronizer connected")
+        //os_log(.info, log: logger, "✅ Server time synchronizer connected")
     }
     
     func setAudioManager(_ audioManager: AudioManager) {
         self.audioManager = audioManager
-        os_log(.info, log: logger, "✅ Audio manager connected for fallback timing")
+        //os_log(.info, log: logger, "✅ Audio manager connected for fallback timing")
     }
     
     // MARK: - Update Timer Management
@@ -74,7 +74,7 @@ class NowPlayingManager: ObservableObject {
             self?.updateNowPlayingTime()
         }
         
-        os_log(.debug, log: logger, "🔄 Now playing update timer started")
+        //os_log(.debug, log: logger, "🔄 Now playing update timer started")
     }
     
     private func stopUpdateTimer() {
@@ -86,8 +86,8 @@ class NowPlayingManager: ObservableObject {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
         
         // Log every update to see what's changing the lock screen
-        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
-               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        //os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
+         //      currentTime, timeSource.description, isPlaying ? "YES" : "NO")
         
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
@@ -96,8 +96,8 @@ class NowPlayingManager: ObservableObject {
         let newUsingServerTime = (timeSource == .serverTime)
         if newUsingServerTime != isUsingServerTime {
             isUsingServerTime = newUsingServerTime
-            os_log(.info, log: logger, "🔒 TIME SOURCE CHANGED: %{public}s → %{public}s",
-                   isUsingServerTime ? "Server" : "Other", timeSource.description)
+            //os_log(.info, log: logger, "🔒 TIME SOURCE CHANGED: %{public}s → %{public}s",
+           //        isUsingServerTime ? "Server" : "Other", timeSource.description)
         }
     }
     
@@ -126,8 +126,8 @@ class NowPlayingManager: ObservableObject {
             if timeSinceStorage < 120.0 && lockScreenStoredPosition > 0.1 {
                 let recoveryInfo = getStoredPositionWithTimeOffset()
                 if recoveryInfo.isValid {
-                    os_log(.debug, log: logger, "🔒 Using stored recovery position: %.2f (%.1fs ago)",
-                           recoveryInfo.position, timeSinceStorage)
+                    //os_log(.debug, log: logger, "🔒 Using stored recovery position: %.2f (%.1fs ago)",
+                    //       recoveryInfo.position, timeSinceStorage)
                     
                     return (time: recoveryInfo.position, isPlaying: recoveryInfo.wasPlaying, source: .lastKnown)
                 }
@@ -141,16 +141,16 @@ class NowPlayingManager: ObservableObject {
             // CRITICAL FIX: Use server time if it's > 0.1 seconds (not just > 0)
             // This prevents using bogus 0.00 positions from pause commands
             if serverInfo.time > 0.1 {
-                os_log(.debug, log: logger, "🔒 Using server time: %.2f (marked valid: %{public}s)",
-                       serverInfo.time, serverInfo.isServerTime ? "YES" : "NO")
+                //os_log(.debug, log: logger, "🔒 Using server time: %.2f (marked valid: %{public}s)",
+                 //      serverInfo.time, serverInfo.isServerTime ? "YES" : "NO")
                 
                 lastKnownServerTime = serverInfo.time
                 return (time: serverInfo.time, isPlaying: serverInfo.isPlaying, source: .serverTime)
             } else {
                 // Server time is 0 or very small - use last known good server time if available
                 if lastKnownServerTime > 0.1 {
-                    os_log(.debug, log: logger, "🔒 Server time is %.2f, using last known good: %.2f",
-                           serverInfo.time, lastKnownServerTime)
+                    //os_log(.debug, log: logger, "🔒 Server time is %.2f, using last known good: %.2f",
+                   //       serverInfo.time, lastKnownServerTime)
                     
                     return (time: lastKnownServerTime, isPlaying: serverInfo.isPlaying, source: .serverTime)
                 }
@@ -164,7 +164,7 @@ class NowPlayingManager: ObservableObject {
             
             // CRITICAL FIX: Only use audio time if it's reasonable and different from our last server time
             if audioTime > 0.1 && abs(audioTime - lastKnownServerTime) < 120.0 {
-                os_log(.debug, log: logger, "🔒 Using audio time: %.2f (server time unavailable)", audioTime)
+                //os_log(.debug, log: logger, "🔒 Using audio time: %.2f (server time unavailable)", audioTime)
                 lastKnownAudioTime = audioTime
                 return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
             }
@@ -172,7 +172,7 @@ class NowPlayingManager: ObservableObject {
         
         // Ultimate fallback - use the best time we have
         let fallbackTime = max(lastKnownServerTime, lastKnownAudioTime, lockScreenStoredPosition)
-        os_log(.debug, log: logger, "🔒 Using ultimate fallback time: %.2f", fallbackTime)
+        //os_log(.debug, log: logger, "🔒 Using ultimate fallback time: %.2f", fallbackTime)
         
         return (time: fallbackTime, isPlaying: false, source: .lastKnown)
     }
@@ -181,8 +181,8 @@ class NowPlayingManager: ObservableObject {
     func storeLockScreenPosition() {
         let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
         
-        os_log(.info, log: logger, "🔒 STORAGE CALL - Current: %.2f, Previously stored: %.2f",
-               currentTime, lockScreenStoredPosition)
+        //os_log(.info, log: logger, "🔒 STORAGE CALL - Current: %.2f, Previously stored: %.2f",
+        //       currentTime, lockScreenStoredPosition)
         
         // Show what time sources are available
         var serverTime: Double = 0.0
@@ -192,13 +192,13 @@ class NowPlayingManager: ObservableObject {
             let serverInfo = synchronizer.getCurrentInterpolatedTime()
             serverTime = serverInfo.time
             serverValid = serverInfo.isServerTime
-            os_log(.info, log: logger, "🔒 SERVER TIME: %.2f (valid: %{public}s)",
-                   serverTime, serverValid ? "YES" : "NO")
+            //os_log(.info, log: logger, "🔒 SERVER TIME: %.2f (valid: %{public}s)",
+            //       serverTime, serverValid ? "YES" : "NO")
         }
         
         if let audioManager = audioManager {
             let audioTime = audioManager.getCurrentTime()
-            os_log(.info, log: logger, "🔒 AUDIO TIME: %.2f", audioTime)
+            //os_log(.info, log: logger, "🔒 AUDIO TIME: %.2f", audioTime)
         }
         
         // IMPROVED LOGIC: Prefer last known good server time over audio time
@@ -214,7 +214,7 @@ class NowPlayingManager: ObservableObject {
         else if !serverValid && lastKnownServerTime > 0.1 {
             positionToStore = lastKnownServerTime
             sourceUsed = "last known server time"
-            os_log(.info, log: logger, "🔒 Using last known server time: %.2f (current server invalid)", lastKnownServerTime)
+            //os_log(.info, log: logger, "🔒 Using last known server time: %.2f (current server invalid)", lastKnownServerTime)
         }
         // 3. Fall back to audio manager time
         else if let audioManager = audioManager {
@@ -222,7 +222,7 @@ class NowPlayingManager: ObservableObject {
             if audioTime > 0.1 {
                 positionToStore = audioTime
                 sourceUsed = "audio manager time"
-                os_log(.info, log: logger, "🔒 Falling back to audio time: %.2f (no good server time)", audioTime)
+                //os_log(.info, log: logger, "🔒 Falling back to audio time: %.2f (no good server time)", audioTime)
             }
         }
         
@@ -233,11 +233,11 @@ class NowPlayingManager: ObservableObject {
             lockScreenWasPlaying = isPlaying
             connectionLostTime = Date()
             
-            os_log(.info, log: logger, "🔒 STORED NEW POSITION: %.2f (source: %{public}s)",
-                   positionToStore, sourceUsed)
+            //os_log(.info, log: logger, "🔒 STORED NEW POSITION: %.2f (source: %{public}s)",
+            //       positionToStore, sourceUsed)
         } else {
-            os_log(.error, log: logger, "🔒 STORAGE REJECTED - No valid position found (server: %.2f, audio: %.2f)",
-                   serverTime, currentTime)
+            //os_log(.error, log: logger, "🔒 STORAGE REJECTED - No valid position found (server: %.2f, audio: %.2f)",
+            //       serverTime, currentTime)
         }
     }
 
@@ -429,8 +429,8 @@ class NowPlayingManager: ObservableObject {
     
     // MARK: - Now Playing Info Updates
     private func updateNowPlayingInfo(isPlaying: Bool, currentTime: Double = 0.0) {
-        os_log(.debug, log: logger, "🔒 SETTING LOCK SCREEN: %.2f (playing: %{public}s)",
-               currentTime, isPlaying ? "YES" : "NO")
+        //os_log(.debug, log: logger, "🔒 SETTING LOCK SCREEN: %.2f (playing: %{public}s)",
+         //      currentTime, isPlaying ? "YES" : "NO")
         
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         

@@ -455,7 +455,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Record that we responded (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
         
-        os_log(.debug, log: logger, "📍 Responded to server status request with %{public}s", statusCode)
+        //os_log(.debug, log: logger, "📍 Responded to server status request with %{public}s", statusCode)
     }
     
     

@@ -308,7 +308,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         let timeSinceLastCommand = now.timeIntervalSince(lastSentTime)
         
         if lastSentCommand == code && timeSinceLastCommand < minimumCommandInterval {
-            os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s", code)
+            //os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s", code)
             return
         }
         
