@@ -15,6 +15,7 @@ protocol SlimProtoClientDelegate: AnyObject {
 private var lastSentCommand: String = ""
 private var lastSentTime: Date = Date()
 private let minimumCommandInterval: TimeInterval = 0.2  // 200ms minimum between commands
+private var lastServerTimestamp: UInt32 = 0
 
 // MARK: - Command Structure
 struct SlimProtoCommand {
@@ -297,42 +298,22 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
                settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
-    func sendStatus(_ code: String) {
+    func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {
         guard isConnected else {
             os_log(.error, log: logger, "Cannot send status - not connected")
             return
         }
         
-        // Anti-spam protection (keep this)
-        let now = Date()
-        let timeSinceLastCommand = now.timeIntervalSince(lastSentTime)
-        
-        if lastSentCommand == code && timeSinceLastCommand < minimumCommandInterval {
-            //os_log(.error, log: logger, "🚫 Blocked duplicate command: %{public}s", code)
-            return
-        }
-        
-        lastSentCommand = code
-        lastSentTime = now
-        
-        switch code {
-        case "STMt", "STMp":
-            // These are routine heartbeat responses - make them debug level
-            os_log(.debug, log: logger, "📤 Sending STAT: %{public}s", code)
-        case "STMc", "STMs", "STMr", "STMf", "STMd", "STMn":
-            // These are important state changes - keep as info level
-            os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
-        default:
-            // Unknown codes - log as info
-            os_log(.info, log: logger, "📤 Sending STAT: %{public}s", code)
-        }
+        os_log(.debug, log: logger, "📤 Sending STAT: %{public}s", code)
         
         var statusData = Data()
         
-        // Basic fields
+        // Event code (4 bytes, space-padded)
         let eventCode = code.padding(toLength: 4, withPad: " ", startingAt: 0)
         statusData.append(eventCode.data(using: .ascii) ?? Data())
-        statusData.append(0) // CRLF
+        
+        // Basic fields (same for ALL status packets)
+        statusData.append(0) // num_crlf
         statusData.append(UInt8(ascii: "m")) // MAS Initialized
         
         // MAS Mode based on code
@@ -342,7 +323,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             statusData.append(0) // Playing/other
         }
         
-        // Buffer info
+        // Buffer info (8 bytes total)
         let bufferSize = UInt32(settings.bufferSize)
         statusData.append(Data([
             UInt8((bufferSize >> 24) & 0xff),
@@ -359,7 +340,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bufferFullness & 0xff)
         ]))
         
-        // Connection info
+        // Bytes received (8 bytes total)
         let connectionDuration = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
         let bytesReceived: UInt64 = UInt64(abs(connectionDuration) * 40000)
         statusData.append(Data([
@@ -373,9 +354,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bytesReceived & 0xff)
         ]))
         
-        // Signal strength, jiffies, output buffer
-        statusData.append(Data([0x00, 0x00])) // Signal strength
+        // Signal strength (2 bytes)
+        statusData.append(Data([0xFF, 0xFF])) // Like C reference: 0xffff
         
+        // Jiffies (4 bytes)
         let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
         statusData.append(Data([
             UInt8((jiffies >> 24) & 0xff),
@@ -384,6 +366,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(jiffies & 0xff)
         ]))
         
+        // Output buffer size (4 bytes)
         let outputBufferSize: UInt32 = 8192
         statusData.append(Data([
             UInt8((outputBufferSize >> 24) & 0xff),
@@ -392,6 +375,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferSize & 0xff)
         ]))
         
+        // Output buffer fullness (4 bytes)
         let outputBufferFullness: UInt32 = code == "STMp" ? 0 : 4096
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
@@ -400,53 +384,52 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(outputBufferFullness & 0xff)
         ]))
         
-        // CRITICAL FIX: Always include timing fields for STMt responses
-        if code == "STMt" {
-            // Get actual audio player position (not server position)
-            let position: Double
-            if let commandHandler = commandHandler {
-                // Use audio manager's current time as the authoritative source
-                position = commandHandler.getCurrentAudioTime() // We need to add this method
-            } else {
-                position = 0.0
-            }
-            
-            let clampedPosition = max(0, min(position, 86400))
-            let elapsedSeconds = UInt32(clampedPosition)
-            
-            // Elapsed seconds
-            statusData.append(Data([
-                UInt8((elapsedSeconds >> 24) & 0xff),
-                UInt8((elapsedSeconds >> 16) & 0xff),
-                UInt8((elapsedSeconds >> 8) & 0xff),
-                UInt8(elapsedSeconds & 0xff)
-            ]))
-            
-            // Voltage
-            statusData.append(Data([0x00, 0x00]))
+        // CRITICAL: Always include ALL remaining fields for consistent packet structure
         
-            
-            // Elapsed milliseconds
-            let elapsedMs = UInt32(clampedPosition * 1000)
-            statusData.append(Data([
-                UInt8((elapsedMs >> 24) & 0xff),
-                UInt8((elapsedMs >> 16) & 0xff),
-                UInt8((elapsedMs >> 8) & 0xff),
-                UInt8(elapsedMs & 0xff)
-            ]))
-            
-            // Echo back server timestamp
-            statusData.append(Data([0x00, 0x00, 0x00, 0x00]))
-            
-            // Error code
-            statusData.append(Data([0x00, 0x00]))
-            
-            os_log(.debug, log: logger, "STAT with timing - audio position %.2f", clampedPosition)
+        // Get current audio position for timing
+        let position: Double
+        if let commandHandler = commandHandler {
+            position = commandHandler.getCurrentAudioTime()
         } else {
-            os_log(.info, log: logger, "STAT without timing - %{public}s", code)
+            position = 0.0
         }
         
-        // Send the message
+        // Clamp position to reasonable bounds
+        let clampedPosition = max(0, min(position, 86400)) // Max 24 hours
+        
+        // Elapsed seconds (4 bytes)
+        let elapsedSeconds = UInt32(clampedPosition)
+        statusData.append(Data([
+            UInt8((elapsedSeconds >> 24) & 0xff),
+            UInt8((elapsedSeconds >> 16) & 0xff),
+            UInt8((elapsedSeconds >> 8) & 0xff),
+            UInt8(elapsedSeconds & 0xff)
+        ]))
+        
+        // Voltage (2 bytes) - not used
+        statusData.append(Data([0x00, 0x00]))
+        
+        // Elapsed milliseconds (4 bytes)
+        let elapsedMs = UInt32(clampedPosition * 1000)
+        statusData.append(Data([
+            UInt8((elapsedMs >> 24) & 0xff),
+            UInt8((elapsedMs >> 16) & 0xff),
+            UInt8((elapsedMs >> 8) & 0xff),
+            UInt8(elapsedMs & 0xff)
+        ]))
+        
+        // Server timestamp (4 bytes) - echo back what server sent us
+        statusData.append(Data([
+            UInt8((serverTimestamp >> 24) & 0xff),
+            UInt8((serverTimestamp >> 16) & 0xff),
+            UInt8((serverTimestamp >> 8) & 0xff),
+            UInt8(serverTimestamp & 0xff)
+        ]))
+        
+        // Error code (2 bytes)
+        statusData.append(Data([0x00, 0x00]))
+        
+        // Create and send the message
         let command = "STAT".data(using: .ascii)!
         let length = UInt32(statusData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }
@@ -457,6 +440,44 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         fullMessage.append(statusData)
         
         socket.write(fullMessage, withTimeout: 30, tag: 2)
+        
+        os_log(.debug, log: logger, "STAT packet: %{public}s, position: %.2f, size: %d bytes",
+               code, clampedPosition, fullMessage.count)
+    }
+    
+    // ADD THESE METHODS:
+    func sendRESP(_ headers: String) {
+        guard isConnected else { return }
+        
+        let respData = headers.data(using: .utf8) ?? Data()
+        let command = "RESP".data(using: .ascii)!
+        let length = UInt32(respData.count).bigEndian
+        let lengthData = withUnsafeBytes(of: length) { Data($0) }
+        
+        var fullMessage = Data()
+        fullMessage.append(command)
+        fullMessage.append(lengthData)
+        fullMessage.append(respData)
+        
+        socket.write(fullMessage, withTimeout: 30, tag: 4)
+        os_log(.debug, log: logger, "📤 RESP sent (%d bytes)", fullMessage.count)
+    }
+
+    func sendMETA(_ metadata: String) {
+        guard isConnected else { return }
+        
+        let metaData = metadata.data(using: .utf8) ?? Data()
+        let command = "META".data(using: .ascii)!
+        let length = UInt32(metaData.count).bigEndian
+        let lengthData = withUnsafeBytes(of: length) { Data($0) }
+        
+        var fullMessage = Data()
+        fullMessage.append(command)
+        fullMessage.append(lengthData)
+        fullMessage.append(metaData)
+        
+        socket.write(fullMessage, withTimeout: 30, tag: 5)
+        os_log(.debug, log: logger, "📤 META sent (%d bytes)", fullMessage.count)
     }
 
     

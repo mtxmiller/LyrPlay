@@ -16,15 +16,13 @@ class SlimProtoCoordinator: ObservableObject {
     private let settings = SettingsManager.shared
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SlimProtoCoordinator")
     
-    // MARK: - State Management
-    private var statusTimer: Timer?
-    private var lastStatusSent: Date?
-    
     private var metadataRefreshTimer: Timer?
     
     // MARK: - Settings Tracking (ADD THESE LINES)
     private(set) var lastKnownHost: String = ""
     private(set) var lastKnownPort: UInt16 = 3483
+    private var playbackHeartbeatTimer: Timer?
+
     
     // MARK: - Initialization
     init(audioManager: AudioManager) {
@@ -37,7 +35,8 @@ class SlimProtoCoordinator: ObservableObject {
         setupDelegation()
         setupAudioCallbacks()
         setupServerTimeIntegration()
-        
+        setupAudioPlayerIntegration()
+
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with ServerTimeSynchronizer")
     }
     
@@ -71,6 +70,10 @@ class SlimProtoCoordinator: ObservableObject {
         audioManager.slimClient = self
     }
     
+    func setupAudioManagerIntegration() {
+        audioManager.setCommandHandler(commandHandler)
+    }
+    
     private func setupServerTimeIntegration() {
         // Connect ServerTimeSynchronizer to audio manager's NowPlayingManager
         // This will be done when we set the audio manager reference
@@ -101,7 +104,6 @@ class SlimProtoCoordinator: ObservableObject {
     func disconnect() {
         os_log(.info, log: logger, "User requested disconnection")
         connectionManager.userInitiatedDisconnection()
-        stopStatusTimer()
         stopServerTimeSync()
         client.disconnect()
     }
@@ -128,62 +130,28 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "⏹️ Server time synchronization stopped")
     }
     
-    // MARK: - Enhanced Status Timer with Background Awareness
-    private func startStatusTimer() {
-        stopStatusTimer()
-        
-        // Get interval from connection manager's background strategy
-        let interval = connectionManager.backgroundConnectionStrategy.statusInterval
-        
-        statusTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.sendPeriodicStatus()
-        }
-        
-        
-        os_log(.info, log: logger, "Status timer started with %.1f second interval (%{public}s strategy)",
-               interval, connectionManager.backgroundConnectionStrategy.description)
-    }
-    
-    private func stopStatusTimer() {
-        statusTimer?.invalidate()
-        statusTimer = nil
-        
-        // NEW: Also stop lock screen timer
-    }
-    
-    private func sendPeriodicStatus() {
-        // ENHANCED: More aggressive spam prevention
-        if let lastSent = lastStatusSent, Date().timeIntervalSince(lastSent) < 8.0 {  // Increased from 5s to 8s
-            return
-        }
-        
-        // Only send status during active streaming
-        let streamState = commandHandler.streamState
-        
-        if streamState != "Stopped" {
-            let statusCode: String
-            
-            if streamState == "Paused" {
-                statusCode = "STMp"  // Pause status when paused
-            } else {
-                statusCode = "STMt"  // Timer status when playing
-            }
-            
-            // Send the status
-            client.sendStatus(statusCode)
-            lastStatusSent = Date()
-            
-            // Record heartbeat for health monitoring
-            connectionManager.recordHeartbeatResponse()
-            
-        } else {
-            os_log(.debug, log: logger, "📊 Skipping periodic status - stream stopped")
-        }
-    }
-    
     func requestFreshMetadata() {
         os_log(.info, log: logger, "🔄 Requesting fresh metadata due to stream change")
         fetchCurrentTrackMetadata()
+    }
+    
+    private func startPlaybackHeartbeat() {
+        stopPlaybackHeartbeat()
+        
+        // Only during active playback, send STMt every second like squeezelite
+        playbackHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            
+            // Only send if actively playing (not paused/stopped)
+            if self.audioManager.getPlayerState() == "playing" && !self.commandHandler.isPausedByLockScreen {
+                self.client.sendStatus("STMt")
+            }
+        }
+    }
+
+    private func stopPlaybackHeartbeat() {
+        playbackHeartbeatTimer?.invalidate()
+        playbackHeartbeatTimer = nil
     }
     
     // MARK: - Connection State (Enhanced)
@@ -237,8 +205,11 @@ class SlimProtoCoordinator: ObservableObject {
         metadataRefreshTimer = nil
     }
     
+    private func setupAudioPlayerIntegration() {
+        audioManager.setCommandHandler(commandHandler)
+    }
+    
     deinit {
-        stopStatusTimer()
         stopServerTimeSync()
         stopMetadataRefresh()  // Add this line
         disconnect()
@@ -253,21 +224,19 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         connectionManager.didConnect()
-        startStatusTimer()
         
-        // Start server time synchronization once connected
+        // Don't start any status timers here
+        // Heartbeat only starts during playback
+        
         startServerTimeSync()
-        
-        // Setup NowPlayingManager integration after connection
         setupNowPlayingManagerIntegration()
     }
-    
+
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         connectionManager.didDisconnect(error: error)
-        stopStatusTimer()
         
-        // Stop server time sync when disconnected
+        stopPlaybackHeartbeat()  // ← Correct timer
         stopServerTimeSync()
     }
     
@@ -305,41 +274,15 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerDidEnterBackground() {
-        os_log(.info, log: logger, "📱 Coordinator handling background transition")
-        
-        if connectionManager.connectionState.isConnected {
-            // REMOVED: All position tracking and reporting
-            // Just send "I'm alive" status
-            client.sendStatus("STMt")
-            connectionManager.recordHeartbeatResponse()
-            
-            os_log(.info, log: logger, "📱 Sent background alive status")
-        }
-        
-        if statusTimer != nil {
-            startStatusTimer()
-        }
+        // Connection will naturally pause/close
+        // Server handles this gracefully
     }
     
     func connectionManagerDidEnterForeground() {
-        os_log(.info, log: logger, "📱 Coordinator handling foreground transition")
-        
         if connectionManager.connectionState.isConnected {
-            // REMOVED: All position tracking and reporting
-            // Just send "I'm alive" status
-            client.sendStatus("STMt")
-            connectionManager.recordHeartbeatResponse()
-            
-            // Let server time sync get the actual position FROM the server
             serverTimeSynchronizer.performImmediateSync()
-            
-            os_log(.info, log: logger, "📱 Sent foreground alive status")
         } else {
             connect()
-        }
-        
-        if statusTimer != nil {
-            startStatusTimer()
         }
     }
     
@@ -361,25 +304,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             os_log(.error, log: logger, "🌐 Network lost - server time sync will fall back to local time")
         }
         
-        // Restart status timer with appropriate interval for network type
-        if statusTimer != nil {
-            startStatusTimer()
-        }
     }
     
     func connectionManagerShouldCheckHealth() {
-        os_log(.info, log: logger, "💓 Connection health check requested")
-        
-        if connectionManager.connectionState.isConnected {
-            // Send health check based on stream state (not audio state)
-            if commandHandler.streamState == "Paused" {
-                client.sendStatus("STMp")
-            } else {
-                client.sendStatus("STMt")
-            }
-            
-            os_log(.info, log: logger, "💓 Health check sent")
-        }
+        // Server polls us with strm 't' commands
+        // No need to send unsolicited status
     }
     
     func connectionManagerWillSleep() {
@@ -401,6 +330,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didStartStream(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f", format, startTime)
         
+        // Stop any existing playback and timers first
+        audioManager.stop()
+        stopPlaybackHeartbeat()
+        
+        // Start the new stream
         if startTime > 0 {
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
         } else {
@@ -408,12 +342,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         }
         
         // IMPORTANT: Tell server time synchronizer we're starting to play
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        // Fixed: should be 'true' since we're starting playback
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
         
-        client.sendStatus("STMc") // Connecting
+        // Start the 1-second heartbeat timer (like squeezelite)
+        // This replaces all the delayed status messages
+        startPlaybackHeartbeat()
         
+        // After starting the stream, wait a moment then send STMs
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.client.sendStatus("STMs") // Started
+            self.client.sendStatus("STMs")  // Track started
         }
         
         // Get metadata and sync with server
@@ -426,6 +364,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             }
         }
         
+        // Trigger server time sync after connection stabilizes
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.serverTimeSynchronizer.performImmediateSync()
         }
@@ -435,35 +374,35 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
         audioManager.pause()
-        
-        // IMPORTANT: Tell server time synchronizer we're paused
-        //let currentTime = audioManager.getCurrentTime()
-        //serverTimeSynchronizer.updatePlaybackState(isPlaying: false, currentTime: currentTime)
         serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
+        // Stop heartbeat when paused
+        stopPlaybackHeartbeat()
         
         client.sendStatus("STMp")
     }
 
-    
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
         audioManager.play()
+        serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
         
-        // IMPORTANT: Tell server time synchronizer we're playing
-        let currentTime = audioManager.getCurrentTime()
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        // Restart heartbeat when resumed
+        startPlaybackHeartbeat()
         
         client.sendStatus("STMr")
     }
-    
+
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
         
         audioManager.stop()
-        
-        // IMPORTANT: Tell server time synchronizer we're stopped
         serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
+        // Stop heartbeat when stopped
+        stopPlaybackHeartbeat()
+        
         client.sendStatus("STMf")
     }
     
@@ -1055,7 +994,7 @@ extension SlimProtoCoordinator {
         
         // Store position through NowPlayingManager
         let nowPlayingManager = audioManager.getNowPlayingManager()
-        nowPlayingManager.storeLockScreenPosition()
+        //nowPlayingManager.storeLockScreenPosition()
     }
 
     func connectionManagerDidReconnectAfterTimeout() {
@@ -1069,51 +1008,14 @@ extension SlimProtoCoordinator {
 
     // Add this new method for position recovery
     private func attemptPositionRecovery() {
-        let nowPlayingManager = audioManager.getNowPlayingManager()
-        let recoveryInfo = nowPlayingManager.getStoredPositionWithTimeOffset()
-        
-        guard recoveryInfo.isValid else {
-            os_log(.info, log: logger, "🔒 No valid stored position for recovery")
-            return
-        }
-        
-        os_log(.info, log: logger, "🔒 Performing position recovery to %.2f seconds", recoveryInfo.position)
-        
-        // Wait a moment for connection to stabilize, then seek
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.sendSeekCommand(to: recoveryInfo.position) { success in
-                if success {
-                    os_log(.info, log: self.logger, "✅ Position recovery successful")
-                    
-                    // If we were playing before, resume playback
-                    if recoveryInfo.wasPlaying {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            self.sendJSONRPCCommand("play")
-                        }
-                    }
-                } else {
-                    os_log(.error, log: self.logger, "❌ Position recovery failed")
-                }
-                
-                // Clear stored position
-                nowPlayingManager.clearStoredPosition()
-            }
-        }
+        os_log(.info, log: logger, "🔒 Position recovery temporarily disabled during SlimProto standardization")
+        // The server will handle position management through proper SlimProto
+        return
     }
-    
+
     private func performFallbackRecovery(recoveryInfo: (position: Double, wasPlaying: Bool, isValid: Bool), nowPlayingManager: NowPlayingManager) {
-        // First, try to restart the current track from beginning
-        sendJSONRPCCommand("play")
-        
-        // Then seek to stored position
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.sendSeekCommand(to: recoveryInfo.position) { success in
-                if success {
-                    os_log(.info, log: self.logger, "✅ Fallback recovery successful")
-                }
-                nowPlayingManager.clearStoredPosition()
-            }
-        }
+        os_log(.info, log: logger, "🔒 Fallback recovery temporarily disabled during SlimProto standardization")
+        return
     }
 
 

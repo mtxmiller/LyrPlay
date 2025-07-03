@@ -19,7 +19,7 @@ class SlimProtoCommandHandler: ObservableObject {
     
     // MARK: - State
     private var isStreamActive = false
-    private var isPausedByLockScreen = false
+    var isPausedByLockScreen = false
     private var lastKnownPosition: Double = 0.0
     private var streamPosition: Double = 0.0
     private var streamDuration: Double = 0.0
@@ -48,34 +48,29 @@ class SlimProtoCommandHandler: ObservableObject {
         case "setd":
             // Handle SETD commands for player name
             processSetdCommand(command.payload)
+            // In processCommand method - updated versions:
         case "audg":
-            // Handle volume command
             processVolumeCommand(command.payload)
-            slimProtoClient?.sendStatus("STMt")
+            slimProtoClient?.sendStatus("STMt")  // ← Keep as-is (no timestamp needed)
+
         case "aude":
-            slimProtoClient?.sendStatus("STMt") // Acknowledge with heartbeat
-        case "stat":
-            // Respond to STAT requests based on actual state
-            if isPausedByLockScreen {
-                slimProtoClient?.sendStatus("STMp")
-                os_log(.info, log: logger, "📍 STAT request - responding with PAUSE status")
-            } else {
-                slimProtoClient?.sendStatus("STMt")
-            }
+            slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
+
         case "vers":
-            slimProtoClient?.sendStatus("STMt")
+            slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
+
         case "vfdc":
-            // Respond to VFD commands based on actual state
             if isPausedByLockScreen {
-                slimProtoClient?.sendStatus("STMp")
+                slimProtoClient?.sendStatus("STMp")  // ← Keep as-is
             } else {
-                slimProtoClient?.sendStatus("STMt")
+                slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
             }
+
         case "grfe", "grfb":
-            slimProtoClient?.sendStatus("STMt")
+            slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
+
         default:
-            os_log(.info, log: logger, "Unknown command: %{public}s", command.type)
-            slimProtoClient?.sendStatus("STMt")
+            slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
         }
     }
     
@@ -313,19 +308,29 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f", format, startTime)
         
-        // Track server's time reference but don't try to maintain it locally
+        // Send STMf (flush) first, like squeezelite
+        slimProtoClient?.sendStatus("STMf")
+        
+        // Update state
         serverStartTime = Date()
         serverStartPosition = startTime
         lastKnownPosition = startTime
-        
         isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
         
         delegate?.didStartStream(url: url, format: format, startTime: startTime)
-        
-        // REMOVED: All the STMc/STMs sending - let coordinator handle it
-        os_log(.info, log: logger, "✅ Stream start delegated - server manages position")
+    }
+
+    // ADD THESE NEW METHODS:
+    func handleStreamConnected() {
+        os_log(.info, log: logger, "🔗 Stream connected")
+        slimProtoClient?.sendStatus("STMc")
+    }
+
+    func handleHTTPHeaders(_ headers: String) {
+        os_log(.info, log: logger, "📄 HTTP headers received")
+        slimProtoClient?.sendRESP(headers)
     }
     
     private func handlePauseCommand() {
@@ -406,14 +411,25 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     private func handleStatusRequest(_ payload: Data) {
+        // Extract server timestamp from strm 't' command
+        // In strm packets, the replay_gain field (bytes 20-23) contains the timestamp for 't' commands
+        var serverTimestamp: UInt32 = 0
+        
+        if payload.count >= 24 {
+            // Extract the replay_gain field which contains the server timestamp for 't' commands
+            let timestampBytes = payload.subdata(in: 20..<24)
+            serverTimestamp = timestampBytes.withUnsafeBytes { bytes in
+                bytes.load(as: UInt32.self).bigEndian
+            }
+        }
         
         delegate?.didReceiveStatusRequest()
         
         if isPausedByLockScreen {
-            slimProtoClient?.sendStatus("STMp")
+            slimProtoClient?.sendStatus("STMp", serverTimestamp: serverTimestamp)
             os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
         } else {
-            slimProtoClient?.sendStatus("STMt")
+            slimProtoClient?.sendStatus("STMt", serverTimestamp: serverTimestamp)
             os_log(.info, log: logger, "📍 Responding to status request with TIMER status")
         }
     }

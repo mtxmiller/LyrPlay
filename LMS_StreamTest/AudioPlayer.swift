@@ -42,6 +42,9 @@ class AudioPlayer: NSObject, ObservableObject {
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 1.0  // Max 1 update per second
     
+    weak var commandHandler: SlimProtoCommandHandler?
+
+    
     // MARK: - Initialization
     override init() {
         super.init()
@@ -95,6 +98,21 @@ class AudioPlayer: NSObject, ObservableObject {
         // FLAC needs longer buffer times, minimum 2 seconds
         return max(2.0, min(30.0, bufferSeconds))
     }
+    
+    private func handleHTTPResponse(_ response: URLResponse?) {
+        if let httpResponse = response as? HTTPURLResponse {
+            var headerString = "HTTP/\(httpResponse.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode))\r\n"
+            
+            for (key, value) in httpResponse.allHeaderFields {
+                headerString += "\(key): \(value)\r\n"
+            }
+            headerString += "\r\n"
+            
+            os_log(.info, log: logger, "📄 HTTP headers received")
+            commandHandler?.handleHTTPHeaders(headerString)  // Sends RESP
+        }
+    }
+
 
     
     // MARK: - Stream Playback (SIMPLIFIED)
@@ -328,6 +346,10 @@ extension AudioPlayer: STKAudioPlayerDelegate {
         case .eof: // End of file - natural track end
             if !isIntentionallyPaused && !isIntentionallyStopped {
                 os_log(.info, log: logger, "🎵 Track ended naturally (EOF)")
+                
+                // INTEGRATION POINT: Send STMd (decode ready) through command handler
+                commandHandler?.notifyTrackEnded()
+                
                 DispatchQueue.main.async {
                     self.delegate?.audioPlayerDidReachEnd()
                 }
@@ -339,6 +361,10 @@ extension AudioPlayer: STKAudioPlayerDelegate {
             // Check if we have reasonable progress to determine if this was a natural end
             if progress > 10.0 && !isIntentionallyPaused && !isIntentionallyStopped {
                 os_log(.info, log: logger, "🎵 Track ended naturally (None reason but good progress: %.2f)", progress)
+                
+                // INTEGRATION POINT: Send STMd (decode ready) through command handler
+                commandHandler?.notifyTrackEnded()
+                
                 DispatchQueue.main.async {
                     self.delegate?.audioPlayerDidReachEnd()
                 }
@@ -347,10 +373,15 @@ extension AudioPlayer: STKAudioPlayerDelegate {
             }
         case .userAction: // User stopped
             os_log(.info, log: logger, "👤 Track stopped by user action")
+            // No STMd needed for user actions - server initiated the stop
+            
         case .error: // Error occurred
             os_log(.error, log: logger, "❌ Track stopped due to error")
             // Only trigger on error if enough time has passed (real error, not startup issue)
             if !isIntentionallyPaused && !isIntentionallyStopped && progress > 5.0 {
+                // INTEGRATION POINT: Send STMd even on errors after significant progress
+                commandHandler?.notifyTrackEnded()
+                
                 DispatchQueue.main.async {
                     self.delegate?.audioPlayerDidReachEnd()
                 }
@@ -366,25 +397,35 @@ extension AudioPlayer: STKAudioPlayerDelegate {
         let previousStateString = playerStateDescription(previousState)
         os_log(.debug, log: logger, "🔄 StreamingKit state changed: %{public}s → %{public}s", previousStateString, stateString)
         
-        // CRITICAL: Only report time updates for significant state changes
-        // Don't spam time updates during constant buffering state changes
-        let shouldReportTimeUpdate: Bool
-        
-        switch state {
-        case let newState where newState.contains(.playing):
-            shouldReportTimeUpdate = !previousState.contains(.playing)  // Only when starting to play
-        case let newState where newState.contains(.paused):
-            shouldReportTimeUpdate = !previousState.contains(.paused)   // Only when starting to pause
-        case let newState where newState.contains(.stopped):
-            shouldReportTimeUpdate = !previousState.contains(.stopped) // Only when stopping
-        default:
-            shouldReportTimeUpdate = false  // Don't report during buffering/transitioning
+        // INTEGRATION POINT 1: When connection is established
+        if state.contains(.buffering) && !previousState.contains(.buffering) {
+            os_log(.info, log: logger, "🔗 Stream connection established")
+            commandHandler?.handleStreamConnected()  // Sends STMc
         }
         
-        if shouldReportTimeUpdate {
-            let currentTime = getCurrentTime()
-            delegate?.audioPlayerTimeDidUpdate(currentTime)
-            os_log(.debug, log: logger, "📍 Reported time update: %.2f", currentTime)
+        // INTEGRATION POINT 2: When playback actually starts
+        if state.contains(.playing) && !previousState.contains(.playing) {
+            // This is when we should send STMs (track started)
+            os_log(.info, log: logger, "🎵 Playback actually started")
+            // Note: STMs should be sent by the coordinator after this delegate call
+        }
+        
+        // Handle other state changes...
+        switch state {
+        case let newState where newState.contains(.playing):
+            if !previousState.contains(.playing) {
+                delegate?.audioPlayerDidStartPlaying()
+            }
+        case let newState where newState.contains(.paused):
+            if !previousState.contains(.paused) {
+                delegate?.audioPlayerDidPause()
+            }
+        case let newState where newState.contains(.stopped):
+            if !previousState.contains(.stopped) {
+                delegate?.audioPlayerDidStop()
+            }
+        default:
+            break
         }
     }
     

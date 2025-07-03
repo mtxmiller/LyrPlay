@@ -16,6 +16,8 @@ class AudioManager: NSObject, ObservableObject {
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 2.0  // Max update every 2 seconds
     
+    weak var commandHandler: SlimProtoCommandHandler?
+    
     
     // NEW: Expose NowPlayingManager for coordinator access
     func getNowPlayingManager() -> NowPlayingManager {
@@ -57,6 +59,12 @@ class AudioManager: NSObject, ObservableObject {
         
         os_log(.info, log: logger, "✅ Component delegation configured with interruption handling")
     }
+    
+    func setCommandHandler(_ handler: SlimProtoCommandHandler) {
+        commandHandler = handler
+        audioPlayer.commandHandler = handler
+    }
+    
     
     // MARK: - Public Interface (Exact same as original AudioManager)
     
