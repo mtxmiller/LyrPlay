@@ -44,6 +44,7 @@ class AudioPlayer: NSObject, ObservableObject {
     
     weak var commandHandler: SlimProtoCommandHandler?
 
+    // REMOVED: private var customURLSessionTask: URLSessionDataTask?
     
     // MARK: - Initialization
     override init() {
@@ -99,19 +100,14 @@ class AudioPlayer: NSObject, ObservableObject {
         return max(2.0, min(30.0, bufferSeconds))
     }
     
-    private func handleHTTPResponse(_ response: URLResponse?) {
-        if let httpResponse = response as? HTTPURLResponse {
-            var headerString = "HTTP/\(httpResponse.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode))\r\n"
-            
-            for (key, value) in httpResponse.allHeaderFields {
-                headerString += "\(key): \(value)\r\n"
-            }
-            headerString += "\r\n"
-            
-            os_log(.info, log: logger, "📄 HTTP headers received")
-            commandHandler?.handleHTTPHeaders(headerString)  // Sends RESP
-        }
-    }
+    // REMOVED: HTTP response handling - no longer needed
+    // private func handleHTTPResponse(_ response: URLResponse?) { ... }
+    
+    // REMOVED: HTTP header interception - StreamingKit handles format detection naturally
+    // private func interceptHTTPHeaders(for url: URL) { ... }
+    
+    // REMOVED: HTTP header formatting - no longer needed
+    // private func formatHTTPHeaders(_ response: HTTPURLResponse) -> String { ... }
 
 
     
@@ -126,7 +122,10 @@ class AudioPlayer: NSObject, ObservableObject {
         
         prepareForNewStream()
         
-        // CRITICAL: Reset track end detection protection from REFERENCE
+        // REMOVED: HTTP header interception - let StreamingKit handle format detection naturally
+        // interceptHTTPHeaders(for: url)
+        
+        // Reset track end detection protection
         trackEndDetectionEnabled = false
         trackStartTime = Date()
         
@@ -136,7 +135,7 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
         }
         
-        // SIMPLE: StreamingKit handles everything
+        // StreamingKit handles everything
         audioPlayer.play(url)
         
         os_log(.info, log: logger, "✅ StreamingKit playback started")
@@ -152,7 +151,10 @@ class AudioPlayer: NSObject, ObservableObject {
         
         prepareForNewStream()
         
-        // CRITICAL: Reset track end detection protection from REFERENCE
+        // REMOVED: HTTP header interception - let StreamingKit handle format detection naturally
+        // interceptHTTPHeaders(for: url)
+        
+        // Reset track end detection protection
         trackEndDetectionEnabled = false
         trackStartTime = Date()
         

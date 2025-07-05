@@ -243,7 +243,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
         // Use device ID 9 (squeezelite) which is better recognized by LMS
         // This prevents the "AppleCoreMedia" identification issue
-        let deviceID: UInt8 = 9   // squeezelite - well-supported by LMS
+        let deviceID: UInt8 = 12   // squeezelite - well-supported by LMS
         let revision: UInt8 = 0   // Standard revision
         
         // Get MAC address from settings
@@ -277,7 +277,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
         
         // *** FIXED: Enhanced capabilities string with proper player identification ***
-        let capabilities = settings.capabilitiesString
+        let capabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=SqueezeLite,MaxSampleRate=48000,flc,alc,aac,mp3"
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)

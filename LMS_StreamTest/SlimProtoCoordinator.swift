@@ -209,6 +209,15 @@ class SlimProtoCoordinator: ObservableObject {
         audioManager.setCommandHandler(commandHandler)
     }
     
+    // MARK: - Audio Player Event Handlers
+    func handleAudioPlayerDidStartPlaying() {
+        os_log(.info, log: logger, "🎵 Audio playback actually started - sending STMs")
+        
+        // This is when we should send STMs (track started playing)
+        // Only after RESP and STMc have been sent
+        client.sendStatus("STMs")
+    }
+    
     deinit {
         stopServerTimeSync()
         stopMetadataRefresh()  // Add this line
@@ -274,8 +283,21 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerDidEnterBackground() {
-        // Connection will naturally pause/close
-        // Server handles this gracefully
+        os_log(.info, log: logger, "📱 App backgrounded - checking SlimProto recovery strategy")
+        
+        // CRITICAL: If paused by lock screen, disconnect cleanly to trigger server's
+        // disconnect/recovery mechanism (persistPlaybackStateForPowerOff)
+        if commandHandler.isPausedByLockScreen {
+            os_log(.info, log: logger, "🔌 Clean disconnect - paused by lock screen + backgrounded")
+            os_log(.info, log: logger, "📍 Server will save playingAtPowerOff=true and positionAtDisconnect")
+            os_log(.info, log: logger, "🔄 This enables proper resume recovery when reconnecting")
+            
+            // Clean disconnect to trigger server's persistPlaybackStateForPowerOff
+            disconnect()
+        } else {
+            os_log(.info, log: logger, "▶️ App backgrounded while playing - maintaining connection for active playback")
+            // Keep connection alive for active playback
+        }
     }
     
     func connectionManagerDidEnterForeground() {
@@ -322,6 +344,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             os_log(.info, log: self.logger, "💤 Sleep status sent, connection will naturally close")
         }
     }
+    
+    
 }
 
 // MARK: - SlimProtoCommandHandlerDelegate
@@ -334,7 +358,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         audioManager.stop()
         stopPlaybackHeartbeat()
         
-        // Start the new stream
+        // Start the new stream - this will trigger the sequence:
+        // 1. handleStartCommand sends STMf (already done by command handler)
+        // 2. AudioPlayer intercepts headers → RESP
+        // 3. StreamingKit starts buffering → STMc (via delegate)
+        // 4. Playback actually starts → STMs (below)
         if startTime > 0 {
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
         } else {
@@ -342,17 +370,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         }
         
         // IMPORTANT: Tell server time synchronizer we're starting to play
-        // Fixed: should be 'true' since we're starting playback
         serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
         
         // Start the 1-second heartbeat timer (like squeezelite)
-        // This replaces all the delayed status messages
         startPlaybackHeartbeat()
-        
-        // After starting the stream, wait a moment then send STMs
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.client.sendStatus("STMs")  // Track started
-        }
         
         // Get metadata and sync with server
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -438,7 +459,18 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        // CRITICAL FIX: Always ensure SlimProto connection for audio streaming
+        // CRITICAL: For PLAY commands after disconnect, rely on SlimProto reconnection
+        // to trigger server's resumeOnPower() logic with stored position
+        if command.lowercased() == "play" && !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "🔄 PLAY after disconnect - using SlimProto reconnection for position recovery")
+            os_log(.info, log: logger, "🎯 Server will trigger resumeOnPower() with stored positionAtDisconnect")
+            
+            // Let SlimProto reconnection handle the resume automatically
+            connect()
+            return
+        }
+        
+        // For other commands or when connected, use JSON-RPC
         if !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "❌ No SlimProto connection - starting full reconnection sequence")
             handleDisconnectedLockScreenCommand(command)

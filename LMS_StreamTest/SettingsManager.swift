@@ -367,7 +367,7 @@ class SettingsManager: ObservableObject {
     }
 
     var initialWebURL: String {
-        "http://\(serverHost):\(serverWebPort)/material/?player=\(playerMACAddress)"
+        "http://\(serverHost):\(serverWebPort)/material/"
     }
     
     var formattedMACAddress: String {
@@ -389,7 +389,7 @@ class SettingsManager: ObservableObject {
         }.joined(separator: ",")
         
         // UPDATED: Enhanced capabilities with FLAC support
-        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS,HasVolumeControl=1,HasDigitalVolumeControl=1,MaxSampleRate=48000"
+        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS, MaxSampleRate=48000"
     }
 
     var effectivePlayerName: String {

@@ -328,10 +328,11 @@ class SlimProtoCommandHandler: ObservableObject {
         slimProtoClient?.sendStatus("STMc")
     }
 
-    func handleHTTPHeaders(_ headers: String) {
-        os_log(.info, log: logger, "📄 HTTP headers received")
-        slimProtoClient?.sendRESP(headers)
-    }
+    // REMOVED: HTTP header handling - let StreamingKit handle format detection naturally
+    // func handleHTTPHeaders(_ headers: String) {
+    //     os_log(.info, log: logger, "📄 HTTP headers received")
+    //     slimProtoClient?.sendRESP(headers)
+    // }
     
     private func handlePauseCommand() {
         os_log(.info, log: logger, "⏸️ Server pause command")

@@ -65,6 +65,8 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.commandHandler = handler
     }
     
+
+    
     
     // MARK: - Public Interface (Exact same as original AudioManager)
     
@@ -190,6 +192,10 @@ extension AudioManager: AudioPlayerDelegate {
     
     func audioPlayerDidStartPlaying() {
         os_log(.info, log: logger, "▶️ Audio player started playing")
+        
+        // FORWARD TO COORDINATOR: This is the missing piece!
+        // When AudioPlayer actually starts playing, tell the coordinator to send STMs
+        slimClient?.handleAudioPlayerDidStartPlaying()
         
         // SIMPLIFIED: Just log the event, let the existing timer/update mechanisms handle position updates
         os_log(.debug, log: logger, "📍 Audio start event logged")

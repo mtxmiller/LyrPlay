@@ -179,16 +179,15 @@ struct ContentView: View {
         let baseURL = settings.webURL
         let settingsURL = "lmsstream://settings"
         let settingsName = "iOS App Settings"
-        let playerParam = "player=\(settings.playerMACAddress)"
         
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
         
-        // ADD THIS LINE - cache busting timestamp:
+        // Cache busting timestamp
         let timestamp = Int(Date().timeIntervalSince1970)
         
-        // CHANGE THIS LINE - add timestamp:
-        return "\(baseURL)?\(playerParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
+        // REMOVED: player parameter - let Material control default player selection
+        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
     }
 
     
