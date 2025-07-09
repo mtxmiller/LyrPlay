@@ -350,7 +350,7 @@ class SlimProtoConnectionManager: ObservableObject {
             
             // Log when we're getting close to suspension
             if backgroundTimeRemaining < 30 && backgroundTimeRemaining > 25 {
-                os_log(.error, log: logger, "⏰ Background time running low: %.0f seconds remaining", backgroundTimeRemaining)
+                // REMOVED: Noisy background time logs - os_log(.error, log: logger, "⏰ Background time running low: %.0f seconds remaining", backgroundTimeRemaining)
             }
         } else {
             backgroundTimeRemaining = 0

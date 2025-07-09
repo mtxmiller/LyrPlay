@@ -118,6 +118,12 @@ struct ContentView: View {
                     }
                 )
                 .ignoresSafeArea(.container, edges: .bottom)
+                .onChange(of: webView) { newWebView in
+                    // Pass webView reference to coordinator for Material UI refresh
+                    if let webView = newWebView {
+                        slimProtoCoordinator.setWebView(webView)
+                    }
+                }
             } else {
                 serverErrorView
             }

@@ -2,6 +2,7 @@
 // Enhanced with ServerTimeSynchronizer for accurate lock screen timing
 import Foundation
 import os.log
+import WebKit
 
 // MARK: - Power-On Resume Preference Types
 enum PowerOnResumePreference {
@@ -53,6 +54,8 @@ class SlimProtoCoordinator: ObservableObject {
     private let connectionManager: SlimProtoConnectionManager
     private let audioManager: AudioManager
     private let serverTimeSynchronizer: ServerTimeSynchronizer // Keep for compatibility but minimize usage
+    private let simpleTimeTracker: SimpleTimeTracker // NEW: Material-style time tracking
+    private weak var webView: WKWebView? // NEW: WebView for Material UI refresh
     
     // MARK: - Dependencies
     private let settings = SettingsManager.shared
@@ -90,13 +93,14 @@ class SlimProtoCoordinator: ObservableObject {
         self.commandHandler = SlimProtoCommandHandler()
         self.connectionManager = SlimProtoConnectionManager()
         self.serverTimeSynchronizer = ServerTimeSynchronizer(connectionManager: connectionManager)
+        self.simpleTimeTracker = SimpleTimeTracker() // NEW: Initialize Material-style tracker
         
         setupDelegation()
         setupAudioCallbacks()
         setupServerTimeIntegration()
         setupAudioPlayerIntegration()
 
-        os_log(.info, log: logger, "SlimProtoCoordinator initialized with simplified time tracking")
+        os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
     }
     
     // MARK: - Setup
@@ -835,6 +839,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
+        // CRITICAL FIX: Update SimpleTimeTracker with pause state
+        let currentTime = simpleTimeTracker.getCurrentTimeDouble()
+        simpleTimeTracker.updateFromServer(time: currentTime, playing: false)
+        
         // Normal foreground or background pause - let background handler deal with position saving
         audioManager.pause()
         // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
@@ -847,6 +855,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
+        
+        // CRITICAL FIX: Update SimpleTimeTracker with resume state
+        let currentTime = simpleTimeTracker.getCurrentTimeDouble()
+        simpleTimeTracker.updateFromServer(time: currentTime, playing: true)
         
         audioManager.play()
         // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
@@ -902,12 +914,16 @@ extension SlimProtoCoordinator {
     
     /// Update current server time from actual server responses (not audio player)
     func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
+        // OLD SYSTEM: Keep for backward compatibility during migration
         currentServerTime = position
         serverTimeTimestamp = Date()
         isServerPlaying = isPlaying
         if duration > 0 {
             serverTrackDuration = duration
         }
+        
+        // NEW SYSTEM: Update SimpleTimeTracker with Material-style approach
+        simpleTimeTracker.updateFromServer(time: position, duration: duration, playing: isPlaying)
         
         // Update NowPlayingManager with fresh server time
         audioManager.getNowPlayingManager().updateFromSlimProto(
@@ -916,7 +932,7 @@ extension SlimProtoCoordinator {
             isPlaying: isPlaying
         )
         
-        os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s)", 
+        os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]", 
                position, isPlaying ? "YES" : "NO")
     }
     
@@ -991,6 +1007,15 @@ extension SlimProtoCoordinator {
     
     /// Get current interpolated time based on last server update
     func getCurrentInterpolatedTime() -> (time: Double, isPlaying: Bool) {
+        // NEW SYSTEM: Use SimpleTimeTracker (Material-style approach)
+        let (newTime, newPlaying) = simpleTimeTracker.getCurrentTime()
+        
+        // If SimpleTimeTracker has valid time, use it
+        if newTime > 0.0 || simpleTimeTracker.isTimeFresh() {
+            return (newTime, newPlaying)
+        }
+        
+        // FALLBACK: Use old system for backward compatibility
         guard let timestamp = serverTimeTimestamp else {
             return (0.0, false)
         }
@@ -1015,6 +1040,22 @@ extension SlimProtoCoordinator {
     func getCurrentTimeForSaving() -> Double {
         let (time, _) = getCurrentInterpolatedTime()
         return time
+    }
+    
+    /// Get SimpleTimeTracker for debugging (Material-style system)
+    func getSimpleTimeTracker() -> SimpleTimeTracker {
+        return simpleTimeTracker
+    }
+    
+    /// Set WebView reference for Material UI refresh
+    func setWebView(_ webView: WKWebView) {
+        self.webView = webView
+        os_log(.info, log: logger, "✅ WebView reference set for Material UI refresh")
+    }
+    
+    /// Public method to refresh Material UI (can be called externally)
+    func refreshMaterialInterface() {
+        refreshMaterialUI()
     }
     
     /// Start periodic server time fetching
@@ -1397,29 +1438,52 @@ extension SlimProtoCoordinator {
     
     // MARK: - UI Refresh After Recovery
     private func refreshUIAfterRecovery() {
-        // CRITICAL: Trigger player selection to sync UI with server state
-        // This simulates what happens when user selects player from Material menu
-        let playerID = settings.playerMACAddress
-        
-        // Send simple player selection command
-        let playerSelectCommand = [
-            "id": 1,
-            "method": "slim.request", 
-            "params": [playerID, ["status"]]
-        ] as [String : Any]
-        
-        sendJSONRPCCommandDirect(playerSelectCommand) { [weak self] result in
-            guard let self = self else { return }
+        // CRITICAL: Refresh Material web interface to show correct position after recovery
+        DispatchQueue.main.async {
+            // Try to refresh Material UI via JavaScript first
+            self.refreshMaterialUI()
             
-            DispatchQueue.main.async {
-                // Force server time sync to ensure UI shows correct position
-                // DISABLED: serverTimeSynchronizer.forceImmediateSync()
-                
-                // Notify observers that state may have changed
-                self.objectWillChange.send()
-                
-                os_log(.info, log: self.logger, "✅ UI refreshed with player selection after recovery")
-                DebugLogManager.shared.logInfo("✅ UI refreshed with player selection after recovery")
+            // Also trigger server time sync as backup
+            self.fetchServerTime()
+            
+            // Notify observers that state may have changed
+            self.objectWillChange.send()
+            
+            os_log(.info, log: self.logger, "✅ Material UI refreshed after recovery")
+            DebugLogManager.shared.logInfo("✅ Material UI refreshed after recovery")
+        }
+    }
+    
+    /// Refresh Material web interface via JavaScript
+    private func refreshMaterialUI() {
+        guard let webView = webView else {
+            os_log(.error, log: logger, "❌ Cannot refresh Material UI - no webView reference")
+            return
+        }
+        
+        // Execute JavaScript to trigger Material's refresh mechanism
+        let refreshScript = """
+        try {
+            // Material uses bus.$emit('refreshStatus') to refresh player status
+            if (typeof bus !== 'undefined' && bus.$emit) {
+                bus.$emit('refreshStatus');
+                console.log('✅ Material UI refresh triggered via bus.$emit');
+            } else if (typeof refreshStatus === 'function') {
+                refreshStatus();
+                console.log('✅ Material UI refresh triggered via refreshStatus()');
+            } else {
+                console.log('❌ Material refresh methods not available');
+            }
+        } catch (error) {
+            console.log('❌ Material refresh error:', error);
+        }
+        """
+        
+        webView.evaluateJavaScript(refreshScript) { result, error in
+            if let error = error {
+                os_log(.error, log: self.logger, "❌ Failed to refresh Material UI: %{public}s", error.localizedDescription)
+            } else {
+                os_log(.info, log: self.logger, "✅ Material UI refresh JavaScript executed")
             }
         }
     }
@@ -1959,7 +2023,7 @@ extension SlimProtoCoordinator {
     
     // MARK: - Volume Control
     func setPlayerVolume(_ volume: Float) {
-        os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
+        // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
         audioManager.setVolume(volume)
     }
 

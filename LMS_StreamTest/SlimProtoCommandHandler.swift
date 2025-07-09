@@ -588,11 +588,11 @@ class SlimProtoCommandHandler: ObservableObject {
         if leftGain <= 128 && rightGain <= 128 {
             // Old format: 0-128 range
             normalizedVolume = Float(leftGain) / 128.0
-            os_log(.debug, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+            // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
         } else {
             // New format: 16.16 fixed point where 65536 = 100%
             normalizedVolume = Float(leftGain) / 65536.0
-            os_log(.debug, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+            // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
         }
         
         let clampedVolume = max(0.0, min(1.0, normalizedVolume))
