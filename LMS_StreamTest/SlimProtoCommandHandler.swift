@@ -308,6 +308,13 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStartCommand(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f", format, startTime)
         
+        // CRITICAL DEBUG: Log if server is sending unexpected start times
+        if startTime > 0.1 && startTime < lastKnownPosition - 5.0 {
+            os_log(.error, log: logger, "🚨 SERVER ANOMALY: Start time %.2f is much less than last known %.2f", 
+                   startTime, lastKnownPosition)
+            DebugLogManager.shared.logError("🚨 SERVER ANOMALY: Start time \(String(format: "%.2f", startTime)) is much less than last known \(String(format: "%.2f", lastKnownPosition))")
+        }
+        
         // Send STMf (flush) first, like squeezelite
         slimProtoClient?.sendStatus("STMf")
         
@@ -335,11 +342,13 @@ class SlimProtoCommandHandler: ObservableObject {
     // }
     
     private func handlePauseCommand() {
-        os_log(.info, log: logger, "⏸️ Server pause command")
+        os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
+        DebugLogManager.shared.logInfo("⏸️ Server pause command (last known position: \(String(format: "%.2f", lastKnownPosition)))")
         
         // Don't track position - server knows where we are
         isStreamPaused = true
-        isPausedByLockScreen = true
+        // DON'T automatically set isPausedByLockScreen - only SlimProtoCoordinator should set this
+        // for actual lock screen pauses
         
         // CRITICAL FIX: Only update playing state, NOT position when pausing
         // The pause command doesn't include accurate position data
@@ -380,7 +389,7 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "🔄 Synced to server position: %.2f", serverPosition)
     }
     
-    private func handleUnpauseCommand() {
+    func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
         // Don't track position - server will tell us if we need to seek

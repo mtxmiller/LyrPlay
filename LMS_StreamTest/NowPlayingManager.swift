@@ -86,8 +86,11 @@ class NowPlayingManager: ObservableObject {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
         
         // Log every update to see what's changing the lock screen
-        //os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
-         //      currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
+               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        
+        // Also log to debug file if enabled
+        DebugLogManager.shared.logDebug("🔒 LOCK SCREEN: \(String(format: "%.2f", currentTime))s (\(timeSource.description), playing: \(isPlaying ? "YES" : "NO"))")
         
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
@@ -96,8 +99,8 @@ class NowPlayingManager: ObservableObject {
         let newUsingServerTime = (timeSource == .serverTime)
         if newUsingServerTime != isUsingServerTime {
             isUsingServerTime = newUsingServerTime
-            //os_log(.info, log: logger, "🔒 TIME SOURCE CHANGED: %{public}s → %{public}s",
-           //        isUsingServerTime ? "Server" : "Other", timeSource.description)
+            os_log(.info, log: logger, "🔒 TIME SOURCE CHANGED: %{public}s → %{public}s",
+                   isUsingServerTime ? "Server" : "Other", timeSource.description)
         }
     }
     
@@ -126,45 +129,36 @@ class NowPlayingManager: ObservableObject {
             if timeSinceStorage < 120.0 && lockScreenStoredPosition > 0.1 {
                 let recoveryInfo = getStoredPositionWithTimeOffset()
                 if recoveryInfo.isValid {
-                    //os_log(.debug, log: logger, "🔒 Using stored recovery position: %.2f (%.1fs ago)",
-                    //       recoveryInfo.position, timeSinceStorage)
-                    
                     return (time: recoveryInfo.position, isPlaying: recoveryInfo.wasPlaying, source: .lastKnown)
                 }
             }
         }
         
-        // ENHANCED: If we have ANY server time data, use it - even if marked as "invalid"
-        if let synchronizer = serverTimeSynchronizer {
-            let serverInfo = synchronizer.getCurrentInterpolatedTime()
+        // SIMPLIFIED: Use SlimProto time from coordinator if available
+        if let slimClient = slimClient {
+            let (slimProtoTime, isPlaying) = slimClient.getCurrentInterpolatedTime()
             
-            // CRITICAL FIX: Use server time if it's > 0.1 seconds (not just > 0)
-            // This prevents using bogus 0.00 positions from pause commands
-            if serverInfo.time > 0.1 {
-                //os_log(.debug, log: logger, "🔒 Using server time: %.2f (marked valid: %{public}s)",
-                 //      serverInfo.time, serverInfo.isServerTime ? "YES" : "NO")
+            if slimProtoTime > 0.0 {
+                os_log(.debug, log: logger, "🔒 Using SlimProto time: %.2f (playing: %{public}s)",
+                       slimProtoTime, isPlaying ? "YES" : "NO")
                 
-                lastKnownServerTime = serverInfo.time
-                return (time: serverInfo.time, isPlaying: serverInfo.isPlaying, source: .serverTime)
-            } else {
-                // Server time is 0 or very small - use last known good server time if available
-                if lastKnownServerTime > 0.1 {
-                    //os_log(.debug, log: logger, "🔒 Server time is %.2f, using last known good: %.2f",
-                   //       serverInfo.time, lastKnownServerTime)
-                    
-                    return (time: lastKnownServerTime, isPlaying: serverInfo.isPlaying, source: .serverTime)
-                }
+                lastKnownServerTime = slimProtoTime
+                return (time: slimProtoTime, isPlaying: isPlaying, source: .serverTime)
             }
         }
         
-        // Only fall back to audio manager if we have NO good server data at all
+        // Fall back to last known server time if we have it
+        if lastKnownServerTime > 0.1 {
+            os_log(.debug, log: logger, "🔒 Using last known server time: %.2f", lastKnownServerTime)
+            return (time: lastKnownServerTime, isPlaying: false, source: .serverTime)
+        }
+        
+        // Only fall back to audio manager if we have NO SlimProto time at all
         if let audioManager = audioManager {
             let audioTime = audioManager.getCurrentTime()
             let isPlaying = audioManager.getPlayerState() == "Playing"
             
-            // CRITICAL FIX: Only use audio time if it's reasonable and different from our last server time
-            if audioTime > 0.1 && abs(audioTime - lastKnownServerTime) < 120.0 {
-                //os_log(.debug, log: logger, "🔒 Using audio time: %.2f (server time unavailable)", audioTime)
+            if audioTime > 0.1 {
                 lastKnownAudioTime = audioTime
                 return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
             }
@@ -172,8 +166,6 @@ class NowPlayingManager: ObservableObject {
         
         // Ultimate fallback - use the best time we have
         let fallbackTime = max(lastKnownServerTime, lastKnownAudioTime, lockScreenStoredPosition)
-        //os_log(.debug, log: logger, "🔒 Using ultimate fallback time: %.2f", fallbackTime)
-        
         return (time: fallbackTime, isPlaying: false, source: .lastKnown)
     }
     
@@ -475,6 +467,23 @@ class NowPlayingManager: ObservableObject {
             os_log(.debug, log: logger, "📍 Updated from audio manager: %.2f (state: %{public}s)",
                    currentTime, isPlaying ? "playing" : "paused")
         }
+    }
+    
+    // MARK: - Simplified SlimProto Integration
+    func updateFromSlimProto(currentTime: Double, duration: Double = 0.0, isPlaying: Bool) {
+        // This replaces the complex ServerTimeSynchronizer integration
+        lastKnownServerTime = currentTime
+        
+        // Update duration if provided
+        if duration > 0 {
+            metadataDuration = duration
+        }
+        
+        // Update now playing info immediately with SlimProto data
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+        
+        os_log(.debug, log: logger, "📍 Updated from SlimProto: %.2f (playing: %{public}s)",
+               currentTime, isPlaying ? "YES" : "NO")
     }
     
     // MARK: - Metadata Access

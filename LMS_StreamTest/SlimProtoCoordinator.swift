@@ -3,6 +3,48 @@
 import Foundation
 import os.log
 
+// MARK: - Power-On Resume Preference Types
+enum PowerOnResumePreference {
+    case noResume           // "noResumeOn"
+    case resumePlay         // "resumePlayOn" 
+    case resumePlayFromStart // "resumeResetPlayOn"
+    
+    init(rawValue: String) {
+        switch rawValue {
+        case "resumePlayOn":
+            self = .resumePlay
+        case "resumeResetPlayOn": 
+            self = .resumePlayFromStart
+        case "noResumeOn", "":
+            self = .noResume
+        default:
+            self = .noResume
+        }
+    }
+    
+    var rawValue: String {
+        switch self {
+        case .noResume: return "noResumeOn"
+        case .resumePlay: return "resumePlayOn"
+        case .resumePlayFromStart: return "resumeResetPlayOn"
+        }
+    }
+    
+    var shouldAutoResume: Bool {
+        switch self {
+        case .resumePlay, .resumePlayFromStart: return true
+        case .noResume: return false
+        }
+    }
+    
+    var shouldResumeFromStart: Bool {
+        switch self {
+        case .resumePlayFromStart: return true
+        case .resumePlay, .noResume: return false
+        }
+    }
+}
+
 class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Components
@@ -10,7 +52,7 @@ class SlimProtoCoordinator: ObservableObject {
     private let commandHandler: SlimProtoCommandHandler
     private let connectionManager: SlimProtoConnectionManager
     private let audioManager: AudioManager
-    private let serverTimeSynchronizer: ServerTimeSynchronizer
+    private let serverTimeSynchronizer: ServerTimeSynchronizer // Keep for compatibility but minimize usage
     
     // MARK: - Dependencies
     private let settings = SettingsManager.shared
@@ -22,6 +64,23 @@ class SlimProtoCoordinator: ObservableObject {
     private(set) var lastKnownHost: String = ""
     private(set) var lastKnownPort: UInt16 = 3483
     private var playbackHeartbeatTimer: Timer?
+    
+    // MARK: - Background State Tracking
+    private var isAppInBackground: Bool = false
+    private var backgroundedWhilePlaying: Bool = false
+    
+    // MARK: - Simple Position Recovery
+    private var savedPosition: Double = 0.0
+    private var savedPositionTimestamp: Date?
+    private var shouldResumeOnPlay: Bool = false
+    private var isLockScreenPlayRecovery: Bool = false
+    
+    // MARK: - Simple Time Tracking (replaces complex ServerTimeSynchronizer)
+    private var currentServerTime: Double = 0.0
+    private var serverTimeTimestamp: Date?
+    private var isServerPlaying: Bool = false
+    private var serverTrackDuration: Double = 0.0
+    private var serverTimeTimer: Timer?
 
     
     // MARK: - Initialization
@@ -37,7 +96,7 @@ class SlimProtoCoordinator: ObservableObject {
         setupServerTimeIntegration()
         setupAudioPlayerIntegration()
 
-        os_log(.info, log: logger, "SlimProtoCoordinator initialized with ServerTimeSynchronizer")
+        os_log(.info, log: logger, "SlimProtoCoordinator initialized with simplified time tracking")
     }
     
     // MARK: - Setup
@@ -75,18 +134,18 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     private func setupServerTimeIntegration() {
-        // Connect ServerTimeSynchronizer to audio manager's NowPlayingManager
-        // This will be done when we set the audio manager reference
-        os_log(.info, log: logger, "✅ Server time integration configured")
+        // DISABLED: Don't connect ServerTimeSynchronizer to NowPlayingManager
+        // We're using our simplified system instead
+        // audioManager.setupServerTimeIntegration(with: serverTimeSynchronizer)
+        os_log(.info, log: logger, "✅ Server time integration disabled (using simplified system)")
     }
     
     // MARK: - Audio Manager Integration Enhancement
     func setupNowPlayingManagerIntegration() {
-        // Use AudioManager's integration method to set up server time sync
-        audioManager.setupServerTimeIntegration(with: serverTimeSynchronizer)
-        serverTimeSynchronizer.setConnectionManager(connectionManager)
+        // Simple integration - just set the coordinator reference
+        audioManager.getNowPlayingManager().setSlimClient(self)
         
-        os_log(.info, log: logger, "✅ Server time synchronizer connected via AudioManager")
+        os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
     }
     
     // MARK: - Public Interface
@@ -102,9 +161,11 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     func disconnect() {
-        os_log(.info, log: logger, "User requested disconnection")
+        os_log(.info, log: logger, "🔌 Disconnecting from server")
+        DebugLogManager.shared.logInfo("🔌 Disconnecting from server")
         connectionManager.userInitiatedDisconnection()
-        stopServerTimeSync()
+        // DON'T stop server time sync immediately - preserve last known good time for lock screen
+        // stopServerTimeSync()
         client.disconnect()
     }
     
@@ -119,15 +180,15 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
     }
     
-    // MARK: - Server Time Sync Management
+    // MARK: - Server Time Sync Management (DISABLED - using simplified SlimProto tracking)
     private func startServerTimeSync() {
-        serverTimeSynchronizer.startSyncing()
-        os_log(.info, log: logger, "🔄 Server time synchronization started")
+        serverTimeSynchronizer.startSyncing() // Keep for compatibility
+        os_log(.info, log: logger, "🔄 Using simplified SlimProto time tracking")
     }
     
     private func stopServerTimeSync() {
-        serverTimeSynchronizer.stopSyncing()
-        os_log(.info, log: logger, "⏹️ Server time synchronization stopped")
+        serverTimeSynchronizer.stopSyncing() // Keep for compatibility
+        os_log(.info, log: logger, "⏹️ Simplified time tracking stopped")
     }
     
     func requestFreshMetadata() {
@@ -181,7 +242,7 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Server Time Debug Info
     var serverTimeStatus: String {
-        return serverTimeSynchronizer.syncStatus
+        return "Simplified SlimProto Time Tracking"
     }
     
     var timeSourceInfo: String {
@@ -220,6 +281,7 @@ class SlimProtoCoordinator: ObservableObject {
     
     deinit {
         stopServerTimeSync()
+        stopServerTimeFetching()  // Stop our simplified server time fetching
         stopMetadataRefresh()  // Add this line
         disconnect()
     }
@@ -239,6 +301,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         
         startServerTimeSync()
         setupNowPlayingManagerIntegration()
+        
+        // Check if we need to recover position after reconnection
+        checkForPositionRecoveryAfterConnection()
     }
 
     func slimProtoDidDisconnect(error: Error?) {
@@ -283,28 +348,404 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerDidEnterBackground() {
-        os_log(.info, log: logger, "📱 App backgrounded - checking SlimProto recovery strategy")
+        isAppInBackground = true
         
-        // CRITICAL: If paused by lock screen, disconnect cleanly to trigger server's
-        // disconnect/recovery mechanism (persistPlaybackStateForPowerOff)
-        if commandHandler.isPausedByLockScreen {
-            os_log(.info, log: logger, "🔌 Clean disconnect - paused by lock screen + backgrounded")
-            os_log(.info, log: logger, "📍 Server will save playingAtPowerOff=true and positionAtDisconnect")
-            os_log(.info, log: logger, "🔄 This enables proper resume recovery when reconnecting")
+        os_log(.info, log: logger, "📱 App backgrounded - checking SlimProto recovery strategy")
+        DebugLogManager.shared.logInfo("📱 App backgrounded - checking recovery strategy")
+        
+        let isLockScreenPaused = commandHandler.isPausedByLockScreen
+        let playerState = audioManager.getPlayerState()
+        
+        os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
+               isLockScreenPaused ? "YES" : "NO", playerState)
+        DebugLogManager.shared.logInfo("🔍 Pause state - lockScreen: \(isLockScreenPaused ? "YES" : "NO"), player: \(playerState)")
+        
+        // SIMPLE STRATEGY: Save position locally when backgrounding while paused
+        if playerState == "Paused" || playerState == "Stopped" {
+            backgroundedWhilePlaying = false
+            os_log(.info, log: logger, "⏸️ App backgrounded while paused - saving position locally")
+            DebugLogManager.shared.logInfo("⏸️ App backgrounded while paused - saving position locally")
             
-            // Clean disconnect to trigger server's persistPlaybackStateForPowerOff
+            // Save position using current SlimProto time data
+            os_log(.info, log: logger, "💾 Saving position using current SlimProto time")
+            DebugLogManager.shared.logInfo("💾 Saving position using current SlimProto time")
+            
+            saveCurrentPositionLocally()
+            
+            // Continue with disconnect after saving position
+            os_log(.info, log: logger, "🔌 Disconnecting normally - position saved locally")
+            DebugLogManager.shared.logInfo("🔌 Disconnecting normally - position saved locally")
             disconnect()
+            
+            return // Don't continue with immediate disconnect
         } else {
-            os_log(.info, log: logger, "▶️ App backgrounded while playing - maintaining connection for active playback")
-            // Keep connection alive for active playback
+            backgroundedWhilePlaying = true
+            os_log(.info, log: logger, "▶️ App backgrounded while playing - monitoring for pause after backgrounding")
+            DebugLogManager.shared.logInfo("▶️ App backgrounded while playing - monitoring for pause after backgrounding")
+            // Keep connection alive for active playback, but monitor for pause
         }
     }
     
     func connectionManagerDidEnterForeground() {
+        isAppInBackground = false
+        backgroundedWhilePlaying = false
+        
+        // CRITICAL: Clear lock screen recovery flag when app opens normally
+        // App-open should use normal app-open recovery, not lock screen recovery
+        isLockScreenPlayRecovery = false
+        os_log(.info, log: logger, "📱 App foregrounded - cleared lock screen recovery flag")
+        DebugLogManager.shared.logInfo("📱 App foregrounded - cleared lock screen recovery flag")
+        
         if connectionManager.connectionState.isConnected {
-            serverTimeSynchronizer.performImmediateSync()
+            // DISABLED: serverTimeSynchronizer.performImmediateSync()
+            
+            // Check if we need to recover position after being backgrounded
+            checkForPositionRecoveryOnForeground()
         } else {
+            // Will connect and potentially recover position
             connect()
+        }
+    }
+    
+    // MARK: - Simple Position Recovery Methods
+    
+    private func saveCurrentPositionLocally() {
+        // Fetch fresh server time first, then save position
+        os_log(.info, log: logger, "🔄 Fetching fresh server time before saving position")
+        DebugLogManager.shared.logInfo("🔄 Fetching fresh server time before saving position")
+        
+        fetchServerTime()
+        
+        // Wait briefly for server time response, then save position
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let currentTime = self.getCurrentTimeForSaving()
+            let audioTime = self.audioManager.getCurrentTime()
+            
+            os_log(.info, log: self.logger, "🔍 Position sources - Server: %.2f, Audio: %.2f", 
+                   currentTime, audioTime)
+            DebugLogManager.shared.logInfo("🔍 Position sources - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
+            
+            // Use real server time as primary source (the server truth)
+            var positionToSave: Double = 0.0
+            var sourceUsed: String = "none"
+            
+            if currentTime > 0.1 {
+                positionToSave = currentTime
+                sourceUsed = "real server time"
+                os_log(.info, log: self.logger, "✅ Using real server time: %.2f", currentTime)
+                DebugLogManager.shared.logInfo("✅ Using real server time: \(String(format: "%.2f", currentTime))")
+            }
+            // Fallback to audio time only if server time unavailable
+            else if audioTime > 0.1 {
+                positionToSave = audioTime
+                sourceUsed = "audio manager (fallback)"
+                os_log(.info, log: self.logger, "🔄 Server time unavailable, using audio time: %.2f", audioTime)
+                DebugLogManager.shared.logInfo("🔄 Server time unavailable, using audio time: \(String(format: "%.2f", audioTime))")
+            }
+            
+            // Only save if we got a valid position
+            if positionToSave > 0.1 {
+                self.savedPosition = positionToSave
+                self.savedPositionTimestamp = Date()
+                self.shouldResumeOnPlay = true
+                
+                os_log(.info, log: self.logger, "💾 Saved position locally: %.2f seconds (from %{public}s)", 
+                       positionToSave, sourceUsed)
+                DebugLogManager.shared.logInfo("💾 Saved position locally: \(String(format: "%.2f", positionToSave)) seconds (from \(sourceUsed))")
+            } else {
+                os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
+                       currentTime, audioTime)
+                DebugLogManager.shared.logError("❌ No valid position to save - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
+            }
+        }
+    }
+    
+    private func checkForPositionRecoveryOnForeground() {
+        // Check if we have a saved position that needs recovery
+        guard shouldResumeOnPlay,
+              let timestamp = savedPositionTimestamp,
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "ℹ️ No position recovery needed on foreground")
+            return
+        }
+        
+        // Check if the saved position is recent (within 10 minutes)
+        let timeSinceSave = Date().timeIntervalSince(timestamp)
+        guard timeSinceSave < 600 else {
+            os_log(.info, log: logger, "⚠️ Saved position too old for foreground recovery - clearing")
+            DebugLogManager.shared.logWarning("⚠️ Saved position too old for foreground recovery - clearing")
+            clearSavedPosition()
+            return
+        }
+        
+        os_log(.info, log: logger, "🔄 App foregrounded with saved position - will recover on next connection")
+        DebugLogManager.shared.logInfo("🔄 App foregrounded with saved position - will recover on next connection")
+    }
+    
+    private func clearSavedPosition() {
+        shouldResumeOnPlay = false
+        savedPosition = 0.0
+        savedPositionTimestamp = nil
+        isLockScreenPlayRecovery = false
+        os_log(.info, log: logger, "🗑️ Cleared saved position")
+        DebugLogManager.shared.logInfo("🗑️ Cleared saved position")
+    }
+    
+    private func checkForPositionRecoveryAfterConnection() {
+        // Skip if this is a lock screen play recovery (handled separately)
+        if isLockScreenPlayRecovery {
+            os_log(.info, log: logger, "ℹ️ Skipping app-open recovery - this is lock screen play recovery")
+            DebugLogManager.shared.logInfo("ℹ️ Skipping app-open recovery - this is lock screen play recovery")
+            return
+        }
+        
+        // DEBUG: Always log the current saved position state
+        os_log(.info, log: logger, "🔍 Recovery check - savedPosition: %.2f, shouldResumeOnPlay: %{public}s, timestamp: %{public}s", 
+               savedPosition, shouldResumeOnPlay ? "YES" : "NO", 
+               savedPositionTimestamp?.description ?? "nil")
+        DebugLogManager.shared.logInfo("🔍 Recovery check - savedPosition: \(String(format: "%.2f", savedPosition)), shouldResumeOnPlay: \(shouldResumeOnPlay ? "YES" : "NO"), timestamp: \(savedPositionTimestamp?.description ?? "nil")")
+        
+        // Check if we have a saved position that needs recovery
+        guard shouldResumeOnPlay,
+              let timestamp = savedPositionTimestamp,
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "ℹ️ No position recovery needed after connection")
+            return
+        }
+        
+        // Check if the saved position is recent (within 10 minutes)
+        let timeSinceSave = Date().timeIntervalSince(timestamp)
+        guard timeSinceSave < 600 else {
+            os_log(.info, log: logger, "⚠️ Saved position too old after connection (%.0f seconds) - clearing", timeSinceSave)
+            DebugLogManager.shared.logWarning("⚠️ Saved position too old after connection (\(Int(timeSinceSave)) seconds) - clearing")
+            clearSavedPosition()
+            return
+        }
+        
+        // CRITICAL: Reject stale positions that don't match current server time
+        // If saved position is significantly different from current server time, it's probably stale
+        let (currentServerTime, _) = getCurrentInterpolatedTime()
+        let timeDifference = abs(savedPosition - currentServerTime)
+        
+        // If current server time is valid and saved position is more than 10 seconds off, reject it
+        if currentServerTime > 1.0 && timeDifference > 10.0 {
+            os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
+                   savedPosition, currentServerTime, timeDifference)
+            DebugLogManager.shared.logError("🚨 REJECTING stale position \(String(format: "%.2f", savedPosition)) - server shows \(String(format: "%.2f", currentServerTime)) (diff: \(String(format: "%.2f", timeDifference)))")
+            clearSavedPosition()
+            return
+        }
+        
+        os_log(.info, log: logger, "🎯 Connection established with saved position - will recover after stabilization")
+        DebugLogManager.shared.logInfo("🎯 Connection established with saved position - will recover after stabilization")
+        
+        // Wait for connection to stabilize, then seek to saved position
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.performSimplePositionRecoveryAfterConnection()
+        }
+    }
+    
+    private func performSimplePositionRecoveryAfterConnection() {
+        // This is for when app is opened and reconnects (not lock screen play)
+        // We seek to position but DON'T automatically start playing
+        
+        guard shouldResumeOnPlay,
+              let timestamp = savedPositionTimestamp,
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "ℹ️ No saved position to recover after connection")
+            return
+        }
+        
+        // Double-check age
+        let timeSinceSave = Date().timeIntervalSince(timestamp)
+        guard timeSinceSave < 600 else {
+            os_log(.info, log: logger, "⚠️ Position too old - not recovering")
+            clearSavedPosition()
+            return
+        }
+        
+        os_log(.info, log: logger, "🎯 Recovering to saved position after app open: %.2f seconds", savedPosition)
+        DebugLogManager.shared.logInfo("🎯 Recovering to saved position after app open: \(String(format: "%.2f", savedPosition)) seconds")
+        
+        // App open recovery: play → seek → pause (fast sequence to minimize audio blip)
+        os_log(.info, log: logger, "🔄 App open: play → seek → pause sequence (fast)")
+        DebugLogManager.shared.logInfo("🔄 App open: play → seek → pause sequence (fast)")
+        
+        // CRITICAL: Pause server time sync during recovery to prevent crazy time jumps
+        os_log(.info, log: logger, "⏸️ Pausing server time sync during recovery")
+        DebugLogManager.shared.logInfo("⏸️ Pausing server time sync during recovery")
+        // DISABLED: serverTimeSynchronizer.pauseUpdates()
+        
+        sendJSONRPCCommand("play")
+        
+        // Wait briefly for playback to start, then seek, then pause
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            os_log(.info, log: self.logger, "🎯 App open: Now seeking to saved position: %.2f seconds", self.savedPosition)
+            DebugLogManager.shared.logInfo("🎯 App open: Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
+            
+            self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
+                guard let self = self else { return }
+                
+                if seekSuccess {
+                    os_log(.info, log: self.logger, "✅ App open: Seek successful - now pausing")
+                    DebugLogManager.shared.logInfo("✅ App open: Seek successful - now pausing")
+                    
+                    // Pause immediately after seeking so user sees correct position but isn't auto-playing
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.sendJSONRPCCommand("pause")
+                        os_log(.info, log: self.logger, "⏸️ App open recovery complete - positioned at saved location")
+                        DebugLogManager.shared.logInfo("⏸️ App open recovery complete - positioned at saved location")
+                        
+                        // CRITICAL: Refresh UI after recovery and resume server time sync
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
+                            DebugLogManager.shared.logInfo("🔄 Refreshing UI after recovery")
+                            self.refreshUIAfterRecovery()
+                            
+                            os_log(.info, log: self.logger, "▶️ Resuming server time sync after recovery")
+                            DebugLogManager.shared.logInfo("▶️ Resuming server time sync after recovery")
+                            // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                        }
+                    }
+                } else {
+                    os_log(.error, log: self.logger, "❌ App open: Failed to seek to saved position")
+                    DebugLogManager.shared.logError("❌ App open: Failed to seek to saved position")
+                    
+                    // Resume server time sync even if seek failed
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        os_log(.info, log: self.logger, "▶️ Resuming server time sync after failed recovery")
+                        DebugLogManager.shared.logInfo("▶️ Resuming server time sync after failed recovery")
+                        // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                    }
+                }
+                
+                // DON'T clear saved position here - keep it for potential lock screen recovery
+                os_log(.info, log: self.logger, "ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
+                DebugLogManager.shared.logInfo("ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
+            }
+        }
+    }
+    
+    private func tryDirectPreferenceMethod(completion: @escaping (Bool) -> Void) {
+        os_log(.info, log: logger, "🔧 Reading user's Material power-on resume setting")
+        DebugLogManager.shared.logInfo("🔧 Reading user's Material power-on resume setting")
+        
+        let currentPosition = audioManager.getCurrentTime()
+        let playerID = settings.playerMACAddress
+        
+        os_log(.info, log: logger, "📍 Current position: %.2f seconds, Player: %{public}s", currentPosition, playerID)
+        DebugLogManager.shared.logInfo("📍 Current position: \(String(format: "%.2f", currentPosition))s, Player: \(playerID)")
+        
+        // CRITICAL CHECK: If position is 0, we still want to proceed for user preference setting
+        if currentPosition <= 0.0 {
+            os_log(.error, log: logger, "⚠️ Current position is %.2f - this might indicate an issue", currentPosition)
+            DebugLogManager.shared.logWarning("⚠️ Current position is \(String(format: "%.2f", currentPosition)) - checking if this is expected")
+        }
+        
+        // First, read the user's power-on resume preference from Material
+        let getPrefCommand = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "powerOnResume", "?"]]
+        ] as [String : Any]
+        
+        sendJSONRPCCommandDirect(getPrefCommand) { [weak self] result in
+            guard let self = self else { 
+                completion(false)
+                return 
+            }
+            
+            // Parse the user's resume preference
+            let resumePreference = self.parsePowerOnResumePreference(result)
+            let shouldAutoResume = resumePreference.shouldAutoResume
+            let resumeFromStart = resumePreference.shouldResumeFromStart
+            
+            os_log(.info, log: self.logger, "📱 User's Material setting: %{public}s (auto-resume: %{public}s)", 
+                   resumePreference.rawValue, shouldAutoResume ? "YES" : "NO")
+            
+            DebugLogManager.shared.logInfo("📱 Material Setting: \(resumePreference.rawValue) (auto-resume: \(shouldAutoResume ? "YES" : "NO"))")
+            
+            // INSIGHT: We cannot manually set playingAtPowerOff/positionAtDisconnect via JSON-RPC
+            // These are server-internal preferences set automatically during disconnect
+            // Instead, we need to ensure the server SEES us as playing when we disconnect
+            
+            os_log(.info, log: self.logger, "🎯 User wants auto-resume: %{public}s - skipping manual preference setting", shouldAutoResume ? "YES" : "NO")
+            DebugLogManager.shared.logInfo("🎯 User wants auto-resume: \(shouldAutoResume ? "YES" : "NO") - server will handle this automatically")
+            
+            // The real strategy: Use silent resume to ensure server sees us as PLAYING during disconnect
+            // This will make server's persistPlaybackStateForPowerOff save playingAtPowerOff=true
+            os_log(.info, log: self.logger, "✅ User preference understood - proceeding with server-compatible method")
+            DebugLogManager.shared.logInfo("✅ User preference understood - proceeding with server-compatible method")
+            completion(true)
+        }
+    }
+    
+    // Helper method to parse Material power-on resume preference
+    private func parsePowerOnResumePreference(_ result: [String: Any]) -> PowerOnResumePreference {
+        // Look for the preference value in the result
+        if let resultData = result["result"] as? [String: Any] {
+            os_log(.info, log: logger, "🔍 PARSING: Full result data: %{public}s", String(describing: resultData))
+            DebugLogManager.shared.logInfo("🔍 PARSING: Full result data: \(String(describing: resultData))")
+            
+            // Try different possible keys that the server might return
+            let possibleKeys = ["_p2", "_powerOnResume", "powerOnResume", "_pref"]
+            
+            for key in possibleKeys {
+                if let prefValue = resultData[key] as? String {
+                    os_log(.info, log: logger, "🔍 FOUND preference at key '%{public}s': %{public}s", key, prefValue)
+                    DebugLogManager.shared.logInfo("🔍 FOUND preference at key '\(key)': \(prefValue)")
+                    
+                    // Handle full format like "PauseOff-PlayOn" or shortened format like "resumePlayOn"
+                    if prefValue.contains("-") {
+                        // Full format: extract the "On" part after the dash
+                        let components = prefValue.components(separatedBy: "-")
+                        if components.count == 2 {
+                            let onPart = components[1]
+                            os_log(.info, log: logger, "🔍 EXTRACTED 'On' part: %{public}s", onPart)
+                            return PowerOnResumePreference(rawValue: onPart)
+                        }
+                    } else {
+                        // Shortened format: use as-is
+                        return PowerOnResumePreference(rawValue: prefValue)
+                    }
+                }
+            }
+        }
+        
+        os_log(.info, log: logger, "🔍 NO preference found - defaulting to noResume")
+        DebugLogManager.shared.logWarning("🔍 NO preference found - defaulting to noResume")
+        // Default to no resume if we can't read the preference
+        return .noResume
+    }
+    
+    private func performSilentResumeMethod() {
+        os_log(.info, log: logger, "🔇 Silent resume strategy - paused by lock screen + backgrounded")
+        os_log(.info, log: logger, "⚠️ Server only saves position when isPlaying(1) = true during disconnect")
+        os_log(.info, log: logger, "🎯 Solution: Silent resume → set isPlaying(1) → disconnect")
+        
+        // Step 1: Store current volume and mute audio
+        let originalVolume = audioManager.getVolume()
+        audioManager.setVolume(0.0)
+        
+        // Step 2: Send resume command silently to set server isPlaying(1) flag
+        os_log(.info, log: logger, "🔇 Resuming silently to set server isPlaying(1)")
+        commandHandler.handleUnpauseCommand()
+        
+        // Step 3: Reset lock screen pause flag so STMt heartbeats resume
+        commandHandler.isPausedByLockScreen = false
+        os_log(.info, log: logger, "🔇 Reset isPausedByLockScreen - STMt heartbeats will resume")
+        
+        // Step 4: Wait for STMt messages to be sent to server, then disconnect
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // Restore original volume
+            self.audioManager.setVolume(originalVolume)
+            
+            os_log(.info, log: self.logger, "🔌 Disconnecting while server thinks we're playing")
+            os_log(.info, log: self.logger, "📍 Server will save playingAtPowerOff=true and positionAtDisconnect")
+            os_log(.info, log: self.logger, "🔄 Lock screen resume will trigger server's resumeOnPower() logic")
+            
+            // Clean disconnect to trigger server's persistPlaybackStateForPowerOff
+            self.disconnect()
         }
     }
     
@@ -319,7 +760,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 connect()
             } else if connectionManager.connectionState.isConnected {
                 // Network restored - trigger immediate server time sync
-                serverTimeSynchronizer.performImmediateSync()
+                // DISABLED: serverTimeSynchronizer.performImmediateSync()
             }
         } else {
             // Network lost - server time sync will automatically handle this
@@ -369,8 +810,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             audioManager.playStreamWithFormat(urlString: url, format: format)
         }
         
-        // IMPORTANT: Tell server time synchronizer we're starting to play
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
+        // Start periodic server time fetching for lock screen updates
+        startServerTimeFetching()
         
         // Start the 1-second heartbeat timer (like squeezelite)
         startPlaybackHeartbeat()
@@ -385,29 +826,30 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             }
         }
         
-        // Trigger server time sync after connection stabilizes
+        // Fetch server time after connection stabilizes
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.serverTimeSynchronizer.performImmediateSync()
+            self.fetchServerTime()
         }
     }
     
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
+        // Normal foreground or background pause - let background handler deal with position saving
         audioManager.pause()
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
-        
-        // Stop heartbeat when paused
+        // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
         stopPlaybackHeartbeat()
         
-        client.sendStatus("STMp")
+        if !isAppInBackground {
+            client.sendStatus("STMp")
+        }
     }
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
         
         audioManager.play()
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
+        // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
         
         // Restart heartbeat when resumed
         startPlaybackHeartbeat()
@@ -419,7 +861,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "⏹️ Server stop command")
         
         audioManager.stop()
-        serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
+        
+        // Stop periodic server time fetching
+        stopServerTimeFetching()
         
         // Stop heartbeat when stopped
         stopPlaybackHeartbeat()
@@ -453,20 +897,171 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
 }
 
+// MARK: - Simple Time Tracking (replaces ServerTimeSynchronizer)
+extension SlimProtoCoordinator {
+    
+    /// Update current server time from actual server responses (not audio player)
+    func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
+        currentServerTime = position
+        serverTimeTimestamp = Date()
+        isServerPlaying = isPlaying
+        if duration > 0 {
+            serverTrackDuration = duration
+        }
+        
+        // Update NowPlayingManager with fresh server time
+        audioManager.getNowPlayingManager().updateFromSlimProto(
+            currentTime: position,
+            duration: serverTrackDuration,
+            isPlaying: isPlaying
+        )
+        
+        os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s)", 
+               position, isPlaying ? "YES" : "NO")
+    }
+    
+    /// Fetch actual server time via JSON-RPC (not audio player time)
+    func fetchServerTime() {
+        guard !settings.activeServerHost.isEmpty else {
+            return
+        }
+        
+        let playerID = settings.playerMACAddress
+        let jsonRPC = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [
+                playerID,
+                ["status", "-", "1", "tags:u,d,t"]
+            ]
+        ] as [String : Any]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            return
+        }
+        
+        let webPort = settings.activeServerWebPort
+        let host = settings.activeServerHost
+        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = jsonData
+        request.timeoutInterval = 5.0
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.parseServerTimeResponse(data: data, error: error)
+            }
+        }.resume()
+    }
+    
+    /// Parse JSON-RPC response to extract real server time
+    private func parseServerTimeResponse(data: Data?, error: Error?) {
+        guard let data = data, error == nil else {
+            return
+        }
+        
+        do {
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? [String: Any] else {
+                return
+            }
+            
+            // Extract REAL server time from server response
+            let serverTime = result["time"] as? Double ?? 0.0
+            let duration = result["duration"] as? Double ?? 0.0
+            let mode = result["mode"] as? String ?? "stop"
+            let isPlaying = (mode == "play")
+            
+            // Update our time tracking with REAL server time
+            updateServerTime(position: serverTime, duration: duration, isPlaying: isPlaying)
+            
+            os_log(.info, log: logger, "📡 Real server time fetched: %.2f (playing: %{public}s)", 
+                   serverTime, isPlaying ? "YES" : "NO")
+            
+        } catch {
+            os_log(.error, log: logger, "❌ Failed to parse server time response: %{public}s", error.localizedDescription)
+        }
+    }
+    
+    /// Get current interpolated time based on last server update
+    func getCurrentInterpolatedTime() -> (time: Double, isPlaying: Bool) {
+        guard let timestamp = serverTimeTimestamp else {
+            return (0.0, false)
+        }
+        
+        let elapsed = Date().timeIntervalSince(timestamp)
+        
+        // If too much time has passed, don't interpolate
+        if elapsed > 30.0 {
+            return (currentServerTime, isServerPlaying)
+        }
+        
+        // Interpolate if playing
+        if isServerPlaying {
+            let interpolatedTime = currentServerTime + elapsed
+            return (interpolatedTime, true)
+        } else {
+            return (currentServerTime, false)
+        }
+    }
+    
+    /// Get current time for position saving
+    func getCurrentTimeForSaving() -> Double {
+        let (time, _) = getCurrentInterpolatedTime()
+        return time
+    }
+    
+    /// Start periodic server time fetching
+    func startServerTimeFetching() {
+        stopServerTimeFetching() // Stop any existing timer
+        
+        // Fetch immediately
+        fetchServerTime()
+        
+        // Start periodic timer (every 8 seconds)
+        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+            self?.fetchServerTime()
+        }
+        
+        os_log(.info, log: logger, "🔄 Started periodic server time fetching")
+    }
+    
+    /// Stop periodic server time fetching
+    func stopServerTimeFetching() {
+        serverTimeTimer?.invalidate()
+        serverTimeTimer = nil
+        os_log(.info, log: logger, "⏹️ Stopped periodic server time fetching")
+    }
+}
+
 // MARK: - Enhanced Lock Screen Integration with SlimProto Connection Fix
 extension SlimProtoCoordinator {
     
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        // CRITICAL: For PLAY commands after disconnect, rely on SlimProto reconnection
-        // to trigger server's resumeOnPower() logic with stored position
+        // SIMPLE STRATEGY: For PLAY commands after disconnect, reconnect and seek to saved position
         if command.lowercased() == "play" && !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "🔄 PLAY after disconnect - using SlimProto reconnection for position recovery")
-            os_log(.info, log: logger, "🎯 Server will trigger resumeOnPower() with stored positionAtDisconnect")
+            os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
+            DebugLogManager.shared.logInfo("🔄 PLAY after disconnect - using simple position recovery")
             
-            // Let SlimProto reconnection handle the resume automatically
+            // Mark this as lock screen play recovery to prevent double recovery
+            isLockScreenPlayRecovery = true
+            
+            // CRITICAL: Ensure audio session is active for background playback
+            audioManager.activateAudioSession()
+            
+            // Reconnect and handle position recovery manually
             connect()
+            
+            // Monitor reconnection and apply saved position
+            monitorReconnectionForSimplePositionRecovery()
             return
         }
         
@@ -478,6 +1073,13 @@ extension SlimProtoCoordinator {
         }
         
         // If connected, send command via JSON-RPC (faster) but ensure SlimProto stays connected
+        
+        // CRITICAL: Track if this is a lock screen pause
+        if command.lowercased() == "pause" {
+            os_log(.info, log: logger, "🔒 Lock screen PAUSE - marking as lock screen pause")
+            commandHandler.isPausedByLockScreen = true
+        }
+        
         sendJSONRPCCommand(command)
     }
     
@@ -529,7 +1131,7 @@ extension SlimProtoCoordinator {
         // CRITICAL FIX: For pause commands, get current server position FIRST
         if command.lowercased() == "pause" {
             os_log(.info, log: logger, "🔒 Pause command - getting current server position first")
-            serverTimeSynchronizer.forceImmediateSync()
+            // DISABLED: serverTimeSynchronizer.forceImmediateSync()
             
             // Wait a moment for sync to complete, then continue with normal pause logic
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -632,10 +1234,21 @@ extension SlimProtoCoordinator {
                         self.ensureSlimProtoConnection()
                     }
                     
-                    // For skip commands, refresh metadata
+                    // For skip commands, refresh metadata and resume server time sync
                     if command == "next" || command == "previous" {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             self.fetchCurrentTrackMetadata()
+                            
+                            // CRITICAL: Resume server time sync after track skip
+                            // This ensures we get fresh server time for the new track
+                            os_log(.info, log: self.logger, "▶️ Resuming server time sync after track skip")
+                            DebugLogManager.shared.logInfo("▶️ Resuming server time sync after track skip")
+                            // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                            
+                            // Force immediate sync to get current position of new track
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                // DISABLED: serverTimeSynchronizer.forceImmediateSync()
+                            }
                         }
                     }
                 }
@@ -644,6 +1257,241 @@ extension SlimProtoCoordinator {
         
         task.resume()
         os_log(.info, log: logger, "🌐 Sent JSON-RPC %{public}s command to LMS", command)
+    }
+    
+    // Monitor reconnection and apply simple position recovery
+    private func monitorReconnectionForSimplePositionRecovery() {
+        os_log(.info, log: logger, "👀 Monitoring reconnection for simple position recovery")
+        DebugLogManager.shared.logInfo("👀 Monitoring reconnection for simple position recovery")
+        
+        var attempts = 0
+        let maxAttempts = 10 // 10 seconds max wait
+        
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
+            attempts += 1
+            
+            if self.connectionManager.connectionState.isConnected {
+                os_log(.info, log: self.logger, "✅ Reconnected - applying simple position recovery")
+                DebugLogManager.shared.logInfo("✅ Reconnected - applying simple position recovery")
+                timer.invalidate()
+                
+                // Wait a moment for connection to stabilize, then seek and play
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.performSimplePositionRecovery()
+                }
+                
+            } else if attempts >= maxAttempts {
+                os_log(.error, log: self.logger, "❌ Reconnection timeout for position recovery")
+                DebugLogManager.shared.logError("❌ Reconnection timeout for position recovery")
+                timer.invalidate()
+            }
+        }
+    }
+    
+    private func performSimplePositionRecovery() {
+        // Check if we have a saved position to recover
+        guard shouldResumeOnPlay,
+              let timestamp = savedPositionTimestamp,
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "ℹ️ No saved position to recover - playing from current position")
+            DebugLogManager.shared.logInfo("ℹ️ No saved position to recover - playing from current position")
+            sendJSONRPCCommand("play")
+            return
+        }
+        
+        // Check if the saved position is recent (within 10 minutes)
+        let timeSinceSave = Date().timeIntervalSince(timestamp)
+        guard timeSinceSave < 600 else {
+            os_log(.info, log: logger, "⚠️ Saved position too old (%.0f seconds) - playing from current position", timeSinceSave)
+            DebugLogManager.shared.logWarning("⚠️ Saved position too old (\(Int(timeSinceSave)) seconds) - playing from current position")
+            shouldResumeOnPlay = false
+            sendJSONRPCCommand("play")
+            return
+        }
+        
+        // CRITICAL: Reject stale positions that don't match current server time
+        // If saved position is significantly different from current server time, it's probably stale
+        let (currentServerTime, _) = getCurrentInterpolatedTime()
+        let timeDifference = abs(savedPosition - currentServerTime)
+        
+        // If current server time is valid and saved position is more than 10 seconds off, reject it
+        if currentServerTime > 1.0 && timeDifference > 10.0 {
+            os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
+                   savedPosition, currentServerTime, timeDifference)
+            DebugLogManager.shared.logError("🚨 REJECTING stale position \(String(format: "%.2f", savedPosition)) - server shows \(String(format: "%.2f", currentServerTime)) (diff: \(String(format: "%.2f", timeDifference)))")
+            clearSavedPosition()
+            
+            // CRITICAL: Use current server position instead of starting from 0
+            os_log(.info, log: logger, "🎯 Using current server position: %.2f seconds instead of stale position", currentServerTime)
+            DebugLogManager.shared.logInfo("🎯 Using current server position: \(String(format: "%.2f", currentServerTime)) seconds instead of stale position")
+            
+            // Recover to current server position instead of saved position
+            savedPosition = currentServerTime
+            // Continue with normal recovery logic using current server position
+        }
+        
+        os_log(.info, log: logger, "🎯 Recovering to saved position: %.2f seconds", savedPosition)
+        DebugLogManager.shared.logInfo("🎯 Recovering to saved position: \(String(format: "%.2f", savedPosition)) seconds")
+        
+        // Lock screen recovery: play → seek → play (fast sequence to minimize audio blip)
+        os_log(.info, log: logger, "🔄 Lock screen: play → seek → play sequence (fast)")
+        DebugLogManager.shared.logInfo("🔄 Lock screen: play → seek → play sequence (fast)")
+        
+        // CRITICAL: Pause server time sync during lock screen recovery too
+        os_log(.info, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
+        DebugLogManager.shared.logInfo("⏸️ Pausing server time sync during lock screen recovery")
+        // DISABLED: serverTimeSynchronizer.pauseUpdates()
+        
+        sendJSONRPCCommand("play")
+        
+        // Wait briefly for playback to start, then seek to saved position
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            os_log(.info, log: self.logger, "🎯 Now seeking to saved position: %.2f seconds", self.savedPosition)
+            DebugLogManager.shared.logInfo("🎯 Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
+            
+            self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
+                guard let self = self else { return }
+                
+                if seekSuccess {
+                    os_log(.info, log: self.logger, "✅ Lock screen: Seek successful - continuing playback")
+                    DebugLogManager.shared.logInfo("✅ Lock screen: Seek successful - continuing playback")
+                    
+                    // For lock screen recovery, continue playing after seek
+                    // No additional play command needed - we're already playing
+                } else {
+                    os_log(.error, log: self.logger, "❌ Lock screen: Failed to seek to saved position")
+                    DebugLogManager.shared.logError("❌ Lock screen: Failed to seek to saved position")
+                }
+                
+                // CRITICAL: Resume server time sync after lock screen recovery
+                // Wait longer for seek to complete on server before resuming sync
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    os_log(.info, log: self.logger, "▶️ Resuming server time sync after lock screen recovery")
+                    DebugLogManager.shared.logInfo("▶️ Resuming server time sync after lock screen recovery")
+                    // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                    
+                    // Force immediate sync to get fresh server time after seek
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        os_log(.info, log: self.logger, "🔄 Forcing server time sync after seek")
+                        DebugLogManager.shared.logInfo("🔄 Forcing server time sync after seek")
+                        // DISABLED: serverTimeSynchronizer.forceImmediateSync()
+                    }
+                }
+                
+                // Clear the saved position and reset lock screen flag
+                self.shouldResumeOnPlay = false
+                self.savedPosition = 0.0
+                self.savedPositionTimestamp = nil
+                self.isLockScreenPlayRecovery = false
+                
+                os_log(.info, log: self.logger, "🎵 Lock screen recovery complete")
+                DebugLogManager.shared.logInfo("🎵 Lock screen recovery complete")
+            }
+        }
+    }
+    
+    // MARK: - UI Refresh After Recovery
+    private func refreshUIAfterRecovery() {
+        // CRITICAL: Trigger player selection to sync UI with server state
+        // This simulates what happens when user selects player from Material menu
+        let playerID = settings.playerMACAddress
+        
+        // Send simple player selection command
+        let playerSelectCommand = [
+            "id": 1,
+            "method": "slim.request", 
+            "params": [playerID, ["status"]]
+        ] as [String : Any]
+        
+        sendJSONRPCCommandDirect(playerSelectCommand) { [weak self] result in
+            guard let self = self else { return }
+            
+            DispatchQueue.main.async {
+                // Force server time sync to ensure UI shows correct position
+                // DISABLED: serverTimeSynchronizer.forceImmediateSync()
+                
+                // Notify observers that state may have changed
+                self.objectWillChange.send()
+                
+                os_log(.info, log: self.logger, "✅ UI refreshed with player selection after recovery")
+                DebugLogManager.shared.logInfo("✅ UI refreshed with player selection after recovery")
+            }
+        }
+    }
+    
+    // Direct JSON-RPC command sender for preference testing
+    private func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+        os_log(.info, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
+        DebugLogManager.shared.logInfo("🌐 Sending JSON-RPC: \(String(describing: jsonRPC))")
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
+            os_log(.error, log: logger, "❌ Failed to create JSON-RPC command")
+            DebugLogManager.shared.logError("❌ Failed to create JSON-RPC command")
+            completion([:])
+            return
+        }
+        
+        let urlString = "\(settings.webURL)jsonrpc.js"
+        os_log(.info, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
+        DebugLogManager.shared.logInfo("🌐 JSON-RPC URL: \(urlString)")
+        
+        guard let url = URL(string: urlString) else {
+            os_log(.error, log: logger, "❌ Invalid JSON-RPC URL: %{public}s", urlString)
+            DebugLogManager.shared.logError("❌ Invalid JSON-RPC URL: \(urlString)")
+            completion([:])
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = jsonData
+        request.timeoutInterval = 5.0
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                os_log(.error, log: self.logger, "❌ JSON-RPC request failed: %{public}s", error.localizedDescription)
+                DebugLogManager.shared.logError("❌ JSON-RPC request failed: \(error.localizedDescription)")
+                completion([:])
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                os_log(.info, log: self.logger, "🌐 JSON-RPC response status: %d", httpResponse.statusCode)
+                DebugLogManager.shared.logInfo("🌐 JSON-RPC response status: \(httpResponse.statusCode)")
+            }
+            
+            guard let data = data else {
+                os_log(.error, log: self.logger, "❌ No data received from JSON-RPC request")
+                DebugLogManager.shared.logError("❌ No data received from JSON-RPC request")
+                completion([:])
+                return
+            }
+            
+            do {
+                if let jsonResult = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    os_log(.info, log: self.logger, "✅ JSON-RPC response: %{public}s", String(describing: jsonResult))
+                    DebugLogManager.shared.logInfo("✅ JSON-RPC response: \(String(describing: jsonResult))")
+                    completion(jsonResult)
+                } else {
+                    os_log(.error, log: self.logger, "❌ Invalid JSON-RPC response format")
+                    DebugLogManager.shared.logError("❌ Invalid JSON-RPC response format")
+                    completion([:])
+                }
+            } catch {
+                os_log(.error, log: self.logger, "❌ Failed to parse JSON-RPC response: %{public}s", error.localizedDescription)
+                DebugLogManager.shared.logError("❌ Failed to parse JSON-RPC response: \(error.localizedDescription)")
+                completion([:])
+            }
+        }
+        
+        task.resume()
     }
     
     // CRITICAL: Ensure SlimProto connection for audio streaming
@@ -668,7 +1516,7 @@ extension SlimProtoCoordinator {
                     
                     // Start server time sync for position tracking
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        self.serverTimeSynchronizer.performImmediateSync()
+                        // DISABLED: serverTimeSynchronizer.performImmediateSync()
                     }
                     
                 } else if waitTime >= 15 {
@@ -684,7 +1532,7 @@ extension SlimProtoCoordinator {
             
             // Trigger server time sync
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.serverTimeSynchronizer.performImmediateSync()
+                // DISABLED: serverTimeSynchronizer.performImmediateSync()
             }
         }
     }
@@ -1091,6 +1939,12 @@ extension SlimProtoCoordinator {
                     completion(false)
                 } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                     os_log(.info, log: self.logger, "✅ Seek command sent successfully to %.2f", clampedPosition)
+                    
+                    // Fetch fresh server time after seek to update lock screen
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.fetchServerTime()
+                    }
+                    
                     completion(true)
                 } else {
                     os_log(.error, log: self.logger, "Seek command failed with HTTP error")

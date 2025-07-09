@@ -32,6 +32,7 @@ class ServerTimeSynchronizer: ObservableObject {
     private var consecutiveFailures: Int = 0
     private var isInBackground: Bool = false
     private var currentSyncInterval: TimeInterval = 5.0
+    private var updatesPaused: Bool = false  // ADD: For pausing updates during recovery
     
     // MARK: - Background Strategy Integration
     private weak var connectionManager: SlimProtoConnectionManager?
@@ -132,6 +133,23 @@ class ServerTimeSynchronizer: ObservableObject {
         isServerTimeAvailable = false
         consecutiveFailures = 0
         lastSuccessfulSync = nil
+    }
+    
+    // MARK: - Pause/Resume Updates (for recovery scenarios)
+    func pauseUpdates() {
+        os_log(.info, log: logger, "⏸️ Pausing server time updates")
+        updatesPaused = true
+        stopSyncTimer()  // Stop the timer but keep other state
+    }
+    
+    func resumeUpdates() {
+        os_log(.info, log: logger, "▶️ Resuming server time updates")
+        updatesPaused = false
+        
+        // Only restart if we were syncing before
+        if isServerTimeAvailable || lastSuccessfulSync != nil {
+            restartSyncTimer()
+        }
     }
     
     func performImmediateSync() {
@@ -280,6 +298,12 @@ class ServerTimeSynchronizer: ObservableObject {
     
     // MARK: - Success/Failure Handling
     private func handleSyncSuccess(currentTime: Double, duration: Double, isPlaying: Bool) {
+        // CRITICAL: Don't update if updates are paused (during recovery)
+        if updatesPaused {
+            os_log(.debug, log: logger, "🔒 Server time updates paused - ignoring sync result: %.2f", currentTime)
+            return
+        }
+        
         // Update state
         let oldTime = lastServerTime
         let oldPlaying = lastServerIsPlaying
@@ -327,11 +351,23 @@ class ServerTimeSynchronizer: ObservableObject {
     func forceImmediateSync() {
         os_log(.info, log: logger, "🔄 Forcing immediate server time sync to get current position")
         
+        // CRITICAL: Force sync even if updates are paused (for position saving)
+        let wasPaused = updatesPaused
+        updatesPaused = false
+        
         // Cancel any existing sync
         cancelCurrentSyncTask()
         
         // Perform immediate sync
         fetchServerTime()
+        
+        // Restore pause state after a brief delay to allow sync to complete
+        if wasPaused {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.updatesPaused = true
+                os_log(.debug, log: self.logger, "🔒 Restored pause state after force sync")
+            }
+        }
     }
     
     private func handleSyncFailure(_ error: Error) {

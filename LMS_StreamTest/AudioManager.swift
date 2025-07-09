@@ -146,6 +146,10 @@ class AudioManager: NSObject, ObservableObject {
         return audioPlayer.getVolume()
     }
     
+    func activateAudioSession() {
+        audioSessionManager.activateAudioSession()
+    }
+    
     // Metadata management
     func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval = 0.0) {
         // Update both the player and now playing manager
@@ -204,9 +208,14 @@ extension AudioManager: AudioPlayerDelegate {
     func audioPlayerDidPause() {
         os_log(.info, log: logger, "⏸️ Audio player paused")
         
-        // Update now playing info
-        let currentTime = audioPlayer.getCurrentTime()
-        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentTime)
+        // DON'T use audio player time - it can be wrong/stale
+        // Let the server time synchronizer handle position tracking
+        let audioTime = audioPlayer.getCurrentTime()
+        os_log(.info, log: logger, "🔒 Audio player reports pause time: %.2f (NOT using - server is master)", audioTime)
+        DebugLogManager.shared.logInfo("🔒 Audio player reports: \(String(format: "%.2f", audioTime))s (server is master)")
+        
+        // Update playing state only, let server time synchronizer provide the position
+        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
     }
     
     func audioPlayerDidStop() {

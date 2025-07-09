@@ -397,6 +397,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // Clamp position to reasonable bounds
         let clampedPosition = max(0, min(position, 86400)) // Max 24 hours
         
+        // NOTE: Don't update coordinator with audio player time - that's wrong!
+        // The coordinator should get server time from JSON-RPC responses, not audio player time
+        // coordinator.updateServerTime(position: clampedPosition, isPlaying: isPlaying)
+        
         // Elapsed seconds (4 bytes)
         let elapsedSeconds = UInt32(clampedPosition)
         statusData.append(Data([
