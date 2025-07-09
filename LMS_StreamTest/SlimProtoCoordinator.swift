@@ -267,14 +267,7 @@ class SlimProtoCoordinator: ObservableObject {
         metadataRefreshTimer = nil
     }
     
-    // Helper method to restart radio metadata refresh if it's not running
-    private func ensureRadioMetadataRefreshIsRunning() {
-        if metadataRefreshTimer == nil {
-            // For now, just restart metadata refresh - we'll rely on the timer to determine if it's radio
-            os_log(.info, log: logger, "🔄 Ensuring metadata refresh is running")
-            fetchCurrentTrackMetadata()
-        }
-    }
+    // REMOVED: ensureRadioMetadataRefreshIsRunning - redundant with fetchCurrentTrackMetadata
     
     private func setupAudioPlayerIntegration() {
         audioManager.setCommandHandler(commandHandler)
@@ -847,7 +840,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Restart metadata refresh for radio streams after resume
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.ensureRadioMetadataRefreshIsRunning()
+            // Simplified: Just fetch metadata if timer isn't running
+            if self.metadataRefreshTimer == nil {
+                self.fetchCurrentTrackMetadata()
+            }
         }
         
         client.sendStatus("STMr")
@@ -1564,7 +1560,7 @@ extension SlimProtoCoordinator {
     private func fetchCurrentTrackMetadata() {
         let playerID = settings.playerMACAddress
         
-        // ENHANCED: Request additional tags for radio/plugin artwork support
+        // SIMPLIFIED: Use Material skin's minimal tag set for efficiency
         let jsonRPC = [
             "id": 1,
             "method": "slim.request",
@@ -1572,8 +1568,8 @@ extension SlimProtoCoordinator {
                 playerID,
                 [
                     "status", "-", "1",
-                    // ENHANCED: Added artwork_url (u), coverid (c), icon (i), and image tags
-                    "tags:u,a,A,l,t,d,e,s,o,r,c,g,p,i,q,y,j,J,K,N,S,w,x,C,G,R,T,I,D,U,F,L,f,n,m,b,v,h,k,z,url,remote_title,bitrate"
+                    // Material skin tags: basic metadata + artwork + streaming info
+                    "tags:cdegilopqrstuyAABEGIKNPSTV"
                 ]
             ]
         ] as [String : Any]
@@ -1610,7 +1606,7 @@ extension SlimProtoCoordinator {
         os_log(.debug, log: logger, "🌐 Requesting enhanced track metadata")
     }
     
-    // Replace the parseTrackMetadata method in SlimProtoCoordinator.swift
+    // SIMPLIFIED: parseTrackMetadata method using Material skin approach
     private func parseTrackMetadata(data: Data) {
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1618,185 +1614,25 @@ extension SlimProtoCoordinator {
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
                 
-                // Metadata parsing - debug logging removed to reduce spam
+                // SIMPLIFIED: Use Material skin's straightforward metadata approach
+                let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LMS Stream"
+                let trackArtist = firstTrack["artist"] as? String ?? firstTrack["albumartist"] as? String ?? "Unknown Artist"
+                let trackAlbum = firstTrack["album"] as? String ?? firstTrack["remote_title"] as? String ?? "Lyrion Music Server"
                 
-                // ENHANCED: Handle radio stream metadata with better field priority
-                var trackTitle = "LMS Stream"
-                var trackArtist = "Unknown Artist"
-                var isRadioStream = false
-                
-                // Check if this is a radio stream by looking for indicators
-                if let url = firstTrack["url"] as? String {
-                    isRadioStream = url.contains("stream") || url.contains("radio") || url.contains("live") ||
-                                   url.contains(".pls") || url.contains(".m3u") || url.hasPrefix("http")
-                }
-                
-                if isRadioStream {
-                    
-                    // For radio streams, prioritize fields that contain current song info
-                    // Priority 1: Check 'title' field first (often contains current song)
-                    if let title = firstTrack["title"] as? String, !title.isEmpty &&
-                       !title.contains("(pls)") && !title.contains("FM") && !title.contains("Radio") {
-                        
-                        // Parse "Artist - Title" format if present
-                        let components = title.components(separatedBy: " - ")
-                        if components.count >= 2 {
-                            trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                            trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            // Parsed from title field
-                        } else {
-                            trackTitle = title
-                            // FIXED: Also check for separate artist field when title doesn't contain " - "
-                            if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                                trackArtist = artist
-                                // Using title + separate artist
-                            } else {
-                                // Using title field only
-                            }
-                        }
-                    }
-                    // Priority 2: Check 'track' field (sometimes contains current song)
-                    else if let track = firstTrack["track"] as? String, !track.isEmpty &&
-                            !track.contains("(pls)") && !track.contains("FM") && !track.contains("Radio") {
-                        
-                        let components = track.components(separatedBy: " - ")
-                        if components.count >= 2 {
-                            trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                            trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            // Parsed from track field
-                        } else {
-                            trackTitle = track
-                            // FIXED: Also check for separate artist field
-                            if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                                trackArtist = artist
-                                // Using track + separate artist
-                            } else {
-                                // Using track field only
-                            }
-                        }
-                    }
-                    // Priority 3: Try remote_title but filter out station names
-                    else if let remoteTitle = firstTrack["remote_title"] as? String, !remoteTitle.isEmpty &&
-                            !remoteTitle.contains("(pls)") && !remoteTitle.contains("FM") && !remoteTitle.contains("Radio") {
-                        
-                        let components = remoteTitle.components(separatedBy: " - ")
-                        if components.count >= 2 {
-                            trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                            trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            // Parsed from remote_title
-                        } else {
-                            trackTitle = remoteTitle
-                            // FIXED: Also check for separate artist field
-                            if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                                trackArtist = artist
-                                // Using remote_title + separate artist
-                            } else {
-                                // Using remote_title only
-                            }
-                        }
-                    }
-                    // Priority 4: Use separate title and artist fields
-                    else {
-                        if let title = firstTrack["title"] as? String, !title.isEmpty {
-                            trackTitle = title
-                        } else if let track = firstTrack["track"] as? String, !track.isEmpty {
-                            trackTitle = track
-                        }
-                        
-                        if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                            trackArtist = artist
-                        }
-                        
-                        // Using fallback separate fields
-                    }
-                    
-                    // REMOVED: The section that looks for station names and overwrites good data
-                    // We already have the correct title and artist, don't second-guess it
-                } else {
-                    // Non-radio stream - use original logic
-                    trackTitle = firstTrack["title"] as? String ??
-                               firstTrack["track"] as? String ?? "LMS Stream"
-                    
-                    if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
-                        trackArtist = artist
-                    } else if let albumArtist = firstTrack["albumartist"] as? String, !albumArtist.isEmpty {
-                        trackArtist = albumArtist
-                    } else if let contributors = firstTrack["contributors"] as? [[String: Any]] {
-                        for contributor in contributors {
-                            if let role = contributor["role"] as? String,
-                               let name = contributor["name"] as? String,
-                               role.lowercased().contains("artist") {
-                                trackArtist = name
-                                break
-                            }
-                        }
-                    }
-                    // Non-radio metadata
-                }
-                
-                let trackAlbum = firstTrack["album"] as? String ?? (isRadioStream ? firstTrack["remote_title"] as? String ?? "Internet Radio" : "Lyrion Music Server")
                 // CRITICAL FIX: Only update duration if server explicitly provides it (Material skin approach)
                 let serverDuration = firstTrack["duration"] as? Double
                 
-                // ENHANCED: Multi-source artwork URL detection (existing code remains the same)
+                // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
-                
-                // Priority 1: Check for remote artwork URL (radio stations, plugins like Radio Paradise, TuneIn, etc.)
-                if let remoteArtworkURL = firstTrack["artwork_url"] as? String, !remoteArtworkURL.isEmpty {
-                    // Handle both relative and absolute URLs
-                    if remoteArtworkURL.hasPrefix("http://") || remoteArtworkURL.hasPrefix("https://") {
-                        // Absolute URL - use as-is (common for Radio Paradise, TuneIn, etc.)
-                        artworkURL = remoteArtworkURL
-                    } else if remoteArtworkURL.hasPrefix("/") {
-                        // Relative URL - prepend server address
-                        let webPort = settings.activeServerWebPort
-                        let host = settings.activeServerHost
-                        artworkURL = "http://\(host):\(webPort)\(remoteArtworkURL)"
-                    }
-                }
-                
-                // Priority 2: Check for coverid (local music library)
-                if artworkURL == nil, let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
-                    let webPort = settings.activeServerWebPort
-                    let host = settings.activeServerHost
-                    artworkURL = "http://\(host):\(webPort)/music/\(coverid)/cover.jpg"
-                }
-                
-                // Priority 3: Fallback to track ID (legacy method for local tracks)
-                if artworkURL == nil, let trackID = firstTrack["id"] as? Int {
-                    let webPort = settings.activeServerWebPort
-                    let host = settings.activeServerHost
-                    artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
-                }
-                
-                // Priority 4: Check for plugin-specific icon/image fields
-                if artworkURL == nil {
-                    // Some plugins use 'icon' field
-                    if let iconURL = firstTrack["icon"] as? String, !iconURL.isEmpty {
-                        if iconURL.hasPrefix("http://") || iconURL.hasPrefix("https://") {
-                            artworkURL = iconURL
-                        } else if iconURL.hasPrefix("/") {
-                            let webPort = settings.activeServerWebPort
-                            let host = settings.activeServerHost
-                            artworkURL = "http://\(host):\(webPort)\(iconURL)"
-                        }
-                    }
-                    // Some plugins use 'image' field
-                    else if let imageURL = firstTrack["image"] as? String, !imageURL.isEmpty {
-                        if imageURL.hasPrefix("http://") || imageURL.hasPrefix("https://") {
-                            artworkURL = imageURL
-                        } else if imageURL.hasPrefix("/") {
-                            let webPort = settings.activeServerWebPort
-                            let host = settings.activeServerHost
-                            artworkURL = "http://\(host):\(webPort)\(imageURL)"
-                        }
-                    }
+                if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
+                    artworkURL = artwork.hasPrefix("http") ? artwork : "http://\(settings.activeServerHost):\(settings.activeServerWebPort)\(artwork)"
+                } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
+                    artworkURL = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverid)/cover.jpg"
                 }
                 
                 // Log final metadata result
-                let sourceType = determineSourceType(from: firstTrack)
-                os_log(.info, log: logger, "🎵 %{public}s: '%{public}s' by %{public}s%{public}s",
-                       sourceType, trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
+                os_log(.info, log: logger, "🎵 Material-style: '%{public}s' by %{public}s%{public}s",
+                       trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
                 
                 DispatchQueue.main.async {
                     // Only update duration if server explicitly provides it (Material skin approach)
@@ -1826,8 +1662,7 @@ extension SlimProtoCoordinator {
         } catch {
             os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
         }
-    }
-    
+    }    
     // MARK: - Helper Method to Determine Source Type
     private func determineSourceType(from trackData: [String: Any]) -> String {
         // Check various indicators to determine the source type
