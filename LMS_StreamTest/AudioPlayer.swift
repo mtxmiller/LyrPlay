@@ -206,7 +206,7 @@ class AudioPlayer: NSObject, ObservableObject {
         isIntentionallyPaused = false
         audioPlayer.stop()
         delegate?.audioPlayerDidStop()
-        os_log(.info, log: logger, "⏹️ StreamingKit stopped playback")
+        os_log(.debug, log: logger, "⏹️ StreamingKit stopped playback")
     }
     
     // MARK: - Time and State (UPDATED)

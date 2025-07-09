@@ -125,7 +125,7 @@ class ServerTimeSynchronizer: ObservableObject {
     }
     
     func stopSyncing() {
-        os_log(.info, log: logger, "⏹️ Stopping server time synchronization")
+        os_log(.debug, log: logger, "⏹️ Stopping server time synchronization")
         
         stopSyncTimer()
         cancelCurrentSyncTask()

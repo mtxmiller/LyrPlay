@@ -401,7 +401,7 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     private func handleStopCommand() {
-        os_log(.info, log: logger, "⏹️ Server stop command")
+        os_log(.debug, log: logger, "⏹️ Server stop command")
         isPausedByLockScreen = false
         isStreamActive = false
         lastKnownPosition = 0.0

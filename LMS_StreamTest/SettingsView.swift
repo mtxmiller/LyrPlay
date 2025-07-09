@@ -35,6 +35,15 @@ struct SettingsView: View {
                         )
                     }
                     
+                    NavigationLink(destination: ServerDiscoverySettingsView()) {
+                        SettingsRow(
+                            icon: "magnifyingglass",
+                            title: "Discover Servers",
+                            value: "Find LMS servers",
+                            valueColor: .blue
+                        )
+                    }
+                    
                     Button(action: { showingConnectionTest = true }) {
                         SettingsRow(
                             icon: "network",
@@ -50,7 +59,7 @@ struct SettingsView: View {
                 Section(header: Text("Backup Server")) {
                     Toggle(isOn: $settings.isBackupServerEnabled) {
                         SettingsRow(
-                            icon: "server.rack.fill",
+                            icon: "server.rack",
                             title: "Enable Backup Server",
                             value: settings.isBackupServerEnabled ? "Enabled" : "Disabled",
                             valueColor: settings.isBackupServerEnabled ? .green : .secondary
@@ -113,14 +122,7 @@ struct SettingsView: View {
                 
                 // Audio Settings Section
                 Section(header: Text("Audio Settings")) {
-                    /* NavigationLink(destination: AudioConfigView()) {
-                        SettingsRow(
-                            icon: "waveform",
-                            title: "Audio Formats",
-                            value: formatsSummary,
-                            valueColor: .secondary
-                        )
-                    } */
+                    // REMOVED: Legacy Audio Formats configuration - now hardcoded
                     
                     NavigationLink(destination: BufferConfigView()) {
                         SettingsRow(
@@ -264,10 +266,7 @@ struct SettingsView: View {
         }
     }
     
-    private var formatsSummary: String {
-        let formats = settings.preferredFormats.prefix(2).joined(separator: ", ")
-        return formats.uppercased()
-    }
+    // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
     
     private var bufferSummary: String {
         let bufferKB = settings.bufferSize / 1024
@@ -491,86 +490,7 @@ struct PlayerConfigView: View {
     }
 }
 
-// MARK: - Audio Configuration View
-/* struct AudioConfigView: View {
-    @StateObject private var settings = SettingsManager.shared
-    @Environment(\.presentationMode) var presentationMode
-    
-    @State private var preferredFormats: [String] = []
-    @State private var hasChanges = false
-    
-    private let availableFormats = [
-        ("aac", "AAC", "Advanced Audio Coding - Best for streaming"),
-        ("alac", "ALAC", "Apple Lossless - CD quality, larger files"),
-        ("mp3", "MP3", "MPEG Audio - Universal compatibility"),
-        ("flac", "FLAC", "Free Lossless - High quality, transcoded on iOS")
-    ]
-    
-    var body: some View {
-        Form {
-            Section(header: Text("Format Preferences")) {
-                Text("Drag to reorder formats by preference. The app will request formats in this order from your LMS server.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                ForEach(preferredFormats.indices, id: \.self) { index in
-                    if let format = availableFormats.first(where: { $0.0 == preferredFormats[index] }) {
-                        FormatRow(
-                            format: format,
-                            position: index + 1,
-                            isSelected: true
-                        )
-                    }
-                }
-                .onMove(perform: moveFormats)
-            }
-            
-            Section(header: Text("Available Formats")) {
-                ForEach(availableFormats.filter { !preferredFormats.contains($0.0) }, id: \.0) { format in
-                    Button(action: { addFormat(format.0) }) {
-                        FormatRow(format: format, position: nil, isSelected: false)
-                    }
-                    .foregroundColor(.primary)
-                }
-            }
-        }
-        .navigationTitle("Audio Formats")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                EditButton()
-            }
-            
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Save") {
-                    saveSettings()
-                }
-                .disabled(!hasChanges)
-            }
-        }
-        .onAppear {
-            preferredFormats = settings.preferredFormats
-        }
-    }
-    
-    private func moveFormats(from source: IndexSet, to destination: Int) {
-        preferredFormats.move(fromOffsets: source, toOffset: destination)
-        hasChanges = true
-    }
-    
-    private func addFormat(_ format: String) {
-        preferredFormats.append(format)
-        hasChanges = true
-    }
-    
-    private func saveSettings() {
-        settings.preferredFormats = preferredFormats
-        settings.saveSettings()
-        hasChanges = false
-        
-        presentationMode.wrappedValue.dismiss()
-    }
-} */
+// REMOVED: Legacy AudioConfigView - capabilities are now hardcoded in SlimProtoClient
 
 struct FormatRow: View {
     let format: (String, String, String)
@@ -1198,5 +1118,155 @@ struct DocumentPicker: UIViewControllerRepresentable {
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             // User cancelled the export
         }
+    }
+}
+
+// MARK: - Server Discovery Settings View
+struct ServerDiscoverySettingsView: View {
+    @StateObject private var settings = SettingsManager.shared
+    @StateObject private var discoveryManager = ServerDiscoveryManager()
+    @Environment(\.presentationMode) var presentationMode
+    @State private var showingAlert = false
+    @State private var alertMessage = ""
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                // Title and description
+                VStack(spacing: 16) {
+                    Text("Discover LMS Servers")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    
+                    Text("Search for Lyrion Music Servers on your local network using UDP broadcast discovery.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.top)
+                
+                // Discovery button
+                Button(action: startDiscovery) {
+                    HStack {
+                        if discoveryManager.isDiscovering {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                                .progressViewStyle(CircularProgressViewStyle())
+                            Text("Searching...")
+                        } else {
+                            Image(systemName: "magnifyingglass")
+                            Text("Find Servers")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .disabled(discoveryManager.isDiscovering)
+                .padding(.horizontal)
+                
+                // Discovered servers
+                if !discoveryManager.discoveredServers.isEmpty {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Found Servers")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        
+                        ForEach(discoveryManager.discoveredServers) { server in
+                            ServerDiscoveryRow(server: server) {
+                                selectServer(server)
+                            }
+                        }
+                    }
+                    .padding(.top)
+                }
+                
+                if discoveryManager.discoveredServers.isEmpty && !discoveryManager.isDiscovering {
+                    Text("No servers found. Make sure your LMS server is running and on the same network.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                
+                Spacer()
+            }
+            .navigationTitle("Server Discovery")
+            .navigationBarItems(trailing: Button("Done") {
+                presentationMode.wrappedValue.dismiss()
+            })
+        }
+        .alert("Server Selected", isPresented: $showingAlert) {
+            Button("OK") { }
+        } message: {
+            Text(alertMessage)
+        }
+        .onAppear {
+            startDiscovery()
+        }
+        .onDisappear {
+            discoveryManager.stopDiscovery()
+        }
+    }
+    
+    private func startDiscovery() {
+        discoveryManager.startDiscovery()
+    }
+    
+    private func selectServer(_ server: DiscoveredServer) {
+        // Validate server first
+        discoveryManager.validateServer(server) { isValid in
+            if isValid {
+                // Save to settings
+                settings.serverHost = server.host
+                settings.serverWebPort = server.port
+                settings.serverSlimProtoPort = 3483
+                settings.saveSettings()
+                
+                alertMessage = "Server '\(server.name)' at \(server.host) has been selected and saved to your settings."
+                showingAlert = true
+                
+                // Auto-dismiss after selection
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    presentationMode.wrappedValue.dismiss()
+                }
+            } else {
+                alertMessage = "Unable to connect to server '\(server.name)' at \(server.host). Please try another server."
+                showingAlert = true
+            }
+        }
+    }
+}
+
+// MARK: - Server Discovery Row
+struct ServerDiscoveryRow: View {
+    let server: DiscoveredServer
+    let onSelect: () -> Void
+    
+    var body: some View {
+        Button(action: onSelect) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(server.name)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    Text("\(server.host):\(server.port)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.blue)
+            }
+            .padding()
+            .background(Color(.systemGray6))
+            .cornerRadius(8)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .padding(.horizontal)
     }
 }

@@ -78,11 +78,7 @@ class SlimProtoCoordinator: ObservableObject {
     private var shouldResumeOnPlay: Bool = false
     private var isLockScreenPlayRecovery: Bool = false
     
-    // MARK: - Simple Time Tracking (replaces complex ServerTimeSynchronizer)
-    private var currentServerTime: Double = 0.0
-    private var serverTimeTimestamp: Date?
-    private var isServerPlaying: Bool = false
-    private var serverTrackDuration: Double = 0.0
+    // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
 
     
@@ -187,12 +183,12 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Server Time Sync Management (DISABLED - using simplified SlimProto tracking)
     private func startServerTimeSync() {
         serverTimeSynchronizer.startSyncing() // Keep for compatibility
-        os_log(.info, log: logger, "🔄 Using simplified SlimProto time tracking")
+        os_log(.debug, log: logger, "🔄 Using simplified SlimProto time tracking")
     }
     
     private func stopServerTimeSync() {
         serverTimeSynchronizer.stopSyncing() // Keep for compatibility
-        os_log(.info, log: logger, "⏹️ Simplified time tracking stopped")
+        os_log(.debug, log: logger, "⏹️ Simplified time tracking stopped")
     }
     
     func requestFreshMetadata() {
@@ -257,17 +253,27 @@ class SlimProtoCoordinator: ObservableObject {
         // Stop any existing timer
         stopMetadataRefresh()
         
-        // For radio streams, refresh metadata every 30 seconds to catch track changes
-        metadataRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        // For radio streams, refresh metadata every 15 seconds to catch track changes faster
+        metadataRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            os_log(.debug, log: self?.logger ?? OSLog.default, "🔄 Timer triggered metadata refresh")
             self?.fetchCurrentTrackMetadata()
         }
         
-        os_log(.info, log: logger, "🎵 Started automatic metadata refresh for radio stream")
+        os_log(.debug, log: logger, "🎵 Started metadata refresh for radio stream")
     }
 
     private func stopMetadataRefresh() {
         metadataRefreshTimer?.invalidate()
         metadataRefreshTimer = nil
+    }
+    
+    // Helper method to restart radio metadata refresh if it's not running
+    private func ensureRadioMetadataRefreshIsRunning() {
+        if metadataRefreshTimer == nil {
+            // For now, just restart metadata refresh - we'll rely on the timer to determine if it's radio
+            os_log(.info, log: logger, "🔄 Ensuring metadata refresh is running")
+            fetchCurrentTrackMetadata()
+        }
     }
     
     private func setupAudioPlayerIntegration() {
@@ -401,8 +407,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         DebugLogManager.shared.logInfo("📱 App foregrounded - cleared lock screen recovery flag")
         
         if connectionManager.connectionState.isConnected {
-            // DISABLED: serverTimeSynchronizer.performImmediateSync()
-            
             // Check if we need to recover position after being backgrounded
             checkForPositionRecoveryOnForeground()
         } else {
@@ -414,53 +418,45 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     // MARK: - Simple Position Recovery Methods
     
     private func saveCurrentPositionLocally() {
-        // Fetch fresh server time first, then save position
-        os_log(.info, log: logger, "🔄 Fetching fresh server time before saving position")
-        DebugLogManager.shared.logInfo("🔄 Fetching fresh server time before saving position")
+        // Use current time immediately (no server fetch needed - we have SimpleTimeTracker)
+        let currentTime = self.getCurrentTimeForSaving()
+        let audioTime = self.audioManager.getCurrentTime()
         
-        fetchServerTime()
+        os_log(.info, log: self.logger, "🔍 Position sources - Server: %.2f, Audio: %.2f", 
+               currentTime, audioTime)
+        DebugLogManager.shared.logInfo("🔍 Position sources - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
         
-        // Wait briefly for server time response, then save position
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let currentTime = self.getCurrentTimeForSaving()
-            let audioTime = self.audioManager.getCurrentTime()
+        // Use SimpleTimeTracker time as primary source (reliable even when disconnected)
+        var positionToSave: Double = 0.0
+        var sourceUsed: String = "none"
+        
+        if currentTime > 0.1 {
+            positionToSave = currentTime
+            sourceUsed = "SimpleTimeTracker"
+            os_log(.info, log: self.logger, "✅ Using SimpleTimeTracker time: %.2f", currentTime)
+            DebugLogManager.shared.logInfo("✅ Using SimpleTimeTracker time: \(String(format: "%.2f", currentTime))")
+        }
+        // Fallback to audio time only if SimpleTimeTracker unavailable
+        else if audioTime > 0.1 {
+            positionToSave = audioTime
+            sourceUsed = "audio manager (fallback)"
+            os_log(.info, log: self.logger, "🔄 SimpleTimeTracker unavailable, using audio time: %.2f", audioTime)
+            DebugLogManager.shared.logInfo("🔄 SimpleTimeTracker unavailable, using audio time: \(String(format: "%.2f", audioTime))")
+        }
+        
+        // Only save if we got a valid position
+        if positionToSave > 0.1 {
+            self.savedPosition = positionToSave
+            self.savedPositionTimestamp = Date()
+            self.shouldResumeOnPlay = true
             
-            os_log(.info, log: self.logger, "🔍 Position sources - Server: %.2f, Audio: %.2f", 
+            os_log(.info, log: self.logger, "💾 Saved position locally: %.2f seconds (from %{public}s)", 
+                   positionToSave, sourceUsed)
+            DebugLogManager.shared.logInfo("💾 Saved position locally: \(String(format: "%.2f", positionToSave)) seconds (from \(sourceUsed))")
+        } else {
+            os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
                    currentTime, audioTime)
-            DebugLogManager.shared.logInfo("🔍 Position sources - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
-            
-            // Use real server time as primary source (the server truth)
-            var positionToSave: Double = 0.0
-            var sourceUsed: String = "none"
-            
-            if currentTime > 0.1 {
-                positionToSave = currentTime
-                sourceUsed = "real server time"
-                os_log(.info, log: self.logger, "✅ Using real server time: %.2f", currentTime)
-                DebugLogManager.shared.logInfo("✅ Using real server time: \(String(format: "%.2f", currentTime))")
-            }
-            // Fallback to audio time only if server time unavailable
-            else if audioTime > 0.1 {
-                positionToSave = audioTime
-                sourceUsed = "audio manager (fallback)"
-                os_log(.info, log: self.logger, "🔄 Server time unavailable, using audio time: %.2f", audioTime)
-                DebugLogManager.shared.logInfo("🔄 Server time unavailable, using audio time: \(String(format: "%.2f", audioTime))")
-            }
-            
-            // Only save if we got a valid position
-            if positionToSave > 0.1 {
-                self.savedPosition = positionToSave
-                self.savedPositionTimestamp = Date()
-                self.shouldResumeOnPlay = true
-                
-                os_log(.info, log: self.logger, "💾 Saved position locally: %.2f seconds (from %{public}s)", 
-                       positionToSave, sourceUsed)
-                DebugLogManager.shared.logInfo("💾 Saved position locally: \(String(format: "%.2f", positionToSave)) seconds (from \(sourceUsed))")
-            } else {
-                os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
-                       currentTime, audioTime)
-                DebugLogManager.shared.logError("❌ No valid position to save - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
-            }
+            DebugLogManager.shared.logError("❌ No valid position to save - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
         }
     }
     
@@ -576,14 +572,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         DebugLogManager.shared.logInfo("🔄 App open: play → seek → pause sequence (fast)")
         
         // CRITICAL: Pause server time sync during recovery to prevent crazy time jumps
-        os_log(.info, log: logger, "⏸️ Pausing server time sync during recovery")
-        DebugLogManager.shared.logInfo("⏸️ Pausing server time sync during recovery")
-        // DISABLED: serverTimeSynchronizer.pauseUpdates()
+        os_log(.debug, log: logger, "⏸️ Pausing server time sync during recovery")
         
         sendJSONRPCCommand("play")
         
-        // Wait briefly for playback to start, then seek, then pause
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        // Wait briefly for playback to start, then seek, then pause immediately
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             os_log(.info, log: self.logger, "🎯 App open: Now seeking to saved position: %.2f seconds", self.savedPosition)
             DebugLogManager.shared.logInfo("🎯 App open: Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
             
@@ -594,22 +588,18 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     os_log(.info, log: self.logger, "✅ App open: Seek successful - now pausing")
                     DebugLogManager.shared.logInfo("✅ App open: Seek successful - now pausing")
                     
-                    // Pause immediately after seeking so user sees correct position but isn't auto-playing
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.sendJSONRPCCommand("pause")
-                        os_log(.info, log: self.logger, "⏸️ App open recovery complete - positioned at saved location")
-                        DebugLogManager.shared.logInfo("⏸️ App open recovery complete - positioned at saved location")
+                    // Pause immediately after seeking (no delay)
+                    self.sendJSONRPCCommand("pause")
+                    os_log(.info, log: self.logger, "⏸️ App open recovery complete - positioned at saved location")
+                    DebugLogManager.shared.logInfo("⏸️ App open recovery complete - positioned at saved location")
+                    
+                    // CRITICAL: Refresh UI after recovery and resume server time sync
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
+                        DebugLogManager.shared.logInfo("🔄 Refreshing UI after recovery")
+                        self.refreshUIAfterRecovery()
                         
-                        // CRITICAL: Refresh UI after recovery and resume server time sync
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
-                            DebugLogManager.shared.logInfo("🔄 Refreshing UI after recovery")
-                            self.refreshUIAfterRecovery()
-                            
-                            os_log(.info, log: self.logger, "▶️ Resuming server time sync after recovery")
-                            DebugLogManager.shared.logInfo("▶️ Resuming server time sync after recovery")
-                            // DISABLED: serverTimeSynchronizer.resumeUpdates()
-                        }
+                        os_log(.debug, log: self.logger, "▶️ Resuming server time sync after recovery")
                     }
                 } else {
                     os_log(.error, log: self.logger, "❌ App open: Failed to seek to saved position")
@@ -617,9 +607,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     
                     // Resume server time sync even if seek failed
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        os_log(.info, log: self.logger, "▶️ Resuming server time sync after failed recovery")
-                        DebugLogManager.shared.logInfo("▶️ Resuming server time sync after failed recovery")
-                        // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                        os_log(.debug, log: self.logger, "▶️ Resuming server time sync after failed recovery")
                     }
                 }
                 
@@ -763,12 +751,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 os_log(.info, log: logger, "🌐 Network available - attempting connection")
                 connect()
             } else if connectionManager.connectionState.isConnected {
-                // Network restored - trigger immediate server time sync
-                // DISABLED: serverTimeSynchronizer.performImmediateSync()
+                // Network restored - server time sync will continue
             }
         } else {
             // Network lost - server time sync will automatically handle this
-            os_log(.error, log: logger, "🌐 Network lost - server time sync will fall back to local time")
+            os_log(.debug, log: logger, "🌐 Network lost - server time sync will fall back to local time")
         }
         
     }
@@ -779,15 +766,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerWillSleep() {
-        os_log(.info, log: logger, "💤 Connection manager requesting sleep status")
-        
-        // Send sleep status to LMS to keep player in the list
-        client.sendSleepStatus()
-        
-        // Give the message time to be sent before connection dies
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            os_log(.info, log: self.logger, "💤 Sleep status sent, connection will naturally close")
-        }
+        // Legacy sleep status removed - modern recovery uses local position saving
+        os_log(.debug, log: logger, "💤 App will sleep - relying on position recovery system")
     }
     
     
@@ -825,7 +805,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.fetchCurrentTrackMetadata()
             
             // Check if this is a radio stream and start automatic refresh
-            if url.contains("stream") || url.contains("radio") || url.contains("live") {
+            if url.contains("stream") || url.contains("radio") || url.contains("live") ||
+               url.contains(".pls") || url.contains(".m3u") || url.hasPrefix("http") {
                 self.startMetadataRefreshForRadio()
             }
         }
@@ -845,7 +826,6 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Normal foreground or background pause - let background handler deal with position saving
         audioManager.pause()
-        // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: false)
         stopPlaybackHeartbeat()
         
         if !isAppInBackground {
@@ -861,10 +841,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         simpleTimeTracker.updateFromServer(time: currentTime, playing: true)
         
         audioManager.play()
-        // DISABLED: serverTimeSynchronizer.updatePlaybackState(isPlaying: true)
         
         // Restart heartbeat when resumed
         startPlaybackHeartbeat()
+        
+        // Restart metadata refresh for radio streams after resume
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.ensureRadioMetadataRefreshIsRunning()
+        }
         
         client.sendStatus("STMr")
     }
@@ -879,6 +863,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Stop heartbeat when stopped
         stopPlaybackHeartbeat()
+        
+        // Stop metadata refresh for radio streams
+        stopMetadataRefresh()
         
         client.sendStatus("STMf")
     }
@@ -909,26 +896,18 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
 }
 
-// MARK: - Simple Time Tracking (replaces ServerTimeSynchronizer)
+// MARK: - Material-Style Time Tracking (Simplified)
 extension SlimProtoCoordinator {
     
-    /// Update current server time from actual server responses (not audio player)
+    /// Update current server time from actual server responses (Material-style approach)
     func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
-        // OLD SYSTEM: Keep for backward compatibility during migration
-        currentServerTime = position
-        serverTimeTimestamp = Date()
-        isServerPlaying = isPlaying
-        if duration > 0 {
-            serverTrackDuration = duration
-        }
-        
-        // NEW SYSTEM: Update SimpleTimeTracker with Material-style approach
+        // SIMPLIFIED: Update SimpleTimeTracker with Material-style approach
         simpleTimeTracker.updateFromServer(time: position, duration: duration, playing: isPlaying)
         
         // Update NowPlayingManager with fresh server time
         audioManager.getNowPlayingManager().updateFromSlimProto(
             currentTime: position,
-            duration: serverTrackDuration,
+            duration: duration > 0 ? duration : simpleTimeTracker.getTrackDuration(),
             isPlaying: isPlaying
         )
         
@@ -1005,35 +984,10 @@ extension SlimProtoCoordinator {
         }
     }
     
-    /// Get current interpolated time based on last server update
-    func getCurrentInterpolatedTime() -> (time: Double, isPlaying: Bool) {
-        // NEW SYSTEM: Use SimpleTimeTracker (Material-style approach)
-        let (newTime, newPlaying) = simpleTimeTracker.getCurrentTime()
-        
-        // If SimpleTimeTracker has valid time, use it
-        if newTime > 0.0 || simpleTimeTracker.isTimeFresh() {
-            return (newTime, newPlaying)
-        }
-        
-        // FALLBACK: Use old system for backward compatibility
-        guard let timestamp = serverTimeTimestamp else {
-            return (0.0, false)
-        }
-        
-        let elapsed = Date().timeIntervalSince(timestamp)
-        
-        // If too much time has passed, don't interpolate
-        if elapsed > 30.0 {
-            return (currentServerTime, isServerPlaying)
-        }
-        
-        // Interpolate if playing
-        if isServerPlaying {
-            let interpolatedTime = currentServerTime + elapsed
-            return (interpolatedTime, true)
-        } else {
-            return (currentServerTime, false)
-        }
+    /// Get current interpolated time (Material-style approach only)
+    func getCurrentInterpolatedTime() -> (time: Double, playing: Bool) {
+        // SIMPLIFIED: Use only SimpleTimeTracker (Material-style approach)
+        return simpleTimeTracker.getCurrentTime()
     }
     
     /// Get current time for position saving
@@ -1070,14 +1024,14 @@ extension SlimProtoCoordinator {
             self?.fetchServerTime()
         }
         
-        os_log(.info, log: logger, "🔄 Started periodic server time fetching")
+        os_log(.debug, log: logger, "🔄 Started periodic server time fetching")
     }
     
     /// Stop periodic server time fetching
     func stopServerTimeFetching() {
         serverTimeTimer?.invalidate()
         serverTimeTimer = nil
-        os_log(.info, log: logger, "⏹️ Stopped periodic server time fetching")
+        os_log(.debug, log: logger, "⏹️ Stopped periodic server time fetching")
     }
 }
 
@@ -1087,13 +1041,16 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
+        // CRITICAL: Mark lock screen play recovery early to prevent double recovery
+        if command.lowercased() == "play" {
+            isLockScreenPlayRecovery = true
+            os_log(.info, log: logger, "🔒 Lock screen play - marked for position recovery")
+        }
+        
         // SIMPLE STRATEGY: For PLAY commands after disconnect, reconnect and seek to saved position
         if command.lowercased() == "play" && !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
             DebugLogManager.shared.logInfo("🔄 PLAY after disconnect - using simple position recovery")
-            
-            // Mark this as lock screen play recovery to prevent double recovery
-            isLockScreenPlayRecovery = true
             
             // CRITICAL: Ensure audio session is active for background playback
             audioManager.activateAudioSession()
@@ -1172,7 +1129,6 @@ extension SlimProtoCoordinator {
         // CRITICAL FIX: For pause commands, get current server position FIRST
         if command.lowercased() == "pause" {
             os_log(.info, log: logger, "🔒 Pause command - getting current server position first")
-            // DISABLED: serverTimeSynchronizer.forceImmediateSync()
             
             // Wait a moment for sync to complete, then continue with normal pause logic
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1282,13 +1238,11 @@ extension SlimProtoCoordinator {
                             
                             // CRITICAL: Resume server time sync after track skip
                             // This ensures we get fresh server time for the new track
-                            os_log(.info, log: self.logger, "▶️ Resuming server time sync after track skip")
-                            DebugLogManager.shared.logInfo("▶️ Resuming server time sync after track skip")
-                            // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                            os_log(.debug, log: self.logger, "▶️ Resuming server time sync after track skip")
                             
                             // Force immediate sync to get current position of new track
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                // DISABLED: serverTimeSynchronizer.forceImmediateSync()
+                                // Server time sync will continue automatically
                             }
                         }
                     }
@@ -1335,6 +1289,12 @@ extension SlimProtoCoordinator {
     }
     
     private func performSimplePositionRecovery() {
+        // DEBUG: Log the current state of saved position variables
+        os_log(.info, log: logger, "🔍 Lock screen recovery check - shouldResumeOnPlay: %{public}s, savedPosition: %.2f, timestamp: %{public}s", 
+               shouldResumeOnPlay ? "YES" : "NO", savedPosition, 
+               savedPositionTimestamp?.description ?? "nil")
+        DebugLogManager.shared.logInfo("🔍 Lock screen recovery check - shouldResumeOnPlay: \(shouldResumeOnPlay ? "YES" : "NO"), savedPosition: \(String(format: "%.2f", savedPosition)), timestamp: \(savedPositionTimestamp?.description ?? "nil")")
+        
         // Check if we have a saved position to recover
         guard shouldResumeOnPlay,
               let timestamp = savedPositionTimestamp,
@@ -1384,9 +1344,7 @@ extension SlimProtoCoordinator {
         DebugLogManager.shared.logInfo("🔄 Lock screen: play → seek → play sequence (fast)")
         
         // CRITICAL: Pause server time sync during lock screen recovery too
-        os_log(.info, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
-        DebugLogManager.shared.logInfo("⏸️ Pausing server time sync during lock screen recovery")
-        // DISABLED: serverTimeSynchronizer.pauseUpdates()
+        os_log(.debug, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
         
         sendJSONRPCCommand("play")
         
@@ -1412,15 +1370,12 @@ extension SlimProtoCoordinator {
                 // CRITICAL: Resume server time sync after lock screen recovery
                 // Wait longer for seek to complete on server before resuming sync
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    os_log(.info, log: self.logger, "▶️ Resuming server time sync after lock screen recovery")
-                    DebugLogManager.shared.logInfo("▶️ Resuming server time sync after lock screen recovery")
-                    // DISABLED: serverTimeSynchronizer.resumeUpdates()
+                    os_log(.debug, log: self.logger, "▶️ Resuming server time sync after lock screen recovery")
                     
                     // Force immediate sync to get fresh server time after seek
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        os_log(.info, log: self.logger, "🔄 Forcing server time sync after seek")
-                        DebugLogManager.shared.logInfo("🔄 Forcing server time sync after seek")
-                        // DISABLED: serverTimeSynchronizer.forceImmediateSync()
+                        os_log(.debug, log: self.logger, "🔄 Forcing server time sync after seek")
+                        // Server time sync will continue automatically
                     }
                 }
                 
@@ -1580,7 +1535,7 @@ extension SlimProtoCoordinator {
                     
                     // Start server time sync for position tracking
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        // DISABLED: serverTimeSynchronizer.performImmediateSync()
+                        // Server time sync will continue automatically
                     }
                     
                 } else if waitTime >= 15 {
@@ -1596,7 +1551,7 @@ extension SlimProtoCoordinator {
             
             // Trigger server time sync
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                // DISABLED: serverTimeSynchronizer.performImmediateSync()
+                // Server time sync will continue automatically
             }
         }
     }
@@ -1652,7 +1607,7 @@ extension SlimProtoCoordinator {
         }
         
         task.resume()
-        os_log(.info, log: logger, "🌐 Requesting enhanced track metadata with radio stream support")
+        os_log(.debug, log: logger, "🌐 Requesting enhanced track metadata")
     }
     
     // Replace the parseTrackMetadata method in SlimProtoCoordinator.swift
@@ -1663,22 +1618,7 @@ extension SlimProtoCoordinator {
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
                 
-                // DEBUG: Log all available fields to understand what's available
-                os_log(.info, log: logger, "🔍 Available metadata fields: %{public}s", firstTrack.keys.sorted().joined(separator: ", "))
-                
-                // Log some key fields for debugging
-                if let remoteTitle = firstTrack["remote_title"] as? String {
-                    os_log(.info, log: logger, "🔍 remote_title: %{public}s", remoteTitle)
-                }
-                if let title = firstTrack["title"] as? String {
-                    os_log(.info, log: logger, "🔍 title: %{public}s", title)
-                }
-                if let artist = firstTrack["artist"] as? String {
-                    os_log(.info, log: logger, "🔍 artist: %{public}s", artist)
-                }
-                if let track = firstTrack["track"] as? String {
-                    os_log(.info, log: logger, "🔍 track: %{public}s", track)
-                }
+                // Metadata parsing - debug logging removed to reduce spam
                 
                 // ENHANCED: Handle radio stream metadata with better field priority
                 var trackTitle = "LMS Stream"
@@ -1692,7 +1632,6 @@ extension SlimProtoCoordinator {
                 }
                 
                 if isRadioStream {
-                    os_log(.info, log: logger, "🎵 Detected radio stream - using radio-specific parsing")
                     
                     // For radio streams, prioritize fields that contain current song info
                     // Priority 1: Check 'title' field first (often contains current song)
@@ -1704,15 +1643,15 @@ extension SlimProtoCoordinator {
                         if components.count >= 2 {
                             trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
                             trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            os_log(.info, log: logger, "🎵 Parsed from title field: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                            // Parsed from title field
                         } else {
                             trackTitle = title
                             // FIXED: Also check for separate artist field when title doesn't contain " - "
                             if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
                                 trackArtist = artist
-                                os_log(.info, log: logger, "🎵 Using title + separate artist: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                                // Using title + separate artist
                             } else {
-                                os_log(.info, log: logger, "🎵 Using title field only: %{public}s", trackTitle)
+                                // Using title field only
                             }
                         }
                     }
@@ -1724,15 +1663,15 @@ extension SlimProtoCoordinator {
                         if components.count >= 2 {
                             trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
                             trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            os_log(.info, log: logger, "🎵 Parsed from track field: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                            // Parsed from track field
                         } else {
                             trackTitle = track
                             // FIXED: Also check for separate artist field
                             if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
                                 trackArtist = artist
-                                os_log(.info, log: logger, "🎵 Using track + separate artist: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                                // Using track + separate artist
                             } else {
-                                os_log(.info, log: logger, "🎵 Using track field only: %{public}s", trackTitle)
+                                // Using track field only
                             }
                         }
                     }
@@ -1744,15 +1683,15 @@ extension SlimProtoCoordinator {
                         if components.count >= 2 {
                             trackArtist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
                             trackTitle = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                            os_log(.info, log: logger, "🎵 Parsed from remote_title: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                            // Parsed from remote_title
                         } else {
                             trackTitle = remoteTitle
                             // FIXED: Also check for separate artist field
                             if let artist = firstTrack["artist"] as? String, !artist.isEmpty {
                                 trackArtist = artist
-                                os_log(.info, log: logger, "🎵 Using remote_title + separate artist: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                                // Using remote_title + separate artist
                             } else {
-                                os_log(.info, log: logger, "🎵 Using remote_title only: %{public}s", trackTitle)
+                                // Using remote_title only
                             }
                         }
                     }
@@ -1768,7 +1707,7 @@ extension SlimProtoCoordinator {
                             trackArtist = artist
                         }
                         
-                        os_log(.info, log: logger, "🎵 Using fallback separate fields: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                        // Using fallback separate fields
                     }
                     
                     // REMOVED: The section that looks for station names and overwrites good data
@@ -1792,7 +1731,7 @@ extension SlimProtoCoordinator {
                             }
                         }
                     }
-                    os_log(.info, log: logger, "🎵 Non-radio metadata: '%{public}s' by %{public}s", trackTitle, trackArtist)
+                    // Non-radio metadata
                 }
                 
                 let trackAlbum = firstTrack["album"] as? String ?? (isRadioStream ? firstTrack["remote_title"] as? String ?? "Internet Radio" : "Lyrion Music Server")
@@ -1807,13 +1746,11 @@ extension SlimProtoCoordinator {
                     if remoteArtworkURL.hasPrefix("http://") || remoteArtworkURL.hasPrefix("https://") {
                         // Absolute URL - use as-is (common for Radio Paradise, TuneIn, etc.)
                         artworkURL = remoteArtworkURL
-                        os_log(.info, log: logger, "🖼️ Using remote artwork URL: %{public}s", remoteArtworkURL)
                     } else if remoteArtworkURL.hasPrefix("/") {
                         // Relative URL - prepend server address
                         let webPort = settings.activeServerWebPort
                         let host = settings.activeServerHost
                         artworkURL = "http://\(host):\(webPort)\(remoteArtworkURL)"
-                        os_log(.info, log: logger, "🖼️ Using server-relative artwork URL: %{public}s", artworkURL!)
                     }
                 }
                 
@@ -1822,7 +1759,6 @@ extension SlimProtoCoordinator {
                     let webPort = settings.activeServerWebPort
                     let host = settings.activeServerHost
                     artworkURL = "http://\(host):\(webPort)/music/\(coverid)/cover.jpg"
-                    os_log(.info, log: logger, "🖼️ Using coverid artwork: %{public}s", artworkURL!)
                 }
                 
                 // Priority 3: Fallback to track ID (legacy method for local tracks)
@@ -1830,7 +1766,6 @@ extension SlimProtoCoordinator {
                     let webPort = settings.activeServerWebPort
                     let host = settings.activeServerHost
                     artworkURL = "http://\(host):\(webPort)/music/\(trackID)/cover.jpg"
-                    os_log(.info, log: logger, "🖼️ Using fallback track ID artwork: %{public}s", artworkURL!)
                 }
                 
                 // Priority 4: Check for plugin-specific icon/image fields
@@ -1839,32 +1774,28 @@ extension SlimProtoCoordinator {
                     if let iconURL = firstTrack["icon"] as? String, !iconURL.isEmpty {
                         if iconURL.hasPrefix("http://") || iconURL.hasPrefix("https://") {
                             artworkURL = iconURL
-                            os_log(.info, log: logger, "🖼️ Using plugin icon URL: %{public}s", iconURL)
                         } else if iconURL.hasPrefix("/") {
                             let webPort = settings.activeServerWebPort
                             let host = settings.activeServerHost
                             artworkURL = "http://\(host):\(webPort)\(iconURL)"
-                            os_log(.info, log: logger, "🖼️ Using server-relative icon URL: %{public}s", artworkURL!)
                         }
                     }
                     // Some plugins use 'image' field
                     else if let imageURL = firstTrack["image"] as? String, !imageURL.isEmpty {
                         if imageURL.hasPrefix("http://") || imageURL.hasPrefix("https://") {
                             artworkURL = imageURL
-                            os_log(.info, log: logger, "🖼️ Using plugin image URL: %{public}s", imageURL)
                         } else if imageURL.hasPrefix("/") {
                             let webPort = settings.activeServerWebPort
                             let host = settings.activeServerHost
                             artworkURL = "http://\(host):\(webPort)\(imageURL)"
-                            os_log(.info, log: logger, "🖼️ Using server-relative image URL: %{public}s", artworkURL!)
                         }
                     }
                 }
                 
-                // Enhanced logging based on source type
+                // Log final metadata result
                 let sourceType = determineSourceType(from: firstTrack)
-                os_log(.info, log: logger, "🎵 Final Metadata (%{public}s): '%{public}s' by %{public}s%{public}s",
-                       sourceType, trackTitle, trackArtist, artworkURL != nil ? " [with artwork]" : "")
+                os_log(.info, log: logger, "🎵 %{public}s: '%{public}s' by %{public}s%{public}s",
+                       sourceType, trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
                 
                 DispatchQueue.main.async {
                     self.audioManager.updateTrackMetadata(
@@ -1936,9 +1867,8 @@ extension SlimProtoCoordinator {
     func connectionManagerShouldStorePosition() {
         os_log(.info, log: logger, "🔒 Connection lost - storing current position for recovery")
         
-        // Store position through NowPlayingManager
-        let nowPlayingManager = audioManager.getNowPlayingManager()
-        //nowPlayingManager.storeLockScreenPosition()
+        // Use the same position saving logic as background handling
+        saveCurrentPositionLocally()
     }
 
     func connectionManagerDidReconnectAfterTimeout() {

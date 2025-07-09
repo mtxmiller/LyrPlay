@@ -14,7 +14,7 @@ class SettingsManager: ObservableObject {
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 8.0
-    @Published var preferredFormats: [String] = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
+    // REMOVED: preferredFormats - capabilities are now hardcoded in SlimProtoClient
     @Published var bufferSize: Int = 2097152  // 2MB
     @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
@@ -54,7 +54,7 @@ class SettingsManager: ObservableObject {
         static let playerName = "PlayerName"
         static let playerMACAddress = "PlayerMACAddress"
         static let connectionTimeout = "ConnectionTimeout"
-        static let preferredFormats = "PreferredFormats"
+        // REMOVED: preferredFormats key - capabilities hardcoded
         static let bufferSize = "BufferSize"
         static let isDebugModeEnabled = "IsDebugModeEnabled"
         static let isConfigured = "IsConfigured"
@@ -82,8 +82,7 @@ class SettingsManager: ObservableObject {
         }
         
         // UPDATED: Set FLAC-first priority order with StreamingKit
-        UserDefaults.standard.set(["flac", "alc", "aac", "mp3"], forKey: Keys.preferredFormats)
-        preferredFormats = ["flac", "alc", "aac", "mp3"]
+        // REMOVED: preferredFormats initialization - capabilities hardcoded
         saveSettings()
     }
     
@@ -113,7 +112,7 @@ class SettingsManager: ObservableObject {
         playerName = UserDefaults.standard.string(forKey: Keys.playerName) ?? ""
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
-        preferredFormats = UserDefaults.standard.stringArray(forKey: Keys.preferredFormats) ?? ["flac", "alc", "aac", "mp3"]
+        // REMOVED: preferredFormats loading - capabilities hardcoded
         bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
         isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
@@ -138,7 +137,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(playerName, forKey: Keys.playerName)
         UserDefaults.standard.set(playerMACAddress, forKey: Keys.playerMACAddress)
         UserDefaults.standard.set(connectionTimeout, forKey: Keys.connectionTimeout)
-        UserDefaults.standard.set(preferredFormats, forKey: Keys.preferredFormats)
+        // REMOVED: preferredFormats saving - capabilities hardcoded
         UserDefaults.standard.set(bufferSize, forKey: Keys.bufferSize)
         UserDefaults.standard.set(isDebugModeEnabled, forKey: Keys.isDebugModeEnabled)
         UserDefaults.standard.set(isConfigured, forKey: Keys.isConfigured)
@@ -166,7 +165,7 @@ class SettingsManager: ObservableObject {
             // MIGRATION: Update format preferences to include FLAC first
             if savedVersion < 2 {
                 os_log(.info, log: logger, "🎵 Migrating to FLAC-first format preferences")
-                UserDefaults.standard.set(["flac", "alc", "aac", "mp3"], forKey: Keys.preferredFormats)
+                // REMOVED: preferredFormats migration - capabilities hardcoded
             }
         }
     }
@@ -328,7 +327,7 @@ class SettingsManager: ObservableObject {
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
-        preferredFormats = ["flac", "alc", "aac", "mp3"] // UPDATED: FLAC first
+        // REMOVED: preferredFormats reset - capabilities hardcoded
         bufferSize = 2097152
         
         saveSettings()
@@ -374,23 +373,7 @@ class SettingsManager: ObservableObject {
         playerMACAddress.uppercased()
     }
     
-    // MARK: - UPDATED: Enhanced capabilities string with FLAC support
-    var capabilitiesString: String {
-        // Convert format names to proper SlimProto abbreviations
-        let convertedFormats = preferredFormats.map { format in
-            switch format.lowercased() {
-            case "flac":
-                return "flc"  // FLAC uses "flc" in SlimProto
-            case "alac":
-                return "alc"  // ALAC abbreviation
-            default:
-                return format // aac, mp3, etc. stay the same
-            }
-        }.joined(separator: ",")
-        
-        // UPDATED: Enhanced capabilities with FLAC support
-        return "\(convertedFormats),Model=squeezelite,ModelName=LMS Stream for iOS, MaxSampleRate=48000"
-    }
+    // REMOVED: Legacy capabilities string building - now hardcoded in SlimProtoClient
 
     var effectivePlayerName: String {
         if !playerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

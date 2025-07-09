@@ -219,7 +219,7 @@ extension AudioManager: AudioPlayerDelegate {
     }
     
     func audioPlayerDidStop() {
-        os_log(.info, log: logger, "⏹️ Audio player stopped")
+        os_log(.debug, log: logger, "⏹️ Audio player stopped")
         
         // Update now playing info
         nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
