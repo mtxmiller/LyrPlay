@@ -577,7 +577,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         sendJSONRPCCommand("play")
         
         // Wait briefly for playback to start, then seek, then pause immediately
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             os_log(.info, log: self.logger, "🎯 App open: Now seeking to saved position: %.2f seconds", self.savedPosition)
             DebugLogManager.shared.logInfo("🎯 App open: Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
             
@@ -594,7 +594,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     DebugLogManager.shared.logInfo("⏸️ App open recovery complete - positioned at saved location")
                     
                     // CRITICAL: Refresh UI after recovery and resume server time sync
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
                         DebugLogManager.shared.logInfo("🔄 Refreshing UI after recovery")
                         self.refreshUIAfterRecovery()
@@ -1735,7 +1735,8 @@ extension SlimProtoCoordinator {
                 }
                 
                 let trackAlbum = firstTrack["album"] as? String ?? (isRadioStream ? firstTrack["remote_title"] as? String ?? "Internet Radio" : "Lyrion Music Server")
-                let duration = firstTrack["duration"] as? Double ?? 0.0
+                // CRITICAL FIX: Only update duration if server explicitly provides it (Material skin approach)
+                let serverDuration = firstTrack["duration"] as? Double
                 
                 // ENHANCED: Multi-source artwork URL detection (existing code remains the same)
                 var artworkURL: String? = nil
@@ -1798,13 +1799,25 @@ extension SlimProtoCoordinator {
                        sourceType, trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
                 
                 DispatchQueue.main.async {
-                    self.audioManager.updateTrackMetadata(
-                        title: trackTitle,
-                        artist: trackArtist,
-                        album: trackAlbum,
-                        artworkURL: artworkURL,
-                        duration: duration
-                    )
+                    // Only update duration if server explicitly provides it (Material skin approach)
+                    if let duration = serverDuration, duration > 0.0 {
+                        self.audioManager.updateTrackMetadata(
+                            title: trackTitle,
+                            artist: trackArtist,
+                            album: trackAlbum,
+                            artworkURL: artworkURL,
+                            duration: duration
+                        )
+                    } else {
+                        // Don't update duration - preserve existing duration
+                        self.audioManager.updateTrackMetadata(
+                            title: trackTitle,
+                            artist: trackArtist,
+                            album: trackAlbum,
+                            artworkURL: artworkURL
+                            // duration parameter omitted - keeps existing duration
+                        )
+                    }
                 }
                 
             } else {

@@ -151,18 +151,23 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     // Metadata management
-    func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval = 0.0) {
-        // Update both the player and now playing manager
-        audioPlayer.setMetadataDuration(duration)
+    func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval? = nil) {
+        // Only update duration if explicitly provided (Material skin approach)
+        if let duration = duration {
+            audioPlayer.setMetadataDuration(duration)
+            os_log(.info, log: logger, "🎵 Updated track metadata: %{public}s - %{public}s (%.0f sec)", title, artist, duration)
+        } else {
+            os_log(.info, log: logger, "🎵 Updated track metadata: %{public}s - %{public}s", title, artist)
+        }
+        
+        // Update now playing manager
         nowPlayingManager.updateTrackMetadata(
             title: title,
             artist: artist,
             album: album,
             artworkURL: artworkURL,
-            duration: duration
+            duration: duration  // Pass through optional duration
         )
-        
-        os_log(.info, log: logger, "🎵 Updated track metadata: %{public}s - %{public}s", title, artist)
     }
     
     // MARK: - Private Audio Session Configuration

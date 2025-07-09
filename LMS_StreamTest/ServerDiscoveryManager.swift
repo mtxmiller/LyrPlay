@@ -82,8 +82,8 @@ class ServerDiscoveryManager: ObservableObject {
     private func performUDPDiscovery(completion: @escaping (Set<DiscoveredServer>) -> Void) {
         var foundServers: Set<DiscoveredServer> = []
         
-        // Use the proper LMS discovery message: "eNAME\0JSON\0UUID\0VERS\0"
-        let discoveryMessage = "eNAME\0JSON\0UUID\0VERS\0"
+        // Use the LMS discovery message: "eIPAD\0NAME\0JSON\0" (Qt client format)
+        let discoveryMessage = "eIPAD\0NAME\0JSON\0"
         guard let discoveryData = discoveryMessage.data(using: .ascii) else {
             completion(foundServers)
             return

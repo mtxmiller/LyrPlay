@@ -375,13 +375,18 @@ class NowPlayingManager: ObservableObject {
     }
     
     // MARK: - Track Metadata Management
-    func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval = 0.0) {
-        os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s (%.0f sec)", title, artist, duration)
+    func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval? = nil) {
+        // Only update duration if explicitly provided (Material skin approach)
+        if let duration = duration {
+            os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s (%.0f sec)", title, artist, duration)
+            metadataDuration = duration
+        } else {
+            os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s", title, artist)
+        }
         
         currentTrackTitle = title
         currentArtist = artist
         currentAlbum = album
-        metadataDuration = duration
         
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {

@@ -277,11 +277,17 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Metadata
     func setMetadataDuration(_ duration: TimeInterval) {
-        // Only log if duration actually changes to avoid spam
-        if abs(metadataDuration - duration) > 1.0 {
-            os_log(.info, log: logger, "🎵 Metadata duration updated: %.0f seconds", duration)
+        // CRITICAL FIX: Don't overwrite existing duration with 0.0
+        if duration > 0.0 {
+            // Only log if duration actually changes to avoid spam
+            if abs(metadataDuration - duration) > 1.0 {
+                os_log(.info, log: logger, "🎵 Metadata duration updated: %.0f seconds", duration)
+            }
+            metadataDuration = duration
+        } else if metadataDuration > 0.0 {
+            // Keep existing duration, don't overwrite with 0.0
+            os_log(.debug, log: logger, "🎵 Preserving existing duration %.0f seconds (ignoring 0.0)", metadataDuration)
         }
-        metadataDuration = duration
     }
     
     // MARK: - Cleanup
