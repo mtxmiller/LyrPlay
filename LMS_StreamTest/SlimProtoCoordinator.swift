@@ -298,7 +298,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     func connectionManagerDidEnterBackground() {
         isAppInBackground = true
         
-        os_log(.info, log: logger, "📱 App backgrounded - checking SlimProto recovery strategy")
+        os_log(.info, log: logger, "📱 App backgrounded - saving position for potential recovery")
         
         let isLockScreenPaused = commandHandler.isPausedByLockScreen
         let playerState = audioManager.getPlayerState()
@@ -306,25 +306,21 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
                isLockScreenPaused ? "YES" : "NO", playerState)
         
-        // SIMPLE STRATEGY: Save position locally when backgrounding while paused
+        // ALWAYS save position when backgrounding (for lock screen recovery)
+        os_log(.info, log: logger, "💾 Saving position for potential lock screen recovery")
+        saveCurrentPositionLocally()
+        
         if playerState == "Paused" || playerState == "Stopped" {
             backgroundedWhilePlaying = false
-            os_log(.info, log: logger, "⏸️ App backgrounded while paused - saving position locally")
+            os_log(.info, log: logger, "⏸️ App backgrounded while paused - staying connected (will disconnect when iOS background time expires)")
             
-            // Save position using current SlimProto time data
-            os_log(.info, log: logger, "💾 Saving position using current SlimProto time")
+            // DON'T disconnect immediately - let connection manager handle background time limits
+            // This allows for quick resume if user returns to app soon
             
-            saveCurrentPositionLocally()
-            
-            // Continue with disconnect after saving position
-            os_log(.info, log: logger, "🔌 Disconnecting normally - position saved locally")
-            disconnect()
-            
-            return // Don't continue with immediate disconnect
         } else {
             backgroundedWhilePlaying = true
-            os_log(.info, log: logger, "▶️ App backgrounded while playing - monitoring for pause after backgrounding")
-            // Keep connection alive for active playback, but monitor for pause
+            os_log(.info, log: logger, "▶️ App backgrounded while playing - maintaining connection for background audio")
+            // Keep connection alive for active playback
         }
     }
     
@@ -387,6 +383,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     private func checkForPositionRecoveryOnForeground() {
+        // DISABLED: App open recovery disabled - not robust enough for production
+        os_log(.info, log: logger, "⚠️ Foreground recovery disabled - too unreliable")
+        return
+        
+        /* DISABLED RECOVERY CODE:
         // Check if we have a saved position that needs recovery
         guard shouldResumeOnPlay,
               let timestamp = savedPositionTimestamp,
@@ -404,6 +405,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         }
         
         os_log(.info, log: logger, "🔄 App foregrounded with saved position - will recover on next connection")
+        END DISABLED RECOVERY CODE */
     }
     
     private func clearSavedPosition() {
@@ -415,6 +417,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     private func checkForPositionRecoveryAfterConnection() {
+        // DISABLED: App open recovery disabled - not robust enough for production
+        os_log(.info, log: logger, "⚠️ App open recovery disabled - too unreliable")
+        return
+        
+        /* DISABLED RECOVERY CODE:
         // Skip if this is a lock screen play recovery (handled separately)
         if isLockScreenPlayRecovery {
             os_log(.info, log: logger, "ℹ️ Skipping app-open recovery - this is lock screen play recovery")
@@ -461,9 +468,15 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.performSimplePositionRecoveryAfterConnection()
         }
+        END DISABLED RECOVERY CODE */
     }
     
     private func performSimplePositionRecoveryAfterConnection() {
+        // DISABLED: App open recovery disabled - not robust enough for production
+        os_log(.info, log: logger, "⚠️ App open position recovery disabled - too unreliable")
+        return
+        
+        /* DISABLED RECOVERY CODE:
         // This is for when app is opened and reconnects (not lock screen play)
         // We seek to position but DON'T automatically start playing
         
@@ -526,6 +539,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 os_log(.info, log: self.logger, "ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
             }
         }
+        END DISABLED RECOVERY CODE */
     }
     
     
@@ -556,8 +570,14 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     func connectionManagerWillSleep() {
-        // Legacy sleep status removed - modern recovery uses local position saving
-        //os_log(.debug, log: logger, "💤 App will sleep - relying on position recovery system")
+        // iOS background time is expiring - disconnect gracefully
+        os_log(.info, log: logger, "💤 iOS background time expiring - disconnecting gracefully")
+        
+        // Save position one final time before disconnect
+        saveCurrentPositionLocally()
+        
+        // Disconnect to conserve resources and battery
+        disconnect()
     }
     
 }
@@ -1385,7 +1405,7 @@ extension SlimProtoCoordinator {
                let firstTrack = loop.first {
                 
                 // SIMPLIFIED: Use Material skin's straightforward metadata approach
-                let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LMS Stream"
+                let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LyrPlay"
                 let trackArtist = firstTrack["artist"] as? String ?? firstTrack["albumartist"] as? String ?? "Unknown Artist"
                 let trackAlbum = firstTrack["album"] as? String ?? firstTrack["remote_title"] as? String ?? "Lyrion Music Server"
                 

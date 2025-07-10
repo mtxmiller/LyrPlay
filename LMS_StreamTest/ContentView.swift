@@ -492,15 +492,15 @@ struct WebView: UIViewRepresentable {
             // CRITICAL: Inject JavaScript to handle Material's appSettings integration
             let settingsHandlerScript = """
             (function() {
-                console.log('LMS Stream: Injecting Material settings handler...');
+                console.log('LyrPlay: Injecting Material settings handler...');
                 
                 // Override window.open to catch the appSettings URL
                 const originalOpen = window.open;
                 window.open = function(url, name, specs) {
-                    console.log('LMS Stream: window.open called with URL:', url);
+                    console.log('LyrPlay: window.open called with URL:', url);
                     
                     if (url && url.startsWith('lmsstream://')) {
-                        console.log('LMS Stream: Handling settings URL:', url);
+                        console.log('LyrPlay: Handling settings URL:', url);
                         // Send message to Swift
                         if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
                             window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
@@ -520,7 +520,7 @@ struct WebView: UIViewRepresentable {
                     },
                     set: function(url) {
                         if (typeof url === 'string' && url.startsWith('lmsstream://')) {
-                            console.log('LMS Stream: Handling location change to:', url);
+                            console.log('LyrPlay: Handling location change to:', url);
                             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
                                 window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
                             }
@@ -530,7 +530,7 @@ struct WebView: UIViewRepresentable {
                     }
                 });
                 
-                console.log('LMS Stream: Material settings handler injected successfully');
+                console.log('LyrPlay: Material settings handler injected successfully');
             })();
             """
             

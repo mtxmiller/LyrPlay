@@ -1,5 +1,5 @@
 // File: InterruptionManager.swift
-// Core interruption handling for LMS Stream app
+// Core interruption handling for LyrPlay app
 import Foundation
 import AVFoundation
 import UIKit

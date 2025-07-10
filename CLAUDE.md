@@ -232,3 +232,45 @@ These repositories provide definitive reference for:
 - **Solution**: Commented out forced sample rate settings in AudioSessionManager.swift
 - **Files Modified**: AudioSessionManager.swift - `setupForLosslessAudio()` and `setupForCompressedAudio()`
 - **Impact**: StreamingKit and audio content now determine optimal sample rates automatically
+
+## Future Repository Migration Plan
+
+### Clean Repository Setup for "LyrPlay"
+When ready to create the final clean repository, follow this migration plan:
+
+#### Option A: Fresh Xcode Project (Recommended)
+1. **Create new Xcode project:**
+   - File → New → Project
+   - Name it `LyrPlay` 
+   - Use same bundle ID: `elm.LMS-StreamTest` (for App Store Connect compatibility)
+
+2. **Copy source files:**
+   - Copy all `.swift` files from `LMS_StreamTest/` to `LyrPlay/`
+   - Copy `Assets.xcassets`, `Info.plist` content
+   - Copy `CLAUDE.md` and update project references
+
+3. **Re-add dependencies:**
+   - Copy `Podfile`, update target name to `LyrPlay`
+   - Run `pod install`
+
+4. **Update build commands in CLAUDE.md:**
+   ```bash
+   # Build from command line
+   xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -configuration Debug build
+   
+   # Run tests
+   xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -destination 'platform=iOS Simulator,name=iPhone 15' test
+   ```
+
+#### Benefits of Clean Repository:
+- Project name: `LyrPlay`
+- Clean file structure with no legacy naming
+- Same bundle ID (App Store compatible)
+- Fresh git history starting from polished final version
+- Professional appearance for open-source release
+
+#### Current Status:
+- App display name already updated to "LyrPlay" in Xcode
+- All source code references updated from "LMS Stream" to "LyrPlay"
+- Bundle ID remains `elm.LMS-StreamTest` for App Store compatibility
+- Ready for clean repository creation when development is complete

@@ -21,7 +21,7 @@ struct OnboardingFlow: View {
         
         var title: String {
             switch self {
-            case .welcome: return "Welcome to SlimAMP"
+            case .welcome: return "Welcome to LyrPlay"
             case .serverSetup: return "Server Setup"
             case .connectionTest: return "Testing Connection"
             case .playerSetup: return "Player Setup"
@@ -1097,7 +1097,7 @@ struct SetupCompleteView: View {
                     .fontWeight(.bold)
                     .foregroundColor(.white)
                 
-                Text("Your LMS Stream app is now configured and ready to use.")
+                Text("Your LyrPlay app is now configured and ready to use.")
                     .font(.body)
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)

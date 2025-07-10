@@ -18,7 +18,7 @@ class NowPlayingManager: ObservableObject {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "NowPlayingManager")
     
     // MARK: - Track Metadata
-    private var currentTrackTitle: String = "LMS Stream"
+    private var currentTrackTitle: String = "LyrPlay"
     private var currentArtist: String = "Unknown Artist"
     private var currentAlbum: String = "Lyrion Music Server"
     private var currentArtwork: UIImage?
@@ -517,7 +517,7 @@ class NowPlayingManager: ObservableObject {
         nowPlayingInfoCenter.nowPlayingInfo = nil
         
         // Reset to defaults
-        currentTrackTitle = "LMS Stream"
+        currentTrackTitle = "LyrPlay"
         currentArtist = "Unknown Artist"
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil

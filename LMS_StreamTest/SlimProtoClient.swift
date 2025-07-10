@@ -1,5 +1,5 @@
 // File: SlimProtoClient.swift
-// Fixed to properly identify as LMS Stream app instead of AppleCoreMedia
+// Fixed to properly identify as LyrPlay app instead of AppleCoreMedia
 import Foundation
 import CocoaAsyncSocket
 import os.log
@@ -238,7 +238,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     // MARK: - FIXED: Protocol Messages with proper device identification
     private func sendHelo() {
-        os_log(.info, log: logger, "Sending HELO message as LMS Stream for iOS")
+        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
         
         // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
         // Use device ID 9 (squeezelite) which is better recognized by LMS

@@ -29,7 +29,7 @@ class SettingsManager: ObservableObject {
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
     private(set) var deviceModel: String = "squeezelite"
-    private(set) var deviceModelName: String = "LMS Stream for iOS"
+    private(set) var deviceModelName: String = "LyrPlay for iOS"
     
     
     // MARK: - Server Type Enum
