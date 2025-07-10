@@ -85,18 +85,6 @@ class AudioSessionManager: ObservableObject {
                 os_log(.info, log: logger, "🔧 Updated audio session for lossless")
             }
             
-            // Only set sample rate if different
-            if audioSession.preferredSampleRate != 48000.0 {
-                try audioSession.setPreferredSampleRate(48000.0)
-                os_log(.info, log: logger, "🔧 Updated sample rate to 48000 Hz")
-            }
-            
-            // Only set buffer duration if different
-            if audioSession.preferredIOBufferDuration != 0.015 {
-                try audioSession.setPreferredIOBufferDuration(0.015)
-                os_log(.info, log: logger, "🔧 Updated buffer duration to 15ms")
-            }
-            
             // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
             // if !audioSession.isOtherAudioPlaying {
             //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
@@ -131,18 +119,6 @@ class AudioSessionManager: ObservableObject {
                 )
                 
                 os_log(.info, log: logger, "🔧 Updated audio session category for compressed audio")
-            }
-            
-            // Only set sample rate if it's different
-            if audioSession.preferredSampleRate != 44100.0 {
-                try audioSession.setPreferredSampleRate(44100.0)
-                os_log(.info, log: logger, "🔧 Updated sample rate to 44100 Hz")
-            }
-            
-            // Only set buffer duration if it's different
-            if audioSession.preferredIOBufferDuration != 0.02 {
-                try audioSession.setPreferredIOBufferDuration(0.02)
-                os_log(.info, log: logger, "🔧 Updated buffer duration to 20ms")
             }
             
             // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
