@@ -16,7 +16,6 @@ class SettingsManager: ObservableObject {
     @Published var connectionTimeout: TimeInterval = 8.0
     // REMOVED: preferredFormats - capabilities are now hardcoded in SlimProtoClient
     @Published var bufferSize: Int = 2097152  // 2MB
-    @Published var isDebugModeEnabled: Bool = false
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
     @Published var shouldReloadWebView: Bool = false
@@ -56,7 +55,6 @@ class SettingsManager: ObservableObject {
         static let connectionTimeout = "ConnectionTimeout"
         // REMOVED: preferredFormats key - capabilities hardcoded
         static let bufferSize = "BufferSize"
-        static let isDebugModeEnabled = "IsDebugModeEnabled"
         static let isConfigured = "IsConfigured"
         static let settingsVersion = "SettingsVersion"
         static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
@@ -114,7 +112,6 @@ class SettingsManager: ObservableObject {
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
         // REMOVED: preferredFormats loading - capabilities hardcoded
         bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
-        isDebugModeEnabled = UserDefaults.standard.bool(forKey: Keys.isDebugModeEnabled)
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
         showFallbackSettingsButton = UserDefaults.standard.object(forKey: Keys.showFallbackSettingsButton) as? Bool ?? true
         backupServerHost = UserDefaults.standard.string(forKey: Keys.backupServerHost) ?? ""
@@ -139,7 +136,6 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(connectionTimeout, forKey: Keys.connectionTimeout)
         // REMOVED: preferredFormats saving - capabilities hardcoded
         UserDefaults.standard.set(bufferSize, forKey: Keys.bufferSize)
-        UserDefaults.standard.set(isDebugModeEnabled, forKey: Keys.isDebugModeEnabled)
         UserDefaults.standard.set(isConfigured, forKey: Keys.isConfigured)
         UserDefaults.standard.set(currentSettingsVersion, forKey: Keys.settingsVersion)
         UserDefaults.standard.set(showFallbackSettingsButton, forKey: Keys.showFallbackSettingsButton)
@@ -322,7 +318,6 @@ class SettingsManager: ObservableObject {
         serverHost = ""
         playerName = "iOS Player"
         isConfigured = false
-        isDebugModeEnabled = false
         
         serverWebPort = 9000
         serverSlimProtoPort = 3483

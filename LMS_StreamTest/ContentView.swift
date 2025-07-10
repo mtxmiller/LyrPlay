@@ -133,10 +133,6 @@ struct ContentView: View {
                 statusOverlay
             }
             
-            // Debug overlay
-            if settings.isDebugModeEnabled && !isAppInBackground {
-                enhancedDebugOverlay
-            }
         }
         .onAppear {
             if !hasConnected && !hasConnectionError {
@@ -287,79 +283,6 @@ struct ContentView: View {
     }
     
     // Enhanced debug overlay with server time synchronization info
-    private var enhancedDebugOverlay: some View {
-        VStack {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Debug Info")
-                        .font(.caption)
-                        .fontWeight(.bold)
-                        .foregroundColor(.white)
-                    
-                    // Connection status with network info
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(connectionStateColor)
-                            .frame(width: 8, height: 8)
-                        Text("\(slimProtoCoordinator.connectionState) • \(slimProtoCoordinator.networkStatus)")
-                            .font(.caption2)
-                            .foregroundColor(.white)
-                    }
-                    
-                    // Stream status
-                    Text("Stream: \(slimProtoCoordinator.streamState)")
-                        .font(.caption2)
-                        .foregroundColor(.blue)
-                    
-                    // Server Time Status with dynamic info
-                    HStack(spacing: 4) {
-                        Image(systemName: serverTimeStatusIcon)
-                            .font(.caption2)
-                            .foregroundColor(serverTimeStatusColor)
-                        Text(serverTimeStatusText)
-                            .font(.caption2)
-                            .foregroundColor(serverTimeStatusColor)
-                    }
-                    
-                    // Connection status with server info
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(connectionStateColor)
-                            .frame(width: 8, height: 8)
-                        Text("\(slimProtoCoordinator.connectionState) • \(settings.currentActiveServer.displayName)")
-                            .font(.caption2)
-                            .foregroundColor(.white)
-                    }
-                    
-                    // Player ID
-                    Text("Player: \(settings.formattedMACAddress)")
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-                    
-                    // Background time only when relevant
-                    if slimProtoCoordinator.isInBackground && slimProtoCoordinator.backgroundTimeRemaining > 0 {
-                        HStack(spacing: 4) {
-                            Image(systemName: "moon.fill")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
-                            Text("Background: \(Int(slimProtoCoordinator.backgroundTimeRemaining))s")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
-                        }
-                    }
-                }
-                .padding(8)
-                .background(Color.black.opacity(0.7))
-                .cornerRadius(8)
-                
-                Spacer()
-            }
-            .padding(.leading, 20)
-            .padding(.top, 100)
-            
-            Spacer()
-        }
-    }
 
     
     private var connectionStateColor: Color {

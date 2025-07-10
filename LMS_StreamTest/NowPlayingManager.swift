@@ -83,8 +83,6 @@ class NowPlayingManager: ObservableObject {
         os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
                currentTime, timeSource.description, isPlaying ? "YES" : "NO")
         
-        // Also log to debug file if enabled
-        DebugLogManager.shared.logDebug("🔒 LOCK SCREEN: \(String(format: "%.2f", currentTime))s (\(timeSource.description), playing: \(isPlaying ? "YES" : "NO"))")
         
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)

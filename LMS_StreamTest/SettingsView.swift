@@ -8,7 +8,6 @@ import UniformTypeIdentifiers
 // MARK: - Main Settings View
 struct SettingsView: View {
     @StateObject private var settings = SettingsManager.shared
-    @StateObject private var debugLog = DebugLogManager.shared
     @Environment(\.presentationMode) var presentationMode
     @State private var showingConnectionTest = false
     @State private var showingResetAlert = false
@@ -16,10 +15,6 @@ struct SettingsView: View {
     //cache clear
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
-    // debug log export
-    @State private var showingDocumentPicker = false
-    @State private var exportURL: URL?
-    @State private var showingLogClearAlert = false
     
     var body: some View {
         NavigationView {
@@ -145,17 +140,6 @@ struct SettingsView: View {
                         )
                     }
                     
-                    Toggle(isOn: $settings.isDebugModeEnabled) {
-                        SettingsRow(
-                            icon: "ant",
-                            title: "Debug Mode",
-                            value: settings.isDebugModeEnabled ? "Enabled" : "Disabled",
-                            valueColor: settings.isDebugModeEnabled ? .green : .secondary
-                        )
-                    }
-                    .onChange(of: settings.isDebugModeEnabled) { _ in
-                        settings.saveSettings()
-                    }
                     
                     Button(action: { showingCacheClearAlert = true }) {
                         SettingsRow(
@@ -168,40 +152,6 @@ struct SettingsView: View {
                     .foregroundColor(.primary)
                     .disabled(isClearingCache)
                     
-                    // Debug Log Controls
-                    Toggle(isOn: $debugLog.isLoggingEnabled) {
-                        SettingsRow(
-                            icon: "doc.text",
-                            title: "Debug Logging",
-                            value: debugLog.isLoggingEnabled ? "Enabled" : "Disabled",
-                            valueColor: debugLog.isLoggingEnabled ? .green : .secondary
-                        )
-                    }
-                    .onChange(of: debugLog.isLoggingEnabled) { enabled in
-                        debugLog.enableLogging(enabled)
-                    }
-                    
-                    if debugLog.isLoggingEnabled {
-                        Button(action: exportDebugLogs) {
-                            SettingsRow(
-                                icon: "square.and.arrow.up",
-                                title: "Export Debug Logs",
-                                value: debugLog.logFileSize,
-                                valueColor: .blue
-                            )
-                        }
-                        .foregroundColor(.primary)
-                        
-                        Button(action: { showingLogClearAlert = true }) {
-                            SettingsRow(
-                                icon: "trash",
-                                title: "Clear Debug Logs",
-                                value: "Delete all logs",
-                                valueColor: .red
-                            )
-                        }
-                        .foregroundColor(.red)
-                    }
                 }
                 
                 // Reset Section
@@ -249,21 +199,6 @@ struct SettingsView: View {
         } message: {
             Text("This will clear Material's web cache and reload the interface. This often fixes UI display issues.")
         }
-        .alert("Clear Debug Logs?", isPresented: $showingLogClearAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Clear Logs", role: .destructive) {
-                debugLog.clearLogs()
-            }
-        } message: {
-            Text("This will permanently delete all debug log files.")
-        }
-        .sheet(isPresented: $showingDocumentPicker, onDismiss: {
-            exportURL = nil
-        }) {
-            if let exportURL = exportURL {
-                DocumentPicker(url: exportURL)
-            }
-        }
     }
     
     // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
@@ -273,15 +208,6 @@ struct SettingsView: View {
         return "\(bufferKB)KB"
     }
     
-    private func exportDebugLogs() {
-        guard let exportURL = debugLog.exportLogs() else {
-            // Could add error alert here if needed
-            return
-        }
-        
-        self.exportURL = exportURL
-        showingDocumentPicker = true
-    }
     
     private func clearMaterialCache() {
         print("🗑️ Starting cache clear...")
@@ -1093,33 +1019,6 @@ struct BackupServerConfigView: View {
 }
 
 
-// MARK: - Document Picker for Log Export
-struct DocumentPicker: UIViewControllerRepresentable {
-    let url: URL
-    
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forExporting: [url])
-        picker.delegate = context.coordinator
-        return picker
-    }
-    
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-    
-    class Coordinator: NSObject, UIDocumentPickerDelegate {
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            // File was successfully saved
-            DebugLogManager.shared.logInfo("Debug log exported successfully")
-        }
-        
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            // User cancelled the export
-        }
-    }
-}
 
 // MARK: - Server Discovery Settings View
 struct ServerDiscoverySettingsView: View {

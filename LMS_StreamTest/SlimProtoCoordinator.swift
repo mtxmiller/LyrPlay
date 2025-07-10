@@ -110,7 +110,6 @@ class SlimProtoCoordinator: ObservableObject {
     
     func disconnect() {
         os_log(.info, log: logger, "🔌 Disconnecting from server")
-        DebugLogManager.shared.logInfo("🔌 Disconnecting from server")
         connectionManager.userInitiatedDisconnection()
         // DON'T stop server time sync immediately - preserve last known good time for lock screen
         // stopServerTimeSync()
@@ -300,37 +299,31 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         isAppInBackground = true
         
         os_log(.info, log: logger, "📱 App backgrounded - checking SlimProto recovery strategy")
-        DebugLogManager.shared.logInfo("📱 App backgrounded - checking recovery strategy")
         
         let isLockScreenPaused = commandHandler.isPausedByLockScreen
         let playerState = audioManager.getPlayerState()
         
         os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
                isLockScreenPaused ? "YES" : "NO", playerState)
-        DebugLogManager.shared.logInfo("🔍 Pause state - lockScreen: \(isLockScreenPaused ? "YES" : "NO"), player: \(playerState)")
         
         // SIMPLE STRATEGY: Save position locally when backgrounding while paused
         if playerState == "Paused" || playerState == "Stopped" {
             backgroundedWhilePlaying = false
             os_log(.info, log: logger, "⏸️ App backgrounded while paused - saving position locally")
-            DebugLogManager.shared.logInfo("⏸️ App backgrounded while paused - saving position locally")
             
             // Save position using current SlimProto time data
             os_log(.info, log: logger, "💾 Saving position using current SlimProto time")
-            DebugLogManager.shared.logInfo("💾 Saving position using current SlimProto time")
             
             saveCurrentPositionLocally()
             
             // Continue with disconnect after saving position
             os_log(.info, log: logger, "🔌 Disconnecting normally - position saved locally")
-            DebugLogManager.shared.logInfo("🔌 Disconnecting normally - position saved locally")
             disconnect()
             
             return // Don't continue with immediate disconnect
         } else {
             backgroundedWhilePlaying = true
             os_log(.info, log: logger, "▶️ App backgrounded while playing - monitoring for pause after backgrounding")
-            DebugLogManager.shared.logInfo("▶️ App backgrounded while playing - monitoring for pause after backgrounding")
             // Keep connection alive for active playback, but monitor for pause
         }
     }
@@ -343,7 +336,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // App-open should use normal app-open recovery, not lock screen recovery
         isLockScreenPlayRecovery = false
         os_log(.info, log: logger, "📱 App foregrounded - cleared lock screen recovery flag")
-        DebugLogManager.shared.logInfo("📱 App foregrounded - cleared lock screen recovery flag")
         
         if connectionManager.connectionState.isConnected {
             // Check if we need to recover position after being backgrounded
@@ -363,7 +355,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         
         os_log(.info, log: self.logger, "🔍 Position sources - Server: %.2f, Audio: %.2f", 
                currentTime, audioTime)
-        DebugLogManager.shared.logInfo("🔍 Position sources - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
         
         // Use SimpleTimeTracker time as primary source (reliable even when disconnected)
         var positionToSave: Double = 0.0
@@ -373,14 +364,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             positionToSave = currentTime
             sourceUsed = "SimpleTimeTracker"
             os_log(.info, log: self.logger, "✅ Using SimpleTimeTracker time: %.2f", currentTime)
-            DebugLogManager.shared.logInfo("✅ Using SimpleTimeTracker time: \(String(format: "%.2f", currentTime))")
         }
         // Fallback to audio time only if SimpleTimeTracker unavailable
         else if audioTime > 0.1 {
             positionToSave = audioTime
             sourceUsed = "audio manager (fallback)"
             os_log(.info, log: self.logger, "🔄 SimpleTimeTracker unavailable, using audio time: %.2f", audioTime)
-            DebugLogManager.shared.logInfo("🔄 SimpleTimeTracker unavailable, using audio time: \(String(format: "%.2f", audioTime))")
         }
         
         // Only save if we got a valid position
@@ -391,11 +380,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             
             os_log(.info, log: self.logger, "💾 Saved position locally: %.2f seconds (from %{public}s)", 
                    positionToSave, sourceUsed)
-            DebugLogManager.shared.logInfo("💾 Saved position locally: \(String(format: "%.2f", positionToSave)) seconds (from \(sourceUsed))")
         } else {
             os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
                    currentTime, audioTime)
-            DebugLogManager.shared.logError("❌ No valid position to save - Server: \(String(format: "%.2f", currentTime)), Audio: \(String(format: "%.2f", audioTime))")
         }
     }
     
@@ -412,13 +399,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         let timeSinceSave = Date().timeIntervalSince(timestamp)
         guard timeSinceSave < 600 else {
             os_log(.info, log: logger, "⚠️ Saved position too old for foreground recovery - clearing")
-            DebugLogManager.shared.logWarning("⚠️ Saved position too old for foreground recovery - clearing")
             clearSavedPosition()
             return
         }
         
         os_log(.info, log: logger, "🔄 App foregrounded with saved position - will recover on next connection")
-        DebugLogManager.shared.logInfo("🔄 App foregrounded with saved position - will recover on next connection")
     }
     
     private func clearSavedPosition() {
@@ -427,14 +412,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         savedPositionTimestamp = nil
         isLockScreenPlayRecovery = false
         os_log(.info, log: logger, "🗑️ Cleared saved position")
-        DebugLogManager.shared.logInfo("🗑️ Cleared saved position")
     }
     
     private func checkForPositionRecoveryAfterConnection() {
         // Skip if this is a lock screen play recovery (handled separately)
         if isLockScreenPlayRecovery {
             os_log(.info, log: logger, "ℹ️ Skipping app-open recovery - this is lock screen play recovery")
-            DebugLogManager.shared.logInfo("ℹ️ Skipping app-open recovery - this is lock screen play recovery")
             return
         }
         
@@ -442,7 +425,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.info, log: logger, "🔍 Recovery check - savedPosition: %.2f, shouldResumeOnPlay: %{public}s, timestamp: %{public}s", 
                savedPosition, shouldResumeOnPlay ? "YES" : "NO", 
                savedPositionTimestamp?.description ?? "nil")
-        DebugLogManager.shared.logInfo("🔍 Recovery check - savedPosition: \(String(format: "%.2f", savedPosition)), shouldResumeOnPlay: \(shouldResumeOnPlay ? "YES" : "NO"), timestamp: \(savedPositionTimestamp?.description ?? "nil")")
         
         // Check if we have a saved position that needs recovery
         guard shouldResumeOnPlay,
@@ -456,7 +438,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         let timeSinceSave = Date().timeIntervalSince(timestamp)
         guard timeSinceSave < 600 else {
             os_log(.info, log: logger, "⚠️ Saved position too old after connection (%.0f seconds) - clearing", timeSinceSave)
-            DebugLogManager.shared.logWarning("⚠️ Saved position too old after connection (\(Int(timeSinceSave)) seconds) - clearing")
             clearSavedPosition()
             return
         }
@@ -470,13 +451,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         if currentServerTime > 1.0 && timeDifference > 10.0 {
             os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
                    savedPosition, currentServerTime, timeDifference)
-            DebugLogManager.shared.logError("🚨 REJECTING stale position \(String(format: "%.2f", savedPosition)) - server shows \(String(format: "%.2f", currentServerTime)) (diff: \(String(format: "%.2f", timeDifference)))")
             clearSavedPosition()
             return
         }
         
         os_log(.info, log: logger, "🎯 Connection established with saved position - will recover after stabilization")
-        DebugLogManager.shared.logInfo("🎯 Connection established with saved position - will recover after stabilization")
         
         // Wait for connection to stabilize, then seek to saved position
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -504,11 +483,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         }
         
         os_log(.info, log: logger, "🎯 Recovering to saved position after app open: %.2f seconds", savedPosition)
-        DebugLogManager.shared.logInfo("🎯 Recovering to saved position after app open: \(String(format: "%.2f", savedPosition)) seconds")
         
         // App open recovery: play → seek → pause (fast sequence to minimize audio blip)
         os_log(.info, log: logger, "🔄 App open: play → seek → pause sequence (fast)")
-        DebugLogManager.shared.logInfo("🔄 App open: play → seek → pause sequence (fast)")
         
         // CRITICAL: Pause server time sync during recovery to prevent crazy time jumps
         os_log(.debug, log: logger, "⏸️ Pausing server time sync during recovery")
@@ -518,31 +495,26 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // Wait briefly for playback to start, then seek, then pause immediately
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             os_log(.info, log: self.logger, "🎯 App open: Now seeking to saved position: %.2f seconds", self.savedPosition)
-            DebugLogManager.shared.logInfo("🎯 App open: Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
             
             self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
                 guard let self = self else { return }
                 
                 if seekSuccess {
                     os_log(.info, log: self.logger, "✅ App open: Seek successful - now pausing")
-                    DebugLogManager.shared.logInfo("✅ App open: Seek successful - now pausing")
                     
                     // Pause immediately after seeking (no delay)
                     self.sendJSONRPCCommand("pause")
                     os_log(.info, log: self.logger, "⏸️ App open recovery complete - positioned at saved location")
-                    DebugLogManager.shared.logInfo("⏸️ App open recovery complete - positioned at saved location")
                     
                     // CRITICAL: Refresh UI after recovery and resume server time sync
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
-                        DebugLogManager.shared.logInfo("🔄 Refreshing UI after recovery")
                         self.refreshUIAfterRecovery()
                         
                         os_log(.debug, log: self.logger, "▶️ Resuming server time sync after recovery")
                     }
                 } else {
                     os_log(.error, log: self.logger, "❌ App open: Failed to seek to saved position")
-                    DebugLogManager.shared.logError("❌ App open: Failed to seek to saved position")
                     
                     // Resume server time sync even if seek failed
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -552,7 +524,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 
                 // DON'T clear saved position here - keep it for potential lock screen recovery
                 os_log(.info, log: self.logger, "ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
-                DebugLogManager.shared.logInfo("ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
             }
         }
     }
@@ -871,7 +842,6 @@ extension SlimProtoCoordinator {
         // SIMPLE STRATEGY: For PLAY commands after disconnect, reconnect and seek to saved position
         if command.lowercased() == "play" && !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
-            DebugLogManager.shared.logInfo("🔄 PLAY after disconnect - using simple position recovery")
             
             // CRITICAL: Ensure audio session is active for background playback
             audioManager.activateAudioSession()
@@ -1078,7 +1048,6 @@ extension SlimProtoCoordinator {
     // Monitor reconnection and apply simple position recovery
     private func monitorReconnectionForSimplePositionRecovery() {
         os_log(.info, log: logger, "👀 Monitoring reconnection for simple position recovery")
-        DebugLogManager.shared.logInfo("👀 Monitoring reconnection for simple position recovery")
         
         var attempts = 0
         let maxAttempts = 10 // 10 seconds max wait
@@ -1093,7 +1062,6 @@ extension SlimProtoCoordinator {
             
             if self.connectionManager.connectionState.isConnected {
                 os_log(.info, log: self.logger, "✅ Reconnected - applying simple position recovery")
-                DebugLogManager.shared.logInfo("✅ Reconnected - applying simple position recovery")
                 timer.invalidate()
                 
                 // Wait a moment for connection to stabilize, then seek and play
@@ -1103,7 +1071,6 @@ extension SlimProtoCoordinator {
                 
             } else if attempts >= maxAttempts {
                 os_log(.error, log: self.logger, "❌ Reconnection timeout for position recovery")
-                DebugLogManager.shared.logError("❌ Reconnection timeout for position recovery")
                 timer.invalidate()
             }
         }
@@ -1114,14 +1081,12 @@ extension SlimProtoCoordinator {
         os_log(.info, log: logger, "🔍 Lock screen recovery check - shouldResumeOnPlay: %{public}s, savedPosition: %.2f, timestamp: %{public}s", 
                shouldResumeOnPlay ? "YES" : "NO", savedPosition, 
                savedPositionTimestamp?.description ?? "nil")
-        DebugLogManager.shared.logInfo("🔍 Lock screen recovery check - shouldResumeOnPlay: \(shouldResumeOnPlay ? "YES" : "NO"), savedPosition: \(String(format: "%.2f", savedPosition)), timestamp: \(savedPositionTimestamp?.description ?? "nil")")
         
         // Check if we have a saved position to recover
         guard shouldResumeOnPlay,
               let timestamp = savedPositionTimestamp,
               savedPosition > 0.1 else {
             os_log(.info, log: logger, "ℹ️ No saved position to recover - playing from current position")
-            DebugLogManager.shared.logInfo("ℹ️ No saved position to recover - playing from current position")
             sendJSONRPCCommand("play")
             return
         }
@@ -1130,7 +1095,6 @@ extension SlimProtoCoordinator {
         let timeSinceSave = Date().timeIntervalSince(timestamp)
         guard timeSinceSave < 600 else {
             os_log(.info, log: logger, "⚠️ Saved position too old (%.0f seconds) - playing from current position", timeSinceSave)
-            DebugLogManager.shared.logWarning("⚠️ Saved position too old (\(Int(timeSinceSave)) seconds) - playing from current position")
             shouldResumeOnPlay = false
             sendJSONRPCCommand("play")
             return
@@ -1145,12 +1109,10 @@ extension SlimProtoCoordinator {
         if currentServerTime > 1.0 && timeDifference > 10.0 {
             os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
                    savedPosition, currentServerTime, timeDifference)
-            DebugLogManager.shared.logError("🚨 REJECTING stale position \(String(format: "%.2f", savedPosition)) - server shows \(String(format: "%.2f", currentServerTime)) (diff: \(String(format: "%.2f", timeDifference)))")
             clearSavedPosition()
             
             // CRITICAL: Use current server position instead of starting from 0
             os_log(.info, log: logger, "🎯 Using current server position: %.2f seconds instead of stale position", currentServerTime)
-            DebugLogManager.shared.logInfo("🎯 Using current server position: \(String(format: "%.2f", currentServerTime)) seconds instead of stale position")
             
             // Recover to current server position instead of saved position
             savedPosition = currentServerTime
@@ -1158,11 +1120,9 @@ extension SlimProtoCoordinator {
         }
         
         os_log(.info, log: logger, "🎯 Recovering to saved position: %.2f seconds", savedPosition)
-        DebugLogManager.shared.logInfo("🎯 Recovering to saved position: \(String(format: "%.2f", savedPosition)) seconds")
         
         // Lock screen recovery: play → seek → play (fast sequence to minimize audio blip)
         os_log(.info, log: logger, "🔄 Lock screen: play → seek → play sequence (fast)")
-        DebugLogManager.shared.logInfo("🔄 Lock screen: play → seek → play sequence (fast)")
         
         // CRITICAL: Pause server time sync during lock screen recovery too
         os_log(.debug, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
@@ -1172,20 +1132,17 @@ extension SlimProtoCoordinator {
         // Wait briefly for playback to start, then seek to saved position
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             os_log(.info, log: self.logger, "🎯 Now seeking to saved position: %.2f seconds", self.savedPosition)
-            DebugLogManager.shared.logInfo("🎯 Now seeking to saved position: \(String(format: "%.2f", self.savedPosition)) seconds")
             
             self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
                 guard let self = self else { return }
                 
                 if seekSuccess {
                     os_log(.info, log: self.logger, "✅ Lock screen: Seek successful - continuing playback")
-                    DebugLogManager.shared.logInfo("✅ Lock screen: Seek successful - continuing playback")
                     
                     // For lock screen recovery, continue playing after seek
                     // No additional play command needed - we're already playing
                 } else {
                     os_log(.error, log: self.logger, "❌ Lock screen: Failed to seek to saved position")
-                    DebugLogManager.shared.logError("❌ Lock screen: Failed to seek to saved position")
                 }
                 
                 // CRITICAL: Resume server time sync after lock screen recovery
@@ -1207,7 +1164,6 @@ extension SlimProtoCoordinator {
                 self.isLockScreenPlayRecovery = false
                 
                 os_log(.info, log: self.logger, "🎵 Lock screen recovery complete")
-                DebugLogManager.shared.logInfo("🎵 Lock screen recovery complete")
             }
         }
     }
@@ -1226,7 +1182,6 @@ extension SlimProtoCoordinator {
             self.objectWillChange.send()
             
             os_log(.info, log: self.logger, "✅ Material UI refreshed after recovery")
-            DebugLogManager.shared.logInfo("✅ Material UI refreshed after recovery")
         }
     }
     
@@ -1267,22 +1222,18 @@ extension SlimProtoCoordinator {
     // Direct JSON-RPC command sender for preference testing
     private func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         os_log(.info, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
-        DebugLogManager.shared.logInfo("🌐 Sending JSON-RPC: \(String(describing: jsonRPC))")
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
             os_log(.error, log: logger, "❌ Failed to create JSON-RPC command")
-            DebugLogManager.shared.logError("❌ Failed to create JSON-RPC command")
             completion([:])
             return
         }
         
         let urlString = "\(settings.webURL)jsonrpc.js"
         os_log(.info, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
-        DebugLogManager.shared.logInfo("🌐 JSON-RPC URL: \(urlString)")
         
         guard let url = URL(string: urlString) else {
             os_log(.error, log: logger, "❌ Invalid JSON-RPC URL: %{public}s", urlString)
-            DebugLogManager.shared.logError("❌ Invalid JSON-RPC URL: \(urlString)")
             completion([:])
             return
         }
@@ -1297,19 +1248,16 @@ extension SlimProtoCoordinator {
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 os_log(.error, log: self.logger, "❌ JSON-RPC request failed: %{public}s", error.localizedDescription)
-                DebugLogManager.shared.logError("❌ JSON-RPC request failed: \(error.localizedDescription)")
                 completion([:])
                 return
             }
             
             if let httpResponse = response as? HTTPURLResponse {
                 os_log(.info, log: self.logger, "🌐 JSON-RPC response status: %d", httpResponse.statusCode)
-                DebugLogManager.shared.logInfo("🌐 JSON-RPC response status: \(httpResponse.statusCode)")
             }
             
             guard let data = data else {
                 os_log(.error, log: self.logger, "❌ No data received from JSON-RPC request")
-                DebugLogManager.shared.logError("❌ No data received from JSON-RPC request")
                 completion([:])
                 return
             }
@@ -1317,16 +1265,13 @@ extension SlimProtoCoordinator {
             do {
                 if let jsonResult = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     os_log(.info, log: self.logger, "✅ JSON-RPC response: %{public}s", String(describing: jsonResult))
-                    DebugLogManager.shared.logInfo("✅ JSON-RPC response: \(String(describing: jsonResult))")
                     completion(jsonResult)
                 } else {
                     os_log(.error, log: self.logger, "❌ Invalid JSON-RPC response format")
-                    DebugLogManager.shared.logError("❌ Invalid JSON-RPC response format")
                     completion([:])
                 }
             } catch {
                 os_log(.error, log: self.logger, "❌ Failed to parse JSON-RPC response: %{public}s", error.localizedDescription)
-                DebugLogManager.shared.logError("❌ Failed to parse JSON-RPC response: \(error.localizedDescription)")
                 completion([:])
             }
         }

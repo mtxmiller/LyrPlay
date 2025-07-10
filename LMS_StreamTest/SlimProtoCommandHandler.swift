@@ -312,7 +312,6 @@ class SlimProtoCommandHandler: ObservableObject {
         if startTime > 0.1 && startTime < lastKnownPosition - 5.0 {
             os_log(.error, log: logger, "🚨 SERVER ANOMALY: Start time %.2f is much less than last known %.2f", 
                    startTime, lastKnownPosition)
-            DebugLogManager.shared.logError("🚨 SERVER ANOMALY: Start time \(String(format: "%.2f", startTime)) is much less than last known \(String(format: "%.2f", lastKnownPosition))")
         }
         
         // Send STMf (flush) first, like squeezelite
@@ -343,7 +342,6 @@ class SlimProtoCommandHandler: ObservableObject {
     
     private func handlePauseCommand() {
         os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
-        DebugLogManager.shared.logInfo("⏸️ Server pause command (last known position: \(String(format: "%.2f", lastKnownPosition)))")
         
         // Don't track position - server knows where we are
         isStreamPaused = true
