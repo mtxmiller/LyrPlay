@@ -63,7 +63,7 @@ The SlimProto protocol is implemented across several specialized components:
 - **SlimProtoClient**: Core protocol implementation with socket management
 - **SlimProtoCommandHandler**: Command processing and response handling
 - **SlimProtoConnectionManager**: Connection state management and recovery
-- **ServerTimeSynchronizer**: Server time synchronization for gapless playback
+- **SimpleTimeTracker**: Simplified time tracking for Material-style playback
 
 ### WebView Integration
 The app embeds the Material LMS web interface with sophisticated integration:

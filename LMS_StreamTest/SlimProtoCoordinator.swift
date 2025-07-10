@@ -1,5 +1,5 @@
 // File: SlimProtoCoordinator.swift
-// Enhanced with ServerTimeSynchronizer for accurate lock screen timing
+// Enhanced with SimpleTimeTracker for accurate lock screen timing
 import Foundation
 import os.log
 import WebKit
@@ -12,7 +12,6 @@ class SlimProtoCoordinator: ObservableObject {
     private let commandHandler: SlimProtoCommandHandler
     private let connectionManager: SlimProtoConnectionManager
     private let audioManager: AudioManager
-    private let serverTimeSynchronizer: ServerTimeSynchronizer // Keep for compatibility but minimize usage
     private let simpleTimeTracker: SimpleTimeTracker // NEW: Material-style time tracking
     private weak var webView: WKWebView? // NEW: WebView for Material UI refresh
     
@@ -47,12 +46,10 @@ class SlimProtoCoordinator: ObservableObject {
         self.client = SlimProtoClient()
         self.commandHandler = SlimProtoCommandHandler()
         self.connectionManager = SlimProtoConnectionManager()
-        self.serverTimeSynchronizer = ServerTimeSynchronizer(connectionManager: connectionManager)
         self.simpleTimeTracker = SimpleTimeTracker() // NEW: Initialize Material-style tracker
         
         setupDelegation()
         setupAudioCallbacks()
-        setupServerTimeIntegration()
         setupAudioPlayerIntegration()
 
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
@@ -67,8 +64,6 @@ class SlimProtoCoordinator: ObservableObject {
         commandHandler.slimProtoClient = client
         commandHandler.delegate = self
         
-        // ADD THIS LINE - Connect ServerTimeSynchronizer to command handler
-        commandHandler.serverTimeSynchronizer = serverTimeSynchronizer
         
         client.commandHandler = commandHandler
         
@@ -92,12 +87,6 @@ class SlimProtoCoordinator: ObservableObject {
         audioManager.setCommandHandler(commandHandler)
     }
     
-    private func setupServerTimeIntegration() {
-        // DISABLED: Don't connect ServerTimeSynchronizer to NowPlayingManager
-        // We're using our simplified system instead
-        // audioManager.setupServerTimeIntegration(with: serverTimeSynchronizer)
-        os_log(.info, log: logger, "✅ Server time integration disabled (using simplified system)")
-    }
     
     // MARK: - Audio Manager Integration Enhancement
     func setupNowPlayingManagerIntegration() {
@@ -139,14 +128,12 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
     }
     
-    // MARK: - Server Time Sync Management (DISABLED - using simplified SlimProto tracking)
+    // MARK: - Server Time Sync Management (Using SimpleTimeTracker)
     private func startServerTimeSync() {
-        serverTimeSynchronizer.startSyncing() // Keep for compatibility
         os_log(.debug, log: logger, "🔄 Using simplified SlimProto time tracking")
     }
     
     private func stopServerTimeSync() {
-        serverTimeSynchronizer.stopSyncing() // Keep for compatibility
         os_log(.debug, log: logger, "⏹️ Simplified time tracking stopped")
     }
     

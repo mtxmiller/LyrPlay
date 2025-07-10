@@ -25,7 +25,6 @@ class NowPlayingManager: ObservableObject {
     private var metadataDuration: TimeInterval = 0.0
     
     // MARK: - Time Sources
-    private var serverTimeSynchronizer: ServerTimeSynchronizer?
     private weak var audioManager: AudioManager?
     private var lastKnownServerTime: Double = 0.0
     private var lastKnownAudioTime: Double = 0.0
@@ -55,11 +54,6 @@ class NowPlayingManager: ObservableObject {
     }
     
     // MARK: - Server Time Integration
-    func setServerTimeSynchronizer(_ synchronizer: ServerTimeSynchronizer) {
-        self.serverTimeSynchronizer = synchronizer
-        synchronizer.delegate = self
-        //os_log(.info, log: logger, "✅ Server time synchronizer connected")
-    }
     
     func setAudioManager(_ audioManager: AudioManager) {
         self.audioManager = audioManager
@@ -180,11 +174,12 @@ class NowPlayingManager: ObservableObject {
         var serverTime: Double = 0.0
         var serverValid: Bool = false
         
-        if let synchronizer = serverTimeSynchronizer {
-            let serverInfo = synchronizer.getCurrentInterpolatedTime()
-            serverTime = serverInfo.time
-            serverValid = serverInfo.isServerTime
-            //os_log(.info, log: logger, "🔒 SERVER TIME: %.2f (valid: %{public}s)",
+        // ServerTimeSynchronizer removed - use SlimProto time from coordinator
+        if let slimClient = slimClient {
+            let slimProtoInfo = slimClient.getCurrentInterpolatedTime()
+            serverTime = slimProtoInfo.time
+            serverValid = (slimProtoInfo.time > 0.0) // Valid if we have a time > 0
+            //os_log(.info, log: logger, "🔒 SLIMPROTO TIME: %.2f (valid: %{public}s)",
             //       serverTime, serverValid ? "YES" : "NO")
         }
         
@@ -550,7 +545,7 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Debug Information
     func getTimeSourceInfo() -> String {
         let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
-        let serverStatus = serverTimeSynchronizer?.syncStatus ?? "No synchronizer"
+        let serverStatus = "SimpleTimeTracker (SlimProto)"
         
         // Simplified debug info - only show key information
         return """
@@ -569,51 +564,3 @@ class NowPlayingManager: ObservableObject {
     }
 }
 
-// MARK: - ServerTimeSynchronizerDelegate
-extension NowPlayingManager: ServerTimeSynchronizerDelegate {
-    
-    func serverTimeDidUpdate(currentTime: Double, duration: Double, isPlaying: Bool) {
-        // Server time is our primary source, so update immediately
-        lastKnownServerTime = currentTime
-        
-        // Update duration if we got one from server and don't have metadata duration
-        if duration > 0 && metadataDuration <= 0 {
-            metadataDuration = duration
-            // Only log when we first get the duration, not every update
-            os_log(.info, log: logger, "📍 Track duration set from server: %.0f seconds", duration)
-        }
-        
-        // Update now playing info with server time
-        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        
-        os_log(.debug, log: logger, "📍 Updated from server time: %.2f/%.2f (%{public}s)",
-               currentTime, duration, isPlaying ? "playing" : "paused")
-    }
-    
-    func serverTimeFetchFailed(error: Error) {
-        os_log(.error, log: logger, "⚠️ Server time fetch failed: %{public}s", error.localizedDescription)
-        
-        // Fall back to audio manager time
-        if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
-            let isPlaying = audioManager.getPlayerState() == "Playing"
-            lastKnownAudioTime = audioTime
-            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: audioTime)
-            os_log(.info, log: logger, "🔄 Fell back to audio manager time: %.2f", audioTime)
-        }
-    }
-    
-    func serverTimeConnectionRestored() {
-        os_log(.info, log: logger, "✅ Server time connection restored")
-        
-        // Immediately request updated time
-        if let synchronizer = serverTimeSynchronizer {
-            let serverInfo = synchronizer.getCurrentInterpolatedTime()
-            if serverInfo.isServerTime {
-                lastKnownServerTime = serverInfo.time
-                updateNowPlayingInfo(isPlaying: serverInfo.isPlaying, currentTime: serverInfo.time)
-                os_log(.info, log: logger, "🔄 Restored to server time: %.2f", serverInfo.time)
-            }
-        }
-    }
-}
