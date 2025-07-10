@@ -4,47 +4,6 @@ import Foundation
 import os.log
 import WebKit
 
-// MARK: - Power-On Resume Preference Types
-enum PowerOnResumePreference {
-    case noResume           // "noResumeOn"
-    case resumePlay         // "resumePlayOn" 
-    case resumePlayFromStart // "resumeResetPlayOn"
-    
-    init(rawValue: String) {
-        switch rawValue {
-        case "resumePlayOn":
-            self = .resumePlay
-        case "resumeResetPlayOn": 
-            self = .resumePlayFromStart
-        case "noResumeOn", "":
-            self = .noResume
-        default:
-            self = .noResume
-        }
-    }
-    
-    var rawValue: String {
-        switch self {
-        case .noResume: return "noResumeOn"
-        case .resumePlay: return "resumePlayOn"
-        case .resumePlayFromStart: return "resumeResetPlayOn"
-        }
-    }
-    
-    var shouldAutoResume: Bool {
-        switch self {
-        case .resumePlay, .resumePlayFromStart: return true
-        case .noResume: return false
-        }
-    }
-    
-    var shouldResumeFromStart: Bool {
-        switch self {
-        case .resumePlayFromStart: return true
-        case .resumePlay, .noResume: return false
-        }
-    }
-}
 
 class SlimProtoCoordinator: ObservableObject {
     
@@ -611,128 +570,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         }
     }
     
-    private func tryDirectPreferenceMethod(completion: @escaping (Bool) -> Void) {
-        os_log(.info, log: logger, "🔧 Reading user's Material power-on resume setting")
-        DebugLogManager.shared.logInfo("🔧 Reading user's Material power-on resume setting")
-        
-        let currentPosition = audioManager.getCurrentTime()
-        let playerID = settings.playerMACAddress
-        
-        os_log(.info, log: logger, "📍 Current position: %.2f seconds, Player: %{public}s", currentPosition, playerID)
-        DebugLogManager.shared.logInfo("📍 Current position: \(String(format: "%.2f", currentPosition))s, Player: \(playerID)")
-        
-        // CRITICAL CHECK: If position is 0, we still want to proceed for user preference setting
-        if currentPosition <= 0.0 {
-            os_log(.error, log: logger, "⚠️ Current position is %.2f - this might indicate an issue", currentPosition)
-            DebugLogManager.shared.logWarning("⚠️ Current position is \(String(format: "%.2f", currentPosition)) - checking if this is expected")
-        }
-        
-        // First, read the user's power-on resume preference from Material
-        let getPrefCommand = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["playerpref", "powerOnResume", "?"]]
-        ] as [String : Any]
-        
-        sendJSONRPCCommandDirect(getPrefCommand) { [weak self] result in
-            guard let self = self else { 
-                completion(false)
-                return 
-            }
-            
-            // Parse the user's resume preference
-            let resumePreference = self.parsePowerOnResumePreference(result)
-            let shouldAutoResume = resumePreference.shouldAutoResume
-            let resumeFromStart = resumePreference.shouldResumeFromStart
-            
-            os_log(.info, log: self.logger, "📱 User's Material setting: %{public}s (auto-resume: %{public}s)", 
-                   resumePreference.rawValue, shouldAutoResume ? "YES" : "NO")
-            
-            DebugLogManager.shared.logInfo("📱 Material Setting: \(resumePreference.rawValue) (auto-resume: \(shouldAutoResume ? "YES" : "NO"))")
-            
-            // INSIGHT: We cannot manually set playingAtPowerOff/positionAtDisconnect via JSON-RPC
-            // These are server-internal preferences set automatically during disconnect
-            // Instead, we need to ensure the server SEES us as playing when we disconnect
-            
-            os_log(.info, log: self.logger, "🎯 User wants auto-resume: %{public}s - skipping manual preference setting", shouldAutoResume ? "YES" : "NO")
-            DebugLogManager.shared.logInfo("🎯 User wants auto-resume: \(shouldAutoResume ? "YES" : "NO") - server will handle this automatically")
-            
-            // The real strategy: Use silent resume to ensure server sees us as PLAYING during disconnect
-            // This will make server's persistPlaybackStateForPowerOff save playingAtPowerOff=true
-            os_log(.info, log: self.logger, "✅ User preference understood - proceeding with server-compatible method")
-            DebugLogManager.shared.logInfo("✅ User preference understood - proceeding with server-compatible method")
-            completion(true)
-        }
-    }
     
-    // Helper method to parse Material power-on resume preference
-    private func parsePowerOnResumePreference(_ result: [String: Any]) -> PowerOnResumePreference {
-        // Look for the preference value in the result
-        if let resultData = result["result"] as? [String: Any] {
-            os_log(.info, log: logger, "🔍 PARSING: Full result data: %{public}s", String(describing: resultData))
-            DebugLogManager.shared.logInfo("🔍 PARSING: Full result data: \(String(describing: resultData))")
-            
-            // Try different possible keys that the server might return
-            let possibleKeys = ["_p2", "_powerOnResume", "powerOnResume", "_pref"]
-            
-            for key in possibleKeys {
-                if let prefValue = resultData[key] as? String {
-                    os_log(.info, log: logger, "🔍 FOUND preference at key '%{public}s': %{public}s", key, prefValue)
-                    DebugLogManager.shared.logInfo("🔍 FOUND preference at key '\(key)': \(prefValue)")
-                    
-                    // Handle full format like "PauseOff-PlayOn" or shortened format like "resumePlayOn"
-                    if prefValue.contains("-") {
-                        // Full format: extract the "On" part after the dash
-                        let components = prefValue.components(separatedBy: "-")
-                        if components.count == 2 {
-                            let onPart = components[1]
-                            os_log(.info, log: logger, "🔍 EXTRACTED 'On' part: %{public}s", onPart)
-                            return PowerOnResumePreference(rawValue: onPart)
-                        }
-                    } else {
-                        // Shortened format: use as-is
-                        return PowerOnResumePreference(rawValue: prefValue)
-                    }
-                }
-            }
-        }
-        
-        os_log(.info, log: logger, "🔍 NO preference found - defaulting to noResume")
-        DebugLogManager.shared.logWarning("🔍 NO preference found - defaulting to noResume")
-        // Default to no resume if we can't read the preference
-        return .noResume
-    }
     
-    private func performSilentResumeMethod() {
-        os_log(.info, log: logger, "🔇 Silent resume strategy - paused by lock screen + backgrounded")
-        os_log(.info, log: logger, "⚠️ Server only saves position when isPlaying(1) = true during disconnect")
-        os_log(.info, log: logger, "🎯 Solution: Silent resume → set isPlaying(1) → disconnect")
-        
-        // Step 1: Store current volume and mute audio
-        let originalVolume = audioManager.getVolume()
-        audioManager.setVolume(0.0)
-        
-        // Step 2: Send resume command silently to set server isPlaying(1) flag
-        os_log(.info, log: logger, "🔇 Resuming silently to set server isPlaying(1)")
-        commandHandler.handleUnpauseCommand()
-        
-        // Step 3: Reset lock screen pause flag so STMt heartbeats resume
-        commandHandler.isPausedByLockScreen = false
-        os_log(.info, log: logger, "🔇 Reset isPausedByLockScreen - STMt heartbeats will resume")
-        
-        // Step 4: Wait for STMt messages to be sent to server, then disconnect
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            // Restore original volume
-            self.audioManager.setVolume(originalVolume)
-            
-            os_log(.info, log: self.logger, "🔌 Disconnecting while server thinks we're playing")
-            os_log(.info, log: self.logger, "📍 Server will save playingAtPowerOff=true and positionAtDisconnect")
-            os_log(.info, log: self.logger, "🔄 Lock screen resume will trigger server's resumeOnPower() logic")
-            
-            // Clean disconnect to trigger server's persistPlaybackStateForPowerOff
-            self.disconnect()
-        }
-    }
     
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
         os_log(.info, log: logger, "🌐 Network change - Available: %{public}s, Expensive: %{public}s",
@@ -760,9 +599,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerWillSleep() {
         // Legacy sleep status removed - modern recovery uses local position saving
-        os_log(.debug, log: logger, "💤 App will sleep - relying on position recovery system")
+        //os_log(.debug, log: logger, "💤 App will sleep - relying on position recovery system")
     }
-    
     
 }
 
