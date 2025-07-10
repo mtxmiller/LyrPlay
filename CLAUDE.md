@@ -168,5 +168,67 @@ The project is actively developed with recent focus on:
 - Audio metadata handling improvements
 - Server discovery enhancements
 - Background audio reliability
+- **FLAC seeking limitation** - Known issue with FLAC file seeking (see Known Limitations below)
+- **Audio session optimization** - Removed forced sample rate settings for better format compatibility
 
 The codebase is well-structured, thoroughly documented, and follows modern iOS development practices with comprehensive error handling and state management.
+
+## Known Limitations
+
+### FLAC Seeking
+- **Issue**: Seeking within FLAC files fails with StreamingKit error 2 (Stream Parse Bytes Failed)
+- **Cause**: LMS server sends raw FLAC audio frames without required metadata headers when seeking
+- **Impact**: Users cannot seek within FLAC files - seeking will cause playback to fail
+- **Workarounds**: 
+  - Restart tracks from beginning instead of seeking
+  - Use AAC or MP3 transcoding for files where seeking is important
+- **Status**: Known limitation, not currently planned for immediate fix due to complexity
+
+## Reference Source Code
+
+When updating the application, reference the following source code repositories for implementation details and protocol understanding:
+
+### Available Reference Sources
+- **slimserver** folder: Complete Lyrion Music Server source code for protocol understanding
+- **squeezelite** folder: Reference Squeezebox player implementation
+- **lms-material** folder: Material skin web interface source code
+- **StreamingKit** source in CocoaPods: Audio streaming implementation details
+
+These repositories provide definitive reference for:
+- SlimProto protocol implementation
+- Audio streaming protocols and formats
+- Server communication patterns
+- Material skin metadata handling approaches
+
+## Recent Updates and Improvements
+
+### Metadata Simplification (2024)
+- **Simplified metadata tags**: Reduced from 35+ tags to Material skin's minimal set for efficiency
+- **Material skin approach**: Adopted proven metadata handling patterns from lms-material
+- **Duration preservation**: Fixed radio stream duration loss during metadata refresh
+- **Conditional updates**: Only update metadata fields when server explicitly provides them
+
+### Recovery Methods Enhancement
+- **App backgrounding recovery**: Improved position saving and restoration
+- **Connection state management**: Enhanced reconnection strategies with proper state handling
+- **Server time synchronization**: Refined timing mechanisms for gapless playback
+- **Lock screen integration**: Better handling of playback state during interruptions
+
+### Major Fixes Completed
+
+#### FLAC Seeking Issue - KNOWN LIMITATION
+- **Problem**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
+- **Root Cause**: When seeking, LMS server starts FLAC streams at frame boundaries without STREAMINFO headers, which StreamingKit requires for decoder initialization
+- **Technical Details**: 
+  - Fresh tracks work fine (server sends complete FLAC file with headers)
+  - Seeks fail because server sends raw FLAC audio frames starting mid-file
+  - StreamingKit needs FLAC metadata blocks to initialize the decoder
+- **Status**: Currently not implemented - FLAC seeking will fail with Stream Parse Bytes Failed error
+- **Workaround**: Users can restart tracks from beginning or use other audio formats (AAC, MP3) for seeking
+- **Future Solution**: Would require capturing FLAC headers during initial playback and prepending them to seeked streams
+
+#### Audio Session Optimization - COMPLETED
+- **Problem**: Forced sample rate settings (44.1kHz/48kHz) potentially interfering with FLAC playback
+- **Solution**: Commented out forced sample rate settings in AudioSessionManager.swift
+- **Files Modified**: AudioSessionManager.swift - `setupForLosslessAudio()` and `setupForCompressedAudio()`
+- **Impact**: StreamingKit and audio content now determine optimal sample rates automatically
