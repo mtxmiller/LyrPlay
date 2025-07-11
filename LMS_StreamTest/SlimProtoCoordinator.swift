@@ -254,8 +254,13 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         checkForPositionRecoveryAfterConnection()
         
         // Check for custom position recovery from server preferences (app open recovery)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.checkForServerPreferencesRecovery()
+        // Only run if this is NOT a lock screen play recovery
+        if !isLockScreenPlayRecovery {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.checkForServerPreferencesRecovery()
+            }
+        } else {
+            os_log(.info, log: logger, "⚠️ Skipping custom position recovery - lock screen recovery in progress")
         }
     }
 
@@ -650,129 +655,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     private func checkForPositionRecoveryAfterConnection() {
-        // DISABLED: App open recovery disabled - not robust enough for production
-        os_log(.info, log: logger, "⚠️ App open recovery disabled - too unreliable")
-        return
-        
-        /* DISABLED RECOVERY CODE:
-        // Skip if this is a lock screen play recovery (handled separately)
-        if isLockScreenPlayRecovery {
-            os_log(.info, log: logger, "ℹ️ Skipping app-open recovery - this is lock screen play recovery")
-            return
-        }
-        
-        // DEBUG: Always log the current saved position state
-        os_log(.info, log: logger, "🔍 Recovery check - savedPosition: %.2f, shouldResumeOnPlay: %{public}s, timestamp: %{public}s", 
-               savedPosition, shouldResumeOnPlay ? "YES" : "NO", 
-               savedPositionTimestamp?.description ?? "nil")
-        
-        // Check if we have a saved position that needs recovery
-        guard shouldResumeOnPlay,
-              let timestamp = savedPositionTimestamp,
-              savedPosition > 0.1 else {
-            os_log(.info, log: logger, "ℹ️ No position recovery needed after connection")
-            return
-        }
-        
-        // Check if the saved position is recent (within 10 minutes)
-        let timeSinceSave = Date().timeIntervalSince(timestamp)
-        guard timeSinceSave < 600 else {
-            os_log(.info, log: logger, "⚠️ Saved position too old after connection (%.0f seconds) - clearing", timeSinceSave)
-            clearSavedPosition()
-            return
-        }
-        
-        // CRITICAL: Reject stale positions that don't match current server time
-        // If saved position is significantly different from current server time, it's probably stale
-        let (currentServerTime, _) = getCurrentInterpolatedTime()
-        let timeDifference = abs(savedPosition - currentServerTime)
-        
-        // If current server time is valid and saved position is more than 10 seconds off, reject it
-        if currentServerTime > 1.0 && timeDifference > 10.0 {
-            os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
-                   savedPosition, currentServerTime, timeDifference)
-            clearSavedPosition()
-            return
-        }
-        
-        os_log(.info, log: logger, "🎯 Connection established with saved position - will recover after stabilization")
-        
-        // Wait for connection to stabilize, then seek to saved position
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.performSimplePositionRecoveryAfterConnection()
-        }
-        END DISABLED RECOVERY CODE */
+        // REMOVED: Legacy app open recovery - replaced with custom position banking
+        os_log(.info, log: logger, "⚠️ Legacy app open recovery removed - using custom position banking instead")
     }
     
     private func performSimplePositionRecoveryAfterConnection() {
-        // DISABLED: App open recovery disabled - not robust enough for production
-        os_log(.info, log: logger, "⚠️ App open position recovery disabled - too unreliable")
-        return
-        
-        /* DISABLED RECOVERY CODE:
-        // This is for when app is opened and reconnects (not lock screen play)
-        // We seek to position but DON'T automatically start playing
-        
-        guard shouldResumeOnPlay,
-              let timestamp = savedPositionTimestamp,
-              savedPosition > 0.1 else {
-            os_log(.info, log: logger, "ℹ️ No saved position to recover after connection")
-            return
-        }
-        
-        // Double-check age
-        let timeSinceSave = Date().timeIntervalSince(timestamp)
-        guard timeSinceSave < 600 else {
-            os_log(.info, log: logger, "⚠️ Position too old - not recovering")
-            clearSavedPosition()
-            return
-        }
-        
-        os_log(.info, log: logger, "🎯 Recovering to saved position after app open: %.2f seconds", savedPosition)
-        
-        // App open recovery: play → seek → pause (fast sequence to minimize audio blip)
-        os_log(.info, log: logger, "🔄 App open: play → seek → pause sequence (fast)")
-        
-        // CRITICAL: Pause server time sync during recovery to prevent crazy time jumps
-        os_log(.debug, log: logger, "⏸️ Pausing server time sync during recovery")
-        
-        sendJSONRPCCommand("play")
-        
-        // Wait briefly for playback to start, then seek, then pause immediately
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            os_log(.info, log: self.logger, "🎯 App open: Now seeking to saved position: %.2f seconds", self.savedPosition)
-            
-            self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
-                guard let self = self else { return }
-                
-                if seekSuccess {
-                    os_log(.info, log: self.logger, "✅ App open: Seek successful - now pausing")
-                    
-                    // Pause immediately after seeking (no delay)
-                    self.sendJSONRPCCommand("pause")
-                    os_log(.info, log: self.logger, "⏸️ App open recovery complete - positioned at saved location")
-                    
-                    // CRITICAL: Refresh UI after recovery and resume server time sync
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        os_log(.info, log: self.logger, "🔄 Refreshing UI after recovery")
-                        self.refreshUIAfterRecovery()
-                        
-                        os_log(.debug, log: self.logger, "▶️ Resuming server time sync after recovery")
-                    }
-                } else {
-                    os_log(.error, log: self.logger, "❌ App open: Failed to seek to saved position")
-                    
-                    // Resume server time sync even if seek failed
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        os_log(.debug, log: self.logger, "▶️ Resuming server time sync after failed recovery")
-                    }
-                }
-                
-                // DON'T clear saved position here - keep it for potential lock screen recovery
-                os_log(.info, log: self.logger, "ℹ️ App open recovery complete - keeping position for potential lock screen recovery")
-            }
-        }
-        END DISABLED RECOVERY CODE */
+        // REMOVED: Legacy app open recovery - replaced with custom position banking
+        os_log(.info, log: logger, "⚠️ Legacy app open position recovery removed - using custom position banking instead")
     }
     
     
@@ -1087,25 +976,28 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        // CRITICAL: Mark lock screen play recovery early to prevent double recovery
+        // CRITICAL: Handle all lock screen play commands to prevent double commands
         if command.lowercased() == "play" {
             isLockScreenPlayRecovery = true
             os_log(.info, log: logger, "🔒 Lock screen play - marked for position recovery")
-        }
-        
-        // SIMPLE STRATEGY: For PLAY commands after disconnect, reconnect and seek to saved position
-        if command.lowercased() == "play" && !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
             
-            // CRITICAL: Ensure audio session is active for background playback
-            audioManager.activateAudioSession()
-            
-            // Reconnect and handle position recovery manually
-            connect()
-            
-            // Monitor reconnection and apply saved position
-            monitorReconnectionForSimplePositionRecovery()
-            return
+            // Only do position recovery if disconnected - otherwise server knows current position
+            if !connectionManager.connectionState.isConnected {
+                os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
+                
+                // CRITICAL: Ensure audio session is active for background playback
+                audioManager.activateAudioSession()
+                
+                // Reconnect and handle position recovery manually
+                connect()
+                
+                // Monitor reconnection and apply saved position
+                monitorReconnectionForSimplePositionRecovery()
+            } else {
+                os_log(.info, log: logger, "🔄 PLAY while connected - server already knows position, sending simple play")
+                sendJSONRPCCommand("play")
+            }
+            return  // CRITICAL: Always return to prevent double command
         }
         
         // For other commands or when connected, use JSON-RPC

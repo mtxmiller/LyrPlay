@@ -6,7 +6,7 @@ import os.log
 
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
-    @StateObject private var audioManager = AudioManager.shared  // ← CHANGE THIS LINE
+    @StateObject private var audioManager: AudioManager  // ← FIXED: Remove .shared here
     @StateObject private var slimProtoCoordinator: SlimProtoCoordinator
     @State private var isLoading = true
     @State private var loadError: String?
@@ -24,8 +24,8 @@ struct ContentView: View {
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
         
-        // ✅ Use the same singleton instance
-        let audioMgr = AudioManager.shared  // ← CHANGE THIS LINE
+        // ✅ FIXED: Use the same singleton instance for EVERYTHING
+        let audioMgr = AudioManager.shared
         self._audioManager = StateObject(wrappedValue: audioMgr)
         
         // ✅ Create SlimProtoCoordinator ONCE with the SAME AudioManager
@@ -35,7 +35,7 @@ struct ContentView: View {
         // ✅ Connect them using the SAME instances
         audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ Enhanced SlimProto architecture with Material integration initialized")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ FIXED: Single AudioManager and SlimProtoCoordinator instances created")
     }
     
     var body: some View {

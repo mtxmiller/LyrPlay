@@ -209,11 +209,11 @@ These repositories provide definitive reference for:
 - **Conditional updates**: Only update metadata fields when server explicitly provides them
 
 ### Recovery Methods Enhancement
-- **App backgrounding recovery**: Improved position saving and restoration
+- **Lock screen recovery**: Simple position recovery when disconnected and user presses lock screen play
+- **Custom position banking**: Server-side player preferences storage for app open recovery with silent server-muted recovery
 - **Connection state management**: Enhanced reconnection strategies with proper state handling
 - **Server time synchronization**: Refined timing mechanisms for gapless playback
-- **Lock screen integration**: Better handling of playback state during interruptions
-- **Silent position recovery**: Server-side volume control for seamless audio-free recovery sequences
+- **Legacy app open recovery**: Removed and replaced with custom position banking system to prevent conflicts
 
 ### Major Fixes Completed
 
@@ -227,7 +227,7 @@ These repositories provide definitive reference for:
   # Add this rule BEFORE the default "flc flc * *" line in convert.conf
   flc flc * 02:70:68:8c:51:41
           # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-          [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b 16 -r 44100 -c 2 -L - -t flac -r 44100 -C 0 -
+          [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
   ```
 - **User Instructions**:
   1. Replace `02:70:68:8c:51:41` with your device's MAC address (shown in LMS web interface)
@@ -236,10 +236,13 @@ These repositories provide definitive reference for:
   4. FLAC seeking will now work properly with fresh headers on every seek operation
 - **Technical Details**:
   - Forces decode→raw→re-encode pipeline that generates complete FLAC headers
+  - Uses LMS variables `$SAMPLESIZE$`, `$SAMPLERATE$`, `$CHANNELS$` for automatic bit depth detection
+  - Handles both 16-bit and 24-bit FLAC files correctly by detecting source properties
+  - Outputs consistent 16-bit FLAC for StreamingKit compatibility (`-b 16` flag)
   - Uses sox for reliable audio processing and format conversion
-  - Maintains audio quality while ensuring StreamingKit compatibility
   - Only affects the specific iOS device, other players use normal passthrough
 - **Performance Impact**: Minimal - transcoding happens in real-time on server with efficient compression level 0
+- **Bit Depth Support**: Supports all FLAC bit depths (16-bit, 24-bit, 32-bit) with automatic detection and conversion to 16-bit output
 
 #### Audio Session Optimization - COMPLETED
 - **Problem**: Forced sample rate settings (44.1kHz/48kHz) potentially interfering with FLAC playback
