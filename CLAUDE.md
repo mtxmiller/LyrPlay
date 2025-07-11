@@ -213,6 +213,7 @@ These repositories provide definitive reference for:
 - **Connection state management**: Enhanced reconnection strategies with proper state handling
 - **Server time synchronization**: Refined timing mechanisms for gapless playback
 - **Lock screen integration**: Better handling of playback state during interruptions
+- **Silent position recovery**: Server-side volume control for seamless audio-free recovery sequences
 
 ### Major Fixes Completed
 
@@ -232,6 +233,22 @@ These repositories provide definitive reference for:
 - **Solution**: Commented out forced sample rate settings in AudioSessionManager.swift
 - **Files Modified**: AudioSessionManager.swift - `setupForLosslessAudio()` and `setupForCompressedAudio()`
 - **Impact**: StreamingKit and audio content now determine optimal sample rates automatically
+
+#### Silent Position Recovery System - COMPLETED
+- **Problem**: Audio snippets heard during custom position recovery (play → seek → pause sequences)
+- **Root Cause**: App-level volume control only affects StreamingKit internal volume, not system audio output
+- **Solution**: Server-side volume control using LMS mixer commands for truly silent recovery
+- **Implementation**: 
+  - `saveServerVolumeAndMute()`: Query current server volume, save to preferences, set server volume to 0
+  - `performCustomPositionRecovery()`: Execute play → seek → pause sequence with server muted
+  - `restoreServerVolume()`: Retrieve saved volume from preferences and restore server volume
+- **Files Modified**: SlimProtoCoordinator.swift - custom position recovery methods
+- **Technical Details**:
+  - Uses LMS JSON-RPC `["mixer", "volume", "?"]` to get current volume
+  - Stores volume in player preferences: `["playerpref", "lyrPlaySavedVolume", volume]`
+  - Sets server volume to 0: `["mixer", "volume", "0"]` during recovery
+  - Restores original volume after recovery completes
+- **Impact**: Completely silent position recovery with no audio snippets during app reopening
 
 ## Future Repository Migration Plan
 

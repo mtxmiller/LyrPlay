@@ -252,6 +252,11 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         
         // Check if we need to recover position after reconnection
         checkForPositionRecoveryAfterConnection()
+        
+        // Check for custom position recovery from server preferences (app open recovery)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.checkForServerPreferencesRecovery()
+        }
     }
 
     func slimProtoDidDisconnect(error: Error?) {
@@ -306,9 +311,10 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
                isLockScreenPaused ? "YES" : "NO", playerState)
         
-        // ALWAYS save position when backgrounding (for lock screen recovery)
-        os_log(.info, log: logger, "💾 Saving position for potential lock screen recovery")
+        // ALWAYS save position when backgrounding (for lock screen recovery AND app open recovery)
+        os_log(.info, log: logger, "💾 Saving position for potential recovery")
         saveCurrentPositionLocally()
+        savePositionToServerPreferences()
         
         if playerState == "Paused" || playerState == "Stopped" {
             backgroundedWhilePlaying = false
@@ -379,6 +385,233 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         } else {
             os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
                    currentTime, audioTime)
+        }
+    }
+    
+    // MARK: - Custom Position Banking (Server Preferences)
+    
+    private func savePositionToServerPreferences() {
+        let (currentTime, _) = getCurrentInterpolatedTime()
+        let playerState = audioManager.getPlayerState()
+        
+        guard currentTime > 0.1 else {
+            os_log(.info, log: logger, "⚠️ No valid position to save to server preferences")
+            return
+        }
+        
+        os_log(.info, log: logger, "💾 Saving position to server preferences: %.2f seconds (state: %{public}s)", 
+               currentTime, playerState)
+        
+        let playerID = settings.playerMACAddress
+        
+        // Save position
+        let savePositionCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlayLastPosition", String(format: "%.2f", currentTime)]]
+        ]
+        
+        // Save player state (paused/playing)
+        let saveStateCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request", 
+            "params": [playerID, ["playerpref", "lyrPlayLastState", playerState]]
+        ]
+        
+        // Save timestamp for validation
+        let saveTimestampCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlaySaveTime", String(Int(Date().timeIntervalSince1970))]]
+        ]
+        
+        // Send all preference updates (fire and forget - no completion needed)
+        sendJSONRPCCommandDirect(savePositionCommand) { _ in }
+        sendJSONRPCCommandDirect(saveStateCommand) { _ in }
+        sendJSONRPCCommandDirect(saveTimestampCommand) { _ in }
+    }
+    
+    private func checkForServerPreferencesRecovery() {
+        os_log(.info, log: logger, "🔍 Checking for custom position recovery from server preferences")
+        
+        let playerID = settings.playerMACAddress
+        
+        // Query our saved position
+        let queryPositionCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlayLastPosition", "?"]]
+        ]
+        
+        sendJSONRPCCommandDirect(queryPositionCommand) { [weak self] response in
+            self?.handleServerPreferencesRecoveryResponse(response)
+        }
+    }
+    
+    private func handleServerPreferencesRecoveryResponse(_ response: [String: Any]?) {
+        guard let response = response,
+              let result = response["result"] as? [String: Any],
+              let positionString = result["_p2"] as? String,
+              let savedPosition = Double(positionString),
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "ℹ️ No custom position found in server preferences")
+            return
+        }
+        
+        os_log(.info, log: logger, "🎯 Found custom saved position: %.2f seconds - starting recovery", savedPosition)
+        
+        // Perform custom position recovery
+        performCustomPositionRecovery(to: savedPosition)
+    }
+    
+    private func performCustomPositionRecovery(to position: Double) {
+        os_log(.info, log: logger, "🔄 Custom recovery: server-muted play → seek → pause sequence to %.2f", position)
+        
+        // First, save current server volume and mute it for silent recovery
+        saveServerVolumeAndMute()
+        
+        // Wait a moment for server volume to be muted, then start recovery sequence
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.sendJSONRPCCommand("play")
+            
+            // Then seek after play starts
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.sendSeekCommand(to: position) { [weak self] seekSuccess in
+                guard let self = self else { return }
+                
+                if seekSuccess {
+                    os_log(.info, log: self.logger, "✅ Custom recovery: Seek successful - pausing at recovered position")
+                    
+                    // Pause at the recovered position
+                    self.sendJSONRPCCommand("pause")
+                    
+                    // Restore server volume after recovery is complete
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.restoreServerVolume()
+                        
+                        // Clear the custom preferences since we've recovered
+                        self.clearServerPreferencesRecovery()
+                        
+                        // Refresh UI after recovery
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            self.refreshUIAfterRecovery()
+                            os_log(.info, log: self.logger, "🎵 Server-muted custom position recovery complete")
+                        }
+                    }
+                } else {
+                    os_log(.error, log: self.logger, "❌ Custom recovery: Failed to seek to saved position")
+                    
+                    // Restore volume even on failure
+                    self.restoreServerVolume()
+                    
+                    // Clear preferences even on failure
+                    self.clearServerPreferencesRecovery()
+                }
+                }
+            }
+        }
+    }
+    
+    private func clearServerPreferencesRecovery() {
+        os_log(.info, log: logger, "🗑️ Clearing custom position recovery preferences")
+        
+        let playerID = settings.playerMACAddress
+        
+        let clearCommands: [[String: Any]] = [
+            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlayLastPosition", ""]]],
+            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlayLastState", ""]]],
+            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlaySaveTime", ""]]]
+        ]
+        
+        for command in clearCommands {
+            sendJSONRPCCommandDirect(command) { _ in }
+        }
+    }
+    
+    private func saveServerVolumeAndMute() {
+        os_log(.info, log: logger, "🔇 Saving current server volume and muting for silent recovery")
+        
+        let playerID = settings.playerMACAddress
+        
+        // Get current volume from server
+        let getVolumeCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["mixer", "volume", "?"]]
+        ]
+        
+        sendJSONRPCCommandDirect(getVolumeCommand) { [weak self] response in
+            guard let self = self else { return }
+            
+            if let result = response["result"] as? [String: Any],
+               let volume = result["_volume"] as? String {
+                
+                // Save current volume to preferences
+                let saveVolumeCommand: [String: Any] = [
+                    "id": 1,
+                    "method": "slim.request", 
+                    "params": [playerID, ["playerpref", "lyrPlaySavedVolume", volume]]
+                ]
+                
+                self.sendJSONRPCCommandDirect(saveVolumeCommand) { _ in
+                    os_log(.info, log: self.logger, "💾 Saved current volume: %{public}s", volume)
+                    
+                    // Now mute the server volume
+                    let muteCommand: [String: Any] = [
+                        "id": 1,
+                        "method": "slim.request",
+                        "params": [playerID, ["mixer", "volume", "0"]]
+                    ]
+                    
+                    self.sendJSONRPCCommandDirect(muteCommand) { _ in
+                        os_log(.info, log: self.logger, "🔇 Server volume muted for silent recovery")
+                    }
+                }
+            }
+        }
+    }
+    
+    private func restoreServerVolume() {
+        os_log(.info, log: logger, "🔊 Restoring server volume after recovery")
+        
+        let playerID = settings.playerMACAddress
+        
+        // Get saved volume from preferences
+        let getSavedVolumeCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlaySavedVolume", "?"]]
+        ]
+        
+        sendJSONRPCCommandDirect(getSavedVolumeCommand) { [weak self] response in
+            guard let self = self else { return }
+            
+            if let result = response["result"] as? [String: Any],
+               let savedVolume = result["_p2"] as? String,
+               !savedVolume.isEmpty {
+                
+                // Restore the saved volume
+                let restoreVolumeCommand: [String: Any] = [
+                    "id": 1,
+                    "method": "slim.request",
+                    "params": [playerID, ["mixer", "volume", savedVolume]]
+                ]
+                
+                self.sendJSONRPCCommandDirect(restoreVolumeCommand) { _ in
+                    os_log(.info, log: self.logger, "🔊 Server volume restored to: %{public}s", savedVolume)
+                    
+                    // Clear the saved volume preference
+                    let clearVolumeCommand: [String: Any] = [
+                        "id": 1,
+                        "method": "slim.request",
+                        "params": [playerID, ["playerpref", "lyrPlaySavedVolume", ""]]
+                    ]
+                    
+                    self.sendJSONRPCCommandDirect(clearVolumeCommand) { _ in }
+                }
+            } else {
+                os_log(.info, log: self.logger, "ℹ️ No saved volume found - leaving current volume unchanged")
+            }
         }
     }
     
@@ -573,8 +806,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // iOS background time is expiring - disconnect gracefully
         os_log(.info, log: logger, "💤 iOS background time expiring - disconnecting gracefully")
         
-        // Save position one final time before disconnect
+        // Save position locally AND to server preferences for bulletproof recovery
         saveCurrentPositionLocally()
+        savePositionToServerPreferences()
         
         // Disconnect to conserve resources and battery
         disconnect()
