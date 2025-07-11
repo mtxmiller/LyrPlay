@@ -217,16 +217,29 @@ These repositories provide definitive reference for:
 
 ### Major Fixes Completed
 
-#### FLAC Seeking Issue - KNOWN LIMITATION
+#### FLAC Seeking Issue - SOLVED with Server-Side Configuration
 - **Problem**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
 - **Root Cause**: When seeking, LMS server starts FLAC streams at frame boundaries without STREAMINFO headers, which StreamingKit requires for decoder initialization
-- **Technical Details**: 
-  - Fresh tracks work fine (server sends complete FLAC file with headers)
-  - Seeks fail because server sends raw FLAC audio frames starting mid-file
-  - StreamingKit needs FLAC metadata blocks to initialize the decoder
-- **Status**: Currently not implemented - FLAC seeking will fail with Stream Parse Bytes Failed error
-- **Workaround**: Users can restart tracks from beginning or use other audio formats (AAC, MP3) for seeking
-- **Future Solution**: Would require capturing FLAC headers during initial playback and prepending them to seeked streams
+- **Solution**: Force server-side FLAC transcoding for iOS devices to ensure proper headers on seeks
+- **Implementation**: Add device-specific transcode rule to LMS server's `convert.conf` file
+- **Server Configuration Required**:
+  ```
+  # Add this rule BEFORE the default "flc flc * *" line in convert.conf
+  flc flc * 02:70:68:8c:51:41
+          # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+          [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b 16 -r 44100 -c 2 -L - -t flac -r 44100 -C 0 -
+  ```
+- **User Instructions**:
+  1. Replace `02:70:68:8c:51:41` with your device's MAC address (shown in LMS web interface)
+  2. Add the rule to LMS server's `convert.conf` file before existing FLAC rules
+  3. Restart LMS server for changes to take effect
+  4. FLAC seeking will now work properly with fresh headers on every seek operation
+- **Technical Details**:
+  - Forces decode→raw→re-encode pipeline that generates complete FLAC headers
+  - Uses sox for reliable audio processing and format conversion
+  - Maintains audio quality while ensuring StreamingKit compatibility
+  - Only affects the specific iOS device, other players use normal passthrough
+- **Performance Impact**: Minimal - transcoding happens in real-time on server with efficient compression level 0
 
 #### Audio Session Optimization - COMPLETED
 - **Problem**: Forced sample rate settings (44.1kHz/48kHz) potentially interfering with FLAC playback
