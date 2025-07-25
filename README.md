@@ -1,6 +1,6 @@
 # LyrPlay
 
-A professional-grade Squeezebox player for iOS devices that transforms your iPhone or iPad into a high-quality network audio player for Logitech Media Server (LMS).
+A Squeezebox player for iOS devices that transforms your iPhone or iPad into a high-quality network audio player for Logitech Media Server (LMS).
 
 ## Features
 
