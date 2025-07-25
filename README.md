@@ -56,6 +56,8 @@ xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -configuration Debug b
 
 Report issues or request features through [GitHub Issues](https://github.com/mtxmiller/LyrPlay/issues).
 
+**App Store Support URL:** https://github.com/mtxmiller/LyrPlay/issues
+
 ## License
 
 Copyright 2025 Eric Miller. All rights reserved.
