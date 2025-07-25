@@ -22,17 +22,50 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - Logitech Media Server (LMS/Lyrion Music Server)
 - Network connection to your LMS server
 
-## FLAC Setup
+## FLAC Seeking Setup
 
-For optimal FLAC seeking, add this rule to your LMS server's `convert.conf` file BEFORE existing FLAC rules:
+LyrPlay supports native FLAC playback, but seeking within FLAC files requires server-side configuration. Without this setup, seeking will cause playback to fail with StreamingKit error 2.
 
-```
-flc flc * [YOUR_DEVICE_MAC_ADDRESS]
-    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
-```
+### For Docker Users (Recommended)
 
-Replace `[YOUR_DEVICE_MAC_ADDRESS]` with your device's MAC address shown in LMS web interface.
+1. **Find your device's MAC address** in the LMS web interface (Settings → Information)
+
+2. **Create a custom-convert.conf file** in your LMS container:
+   ```bash
+   # Enter your LMS Docker container
+   docker exec -it your-lms-container-name /bin/bash
+   
+   # Create the custom configuration file
+   nano /app/custom-convert.conf
+   ```
+
+3. **Add this transcoding rule** (replace `[YOUR_DEVICE_MAC_ADDRESS]` with actual MAC):
+   ```
+   # LyrPlay FLAC seeking support - add BEFORE any existing FLAC rules
+   flc flc * [YOUR_DEVICE_MAC_ADDRESS]
+       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+   ```
+
+4. **Restart your LMS container** for changes to take effect
+
+### For Traditional LMS Installation
+
+Add the same rule to one of these locations (choose the first that exists):
+- `custom-convert.conf` in your LMS root directory
+- `custom-convert.conf` in your Plugins directory  
+- `/etc/slimserver/custom-convert.conf` (Debian/Ubuntu)
+- Edit the main `convert.conf` file directly (will be overwritten on updates)
+
+### Why This Works
+
+This configuration forces FLAC files to be transcoded with proper headers on every seek operation:
+- **Decodes** the FLAC file from the seek position
+- **Re-encodes** it as 16-bit FLAC with complete headers
+- **Enables** perfect seeking without StreamingKit errors
+- **Only affects** your specific iOS device (other players use passthrough)
+
+**Performance Impact**: Minimal - transcoding happens in real-time with efficient compression.
 
 ## Development
 
