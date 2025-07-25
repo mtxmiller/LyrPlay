@@ -36,7 +36,7 @@ LyrPlay supports native FLAC playback, but seeking within FLAC files requires se
    docker exec -it your-lms-container-name /bin/bash
    
    # Create the custom configuration file
-   nano /app/custom-convert.conf
+   nano /lms/custom-convert.conf
    ```
 
 3. **Add this transcoding rule** (replace `[YOUR_DEVICE_MAC_ADDRESS]` with actual MAC):
