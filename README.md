@@ -20,6 +20,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 
 - iOS 18.2 or later
 - Logitech Media Server (LMS/Lyrion Music Server)
+- **Material Skin plugin** (install from LMS Settings → Plugins)
 - Network connection to your LMS server
 
 ## FLAC Seeking Setup
@@ -66,6 +67,28 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
 - **Only affects** your specific iOS device (other players use passthrough)
 
 **Performance Impact**: Minimal - transcoding happens in real-time with efficient compression.
+
+## Usage
+
+### Material Skin Integration
+
+LyrPlay is designed specifically for the **Material Skin**. Make sure you have installed the Material Skin plugin in LMS:
+
+1. **Install Material Skin**: LMS Settings → Plugins → Material Skin → Install
+2. **Access App Settings**: In Material web interface, go to Settings → Application
+3. **LyrPlay Configuration**: App-specific settings appear in the Material settings menu
+
+### Performance Optimization
+
+For slower network connections or to reduce bandwidth usage, you can force MP3 transcoding:
+
+1. **Open LMS Web Interface** (Material Skin)
+2. **Go to Player Options** for your LyrPlay device
+3. **Navigate to Extra Settings**
+4. **Select Audio dropdown**
+5. **Choose Bitrate Limiting** and select your preferred bitrate (e.g., 320kbps, 192kbps, 128kbps)
+
+This will transcode all audio formats to MP3 at your chosen bitrate, significantly reducing network usage while maintaining good audio quality.
 
 ## Development
 
