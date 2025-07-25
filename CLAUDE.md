@@ -4,7 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LMS_StreamTest is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
+**LyrPlay** (formerly LMS_StreamTest) is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
+
+### Current Status: **APP STORE READY** 🚀
+- ✅ **macOS/visionOS exclusion configured** - App will only appear for iPhone/iPad users
+- ✅ **Privacy compliance verified** - Low risk profile, minimal data collection
+- ✅ **App Store metadata prepared** - Description, keywords, promotional text ready
+- ✅ **Professional GitHub repository** - https://github.com/mtxmiller/LyrPlay
+- ✅ **Support URL configured** - https://github.com/mtxmiller/LyrPlay/issues
+
+### Repository Information
+- **GitHub Repository**: https://github.com/mtxmiller/LyrPlay
+- **Local Folder**: Still named `LMS_StreamTest` (internal structure preserved)
+- **App Display Name**: LyrPlay
+- **Bundle ID**: `elm.LMS-StreamTest` (preserved for App Store compatibility)
+- **Internal References**: Still use `LMS_StreamTest` for code consistency
 
 ## Development Commands
 
@@ -114,6 +128,49 @@ The app maintains SlimProto connections in the background:
 - Connection maintenance and reconnection
 - Server time synchronization
 - Proper iOS background task handling
+
+## App Store Readiness Status
+
+### Platform Exclusions (COMPLETED)
+The project has been configured to **prevent macOS and visionOS downloads** due to StreamingKit compatibility issues:
+
+```
+SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+SUPPORTS_MACCATALYST = NO;
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+```
+
+**Why this was needed**: StreamingKit (used for native FLAC support) doesn't work properly on macOS, causing crashes. These settings ensure the app only appears for iPhone/iPad users in the App Store.
+
+### App Store Metadata (COMPLETED)
+Ready-to-use content for App Store Connect:
+
+**Promotional Text (170 chars):**
+```
+Transform your iPhone and iPad into a premium Squeezebox player with native FLAC support, Material web interface, and high-quality audio streaming.
+```
+
+**Keywords (100 chars):**
+```
+flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,lossless,material
+```
+
+**Support URL:** https://github.com/mtxmiller/LyrPlay/issues
+
+### Privacy Compliance (VERIFIED)
+- **Risk Level**: Low - No personal data collection
+- **Network Usage**: HTTP allowed for LMS servers (justified)
+- **Background Audio**: Properly declared with usage descriptions
+- **No Analytics**: No tracking or user data collection
+- **Local Storage**: Only app preferences (UserDefaults)
+
+### Build Configuration
+- **iOS Deployment Target**: 18.2 (latest iOS features)
+- **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
+- **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
+- **Display Name**: LyrPlay
+- **Version**: 1.3
 
 ## Testing Structure
 
@@ -266,38 +323,54 @@ These repositories provide definitive reference for:
   - Restores original volume after recovery completes
 - **Impact**: Completely silent position recovery with no audio snippets during app reopening
 
-## Future Repository Migration Plan
+## Repository Migration Status - COMPLETED ✅
 
-### Clean Repository Setup for "LyrPlay"
-When ready to create the final clean repository, follow this migration plan:
+### Clean Repository Migration - DONE
+The LyrPlay repository has been successfully created and configured:
 
-#### Option A: Fresh Xcode Project (Recommended)
-1. **Create new Xcode project:**
-   - File → New → Project
-   - Name it `LyrPlay` 
-   - Use same bundle ID: `elm.LMS-StreamTest` (for App Store Connect compatibility)
+- **✅ New Repository**: https://github.com/mtxmiller/LyrPlay
+- **✅ Professional README**: Complete setup instructions and documentation
+- **✅ Clean Commit History**: Starts with professional "Initial LyrPlay release" commit
+- **✅ Topics Added**: ios, swift, flac, audio, squeezebox, lms, streaming, music-player, swiftui
+- **✅ Local Project**: Remains in `LMS_StreamTest` folder for consistency
+- **✅ Git Remote**: Updated to point to LyrPlay repository
+- **✅ Xcode Connection**: Source Control now connected to new repository
 
-2. **Copy source files:**
-   - Copy all `.swift` files from `LMS_StreamTest/` to `LyrPlay/`
-   - Copy `Assets.xcassets`, `Info.plist` content
-   - Copy `CLAUDE.md` and update project references
+### Key Benefits Achieved:
+- **Professional appearance** for open-source release
+- **Clean public commit history** (development history preserved locally)
+- **App Store ready** with proper support URL
+- **Consistent branding** with LyrPlay name throughout
 
-3. **Re-add dependencies:**
-   - Copy `Podfile`, update target name to `LyrPlay`
-   - Run `pod install`
+### Current Development Status
+- **Local Folder**: `LMS_StreamTest` (internal consistency preserved)
+- **Repository**: `mtxmiller/LyrPlay` (public-facing)
+- **All pushes/pulls**: Go to LyrPlay repository
+- **Build commands**: Still use `LMS_StreamTest.xcworkspace` (no changes needed)
 
-4. **Update build commands in CLAUDE.md:**
-   ```bash
-   # Build from command line
-   xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -configuration Debug build
-   
-   # Run tests
-   xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -destination 'platform=iOS Simulator,name=iPhone 15' test
-   ```
+## Remaining Tasks for App Store Submission
 
-#### Benefits of Clean Repository:
-- Project name: `LyrPlay`
-- Clean file structure with no legacy naming
+### High Priority (Required)
+- [ ] **Test final build** - Verify all iOS-only functionality works correctly
+- [ ] **Generate archive build** - Create final .ipa for App Store submission
+- [ ] **Submit to App Store Connect** - Upload build and configure metadata
+
+### Medium Priority (Optional)
+- [ ] **Privacy Manifest** - Create PrivacyInfo.xcprivacy file (iOS 17+ requirement)
+- [ ] **Screenshot preparation** - Create App Store screenshots for iPhone/iPad
+- [ ] **App Store review notes** - Prepare notes explaining HTTP usage for LMS servers
+
+### App Store Connect Configuration
+When submitting, use these prepared values:
+- **Support URL**: https://github.com/mtxmiller/LyrPlay/issues
+- **Marketing URL**: (optional) https://github.com/mtxmiller/LyrPlay
+- **Keywords**: flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,lossless,material
+- **Category**: Music
+- **Content Rating**: 4+ (No objectionable content)
+
+---
+
+**Last Updated**: July 2025 - App Store Ready Status
 - Same bundle ID (App Store compatible)
 - Fresh git history starting from polished final version
 - Professional appearance for open-source release
