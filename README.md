@@ -19,7 +19,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 ## Requirements
 
 - iOS 18.2 or later
-- Logitech Media Server (LMS/Lyrion Music Server)
+- Lyrion Media Server (LMS/Lyrion Music Server)
 - **Material Skin plugin** (install from LMS Settings → Plugins)
 - Network connection to your LMS server
 
