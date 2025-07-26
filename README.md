@@ -126,6 +126,8 @@ Report issues or request features through [GitHub Issues](https://github.com/mtx
 
 ## License
 
+See MIT License. 
+
 Copyright 2025 Eric Miller. All rights reserved.
 
 ---
