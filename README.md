@@ -23,6 +23,16 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Material Skin plugin** (install from LMS Settings → Plugins)
 - Network connection to your LMS server
 
+### Remote Access
+
+For remote access outside your home network, you'll need a secure VPN solution:
+
+- **WireGuard** - Modern, fast VPN protocol
+- **Tailscale** - Zero-config mesh VPN built on WireGuard
+- **OpenVPN** - Traditional VPN solution
+
+**Important**: Direct internet exposure of LMS servers is not recommended due to security risks. Always use a VPN for remote access to maintain security while enjoying your music collection anywhere.
+
 ## FLAC Seeking Setup
 
 LyrPlay supports native FLAC playback, but seeking within FLAC files requires server-side configuration. Without this setup, seeking will cause playback to fail with StreamingKit error 2.
@@ -72,7 +82,7 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
 
 ### Material Skin Integration
 
-LyrPlay is designed specifically for the **Material Skin**. Make sure you have installed the Material Skin plugin in LMS:
+LyrPlay is designed specifically for the **Material Skin** by [CDrummond](https://github.com/CDrummond/lms-material). Make sure you have installed the Material Skin plugin in LMS:
 
 1. **Install Material Skin**: LMS Settings → Plugins → Material Skin → Install
 2. **Access App Settings**: In Material web interface, go to Settings → Application

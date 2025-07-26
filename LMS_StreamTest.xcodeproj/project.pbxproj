@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
+		6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
 		78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */; };
@@ -40,6 +41,7 @@
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		6BF8457C2DEB86D000C2BB2A /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		874333B1449148BC67AF774C /* Pods-LMS_StreamTest.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.release.xcconfig"; sourceTree = "<group>"; };
@@ -112,6 +114,7 @@
 		6B9C4D452DEB81F500D22FD6 = {
 			isa = PBXGroup;
 			children = (
+				6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */,
 				6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D612DEB81F600D22FD6 /* LMS_StreamTestTests */,
 				6B9C4D6B2DEB81F600D22FD6 /* LMS_StreamTestUITests */,
@@ -265,6 +268,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -555,7 +559,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -592,7 +596,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
