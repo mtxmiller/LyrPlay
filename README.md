@@ -129,5 +129,3 @@ Report issues or request features through [GitHub Issues](https://github.com/mtx
 Copyright 2025 Eric Miller. All rights reserved.
 
 ---
-
-🎵 Professional audio streaming for iOS
