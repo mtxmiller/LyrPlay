@@ -136,7 +136,7 @@ struct WelcomeView: View {
             }
             
             VStack(spacing: 30) {
-                Text("SlimAMP")
+                Text("LyrPlay")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                     .foregroundColor(.white)
@@ -576,7 +576,7 @@ struct ServerSetupView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("SlimAMP Discovery", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyrPlay Discovery", forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 2.0
         
