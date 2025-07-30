@@ -91,3 +91,6 @@ iOSInjectionProject/
 
 # Mac
 .DS_Store
+
+# Conversation logs
+*.txt
