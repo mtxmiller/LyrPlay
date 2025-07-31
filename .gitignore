@@ -94,3 +94,6 @@ iOSInjectionProject/
 
 # Conversation logs
 *.txt
+
+# LocalPlayer caching development plugin
+lms-remotecache-plugin/
