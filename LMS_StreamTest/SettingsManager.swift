@@ -86,7 +86,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - User-Agent for Web Requests
     var customUserAgent: String {
-        return "iPeng Safari"
+        return "LyrPlay Safari"
     }
     
     // MARK: - URL Session Configuration with Custom User-Agent
