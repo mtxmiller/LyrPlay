@@ -62,11 +62,11 @@ LyrPlay supports native FLAC playback, but seeking within FLAC files requires se
 
 ### For Traditional LMS Installation
 
-Add the same rule to one of these locations (choose the first that exists):
-- `custom-convert.conf` in your LMS root directory
-- `custom-convert.conf` in your Plugins directory  
-- `/etc/slimserver/custom-convert.conf` (Debian/Ubuntu)
-- Edit the main `convert.conf` file directly (will be overwritten on updates)
+Add the same rule to `custom-convert.conf` in your LMS root directory. Common locations:
+- **Most installations**: `[LMS_ROOT]/custom-convert.conf`
+- **Debian/Ubuntu**: `/etc/slimserver/custom-convert.conf`
+
+**Note**: The file must be in the LMS root directory to be loaded properly, not in a subdirectory.
 
 ### Why This Works
 
@@ -115,7 +115,7 @@ Built with:
 pod install
 
 # Build from command line
-xcodebuild -workspace LyrPlay.xcworkspace -scheme LyrPlay -configuration Debug build
+xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest -configuration Debug build
 ```
 
 ## Support
