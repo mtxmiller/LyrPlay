@@ -96,6 +96,7 @@ struct ContentView: View {
             }
         }) {
             SettingsView()
+                .environmentObject(slimProtoCoordinator)
         }
 
     }

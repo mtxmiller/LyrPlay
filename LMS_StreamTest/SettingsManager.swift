@@ -24,6 +24,7 @@ class SettingsManager: ObservableObject {
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
     @Published var currentActiveServer: ServerType = .primary
+    @Published var flacEnabled: Bool = true
     
     
     // MARK: - Read-only Properties
@@ -63,6 +64,7 @@ class SettingsManager: ObservableObject {
         static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
         static let isBackupServerEnabled = "IsBackupServerEnabled"
         static let currentActiveServer = "CurrentActiveServer"
+        static let flacEnabled = "FLACEnabled"
     }
     
     private let currentSettingsVersion = 2 // UPDATED: Increment for FLAC support
@@ -87,6 +89,13 @@ class SettingsManager: ObservableObject {
     // MARK: - User-Agent for Web Requests
     var customUserAgent: String {
         return "LyrPlay Safari"
+    }
+    
+    // MARK: - Dynamic Capabilities String
+    var capabilitiesString: String {
+        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=SqueezeLite,MaxSampleRate=48000"
+        let formats = flacEnabled ? "flc,aac,mp3" : "aac,mp3"
+        return "\(baseCapabilities),\(formats)"
     }
     
     // MARK: - URL Session Configuration with Custom User-Agent
@@ -120,9 +129,10 @@ class SettingsManager: ObservableObject {
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
+        flacEnabled = UserDefaults.standard.object(forKey: Keys.flacEnabled) as? Bool ?? true
         
-        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s",
-               serverHost, playerName, isConfigured ? "YES" : "NO")
+        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, FLAC: %{public}s",
+               serverHost, playerName, isConfigured ? "YES" : "NO", flacEnabled ? "YES" : "NO")
     }
     
     func saveSettings() {
@@ -144,6 +154,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
+        UserDefaults.standard.set(flacEnabled, forKey: Keys.flacEnabled)
         
         UserDefaults.standard.synchronize()
         
