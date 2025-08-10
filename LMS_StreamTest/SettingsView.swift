@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 // MARK: - Main Settings View
 struct SettingsView: View {
     @StateObject private var settings = SettingsManager.shared
+    @EnvironmentObject private var coordinator: SlimProtoCoordinator
     @Environment(\.presentationMode) var presentationMode
     @State private var showingConnectionTest = false
     @State private var showingResetAlert = false
@@ -15,6 +16,7 @@ struct SettingsView: View {
     //cache clear
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
+    @State private var isReconnecting = false
     
     var body: some View {
         NavigationView {
@@ -117,7 +119,44 @@ struct SettingsView: View {
                 
                 // Audio Settings Section
                 Section(header: Text("Audio Settings")) {
-                    // REMOVED: Legacy Audio Formats configuration - now hardcoded
+                    // FLAC Support Toggle
+                    HStack {
+                        Image(systemName: "music.note")
+                            .foregroundColor(.blue)
+                            .frame(width: 20)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Enable FLAC Support")
+                                .font(.body)
+                            Text(isReconnecting ? "Reconnecting..." : "Disabled = MP3 transcode • Auto-reconnects")
+                                .font(.caption)
+                                .foregroundColor(isReconnecting ? .blue : .secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Toggle("", isOn: $settings.flacEnabled)
+                            .disabled(isReconnecting)
+                            .onChange(of: settings.flacEnabled) { _ in
+                                settings.saveSettings()
+                                
+                                // Restart connection if currently connected
+                                if coordinator.connectionState == "Connected" {
+                                    Task {
+                                        await MainActor.run {
+                                            isReconnecting = true
+                                        }
+                                        
+                                        await coordinator.restartConnection()
+                                        
+                                        await MainActor.run {
+                                            isReconnecting = false
+                                        }
+                                    }
+                                }
+                            }
+                    }
+                    .padding(.vertical, 2)
                     
                     NavigationLink(destination: BufferConfigView()) {
                         SettingsRow(

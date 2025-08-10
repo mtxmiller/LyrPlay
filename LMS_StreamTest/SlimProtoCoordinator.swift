@@ -116,6 +116,23 @@ class SlimProtoCoordinator: ObservableObject {
         client.disconnect()
     }
     
+    func restartConnection() async {
+        os_log(.info, log: logger, "🔄 Restarting connection to apply new capabilities...")
+        
+        // Disconnect from server
+        disconnect()
+        
+        // Wait briefly for clean disconnect
+        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+        
+        // Reconnect with new capabilities
+        await MainActor.run {
+            connect()
+        }
+        
+        os_log(.info, log: logger, "✅ Connection restart completed")
+    }
+    
     func updateServerSettings(host: String, port: UInt16) {
         // Store current settings for change detection
         lastKnownHost = host
