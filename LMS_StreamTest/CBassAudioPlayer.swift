@@ -407,14 +407,14 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     private func configureForFormat(_ format: String) {
         switch format.uppercased() {
         case "FLAC", "ALAC":
-            // FLAC streaming optimization - focus on sustained playback
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))        // 5s buffer for sustained FLAC
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(131072))  // 128KB network buffer for large FLAC chunks
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))      // 25% pre-buffer to start sooner
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(100))   // Less frequent updates for stability
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(30000))  // 30s timeout for large files
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(15000)) // 15s read timeout
-            os_log(.info, log: logger, "🎵 Configured for sustained FLAC streaming: 5s buffer, 128KB network, 25%% prebuffer")
+            // FLAC streaming optimization - maximum buffering for complete track playback
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(20000))       // 20s buffer - massive local cache
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(524288))  // 512KB network buffer - huge chunks
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))      // 15% pre-buffer for immediate start
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))   // Very slow updates for stability
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000)) // 2min timeout - very patient
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(60000)) // 1min read timeout
+            os_log(.info, log: logger, "🎵 Configured for complete FLAC tracks: 20s buffer, 512KB network, 15%% prebuffer")
             
         case "AAC":
             // AAC optimizations
@@ -606,17 +606,65 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         }
         
         let state = BASS_ChannelIsActive(currentStream)
-        let bytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
-        let buffered = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_BUFFER))
-        let downloaded = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_DOWNLOAD))
+        let positionBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+        let positionSeconds = BASS_ChannelBytes2Seconds(currentStream, positionBytes)
+        let bufferedBytes = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_BUFFER))
+        let downloadedBytes = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_DOWNLOAD))
         
-        if state == DWORD(BASS_ACTIVE_STALLED) {
-            os_log(.info, log: logger, "🚨 FLAC Stream Status: STALLED - Bytes: %lld, Buffer: %lld, Downloaded: %lld",
-                   bytes, buffered, downloaded)
+        // Calculate buffer health
+        let bufferHealth = getBufferHealth(bufferedBytes: bufferedBytes)
+        let stateDescription = getStreamStateDescription(state)
+        
+        // Only log meaningful status changes, not normal buffering
+        if state == DWORD(BASS_ACTIVE_PLAYING) && positionSeconds > 0 {
+            // Only log every 10 seconds when actually playing
+            if Int(positionSeconds) % 10 == 0 {
+                os_log(.info, log: logger, "✅ FLAC Playing: %.1fs | Downloaded: %lld | Buffer: %{public}s", 
+                       positionSeconds, downloadedBytes, bufferHealth)
+            }
+        } else if state == DWORD(BASS_ACTIVE_STALLED) {
+            // STALLED is normal during buffering - only warn if buffer is critically low
+            if bufferHealth.contains("CRITICAL") {
+                os_log(.error, log: logger, "⚠️ FLAC Critical Buffer: %{public}s | Downloaded: %lld", 
+                       bufferHealth, downloadedBytes)
+            } else {
+                // Normal buffering - less frequent logging
+                os_log(.debug, log: logger, "🔄 FLAC Buffering: %{public}s | Downloaded: %lld", 
+                       bufferHealth, downloadedBytes)
+            }
         } else if state == DWORD(BASS_ACTIVE_STOPPED) {
-            os_log(.error, log: logger, "🚨 FLAC Stream Status: STOPPED - Bytes: %lld, Buffer: %lld, Downloaded: %lld", 
-                   bytes, buffered, downloaded)
+            os_log(.error, log: logger, "❌ FLAC Stream STOPPED at %.1fs | Buffer: %{public}s", 
+                   positionSeconds, bufferHealth)
             stopStreamMonitoring()
+        }
+    }
+    
+    private func getStreamStateDescription(_ state: DWORD) -> String {
+        switch state {
+        case DWORD(BASS_ACTIVE_STOPPED): return "STOPPED"
+        case DWORD(BASS_ACTIVE_PLAYING): return "PLAYING"
+        case DWORD(BASS_ACTIVE_STALLED): return "BUFFERING"
+        case DWORD(BASS_ACTIVE_PAUSED): return "PAUSED"
+        default: return "UNKNOWN"
+        }
+    }
+    
+    private func getBufferHealth(bufferedBytes: QWORD) -> String {
+        // Get current position to calculate remaining buffer
+        let positionBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+        let remainingBytes = bufferedBytes > positionBytes ? bufferedBytes - positionBytes : 0
+        
+        // Calculate buffer in seconds at CD-quality FLAC bitrate (~1411 kbps)
+        let remainingSeconds = Double(remainingBytes) / (1411.0 * 1000.0 / 8.0) // bytes/sec
+        
+        // Convert to percentage of our 20s target buffer
+        let bufferPercentage = min(100, Int((remainingSeconds / 20.0) * 100))
+        
+        switch bufferPercentage {
+        case 80...100: return "EXCELLENT (\(bufferPercentage)% = \(Int(remainingSeconds))s)"
+        case 50...79: return "GOOD (\(bufferPercentage)% = \(Int(remainingSeconds))s)"
+        case 20...49: return "LOW (\(bufferPercentage)% = \(Int(remainingSeconds))s)"
+        default: return "CRITICAL (\(bufferPercentage)% = \(Int(remainingSeconds))s)"
         }
     }
     
