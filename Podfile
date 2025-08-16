@@ -4,7 +4,7 @@ target 'LMS_StreamTest' do
   use_frameworks!
   
   pod 'CocoaAsyncSocket', '~> 7.6'
-  pod 'StreamingKit'
+  # pod 'StreamingKit'  # REMOVED: Migrating to CBass for superior audio capabilities
 
   target 'LMS_StreamTestTests' do
     inherit! :search_paths

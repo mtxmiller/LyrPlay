@@ -34,8 +34,6 @@
 		</dict>
 		<key>StreamingKit.xcscheme</key>
 		<dict>
-			<key>isShown</key>
-			<false/>
 			<key>orderHint</key>
 			<integer>4</integer>
 		</dict>
