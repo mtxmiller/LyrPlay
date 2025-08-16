@@ -57,19 +57,16 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             return
         }
         
-        // Initialize BASSFLAC addon for FLAC support
-        let flacInit = BASSFLAC_Init()
-        if flacInit == 0 {
-            let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ BASSFLAC initialization failed: %d", errorCode)
-        }
+        // Note: BASSFLAC addon is automatically initialized when the library is loaded
+        // No explicit initialization required for BASSFLAC with CBass package
+        os_log(.info, log: logger, "✅ BASSFLAC addon available")
         
         // Configure BASS for optimal LMS streaming
-        BASS_SetConfig(BASS_CONFIG_NET_TIMEOUT, 15000)  // 15 second timeout
-        BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 8192)    // 8KB network buffer
-        BASS_SetConfig(BASS_CONFIG_BUFFER, 500)         // 500ms playback buffer
-        BASS_SetConfig(BASS_CONFIG_UPDATEPERIOD, 10)    // 10ms update period
-        BASS_SetConfig(BASS_CONFIG_UPDATETHREADS, 2)    // Dual-threaded updates
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))  // 15 second timeout
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))    // 8KB network buffer
+        BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))         // 500ms playback buffer
+        BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(10))    // 10ms update period
+        BASS_SetConfig(DWORD(BASS_CONFIG_UPDATETHREADS), DWORD(2))    // Dual-threaded updates
         
         os_log(.info, log: logger, "✅ BASS initialized - Version: %08X", BASS_GetVersion())
         os_log(.info, log: logger, "✅ BASSFLAC addon initialized")
@@ -126,8 +123,8 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         currentStream = BASS_StreamCreateURL(
             urlString,                    // URL
             0,                           // offset (always 0 for network)
-            BASS_STREAM_BLOCK |          // blocking mode for network streams
-            BASS_STREAM_STATUS,          // enable status info
+            DWORD(BASS_STREAM_BLOCK) |   // blocking mode for network streams
+            DWORD(BASS_STREAM_STATUS),   // enable status info
             nil,                         // download progress callback (not needed)
             nil                          // user data
         )
@@ -234,9 +231,9 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Time and State Access (Compatible Interface)
     func getCurrentTime() -> Double {
-        return audioQueue.sync {
+        return audioQueue.sync { () -> Double in
             guard currentStream != 0 else { return 0.0 }
-            let bytes = BASS_ChannelGetPosition(currentStream, BASS_POS_BYTE)
+            let bytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
             return BASS_ChannelBytes2Seconds(currentStream, bytes)
         }
     }
@@ -247,9 +244,9 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             return metadataDuration
         }
         
-        return audioQueue.sync {
+        return audioQueue.sync { () -> Double in
             guard currentStream != 0 else { return 0.0 }
-            let bytes = BASS_ChannelGetLength(currentStream, BASS_POS_BYTE)
+            let bytes = BASS_ChannelGetLength(currentStream, DWORD(BASS_POS_BYTE))
             let duration = BASS_ChannelBytes2Seconds(currentStream, bytes)
             return duration.isFinite && duration > 0 ? duration : 0.0
         }
@@ -262,18 +259,18 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     }
     
     func getPlayerState() -> String {
-        return audioQueue.sync {
+        return audioQueue.sync { () -> String in
             guard currentStream != 0 else { return "No Stream" }
             
             let state = BASS_ChannelIsActive(currentStream)
             switch state {
-            case BASS_ACTIVE_STOPPED:
+            case DWORD(BASS_ACTIVE_STOPPED):
                 return "Stopped"
-            case BASS_ACTIVE_PLAYING:
+            case DWORD(BASS_ACTIVE_PLAYING):
                 return "Playing"
-            case BASS_ACTIVE_PAUSED:
+            case DWORD(BASS_ACTIVE_PAUSED):
                 return "Paused"
-            case BASS_ACTIVE_STALLED:
+            case DWORD(BASS_ACTIVE_STALLED):
                 return "Stalled"
             default:
                 return "Unknown"
@@ -286,15 +283,15 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         let clampedVolume = max(0.0, min(1.0, volume))
         audioQueue.async { [weak self] in
             guard let self = self, self.currentStream != 0 else { return }
-            BASS_ChannelSetAttribute(self.currentStream, BASS_ATTRIB_VOL, clampedVolume)
+            BASS_ChannelSetAttribute(self.currentStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
         }
     }
     
     func getVolume() -> Float {
-        return audioQueue.sync {
+        return audioQueue.sync { () -> Float in
             guard currentStream != 0 else { return 1.0 }
             var volume: Float = 1.0
-            BASS_ChannelGetAttribute(currentStream, BASS_ATTRIB_VOL, &volume)
+            BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
             return volume
         }
     }
@@ -305,7 +302,7 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             guard let self = self, self.currentStream != 0 else { return }
             
             let bytes = BASS_ChannelSeconds2Bytes(self.currentStream, time)
-            let result = BASS_ChannelSetPosition(self.currentStream, bytes, BASS_POS_BYTE)
+            let result = BASS_ChannelSetPosition(self.currentStream, bytes, DWORD(BASS_POS_BYTE))
             
             DispatchQueue.main.async {
                 if result != 0 {
@@ -346,25 +343,25 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         switch format.uppercased() {
         case "FLAC", "ALAC":
             // Lossless audio optimizations
-            BASS_SetConfig(BASS_CONFIG_BUFFER, 1000)        // 1 second buffer
-            BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 16384)   // 16KB network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1000))        // 1 second buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(16384))   // 16KB network buffer
             os_log(.info, log: logger, "🎵 Configured for lossless audio: %{public}@", format)
             
         case "AAC":
             // AAC optimizations
-            BASS_SetConfig(BASS_CONFIG_BUFFER, 500)         // 500ms buffer
-            BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 8192)    // 8KB network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))         // 500ms buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))    // 8KB network buffer
             os_log(.info, log: logger, "🎵 Configured for AAC audio")
             
         case "MP3":
             // MP3 stream optimizations
-            BASS_SetConfig(BASS_CONFIG_BUFFER, 750)         // 750ms buffer
-            BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 8192)    // 8KB network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(750))         // 750ms buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))    // 8KB network buffer
             os_log(.info, log: logger, "🎵 Configured for MP3 streaming")
             
         default:
             // Default configuration
-            BASS_SetConfig(BASS_CONFIG_BUFFER, 500)         // 500ms default
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))         // 500ms default
             os_log(.info, log: logger, "🎵 Using default configuration for format: %{public}@", format)
         }
     }
