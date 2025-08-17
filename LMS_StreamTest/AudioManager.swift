@@ -235,16 +235,13 @@ extension AudioManager: AudioPlayerDelegate {
         // DIAGNOSTIC: Trace callback flow from CBass → AudioManager → NowPlayingManager
         os_log(.info, log: logger, "🔄 AudioManager received time update: %.2fs from audioPlayer", time)
         
-        // REMOVED: All time update reporting and throttling
-        // The server is the master - don't spam it with position updates
+        // CRITICAL FIX: Don't send CBass time to NowPlayingManager
+        // This was causing lock screen to drift from Material skin timing
+        // NowPlayingManager should use ONLY server time for perfect sync
         
-        // Only update now playing info locally, don't send to server
-        let isPlaying = audioPlayer.getPlayerState() == "Playing"
-        os_log(.debug, log: logger, "🔄 AudioManager state: playing=%{public}s", isPlaying ? "YES" : "NO")
-        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
+        os_log(.debug, log: logger, "📍 CBass time update ignored - NowPlayingManager uses server time only")
         
-        // REMOVED: All the complicated throttling and server communication
-        os_log(.debug, log: logger, "📍 Local time update only: %.2f", time)
+        // Note: Playing state updates still sent via pause/stop/start events
     }
 
     

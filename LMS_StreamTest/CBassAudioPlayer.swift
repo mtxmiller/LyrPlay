@@ -105,13 +105,17 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         let userAgent = "LyrPlay/1.0 BASSFLAC"
         BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), userAgent)
         
-        // Configure BASS for optimal iOS/LMS streaming
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))     // 15 second timeout
+        // Configure BASS for optimal iOS/LMS streaming (CBass expert optimizations)
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(20000))     // 20s timeout - responsive but stable
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(10000)) // 10s read timeout
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))       // 8KB default network buffer
-        BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))            // 500ms default playback buffer
-        BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))       // 50ms update period for FLAC
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))      // 64KB default - balanced for all formats
+        BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))           // 2s default - much more responsive
+        BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(100))      // 100ms updates - responsive UI
         BASS_SetConfig(DWORD(BASS_CONFIG_UPDATETHREADS), DWORD(2))       // Dual-threaded updates
+        
+        // Local network optimizations for LMS servers
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), DWORD(0))        // Direct streaming
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PASSIVE), DWORD(0))         // Active mode for local network
         
         // iOS-specific CBass configurations for better iOS audio integration
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), DWORD(0))        // Disable audio mixing for exclusive playback
@@ -204,12 +208,12 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         
         os_log(.info, log: logger, "🔧 Creating BASS stream for URL: %{public}@", urlString)
         
-        // Create BASS stream - FLAC detection is working properly
+        // Create BASS stream - OPTIMIZED for immediate playback (expert recommendation)
+        // REMOVED BASS_STREAM_BLOCK for StreamingKit-like immediate response
         
         currentStream = BASS_StreamCreateURL(
             urlString,                   // Original URL (FLAC detection works fine)
             0,                           // offset (always 0 for network)
-            DWORD(BASS_STREAM_BLOCK) |   // blocking mode for network streams
             DWORD(BASS_STREAM_STATUS) |  // enable status info
             DWORD(BASS_STREAM_AUTOFREE), // auto-free when stopped
             nil,                         // download progress callback (not needed)  
@@ -446,28 +450,30 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     private func configureForFormat(_ format: String) {
         switch format.uppercased() {
         case "FLAC", "ALAC":
-            // FLAC streaming optimization - maximum buffering for complete track playback
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(20000))       // 20s buffer - massive local cache
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(524288))  // 512KB network buffer - huge chunks
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))      // 15% pre-buffer for immediate start
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))   // Very slow updates for stability
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000)) // 2min timeout - very patient
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(60000)) // 1min read timeout
-            os_log(.info, log: logger, "🎵 Configured for complete FLAC tracks: 20s buffer, 512KB network, 15%% prebuffer")
+            // IMMEDIATE START FLAC: StreamingKit-like responsiveness with stability (CBass expert optimized)
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))        // 2s playback buffer - stable
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(524288))  // 512KB network buffer - reasonable size
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(3))       // 3% pre-buffer - only 15.3KB to start!
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // 50ms updates - responsive
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(10000))  // 10s timeout - local network
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(5000)) // 5s read timeout
+            os_log(.info, log: logger, "🎵 Immediate FLAC: 2s buffer, 512KB network, 3%% prebuffer = 15KB to start!")
             
         case "AAC":
-            // AAC optimizations
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))         // 500ms buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))    // 8KB network buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(50))      // Pre-buffer 50%
-            os_log(.info, log: logger, "🎵 Configured for AAC audio")
+            // AAC optimizations - ultra-responsive for compressed format
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))        // 1.5s buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(32768))   // 32KB network buffer  
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(3))       // 3% pre-buffer - immediate start
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // 50ms updates
+            os_log(.info, log: logger, "🎵 Optimized AAC: 1.5s buffer, 32KB network, 3%% prebuffer")
             
         case "MP3":
-            // MP3 stream optimizations
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(750))         // 750ms buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))    // 8KB network buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(50))      // Pre-buffer 50%
-            os_log(.info, log: logger, "🎵 Configured for MP3 streaming")
+            // MP3 optimizations - ultra-responsive for compressed format
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))        // 1.5s buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(32768))   // 32KB network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(3))       // 3% pre-buffer - immediate start
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // 50ms updates
+            os_log(.info, log: logger, "🎵 Optimized MP3: 1.5s buffer, 32KB network, 3%% prebuffer")
             
         default:
             // Default configuration
@@ -724,15 +730,27 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             
             DispatchQueue.main.async {
                 if player.trackEndDetectionEnabled {
-                    os_log(.info, log: player.logger, "🎵 Track ended - notifying SlimProto")
+                    // CRITICAL FIX: Check if this is legitimate track end vs stream starvation
+                    let currentTime = player.getCurrentTime()
+                    let duration = player.getDuration()
                     
-                    // INTEGRATION POINT: Notify SlimProto of track end
-                    player.commandHandler?.notifyTrackEnded()
-                    
-                    // Update UI state
-                    player.isPlaying = false
-                    player.isPaused = false
-                    player.delegate?.audioPlayerDidReachEnd()
+                    // Only notify track end if we're actually near the end of the track
+                    if duration > 0 && currentTime >= (duration - 2.0) {
+                        os_log(.info, log: player.logger, "🎵 Track legitimately ended (%.1fs/%.1fs) - notifying SlimProto", currentTime, duration)
+                        
+                        // INTEGRATION POINT: Notify SlimProto of track end
+                        player.commandHandler?.notifyTrackEnded()
+                        
+                        // Update UI state
+                        player.isPlaying = false
+                        player.isPaused = false
+                        player.delegate?.audioPlayerDidReachEnd()
+                    } else {
+                        os_log(.error, log: player.logger, "⚠️ Stream stopped unexpectedly at %.1fs/%.1fs - likely starvation, NOT track end", currentTime, duration)
+                        
+                        // SQUEEZELITE-STYLE: Notify server of stream disconnection, don't skip tracks
+                        player.handleStreamStarvation(currentTime: currentTime, duration: duration)
+                    }
                 } else {
                     os_log(.debug, log: player.logger, "🎵 Track end detected but suppressed (within minimum duration)")
                 }
@@ -896,11 +914,13 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         let positionBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
         let remainingBytes = bufferedBytes > positionBytes ? bufferedBytes - positionBytes : 0
         
-        // Calculate buffer in seconds at CD-quality FLAC bitrate (~1411 kbps)
-        let remainingSeconds = Double(remainingBytes) / (1411.0 * 1000.0 / 8.0) // bytes/sec
+        // CORRECTED: Use realistic FLAC compressed bitrate (~800 kbps average)
+        // FLAC compression is typically 50-60% of uncompressed PCM
+        let flacBitrate = 800.0 * 1000.0 / 8.0 // ~800 kbps compressed FLAC = 100KB/s
+        let remainingSeconds = Double(remainingBytes) / flacBitrate
         
-        // Convert to percentage of our 20s target buffer
-        let bufferPercentage = min(100, Int((remainingSeconds / 20.0) * 100))
+        // Convert to percentage of our 2s target buffer (updated from 20s)
+        let bufferPercentage = min(100, Int((remainingSeconds / 2.0) * 100))
         
         switch bufferPercentage {
         case 80...100: return "EXCELLENT (\(bufferPercentage)% = \(Int(remainingSeconds))s)"
@@ -982,6 +1002,35 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     
     func isEngineActive() -> Bool {
         return currentStream != 0
+    }
+    
+    // MARK: - Stream Starvation Handling (Squeezelite-style)
+    private func handleStreamStarvation(currentTime: Double, duration: Double) {
+        os_log(.error, log: logger, "🚨 Stream starvation detected - notifying server (squeezelite-style)")
+        
+        // Update UI state to reflect stopped state
+        DispatchQueue.main.async { [weak self] in
+            self?.isPlaying = false
+            self?.isPaused = false
+            self?.delegate?.audioPlayerDidStall()
+        }
+        
+        // CRITICAL: Notify SlimProto coordinator of stream disconnection
+        // Server will decide whether to restart, change format, or stop
+        if let commandHandler = commandHandler {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                // Send stream disconnected status to server with current position
+                commandHandler.reportStreamDisconnection(
+                    currentTime: currentTime,
+                    totalDuration: duration,
+                    reason: "Network starvation"
+                )
+                
+                os_log(.info, log: self.logger, "📡 Notified server: Stream disconnected at %.1fs (reason: starvation)", currentTime)
+            }
+        } else {
+            os_log(.error, log: logger, "❌ Cannot notify server of starvation - no command handler")
+        }
     }
     
     // MARK: - Cleanup

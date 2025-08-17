@@ -40,6 +40,34 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "SlimProtoCommandHandler initialized with FLAC support")
     }
     
+    // MARK: - Stream Starvation Handling (Squeezelite-style)
+    func reportStreamDisconnection(currentTime: Double, totalDuration: Double, reason: String) {
+        os_log(.error, log: logger, "🚨 Reporting stream disconnection: %.1fs/%.1fs (reason: %{public}s)", 
+               currentTime, totalDuration, reason)
+        
+        // Update internal state
+        lastKnownPosition = currentTime
+        isStreamActive = false
+        isStreamPaused = false
+        
+        // Send STAT message with stream disconnected status
+        // This follows squeezelite protocol - server will decide how to handle
+        sendStreamDisconnectedStatus(position: currentTime, reason: reason)
+    }
+    
+    private func sendStreamDisconnectedStatus(position: Double, reason: String) {
+        // Send STMd status (stream disconnected) per squeezelite protocol
+        // Server will receive this and decide whether to restart, change format, or stop
+        os_log(.info, log: logger, "📡 Sending STMd (stream disconnected) to server at position %.1fs", position)
+        slimProtoClient?.sendStatus("STMd")
+        
+        // Optional: Also send current position in a separate STAT update
+        // This ensures server knows exactly where we stopped
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.slimProtoClient?.sendStatus("STMt")
+        }
+    }
+    
     // MARK: - Command Processing (ENHANCED with SETD support)
     func processCommand(_ command: SlimProtoCommand) {
         switch command.type {
