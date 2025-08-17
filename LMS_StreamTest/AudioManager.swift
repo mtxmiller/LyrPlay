@@ -172,14 +172,9 @@ class AudioManager: NSObject, ObservableObject {
     
     // MARK: - Private Audio Session Configuration
     private func configureAudioSessionForFormat(_ format: String) {
-        switch format.uppercased() {
-        case "ALAC", "FLAC":
-            audioSessionManager.setupForLosslessAudio()
-        case "AAC", "MP3":
-            audioSessionManager.setupForCompressedAudio()
-        default:
-            audioSessionManager.setupForCompressedAudio()
-        }
+        // CBASS INTEGRATION: CBass handles all audio session configuration
+        // Removed calls to prevent OSStatus error -50 conflicts
+        os_log(.info, log: logger, "🎵 Format: %{public}s - CBass handles audio session configuration", format)
     }
     
     // MARK: - Lock Screen Integration (Preserved Interface)
@@ -237,11 +232,15 @@ extension AudioManager: AudioPlayerDelegate {
     }
     
     func audioPlayerTimeDidUpdate(_ time: Double) {
+        // DIAGNOSTIC: Trace callback flow from CBass → AudioManager → NowPlayingManager
+        os_log(.info, log: logger, "🔄 AudioManager received time update: %.2fs from audioPlayer", time)
+        
         // REMOVED: All time update reporting and throttling
         // The server is the master - don't spam it with position updates
         
         // Only update now playing info locally, don't send to server
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
+        os_log(.debug, log: logger, "🔄 AudioManager state: playing=%{public}s", isPlaying ? "YES" : "NO")
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
         
         // REMOVED: All the complicated throttling and server communication

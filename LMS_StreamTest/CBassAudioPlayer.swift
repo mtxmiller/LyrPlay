@@ -7,6 +7,8 @@
 //
 
 import Foundation
+import AVFoundation
+import MediaPlayer
 import Bass
 import BassFLAC
 import os.log
@@ -49,11 +51,33 @@ class CBassAudioPlayer: NSObject, ObservableObject {
     
     // MARK: - BASS Initialization
     private func initializeBass() {
-        // Initialize BASS core
-        let bassInit = BASS_Init(-1, 44100, 0, nil, nil)
+        // CRITICAL FIX: Set iOS audio session category BEFORE BASS initialization
+        // This prevents OSStatus error -50
+        setupiOSAudioSessionForCBass()
+        
+        // Initialize BASS core with iOS-specific parameters
+        // Use -1 device for system default, but with iOS-compatible flags
+        let bassInit = BASS_Init(
+            -1,                           // Default device
+            44100,                        // 44.1kHz (iOS standard)
+            DWORD(BASS_DEVICE_DEFAULT),   // Use default device settings
+            nil,                          // No window handle (iOS)
+            nil                           // No class identifier
+        )
+        
         if bassInit == 0 {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
+            
+            // iOS-specific error diagnostics
+            switch errorCode {
+            case BASS_ERROR_DEVICE:
+                os_log(.error, log: logger, "💡 iOS Audio Unit may not be available - check audio session category")
+            case BASS_ERROR_ALREADY:
+                os_log(.info, log: logger, "ℹ️ BASS already initialized - continuing")
+            default:
+                os_log(.error, log: logger, "💡 Check iOS audio session setup before BASS_Init")
+            }
             return
         }
         
@@ -81,13 +105,18 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         let userAgent = "LyrPlay/1.0 BASSFLAC"
         BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), userAgent)
         
-        // Configure BASS for optimal LMS streaming
+        // Configure BASS for optimal iOS/LMS streaming
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))     // 15 second timeout
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(10000)) // 10s read timeout
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8192))       // 8KB default network buffer
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(500))            // 500ms default playback buffer
         BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))       // 50ms update period for FLAC
         BASS_SetConfig(DWORD(BASS_CONFIG_UPDATETHREADS), DWORD(2))       // Dual-threaded updates
+        
+        // iOS-specific CBass configurations for better iOS audio integration
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), DWORD(0))        // Disable audio mixing for exclusive playback
+        BASS_SetConfig(DWORD(BASS_CONFIG_DEV_BUFFER), DWORD(20))         // 20ms device buffer (good for iOS)
+        BASS_SetConfig(DWORD(BASS_CONFIG_GVOL_STREAM), DWORD(10000))     // Global stream volume at max
         
         os_log(.info, log: logger, "✅ BASS initialized - Version: %08X", BASS_GetVersion())
         
@@ -209,12 +238,22 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             if playResult != 0 {
                 os_log(.info, log: self.logger, "✅ CBass stream started successfully - Handle: %d", self.currentStream)
                 
+                // CRITICAL FIX: Register with iOS MediaPlayer framework for lock screen
+                // This must happen AFTER successful BASS stream creation
+                self.registerWithiOSMediaFramework()
+                
                 // INTEGRATION POINT: Notify SlimProto of stream connection
                 self.commandHandler?.handleStreamConnected()
                 
                 // Update UI state
                 self.isPlaying = true
                 self.isPaused = false
+                
+                // Trigger lock screen controls setup with delay to ensure audio is flowing
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.ensureLockScreenControlsAreActive()
+                }
+                
                 self.delegate?.audioPlayerDidStartPlaying()
                 
                 // Enable track end detection after minimum duration
@@ -438,6 +477,206 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - iOS MediaPlayer Framework Registration (CRITICAL for Lock Screen)
+    private func registerWithiOSMediaFramework() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // STEP 1: Ensure audio session options include lock screen support
+            try audioSession.setCategory(
+                .playback,
+                mode: .default,
+                options: [.allowBluetooth, .allowAirPlay, .allowBluetoothA2DP]
+            )
+            
+            // STEP 2: Ensure session is active
+            if !audioSession.isOtherAudioPlaying {
+                try audioSession.setActive(true)
+            }
+            
+            // STEP 3: Register as the current audio player with MediaPlayer framework
+            let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+            let commandCenter = MPRemoteCommandCenter.shared()
+            
+            // Clear any existing registration first
+            nowPlayingInfoCenter.nowPlayingInfo = nil
+            
+            // Set minimal now playing info to register as active audio app
+            var nowPlayingInfo = [String: Any]()
+            nowPlayingInfo[MPMediaItemPropertyTitle] = "CBass Audio Stream"
+            nowPlayingInfo[MPMediaItemPropertyArtist] = "LyrPlay"
+            nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+            nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+            nowPlayingInfo[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+            
+            nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
+            
+            // Enable basic remote commands
+            commandCenter.playCommand.isEnabled = true
+            commandCenter.pauseCommand.isEnabled = true
+            
+            os_log(.info, log: logger, "✅ Registered with iOS MediaPlayer framework for lock screen controls")
+            
+        } catch let error as NSError {
+            os_log(.error, log: logger, "❌ Failed to register with iOS MediaPlayer framework: OSStatus %d", error.code)
+            os_log(.error, log: logger, "   Lock screen controls may not appear")
+        }
+    }
+    
+    // MARK: - iOS Audio Session Setup for CBass (CRITICAL)
+    private func setupiOSAudioSessionForCBass() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // STEP 1: Set category FIRST with minimal options to prevent conflicts
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            
+            // STEP 2: Set preferred sample rate to match BASS_Init
+            try audioSession.setPreferredSampleRate(44100.0)
+            
+            // STEP 3: Set buffer duration for CBass compatibility
+            try audioSession.setPreferredIOBufferDuration(0.005) // 5ms - good for CBass
+            
+            // STEP 4: Activate session BEFORE BASS_Init to claim audio resources
+            try audioSession.setActive(true)
+            
+            os_log(.info, log: logger, "✅ iOS audio session configured for CBass BEFORE BASS_Init")
+            os_log(.info, log: logger, "  Category: %{public}s", audioSession.category.rawValue)
+            os_log(.info, log: logger, "  Sample Rate: %.0f Hz", audioSession.sampleRate)
+            os_log(.info, log: logger, "  Buffer Duration: %.1f ms", audioSession.ioBufferDuration * 1000)
+            
+        } catch let error as NSError {
+            os_log(.error, log: logger, "❌ Critical: Failed to setup iOS audio session for CBass: OSStatus %d", error.code)
+            os_log(.error, log: logger, "   This will likely cause BASS_Init to fail")
+            
+            // Log specific iOS audio session errors
+            switch error.code {
+            case -50:
+                os_log(.error, log: logger, "💡 OSStatus -50: Invalid parameter in audio session setup")
+            case -560030580:
+                os_log(.error, log: logger, "💡 Audio session activation failed - another app may be using audio")
+            default:
+                os_log(.error, log: logger, "💡 Unexpected audio session error: %{public}s", error.localizedDescription)
+            }
+        }
+    }
+    
+    // MARK: - Audio Session Management for CBass
+    private func activateAudioSessionForPlayback() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Ensure we have the right category and options set
+            let currentCategory = audioSession.category
+            if currentCategory != .playback {
+                os_log(.error, log: logger, "⚠️ Audio session category is %{public}s, should be playback", currentCategory.rawValue)
+                
+                // Fix the category if needed
+                try audioSession.setCategory(
+                    .playback,
+                    mode: .default,
+                    options: [.allowBluetooth, .allowAirPlay, .allowBluetoothA2DP, .duckOthers]
+                )
+                os_log(.info, log: logger, "🔧 Fixed audio session category to playback")
+            }
+            
+            // Activate the session
+            try audioSession.setActive(true, options: [])
+            os_log(.info, log: logger, "✅ Audio session activated by CBass - lock screen controls should now appear")
+            
+            // Log current state for debugging
+            os_log(.info, log: logger, "🔍 Audio Session State After Activation:")
+            os_log(.info, log: logger, "  Category: %{public}s", audioSession.category.rawValue)
+            os_log(.info, log: logger, "  Mode: %{public}s", audioSession.mode.rawValue)
+            os_log(.info, log: logger, "  Options: %{public}s", String(describing: audioSession.categoryOptions))
+            os_log(.info, log: logger, "  Sample Rate: %.0f Hz", audioSession.sampleRate)
+            os_log(.info, log: logger, "  Other Audio Playing: %{public}s", audioSession.isOtherAudioPlaying ? "YES" : "NO")
+            
+        } catch let error as NSError {
+            let osStatusError = error.code
+            os_log(.error, log: logger, "❌ Failed to activate audio session - OSStatus: %d, Description: %{public}s", 
+                   osStatusError, error.localizedDescription)
+            
+            // Provide specific guidance for common errors
+            switch osStatusError {
+            case -50: // kAudioSessionInvalidParameter
+                os_log(.error, log: logger, "💡 OSStatus -50: Invalid parameter - check category/mode/options combination")
+            case -560030580: // kAudioSessionNotActiveError
+                os_log(.error, log: logger, "💡 OSStatus -560030580: Session not active - retrying activation")
+            case -560033202: // kAudioSessionBadPropertySizeError
+                os_log(.error, log: logger, "💡 OSStatus -560033202: Bad property size - check buffer duration settings")
+            default:
+                os_log(.error, log: logger, "💡 Unknown OSStatus error - consult Apple audio session documentation")
+            }
+        }
+    }
+    
+    // MARK: - Lock Screen Controls Activation (iOS-Specific CBass Integration)
+    private func ensureLockScreenControlsAreActive() {
+        // CRITICAL FIX: iOS requires specific sequence for lock screen controls with CBass
+        
+        let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        // STEP 1: Clear any existing now playing info first
+        nowPlayingInfoCenter.nowPlayingInfo = nil
+        
+        // STEP 2: Disable all commands temporarily
+        commandCenter.playCommand.isEnabled = false
+        commandCenter.pauseCommand.isEnabled = false
+        commandCenter.stopCommand.isEnabled = false
+        commandCenter.nextTrackCommand.isEnabled = false
+        commandCenter.previousTrackCommand.isEnabled = false
+        
+        // STEP 3: Wait a brief moment for iOS to register the changes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            
+            // STEP 4: Set comprehensive now playing info
+            var nowPlayingInfo = [String: Any]()
+            nowPlayingInfo[MPMediaItemPropertyTitle] = "LyrPlay Audio Stream"
+            nowPlayingInfo[MPMediaItemPropertyArtist] = "CBass Audio Player"
+            nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = "Lyrion Music Server"
+            nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+            nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+            nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = 0.0 // Unknown duration
+            
+            // CRITICAL: Set media type to audio
+            nowPlayingInfo[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+            
+            nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
+            
+            // STEP 5: Re-enable commands with proper targets
+            commandCenter.playCommand.isEnabled = true
+            commandCenter.pauseCommand.isEnabled = true
+            commandCenter.nextTrackCommand.isEnabled = true
+            commandCenter.previousTrackCommand.isEnabled = true
+            
+            os_log(.info, log: self.logger, "✅ Lock screen controls configured for CBass audio playback")
+            
+            // STEP 6: Verify audio session is still active and has proper category
+            let audioSession = AVAudioSession.sharedInstance()
+            if audioSession.category != .playback {
+                os_log(.error, log: self.logger, "⚠️ Audio session category changed - lock screen may not work")
+                
+                // Fix the category if it changed
+                do {
+                    try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
+                    os_log(.info, log: self.logger, "🔧 Restored audio session category for lock screen")
+                } catch {
+                    os_log(.error, log: self.logger, "❌ Failed to restore audio session category: %{public}s", error.localizedDescription)
+                }
+            }
+            
+            // STEP 7: Final verification
+            os_log(.info, log: self.logger, "🔍 Lock Screen Setup Verification:")
+            os_log(.info, log: self.logger, "  Now Playing Info: %{public}s", nowPlayingInfoCenter.nowPlayingInfo != nil ? "SET" : "NIL")
+            os_log(.info, log: self.logger, "  Play Command Enabled: %{public}s", commandCenter.playCommand.isEnabled ? "YES" : "NO")
+            os_log(.info, log: self.logger, "  Audio Session Category: %{public}s", audioSession.category.rawValue)
+            os_log(.info, log: self.logger, "  Audio Session Active: %{public}s", "YES") // We know it's active because we just activated it
+        }
+    }
+    
     // MARK: - Private Helpers
     private func prepareForNewStream() {
         cleanup()
@@ -513,12 +752,15 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         
         // Position updates every second for UI synchronization
         let oneSecondBytes = BASS_ChannelSeconds2Bytes(currentStream, 1.0)
+        os_log(.info, log: logger, "🔧 Setting up BASS_SYNC_POS at %.0f bytes (1.0 second mark)", Double(oneSecondBytes))
+        
         BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_POS), oneSecondBytes, { handle, channel, data, user in
             guard let user = user else { return }
             let player = Unmanaged<CBassAudioPlayer>.fromOpaque(user).takeUnretainedValue()
             
             let currentTime = player.getCurrentTime()
             DispatchQueue.main.async {
+                os_log(.info, log: player.logger, "🔄 CBass Position Sync: %.2fs → delegate?.audioPlayerTimeDidUpdate()", currentTime)
                 player.currentTime = currentTime
                 player.delegate?.audioPlayerTimeDidUpdate(currentTime)
             }

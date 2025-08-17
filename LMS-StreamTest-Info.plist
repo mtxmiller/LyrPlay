@@ -31,5 +31,9 @@
 		<string>fetch</string>
 		<string>processing</string>
 	</array>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>LyrPlay needs access to audio controls for lock screen playback controls.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>LyrPlay does not use the microphone, but this permission is required for audio session management.</string>
 </dict>
 </plist>

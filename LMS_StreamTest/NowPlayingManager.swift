@@ -79,10 +79,9 @@ class NowPlayingManager: ObservableObject {
     private func updateNowPlayingTime() {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
         
-        // Log every update to see what's changing the lock screen
-        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
+        // DIAGNOSTIC: Trace timer-based lock screen updates
+        os_log(.info, log: logger, "⏰ NowPlayingManager TIMER UPDATE: %.2fs (%{public}s, playing: %{public}s)",
                currentTime, timeSource.description, isPlaying ? "YES" : "NO")
-        
         
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
@@ -455,15 +454,24 @@ class NowPlayingManager: ObservableObject {
     
     // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
+        // DIAGNOSTIC: Trace NowPlayingManager receiving updates from AudioManager
+        os_log(.info, log: logger, "🔄 NowPlayingManager received update: %.2fs, playing=%{public}s", 
+               currentTime, isPlaying ? "YES" : "NO")
+        
         // SIMPLIFIED: Always update but with throttling
         let timeDifference = abs(currentTime - lastKnownAudioTime)
         
         // Only update if there's a meaningful time change (2+ seconds)
         if timeDifference > 2.0 {
             lastKnownAudioTime = currentTime
+            os_log(.info, log: logger, "🔒 UPDATING LOCK SCREEN: %.2fs (timeDiff: %.1fs)", 
+                   currentTime, timeDifference)
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
             os_log(.debug, log: logger, "📍 Updated from audio manager: %.2f (state: %{public}s)",
                    currentTime, isPlaying ? "playing" : "paused")
+        } else {
+            os_log(.debug, log: logger, "🔒 SKIPPING lock screen update: %.2fs (timeDiff: %.1fs < 2.0s threshold)", 
+                   currentTime, timeDifference)
         }
     }
     

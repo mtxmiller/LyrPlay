@@ -43,94 +43,39 @@ class AudioSessionManager: ObservableObject {
         os_log(.info, log: logger, "✅ Interruption manager integrated")
     }
     
-    // MARK: - Audio Session Setup
+    // MARK: - Audio Session Setup  
     private func setupInitialAudioSession() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            try audioSession.setCategory(
-                .playback,
-                mode: .default,
-                options: [.allowBluetooth, .allowAirPlay]
-            )
-            try audioSession.setActive(true)
-            
-            os_log(.info, log: logger, "✅ Initial audio session configured")
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to setup initial audio session: %{public}s", error.localizedDescription)
-        }
+        // CRITICAL CBass INTEGRATION: Do NOT set up audio session here
+        // CBass will handle audio session setup in its initialization
+        // This prevents OSStatus error -50 conflicts
+        
+        os_log(.info, log: logger, "✅ Audio session setup deferred to CBass - preventing OSStatus -50 conflicts")
+        os_log(.info, log: logger, "   CBass will handle audio session configuration during BASS_Init")
     }
     
-    // MARK: - Format-Specific Audio Session Configuration
+    // MARK: - CBass Integration: Minimal intervention approach
+    func activateForCBassPlayback() {
+        // CBass has already configured and activated the audio session
+        // Just verify it's working correctly
+        let audioSession = AVAudioSession.sharedInstance()
+        
+        os_log(.info, log: logger, "ℹ️ CBass audio session status check:")
+        os_log(.info, log: logger, "  Category: %{public}s", audioSession.category.rawValue)
+        os_log(.info, log: logger, "  Sample Rate: %.0f Hz", audioSession.sampleRate)
+        os_log(.info, log: logger, "  Other Audio Playing: %{public}s", audioSession.isOtherAudioPlaying ? "YES" : "NO")
+    }
+    
+    // MARK: - Format-Specific Audio Session Configuration (CBass Compatible)
     func setupForLosslessAudio() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            let currentCategory = audioSession.category
-            let currentOptions = audioSession.categoryOptions
-            
-            let desiredOptions: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
-                .allowAirPlay,
-                .allowBluetoothA2DP
-            ]
-            
-            // Only change if different
-            if currentCategory != .playback || currentOptions != desiredOptions {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: desiredOptions
-                )
-                os_log(.info, log: logger, "🔧 Updated audio session for lossless")
-            }
-            
-            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
-            // if !audioSession.isOtherAudioPlaying {
-            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
-            //     os_log(.info, log: logger, "🔧 Activated audio session")
-            // }
-            
-            os_log(.info, log: logger, "✅ Lossless audio session configured (StreamingKit handles activation)")
-        } catch {
-            os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
-        }
+        // CBass has already optimized audio session configuration
+        // No additional setup needed to prevent conflicts
+        os_log(.info, log: logger, "ℹ️ Lossless audio: CBass handles all configuration")
     }
     
     func setupForCompressedAudio() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            let currentCategory = audioSession.category
-            let currentOptions = audioSession.categoryOptions
-            
-            let desiredOptions: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
-                .allowAirPlay,
-                .allowBluetoothA2DP
-            ]
-            
-            // Only change if different
-            if currentCategory != .playback || currentOptions != desiredOptions {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: desiredOptions
-                )
-                
-                os_log(.info, log: logger, "🔧 Updated audio session category for compressed audio")
-            }
-            
-            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
-            // if !audioSession.isOtherAudioPlaying {
-            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
-            //     os_log(.info, log: logger, "🔧 Activated audio session")
-            // }
-            
-            os_log(.info, log: logger, "✅ Compressed audio session configured (StreamingKit handles activation)")
-        } catch {
-            os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
-        }
+        // CBass has already optimized audio session configuration
+        // No additional setup needed to prevent conflicts
+        os_log(.info, log: logger, "ℹ️ Compressed audio: CBass handles all configuration")
     }
     
     // MARK: - Enhanced Audio Session Control
