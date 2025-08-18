@@ -90,10 +90,11 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Audio Manager Integration Enhancement
     func setupNowPlayingManagerIntegration() {
-        // Simple integration - just set the coordinator reference
+        // CORRECTED APPROACH: Pass SimpleTimeTracker to NowPlayingManager
         audioManager.getNowPlayingManager().setSlimClient(self)
+        audioManager.getNowPlayingManager().setSimpleTimeTracker(simpleTimeTracker)
         
-        os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
+        os_log(.info, log: logger, "✅ SimpleTimeTracker connected to NowPlayingManager")
     }
     
     // MARK: - Public Interface
@@ -242,6 +243,20 @@ class SlimProtoCoordinator: ObservableObject {
         // This is when we should send STMs (track started playing)
         // Only after RESP and STMc have been sent
         client.sendStatus("STMs")
+        
+        // CRITICAL FIX: Immediate metadata fetch when audio actually starts
+        // This ensures lock screen shows correct track info immediately
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            os_log(.info, log: self.logger, "🎵 AUDIO STARTED - immediate metadata fetch")
+            self.fetchCurrentTrackMetadata()
+        }
+        
+        // CRITICAL FIX: Also restart server time fetching when audio starts
+        // This ensures we get accurate server time for the new track
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            os_log(.info, log: self.logger, "🔄 Audio playing - ensuring server time sync is active")
+            self.startServerTimeFetching()
+        }
     }
     
     deinit {
@@ -728,6 +743,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didStartStream(url: String, format: String, startTime: Double) {
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f", format, startTime)
         
+        // CRITICAL FIX: Stop server time fetching during track transition
+        // This prevents stale server time from overwriting the reset
+        stopServerTimeFetching()
+        
+        // CRITICAL FIX: Reset SimpleTimeTracker for new track
+        simpleTimeTracker.updateFromServer(time: startTime, playing: false)
+        os_log(.info, log: logger, "🔄 Reset SimpleTimeTracker to %.2f for new track", startTime)
+        
         // Stop any existing playback and timers first
         audioManager.stop()
         stopPlaybackHeartbeat()
@@ -743,26 +766,31 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             audioManager.playStreamWithFormat(urlString: url, format: format)
         }
         
-        // Start periodic server time fetching for lock screen updates
+        // CORRECTED APPROACH: Server time fetching provides anchor points for interpolation
+        // This is how main branch worked - server time + elapsed time interpolation
         startServerTimeFetching()
         
         // Start the 1-second heartbeat timer (like squeezelite)
         startPlaybackHeartbeat()
         
-        // Get metadata and sync with server
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        // Get metadata and sync with server - IMMEDIATE for track transitions
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            os_log(.info, log: self.logger, "🎵 IMMEDIATE metadata fetch for new track")
             self.fetchCurrentTrackMetadata()
             
             // Check if this is a radio stream and start automatic refresh
             if url.contains("stream") || url.contains("radio") || url.contains("live") ||
                url.contains(".pls") || url.contains(".m3u") || url.hasPrefix("http") {
+                os_log(.info, log: self.logger, "📻 Starting radio metadata refresh timer")
                 self.startMetadataRefreshForRadio()
             }
         }
         
-        // Fetch server time after connection stabilizes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.fetchServerTime()
+        // CRITICAL FIX: Restart server time fetching after track stabilizes
+        // This gives the server time to update to the new track position
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            os_log(.info, log: self.logger, "🔄 Restarting server time fetching after track transition")
+            self.startServerTimeFetching()
         }
     }
     
@@ -853,18 +881,19 @@ extension SlimProtoCoordinator {
     
     /// Update current server time from actual server responses (Material-style approach)
     func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
-        // SIMPLIFIED: Update SimpleTimeTracker with Material-style approach
+        // MAIN BRANCH APPROACH: Server time as anchor point for interpolation
         simpleTimeTracker.updateFromServer(time: position, duration: duration, playing: isPlaying)
         
-        // Update NowPlayingManager with fresh server time
-        audioManager.getNowPlayingManager().updateFromSlimProto(
-            currentTime: position,
-            duration: duration > 0 ? duration : simpleTimeTracker.getTrackDuration(),
-            isPlaying: isPlaying
-        )
-        
-        os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]", 
+        os_log(.debug, log: logger, "📍 Server time anchor updated: %.2f (playing: %{public}s)", 
                position, isPlaying ? "YES" : "NO")
+    }
+    
+    /// Update SimpleTimeTracker from CBass audio time (main branch approach)
+    func updateTimeTrackerFromCBass(time: Double, playing: Bool) {
+        // MAIN BRANCH APPROACH: CBass drives timing, keep SimpleTimeTracker in sync
+        simpleTimeTracker.updateFromServer(time: time, playing: playing)
+        os_log(.debug, log: logger, "📍 Updated SimpleTimeTracker from CBass: %.2f (playing: %{public}s)", 
+               time, playing ? "YES" : "NO")
     }
     
     /// Fetch actual server time via JSON-RPC (not audio player time)
@@ -1740,6 +1769,98 @@ extension SlimProtoCoordinator {
 
     func getPlayerVolume() -> Float {
         return audioManager.getVolume()
+    }
+    
+    // MARK: - CarPlay Position Banking Recovery
+    /// Saves current position to server preferences for CarPlay recovery (same system as app open recovery)
+    func savePositionToServerPreferencesForCarPlay() {
+        let (currentTime, _) = getCurrentInterpolatedTime()
+        let playerState = audioManager.getPlayerState()
+        
+        guard currentTime > 0.1 else {
+            os_log(.info, log: logger, "⚠️ CarPlay: No valid position to save to server preferences")
+            return
+        }
+        
+        os_log(.info, log: logger, "🚗💾 CarPlay: Saving position to server preferences: %.2f seconds (state: %{public}s)", 
+               currentTime, playerState)
+        
+        let playerID = settings.playerMACAddress
+        
+        // Use same server preference keys as app open recovery
+        let savePositionCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlayLastPosition", String(format: "%.2f", currentTime)]]
+        ]
+        
+        let saveStateCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlayLastState", playerState]]
+        ]
+        
+        let saveTimeCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "lyrPlaySaveTime", String(Int(Date().timeIntervalSince1970))]]
+        ]
+        
+        // Send all commands
+        sendJSONRPCCommandDirect(savePositionCommand) { _ in }
+        sendJSONRPCCommandDirect(saveStateCommand) { _ in }
+        sendJSONRPCCommandDirect(saveTimeCommand) { _ in }
+        
+        os_log(.info, log: logger, "🚗✅ CarPlay: Position banking complete")
+    }
+    
+    /// Performs CarPlay position recovery using same system as app open recovery
+    func performCarPlayPositionRecovery() {
+        os_log(.info, log: logger, "🚗🔍 CarPlay: Checking connection state for recovery strategy")
+        
+        // ENHANCED: Check connection state like lock screen recovery does
+        if !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "🚗🔄 CarPlay: Disconnected - checking for banked position recovery")
+            
+            let playerID = settings.playerMACAddress
+            
+            // Query saved position (same as app open recovery)
+            let queryPositionCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playerpref", "lyrPlayLastPosition", "?"]]
+            ]
+            
+            sendJSONRPCCommandDirect(queryPositionCommand) { [weak self] response in
+                self?.handleCarPlayRecoveryResponse(response)
+            }
+        } else {
+            os_log(.info, log: logger, "🚗▶️ CarPlay: Still connected - using simple play (server knows position)")
+            // Simple play - server maintains current position
+            sendJSONRPCCommand("play")
+        }
+    }
+    
+    private func handleCarPlayRecoveryResponse(_ response: [String: Any]?) {
+        guard let response = response,
+              let result = response["result"] as? [String: Any],
+              let params = response["params"] as? [Any],
+              params.count >= 2,
+              let resultArray = params[1] as? [Any],
+              resultArray.count >= 3,
+              let positionString = resultArray[2] as? String,
+              let savedPosition = Double(positionString),
+              savedPosition > 0.1 else {
+            os_log(.info, log: logger, "🚗❌ CarPlay: No valid banked position found - using simple play")
+            // Fallback to simple play command
+            sendJSONRPCCommand("play")
+            return
+        }
+        
+        os_log(.info, log: logger, "🚗🎯 CarPlay: Found banked position: %.2f seconds - starting recovery", savedPosition)
+        
+        // Use same sophisticated recovery as app open (silent muted recovery)
+        performCustomPositionRecovery(to: savedPosition)
     }
 }
 

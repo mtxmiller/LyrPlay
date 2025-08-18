@@ -55,6 +55,10 @@ class CBassAudioPlayer: NSObject, ObservableObject {
         // This prevents OSStatus error -50
         setupiOSAudioSessionForCBass()
         
+        // CRITICAL FIX: Register with iOS MediaPlayer framework ONCE during initialization
+        // This prevents OSStatus -50 errors during track transitions
+        registerWithiOSMediaFramework()
+        
         // Initialize BASS core with iOS-specific parameters
         // Use -1 device for system default, but with iOS-compatible flags
         let bassInit = BASS_Init(
@@ -242,9 +246,8 @@ class CBassAudioPlayer: NSObject, ObservableObject {
             if playResult != 0 {
                 os_log(.info, log: self.logger, "✅ CBass stream started successfully - Handle: %d", self.currentStream)
                 
-                // CRITICAL FIX: Register with iOS MediaPlayer framework for lock screen
-                // This must happen AFTER successful BASS stream creation
-                self.registerWithiOSMediaFramework()
+                // MediaPlayer framework registration moved to initializeBass()
+                // to prevent OSStatus -50 errors during track transitions
                 
                 // INTEGRATION POINT: Notify SlimProto of stream connection
                 self.commandHandler?.handleStreamConnected()

@@ -32,6 +32,9 @@ class AudioManager: NSObject, ObservableObject {
     var slimClient: SlimProtoCoordinator?  // Changed from weak to strong reference
     
     private var wasPlayingBeforeInterruption: Bool = false
+    
+    // MARK: - Position Update Timer (Main Branch Approach)
+    private var positionUpdateTimer: Timer?
     private var interruptionPosition: Double = 0.0
     
     // MARK: - Initialization
@@ -201,27 +204,28 @@ extension AudioManager: AudioPlayerDelegate {
         // When AudioPlayer actually starts playing, tell the coordinator to send STMs
         slimClient?.handleAudioPlayerDidStartPlaying()
         
-        // SIMPLIFIED: Just log the event, let the existing timer/update mechanisms handle position updates
+        // CORRECTED APPROACH: No position polling - server time + interpolation handles timing
+        // CBass handles audio, server provides time anchor points
+        
         os_log(.debug, log: logger, "📍 Audio start event logged")
     }
     
     func audioPlayerDidPause() {
         os_log(.info, log: logger, "⏸️ Audio player paused")
         
-        // DON'T use audio player time - it can be wrong/stale
-        // Let the server time synchronizer handle position tracking
-        let audioTime = audioPlayer.getCurrentTime()
-        os_log(.info, log: logger, "🔒 Audio player reports pause time: %.2f (NOT using - server is master)", audioTime)
+        // CORRECTED APPROACH: CBass pause event just notifies state change
+        // Server time + interpolation handles position tracking
         
-        // Update playing state only, let server time synchronizer provide the position
-        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        os_log(.debug, log: logger, "📍 Audio pause event logged")
     }
     
     func audioPlayerDidStop() {
         os_log(.debug, log: logger, "⏹️ Audio player stopped")
         
-        // Update now playing info
-        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        // CORRECTED APPROACH: CBass stop event just notifies state change
+        // Server time + interpolation handles position tracking
+        
+        os_log(.debug, log: logger, "📍 Audio stop event logged")
     }
     
     func audioPlayerDidReachEnd() {
@@ -232,16 +236,11 @@ extension AudioManager: AudioPlayerDelegate {
     }
     
     func audioPlayerTimeDidUpdate(_ time: Double) {
-        // DIAGNOSTIC: Trace callback flow from CBass → AudioManager → NowPlayingManager
-        os_log(.info, log: logger, "🔄 AudioManager received time update: %.2fs from audioPlayer", time)
+        // CORRECTED APPROACH: CBass time updates are for diagnostics only
+        // Server time + interpolation is the single source of truth for timing
+        os_log(.debug, log: logger, "🔄 CBass time update: %.2fs (diagnostic only)", time)
         
-        // CRITICAL FIX: Don't send CBass time to NowPlayingManager
-        // This was causing lock screen to drift from Material skin timing
-        // NowPlayingManager should use ONLY server time for perfect sync
-        
-        os_log(.debug, log: logger, "📍 CBass time update ignored - NowPlayingManager uses server time only")
-        
-        // Note: Playing state updates still sent via pause/stop/start events
+        // No timing updates sent to NowPlayingManager - server time handles this
     }
 
     
@@ -364,17 +363,27 @@ extension AudioManager {
     private func notifyServerOfCarPlayDisconnect(position: Double) {
         guard let slimClient = slimClient else { return }
         
-        // Send pause command specifically for CarPlay disconnect
+        os_log(.info, log: logger, "🚗 CarPlay disconnect - banking position %.2f for recovery", position)
+        
+        // ENHANCED: Use same sophisticated position banking system as app open recovery
+        // Save current position to server preferences for recovery when CarPlay reconnects
+        slimClient.savePositionToServerPreferencesForCarPlay()
+        
+        // Send pause command to server
         slimClient.sendLockScreenCommand("pause")
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect (position: %.2f)", position)
+        os_log(.info, log: logger, "🚗 CarPlay disconnect: position banked and server paused")
     }
     
     private func notifyServerOfCarPlayReconnect() {
         guard let slimClient = slimClient else { return }
         
-        // Send resume command for CarPlay reconnect
-        slimClient.sendLockScreenCommand("play")
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay reconnect")
+        os_log(.info, log: logger, "🚗 CarPlay reconnect - checking for banked position recovery")
+        
+        // ENHANCED: Use same sophisticated position banking system as app open recovery
+        // Check for saved position and perform full recovery if needed
+        slimClient.performCarPlayPositionRecovery()
+        
+        os_log(.info, log: logger, "🚗 CarPlay reconnect: recovery initiated")
     }
     
     // MARK: - Utility Methods

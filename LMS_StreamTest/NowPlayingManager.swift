@@ -24,16 +24,9 @@ class NowPlayingManager: ObservableObject {
     private var currentArtwork: UIImage?
     private var metadataDuration: TimeInterval = 0.0
     
-    // MARK: - Time Sources
-    private weak var audioManager: AudioManager?
-    private var lastKnownServerTime: Double = 0.0
+    // MARK: - SimpleTimeTracker Integration (Main Branch Approach)
+    private weak var simpleTimeTracker: SimpleTimeTracker?
     private var lastKnownAudioTime: Double = 0.0
-    private var isUsingServerTime: Bool = false
-    
-    private var lockScreenStoredPosition: Double = 0.0
-    private var lockScreenStoredTimestamp: Date?
-    private var lockScreenWasPlaying: Bool = false
-    private var connectionLostTime: Date?
     
     // MARK: - Delegation
     weak var delegate: NowPlayingManagerDelegate?
@@ -41,9 +34,9 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
     
-    // MARK: - Update Timer
+    // MARK: - Update Timer (Reduced frequency for SimpleTimeTracker)
     private var updateTimer: Timer?
-    private let updateInterval: TimeInterval = 1.0
+    private let updateInterval: TimeInterval = 0.5
     
     // MARK: - Initialization
     init() {
@@ -53,11 +46,11 @@ class NowPlayingManager: ObservableObject {
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
     }
     
-    // MARK: - Server Time Integration
+    // MARK: - SimpleTimeTracker Integration
     
-    func setAudioManager(_ audioManager: AudioManager) {
-        self.audioManager = audioManager
-        //os_log(.info, log: logger, "✅ Audio manager connected for fallback timing")
+    func setSimpleTimeTracker(_ tracker: SimpleTimeTracker) {
+        self.simpleTimeTracker = tracker
+        os_log(.info, log: logger, "✅ SimpleTimeTracker connected for timing")
     }
     
     // MARK: - Update Timer Management
@@ -77,194 +70,41 @@ class NowPlayingManager: ObservableObject {
     }
     
     private func updateNowPlayingTime() {
-        let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
+        // CORRECTED APPROACH: Use SimpleTimeTracker.getCurrentTime() for timing
+        guard let tracker = simpleTimeTracker else {
+            os_log(.debug, log: logger, "⏰ No SimpleTimeTracker available")
+            return
+        }
+        
+        let (currentTime, isPlaying) = tracker.getCurrentTime()
         
         // DIAGNOSTIC: Trace timer-based lock screen updates
-        os_log(.info, log: logger, "⏰ NowPlayingManager TIMER UPDATE: %.2fs (%{public}s, playing: %{public}s)",
-               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        os_log(.debug, log: logger, "⏰ SimpleTimeTracker update: %.2fs (playing: %{public}s)",
+               currentTime, isPlaying ? "YES" : "NO")
         
-        // Update now playing info with current time
+        // Update now playing info with SimpleTimeTracker time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        
-        // Log time source changes
-        let newUsingServerTime = (timeSource == .serverTime)
-        if newUsingServerTime != isUsingServerTime {
-            isUsingServerTime = newUsingServerTime
-            os_log(.info, log: logger, "🔒 TIME SOURCE CHANGED: %{public}s → %{public}s",
-                   isUsingServerTime ? "Server" : "Other", timeSource.description)
-        }
     }
     
-    // MARK: - Time Source Management
-    private enum TimeSource {
-        case serverTime
-        case audioManager
-        case lastKnown
-        
-        var description: String {
-            switch self {
-            case .serverTime: return "Server Time"
-            case .audioManager: return "Audio Manager"
-            case .lastKnown: return "Last Known"
-            }
+    // MARK: - SimpleTimeTracker Integration (Material-Style)
+    private func getCurrentPlaybackInfo() -> (time: Double, isPlaying: Bool) {
+        // CORRECTED APPROACH: Always use SimpleTimeTracker as single source of truth
+        guard let tracker = simpleTimeTracker else {
+            os_log(.debug, log: logger, "🔒 No SimpleTimeTracker available, returning 0.0")
+            return (0.0, false)
         }
+        
+        let (currentTime, isPlaying) = tracker.getCurrentTime()
+        
+        os_log(.debug, log: logger, "🔒 SimpleTimeTracker time: %.2f (playing: %{public}s)",
+               currentTime, isPlaying ? "YES" : "NO")
+        
+        return (currentTime, isPlaying)
     }
     
-    private func getCurrentPlaybackInfo() -> (time: Double, isPlaying: Bool, source: TimeSource) {
-        
-        // CRITICAL FIX: If we have a stored recovery position, use it during disconnection periods
-        if let storedTimestamp = lockScreenStoredTimestamp {
-            let timeSinceStorage = Date().timeIntervalSince(storedTimestamp)
-            
-            // If we stored a position recently (within 2 minutes) and we're disconnected, use stored position
-            if timeSinceStorage < 120.0 && lockScreenStoredPosition > 0.1 {
-                let recoveryInfo = getStoredPositionWithTimeOffset()
-                if recoveryInfo.isValid {
-                    return (time: recoveryInfo.position, isPlaying: recoveryInfo.wasPlaying, source: .lastKnown)
-                }
-            }
-        }
-        
-        // SIMPLIFIED: Use SlimProto time from coordinator if available
-        if let slimClient = slimClient {
-            let (slimProtoTime, isPlaying) = slimClient.getCurrentInterpolatedTime()
-            
-            if slimProtoTime > 0.0 {
-                os_log(.debug, log: logger, "🔒 Using SlimProto time: %.2f (playing: %{public}s)",
-                       slimProtoTime, isPlaying ? "YES" : "NO")
-                
-                lastKnownServerTime = slimProtoTime
-                return (time: slimProtoTime, isPlaying: isPlaying, source: .serverTime)
-            }
-        }
-        
-        // Fall back to last known server time if we have it
-        if lastKnownServerTime > 0.1 {
-            os_log(.debug, log: logger, "🔒 Using last known server time: %.2f", lastKnownServerTime)
-            return (time: lastKnownServerTime, isPlaying: false, source: .serverTime)
-        }
-        
-        // Only fall back to audio manager if we have NO SlimProto time at all
-        if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
-            let isPlaying = audioManager.getPlayerState() == "Playing"
-            
-            if audioTime > 0.1 {
-                lastKnownAudioTime = audioTime
-                return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
-            }
-        }
-        
-        // Ultimate fallback - use the best time we have
-        let fallbackTime = max(lastKnownServerTime, lastKnownAudioTime, lockScreenStoredPosition)
-        return (time: fallbackTime, isPlaying: false, source: .lastKnown)
-    }
-    
-    // MARK : STORE POSITION
-    func storeLockScreenPosition() {
-        let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
-        
-        //os_log(.info, log: logger, "🔒 STORAGE CALL - Current: %.2f, Previously stored: %.2f",
-        //       currentTime, lockScreenStoredPosition)
-        
-        // Show what time sources are available
-        var serverTime: Double = 0.0
-        var serverValid: Bool = false
-        
-        // ServerTimeSynchronizer removed - use SlimProto time from coordinator
-        if let slimClient = slimClient {
-            let slimProtoInfo = slimClient.getCurrentInterpolatedTime()
-            serverTime = slimProtoInfo.time
-            serverValid = (slimProtoInfo.time > 0.0) // Valid if we have a time > 0
-            //os_log(.info, log: logger, "🔒 SLIMPROTO TIME: %.2f (valid: %{public}s)",
-            //       serverTime, serverValid ? "YES" : "NO")
-        }
-        
-        if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
-            //os_log(.info, log: logger, "🔒 AUDIO TIME: %.2f", audioTime)
-        }
-        
-        // IMPROVED LOGIC: Prefer last known good server time over audio time
-        var positionToStore: Double = 0.0
-        var sourceUsed: String = "none"
-        
-        // 1. Try current server time (if valid and reasonable)
-        if serverValid && serverTime > 0.1 {
-            positionToStore = serverTime
-            sourceUsed = "current server time"
-        }
-        // 2. Try last known good server time (if current server time is invalid)
-        else if !serverValid && lastKnownServerTime > 0.1 {
-            positionToStore = lastKnownServerTime
-            sourceUsed = "last known server time"
-            //os_log(.info, log: logger, "🔒 Using last known server time: %.2f (current server invalid)", lastKnownServerTime)
-        }
-        // 3. Fall back to audio manager time
-        else if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
-            if audioTime > 0.1 {
-                positionToStore = audioTime
-                sourceUsed = "audio manager time"
-                //os_log(.info, log: logger, "🔒 Falling back to audio time: %.2f (no good server time)", audioTime)
-            }
-        }
-        
-        // Only store if we got a valid position
-        if positionToStore > 0.1 {
-            lockScreenStoredPosition = positionToStore
-            lockScreenStoredTimestamp = Date()
-            lockScreenWasPlaying = isPlaying
-            connectionLostTime = Date()
-            
-            //os_log(.info, log: logger, "🔒 STORED NEW POSITION: %.2f (source: %{public}s)",
-            //       positionToStore, sourceUsed)
-        } else {
-            //os_log(.error, log: logger, "🔒 STORAGE REJECTED - No valid position found (server: %.2f, audio: %.2f)",
-            //       serverTime, currentTime)
-        }
-    }
-
-    // Add this method to get stored position with time adjustment
-    func getStoredPositionWithTimeOffset() -> (position: Double, wasPlaying: Bool, isValid: Bool) {
-        os_log(.info, log: logger, "🔒 RECOVERY REQUEST STARTED")
-        
-        // Log what's currently stored
-        os_log(.info, log: logger, "🔒 CURRENT STORED VALUES:")
-        os_log(.info, log: logger, "  - lockScreenStoredPosition: %.2f", lockScreenStoredPosition)
-        os_log(.info, log: logger, "  - lockScreenWasPlaying: %{public}s", lockScreenWasPlaying ? "YES" : "NO")
-        os_log(.info, log: logger, "  - lockScreenStoredTimestamp: %{public}s",
-               lockScreenStoredTimestamp?.description ?? "nil")
-        
-        guard let storedTime = lockScreenStoredTimestamp else {
-            os_log(.info, log: logger, "🔒 RECOVERY REJECTED - No stored timestamp")
-            return (0.0, false, false)
-        }
-        
-        // Only valid if stored recently (within 10 minutes)
-        let timeSinceStorage = Date().timeIntervalSince(storedTime)
-        guard timeSinceStorage < 600 else {
-            os_log(.error, log: logger, "🔒 RECOVERY REJECTED - Position too old: %.0f seconds", timeSinceStorage)
-            return (0.0, false, false)
-        }
-        
-        // SIMPLIFIED: Always return the exact stored position - no estimation!
-        os_log(.info, log: logger, "🔒 RECOVERY RETURNING:")
-        os_log(.info, log: logger, "  - Position: %.2f", lockScreenStoredPosition)
-        os_log(.info, log: logger, "  - Was playing: %{public}s", lockScreenWasPlaying ? "YES" : "NO")
-        os_log(.info, log: logger, "  - Valid: YES")
-        
-        return (lockScreenStoredPosition, lockScreenWasPlaying, true)
-    }
-
-    // Add this method to clear stored position
-    func clearStoredPosition() {
-        lockScreenStoredPosition = 0.0
-        lockScreenStoredTimestamp = nil
-        lockScreenWasPlaying = false
-        connectionLostTime = nil
-        os_log(.info, log: logger, "🔒 Cleared stored lock screen position")
-    }
+    // MARK: - Position Storage (Removed - SimpleTimeTracker handles this)
+    // Position storage and recovery logic removed in favor of SimpleTimeTracker approach
+    // Server time anchor + interpolation automatically handles disconnections and recovery
     
     // MARK: - Now Playing Info Setup
     private func setupNowPlayingInfo() {
@@ -386,7 +226,7 @@ class NowPlayingManager: ObservableObject {
         } else {
             currentArtwork = nil
             // Update immediately without artwork
-            let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
+            let (currentTime, isPlaying) = getCurrentPlaybackInfo()
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         }
     }
@@ -409,7 +249,7 @@ class NowPlayingManager: ObservableObject {
                 
                 // Update now playing info with or without artwork
                 if let self = self {
-                    let (currentTime, isPlaying, _) = self.getCurrentPlaybackInfo()
+                    let (currentTime, isPlaying) = self.getCurrentPlaybackInfo()
                     self.updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
                 }
             }
@@ -452,44 +292,36 @@ class NowPlayingManager: ObservableObject {
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
     }
     
-    // MARK: - Backward Compatibility Methods (keeping existing interface)
+    // MARK: - Backward Compatibility (keeping interface for AudioManager)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
-        // DIAGNOSTIC: Trace NowPlayingManager receiving updates from AudioManager
-        os_log(.info, log: logger, "🔄 NowPlayingManager received update: %.2fs, playing=%{public}s", 
+        // CORRECTED APPROACH: AudioManager updates are diagnostic only
+        // SimpleTimeTracker timer provides actual timing updates
+        os_log(.debug, log: logger, "🔄 AudioManager diagnostic update: %.2fs, playing=%{public}s", 
                currentTime, isPlaying ? "YES" : "NO")
         
-        // SIMPLIFIED: Always update but with throttling
-        let timeDifference = abs(currentTime - lastKnownAudioTime)
+        // Store last audio time for debugging/comparison
+        lastKnownAudioTime = currentTime
         
-        // Only update if there's a meaningful time change (2+ seconds)
-        if timeDifference > 2.0 {
-            lastKnownAudioTime = currentTime
-            os_log(.info, log: logger, "🔒 UPDATING LOCK SCREEN: %.2fs (timeDiff: %.1fs)", 
-                   currentTime, timeDifference)
-            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-            os_log(.debug, log: logger, "📍 Updated from audio manager: %.2f (state: %{public}s)",
-                   currentTime, isPlaying ? "playing" : "paused")
-        } else {
-            os_log(.debug, log: logger, "🔒 SKIPPING lock screen update: %.2fs (timeDiff: %.1fs < 2.0s threshold)", 
-                   currentTime, timeDifference)
-        }
+        // No direct lock screen updates - SimpleTimeTracker timer handles this
     }
     
-    // MARK: - Simplified SlimProto Integration
+    // MARK: - Server Time Integration (Material-Style)
     func updateFromSlimProto(currentTime: Double, duration: Double = 0.0, isPlaying: Bool) {
-        // This replaces the complex ServerTimeSynchronizer integration
-        lastKnownServerTime = currentTime
+        // CORRECTED APPROACH: Server time updates handled by SimpleTimeTracker
+        // This method is for immediate metadata updates only
         
         // Update duration if provided
         if duration > 0 {
             metadataDuration = duration
         }
         
-        // Update now playing info immediately with SlimProto data
-        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        
-        os_log(.debug, log: logger, "📍 Updated from SlimProto: %.2f (playing: %{public}s)",
+        // SimpleTimeTracker handles the timing, we just note the update
+        os_log(.debug, log: logger, "📍 SlimProto metadata update: %.2f (playing: %{public}s)",
                currentTime, isPlaying ? "YES" : "NO")
+        
+        // Trigger immediate lock screen update for metadata changes
+        let (trackerTime, trackerPlaying) = getCurrentPlaybackInfo()
+        updateNowPlayingInfo(isPlaying: trackerPlaying, currentTime: trackerTime)
     }
     
     // MARK: - Metadata Access
@@ -530,7 +362,6 @@ class NowPlayingManager: ObservableObject {
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
         metadataDuration = 0.0
-        lastKnownServerTime = 0.0
         lastKnownAudioTime = 0.0
         
         os_log(.info, log: logger, "🗑️ Now playing info cleared")
@@ -550,14 +381,13 @@ class NowPlayingManager: ObservableObject {
     
     // MARK: - Debug Information
     func getTimeSourceInfo() -> String {
-        let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
-        let serverStatus = "SimpleTimeTracker (SlimProto)"
+        let (currentTime, isPlaying) = getCurrentPlaybackInfo()
+        let trackerStatus = simpleTimeTracker?.isTimeFresh() ?? false ? "Fresh" : "Stale"
         
-        // Simplified debug info - only show key information
         return """
-        Time: \(String(format: "%.1f", currentTime))s (\(source.description))
+        Time: \(String(format: "%.1f", currentTime))s (SimpleTimeTracker)
         Playing: \(isPlaying ? "Yes" : "No")
-        Server: \(serverStatus)
+        Tracker: \(trackerStatus)
         """
     }
     
