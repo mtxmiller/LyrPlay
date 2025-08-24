@@ -30,7 +30,7 @@ class SettingsManager: ObservableObject {
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
     private(set) var deviceModel: String = "squeezelite"
-    private(set) var deviceModelName: String = "LyrPlay for iOS"
+    private(set) var deviceModelName: String = "LyrPlay"
     
     
     // MARK: - Server Type Enum
@@ -93,7 +93,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Dynamic Capabilities String
     var capabilitiesString: String {
-        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=SqueezeLite,MaxSampleRate=48000"
+        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=48000"
         let formats = flacEnabled ? "flc,aac,mp3" : "aac,mp3"
         return "\(baseCapabilities),\(formats)"
     }
@@ -216,9 +216,15 @@ class SettingsManager: ObservableObject {
         
         let cleanHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
         
+        // Note: Local network permission is triggered by server discovery UDP broadcasts
+        
         let webTestResult = await testHTTPConnection(host: cleanHost, port: serverWebPort)
         switch webTestResult {
         case .failure(let error):
+            // Enhanced error message for potential local network permission issues
+            if error.contains("offline") || error.contains("network") {
+                return .webPortFailure("Connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
+            }
             return .webPortFailure(error)
         case .success:
             break
@@ -227,6 +233,10 @@ class SettingsManager: ObservableObject {
         let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: serverSlimProtoPort)
         switch slimProtoTestResult {
         case .failure(let error):
+            // Enhanced error message for potential local network permission issues
+            if error.contains("offline") || error.contains("network") {
+                return .slimProtoPortFailure("Stream connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
+            }
             return .slimProtoPortFailure(error)
         case .success:
             break
