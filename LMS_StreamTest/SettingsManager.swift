@@ -378,7 +378,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Computed Properties
     var webURL: String {
-        "http://\(serverHost):\(serverWebPort)/material/"
+        "http://\(activeServerHost):\(activeServerWebPort)/material/"
     }
 
     var initialWebURL: String {
