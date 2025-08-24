@@ -165,6 +165,30 @@ struct ContentView: View {
                 }
             }
         }
+        .onReceive(settings.$currentActiveServer) { _ in
+            // CRITICAL FIX: Reload WebView when server switches
+            os_log(.info, log: logger, "🔄 Active server changed to: %{public}s - reloading WebView", settings.currentActiveServer.displayName)
+            
+            // Force WebView reload with new server URL
+            if let webView = webView {
+                let newURL = URL(string: materialWebURL)!
+                let request = URLRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+                webView.load(request)
+                os_log(.info, log: logger, "✅ WebView reloaded for server switch to: %{public}s", settings.activeServerHost)
+            }
+            
+            // ALSO CRITICAL: Update SlimProto connection to new server
+            slimProtoCoordinator.updateServerSettings(
+                host: settings.activeServerHost,
+                port: UInt16(settings.activeServerSlimProtoPort)
+            )
+            
+            // Reconnect SlimProto to new server
+            Task {
+                await slimProtoCoordinator.restartConnection()
+                os_log(.info, log: logger, "✅ SlimProto reconnected to: %{public}s:%d", settings.activeServerHost, settings.activeServerSlimProtoPort)
+            }
+        }
     }
     
     private func handleLoadFailure() {
