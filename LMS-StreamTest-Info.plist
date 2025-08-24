@@ -39,12 +39,6 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_lms._tcp</string>
-		<string>_squeezebox-server._tcp</string>
-		<string>_slimserver._tcp</string>
-	</array>
 	<key>NSAllowsLocalNetworking</key>
 	<true/>
 </dict>

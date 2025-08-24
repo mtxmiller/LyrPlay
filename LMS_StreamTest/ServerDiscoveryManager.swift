@@ -105,7 +105,8 @@ class ServerDiscoveryManager: ObservableObject {
         var timeout = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         
-        // Send to port 3483 (LMS discovery port)
+        // Send to port 3483 (LMS discovery port) 
+        os_log(.info, log: logger, "🔍 Sending UDP discovery broadcast to 255.255.255.255:3483")
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(3483).bigEndian
