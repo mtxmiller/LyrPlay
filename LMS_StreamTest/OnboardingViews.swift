@@ -414,13 +414,74 @@ struct ServerSetupView: View {
         }
     }
     
+    // MARK: - Network Detection Helper
+    private func getLocalNetworkBroadcastAddresses() -> [String] {
+        var broadcastAddresses: [String] = []
+        
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else {
+            print("📡 Failed to get network interfaces")
+            return broadcastAddresses
+        }
+        defer { freeifaddrs(ifaddr) }
+        
+        var ptr = ifaddr
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ifa_next }
+            
+            guard let interface = ptr?.pointee else { continue }
+            let flags = Int32(interface.ifa_flags)
+            
+            // Skip loopback and non-broadcast interfaces
+            guard (flags & IFF_LOOPBACK) == 0,
+                  (flags & IFF_BROADCAST) != 0,
+                  (flags & IFF_UP) != 0,
+                  interface.ifa_addr?.pointee.sa_family == UInt8(AF_INET) else {
+                continue
+            }
+            
+            // Calculate broadcast address from IP and netmask
+            guard let addr = interface.ifa_addr?.withMemoryRebound(to: sockaddr_in.self, capacity: 1, { $0.pointee }),
+                  let netmask = interface.ifa_netmask?.withMemoryRebound(to: sockaddr_in.self, capacity: 1, { $0.pointee }) else {
+                continue
+            }
+            
+            let ip = addr.sin_addr.s_addr
+            let mask = netmask.sin_addr.s_addr
+            let broadcast = ip | (~mask)
+            
+            // Convert to string
+            var broadcastAddr = sockaddr_in()
+            broadcastAddr.sin_family = sa_family_t(AF_INET)
+            broadcastAddr.sin_addr.s_addr = broadcast
+            
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = withUnsafePointer(to: &broadcastAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    getnameinfo(sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size),
+                              &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                }
+            }
+            
+            if result == 0 {
+                let broadcastIP = String(cString: host)
+                if !broadcastAddresses.contains(broadcastIP) {
+                    broadcastAddresses.append(broadcastIP)
+                    print("📡 Found broadcast address: \(broadcastIP)")
+                }
+            }
+        }
+        
+        return broadcastAddresses
+    }
+    
     // MARK: - Simple LMS UDP Discovery Protocol
     private func discoverViaUDPBroadcast(completion: @escaping (Set<DiscoveredServer>) -> Void) {
         print("📡 Starting LMS UDP discovery...")
         var foundServers: Set<DiscoveredServer> = []
         
-        // Use the LMS discovery message: "eIPAD\0NAME\0JSON\0" (Qt client format)
-        let discoveryMessage = "eIPAD\0NAME\0JSON\0"
+        // Use the standard LMS discovery message: "eNAME\0JSON\0"
+        let discoveryMessage = "eNAME\0JSON\0"
         guard let discoveryData = discoveryMessage.data(using: .ascii) else {
             completion(foundServers)
             return
@@ -428,35 +489,80 @@ struct ServerSetupView: View {
         
         // Create UDP socket
         let socket = socket(AF_INET, SOCK_DGRAM, 0)
+        print("📡 Socket creation result: \(socket)")
         guard socket >= 0 else {
-            print("❌ Failed to create UDP socket")
+            print("❌ Failed to create UDP socket, error: \(errno)")
+            completion(foundServers)
+            return
+        }
+        print("✅ UDP socket created successfully: \(socket)")
+        
+        // Enable broadcast
+        var broadcast = 1
+        let broadcastResult = setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int>.size))
+        print("📡 Broadcast enable result: \(broadcastResult)")
+        
+        // Set receive timeout
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        let timeoutResult = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        print("📡 Timeout set result: \(timeoutResult)")
+        
+        // Bind socket to local address (required for broadcast)
+        var localAddr = sockaddr_in()
+        localAddr.sin_family = sa_family_t(AF_INET)
+        localAddr.sin_port = 0 // Let system choose port
+        localAddr.sin_addr.s_addr = INADDR_ANY
+        
+        let bindResult = withUnsafePointer(to: &localAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                bind(socket, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        print("📡 bind() result: \(bindResult)")
+        
+        if bindResult != 0 {
+            print("❌ Failed to bind socket, errno: \(errno)")
+            close(socket)
             completion(foundServers)
             return
         }
         
-        // Enable broadcast
-        var broadcast = 1
-        setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int>.size))
-        
-        // Set receive timeout
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
-        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        
-        // Send to port 3483 (LMS discovery port)
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(3483).bigEndian
-        inet_pton(AF_INET, "255.255.255.255", &addr.sin_addr)
-        
-        let sendResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                discoveryData.withUnsafeBytes { bytes in
-                    sendto(socket, bytes.bindMemory(to: UInt8.self).baseAddress, discoveryData.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
+        // Try broadcast discovery - get local network broadcast addresses
+        var targets = getLocalNetworkBroadcastAddresses()
+        if targets.isEmpty {
+            // Fallback to common network ranges if detection fails
+            targets = [
+                "255.255.255.255",      // Global broadcast (try first)
+                "192.168.1.255",        // Common home router range  
+                "192.168.0.255",        // Another common home range
+                "10.0.0.255",           // Some home networks
+            ]
         }
         
-        if sendResult > 0 {
+        for target in targets {
+            print("📡 Trying discovery to: \(target):3483")
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = UInt16(3483).bigEndian
+            let inetResult = inet_pton(AF_INET, target, &addr.sin_addr)
+            print("📡 inet_pton result for \(target): \(inetResult)")
+            
+            if inetResult != 1 {
+                print("❌ Invalid IP address: \(target)")
+                continue
+            }
+            
+            print("📡 Discovery message length: \(discoveryData.count) bytes")
+            let sendResult = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    discoveryData.withUnsafeBytes { bytes in
+                        sendto(socket, bytes.bindMemory(to: UInt8.self).baseAddress, discoveryData.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+            
+            print("📡 sendto() result for \(target): \(sendResult)")
+            if sendResult > 0 {
             print("📡 Sent LMS discovery packet")
             
             // Listen for responses
@@ -465,6 +571,7 @@ struct ServerSetupView: View {
             var senderAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
             
             let startTime = Date()
+            print("📡 Starting to listen for responses (5 second timeout)...")
             while Date().timeIntervalSince(startTime) < 5.0 {
                 let bytesReceived = withUnsafeMutablePointer(to: &senderAddr) { ptr in
                     ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
@@ -472,6 +579,7 @@ struct ServerSetupView: View {
                     }
                 }
                 
+                print("📡 recvfrom() result: \(bytesReceived)")
                 if bytesReceived > 0 {
                     let responseData = Data(responseBuffer.prefix(Int(bytesReceived)))
                     
@@ -496,22 +604,38 @@ struct ServerSetupView: View {
                     usleep(100000) // 100ms delay
                 }
             }
-        }
+            } else {
+                print("❌ Failed to send discovery packet to \(target), sendto() returned: \(sendResult), errno: \(errno)")
+            }
+            
+            // If we found servers, break out of the targets loop
+            if !foundServers.isEmpty {
+                break
+            }
+        } // End targets loop
         
         close(socket)
+        print("📡 Socket closed")
         print("📡 LMS UDP discovery complete, found \(foundServers.count) servers")
         completion(foundServers)
     }
 
     
     private func parseLMSDiscoveryResponse(_ data: Data, serverIP: String) -> DiscoveredServer? {
-        // Parse LMS discovery response format: TAG + length + data
-        var offset = 0
+        // Parse LMS discovery response format: 'E' + TAG + length + data
+        // Skip the 'E' prefix (should be validated)
+        guard data.count > 0 && data[0] == 0x45 else {
+            print("❌ Invalid response packet (doesn't start with 'E')")
+            return nil
+        }
+        
+        var offset = 1 // Skip 'E'
         var serverName: String?
         var webPort: Int?
         
-        while offset < data.count - 4 {
+        while offset < data.count - 5 {
             // Extract 4-byte tag
+            guard offset + 4 <= data.count else { break }
             let tagData = data.subdata(in: offset..<offset+4)
             guard let tag = String(data: tagData, encoding: .ascii) else {
                 break
@@ -527,6 +651,8 @@ struct ServerSetupView: View {
             // Extract data
             guard offset + length <= data.count else { break }
             let valueData = data.subdata(in: offset..<offset+length)
+            
+            print("📡 Parsed tag: \(tag), length: \(length)")
             
             switch tag {
             case "NAME":
@@ -546,10 +672,15 @@ struct ServerSetupView: View {
             offset += length
         }
         
+        guard let name = serverName, let port = webPort else {
+            print("❌ Failed to parse server response - name: \(serverName ?? "nil"), port: \(webPort?.description ?? "nil")")
+            return nil
+        }
+        
         return DiscoveredServer(
-            name: serverName ?? "LMS Server", 
+            name: name, 
             host: serverIP, 
-            port: webPort ?? 9000
+            port: port
         )
     }
 
