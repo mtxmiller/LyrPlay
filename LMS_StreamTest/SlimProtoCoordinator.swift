@@ -29,6 +29,8 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Background State Tracking
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
+    private var isSavingVolume = false
+    private var isRestoringVolume = false
     
     // MARK: - Simple Position Recovery
     private var savedPosition: Double = 0.0
@@ -551,6 +553,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     private func saveServerVolumeAndMute() {
+        guard !isSavingVolume else {
+            os_log(.info, log: logger, "⚠️ Volume save already in progress - skipping duplicate call")
+            return
+        }
+        
+        isSavingVolume = true
         os_log(.info, log: logger, "🔇 Saving current server volume and muting for silent recovery")
         
         let playerID = settings.playerMACAddress
@@ -567,6 +575,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             
             if let result = response["result"] as? [String: Any],
                let volume = result["_volume"] as? String {
+                
+                os_log(.info, log: self.logger, "📊 Current server volume to save: %{public}s", volume)
                 
                 // Save volume locally as backup in case server preferences fail
                 UserDefaults.standard.set(volume, forKey: "lastServerVolume")
@@ -590,13 +600,25 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     
                     self.sendJSONRPCCommandDirect(muteCommand) { _ in
                         os_log(.info, log: self.logger, "🔇 Server volume muted for silent recovery")
+                        
+                        // Reset save flag when complete
+                        self.isSavingVolume = false
                     }
                 }
+            } else {
+                os_log(.error, log: self.logger, "❌ Failed to get current server volume")
+                self.isSavingVolume = false
             }
         }
     }
     
     private func restoreServerVolume() {
+        guard !isRestoringVolume else {
+            os_log(.info, log: logger, "⚠️ Volume restore already in progress - skipping duplicate call")
+            return
+        }
+        
+        isRestoringVolume = true
         os_log(.info, log: logger, "🔊 Restoring server volume after recovery")
         
         let playerID = settings.playerMACAddress
@@ -636,6 +658,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     
                     // Also clear local backup since server restore succeeded
                     UserDefaults.standard.removeObject(forKey: "lastServerVolume")
+                    
+                    // Reset volume restore flag
+                    self.isRestoringVolume = false
                 }
             } else {
                 // Try local backup if server preferences failed
@@ -656,12 +681,25 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                         
                         // Clear the backup since it was used successfully
                         UserDefaults.standard.removeObject(forKey: "lastServerVolume")
+                        
+                        // Reset volume restore flag
+                        self.isRestoringVolume = false
                     }
                 } else {
                     os_log(.info, log: self.logger, "ℹ️ No saved volume found - leaving current volume unchanged")
+                    
+                    // Reset volume restore flag even when no volume found
+                    self.isRestoringVolume = false
                 }
             }
         }
+    }
+    
+    private func resetVolumeFlags() {
+        // Reset both flags in case of errors or completion
+        isSavingVolume = false
+        isRestoringVolume = false
+        os_log(.debug, log: logger, "🔄 Volume flags reset")
     }
     
     private func checkForPositionRecoveryOnForeground() {
