@@ -568,6 +568,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             if let result = response["result"] as? [String: Any],
                let volume = result["_volume"] as? String {
                 
+                // Save volume locally as backup in case server preferences fail
+                UserDefaults.standard.set(volume, forKey: "lastServerVolume")
+                
                 // Save current volume to preferences
                 let saveVolumeCommand: [String: Any] = [
                     "id": 1,
@@ -630,9 +633,33 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     ]
                     
                     self.sendJSONRPCCommandDirect(clearVolumeCommand) { _ in }
+                    
+                    // Also clear local backup since server restore succeeded
+                    UserDefaults.standard.removeObject(forKey: "lastServerVolume")
                 }
             } else {
-                os_log(.info, log: self.logger, "ℹ️ No saved volume found - leaving current volume unchanged")
+                // Try local backup if server preferences failed
+                if let backupVolume = UserDefaults.standard.string(forKey: "lastServerVolume"),
+                   !backupVolume.isEmpty {
+                    
+                    os_log(.info, log: self.logger, "💾 Using local backup volume: %{public}s", backupVolume)
+                    
+                    // Restore using backup volume
+                    let restoreVolumeCommand: [String: Any] = [
+                        "id": 1,
+                        "method": "slim.request",
+                        "params": [playerID, ["mixer", "volume", backupVolume]]
+                    ]
+                    
+                    self.sendJSONRPCCommandDirect(restoreVolumeCommand) { _ in
+                        os_log(.info, log: self.logger, "🔊 Server volume restored from backup: %{public}s", backupVolume)
+                        
+                        // Clear the backup since it was used successfully
+                        UserDefaults.standard.removeObject(forKey: "lastServerVolume")
+                    }
+                } else {
+                    os_log(.info, log: self.logger, "ℹ️ No saved volume found - leaving current volume unchanged")
+                }
             }
         }
     }

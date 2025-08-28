@@ -24,7 +24,7 @@ class SettingsManager: ObservableObject {
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
     @Published var currentActiveServer: ServerType = .primary
-    @Published var flacEnabled: Bool = true
+    @Published var flacEnabled: Bool = false
     
     
     // MARK: - Read-only Properties
@@ -129,7 +129,7 @@ class SettingsManager: ObservableObject {
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
-        flacEnabled = UserDefaults.standard.object(forKey: Keys.flacEnabled) as? Bool ?? true
+        flacEnabled = UserDefaults.standard.object(forKey: Keys.flacEnabled) as? Bool ?? false
         
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, FLAC: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", flacEnabled ? "YES" : "NO")
