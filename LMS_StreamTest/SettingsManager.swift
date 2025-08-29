@@ -94,7 +94,8 @@ class SettingsManager: ObservableObject {
     // MARK: - Dynamic Capabilities String
     var capabilitiesString: String {
         let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=48000"
-        let formats = flacEnabled ? "flc,aac,mp3" : "aac,mp3"
+        // NOTE: AVPlayer only reliably supports MP3/AAC for HTTP streaming (AIFF, ALAC, Opus don't work)
+        let formats = flacEnabled ? "aac,mp3" : "aac,mp3"  // Server transcodes FLAC→AAC when enabled
         return "\(baseCapabilities),\(formats)"
     }
     
