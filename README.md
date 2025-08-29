@@ -1,6 +1,6 @@
 # LyrPlay
 
-![LyrPlay Logo](./lyrplay-logo.svg)
+<img src="./lyrplay-logo.svg" width="200" height="200" alt="LyrPlay Logo">
 
 A Squeezebox player for iOS devices that transforms your iPhone or iPad into a high-quality network audio player for Logitech Media Server (LMS).
 
