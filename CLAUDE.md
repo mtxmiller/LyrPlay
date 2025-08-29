@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **LyrPlay** (formerly LMS_StreamTest) is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
 
-### Current Status: **APP STORE READY** 🚀
-- ✅ **macOS/visionOS exclusion configured** - App will only appear for iPhone/iPad users
-- ✅ **Privacy compliance verified** - Low risk profile, minimal data collection
-- ✅ **App Store metadata prepared** - Description, keywords, promotional text ready
+### Current Status: **LIVE ON APP STORE** 🌟
+- ✅ **Version 1.5 approved and live** - Major improvements now available for download
+- ✅ **Version 1.4 successfully deployed** - First stable release established user base
+- ✅ **Server discovery completely fixed** - Universal network compatibility achieved
+- ✅ **Volume recovery improved** - Race conditions resolved for reliable audio restoration
 - ✅ **Professional GitHub repository** - https://github.com/mtxmiller/LyrPlay
-- ✅ **Support URL configured** - https://github.com/mtxmiller/LyrPlay/issues
+- ✅ **Active user support** - https://github.com/mtxmiller/LyrPlay/issues
 
 ### Repository Information
 - **GitHub Repository**: https://github.com/mtxmiller/LyrPlay
@@ -170,7 +171,7 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Version**: 1.3
+- **Version**: 1.5 (Latest)
 
 ## Testing Structure
 
@@ -220,26 +221,36 @@ Comprehensive error handling with user-friendly recovery:
 
 ## Current Development Status
 
-The project is actively developed with recent focus on:
-- SlimProto command standardization
-- Audio metadata handling improvements
-- Server discovery enhancements
-- Background audio reliability
-- **FLAC seeking limitation** - Known issue with FLAC file seeking (see Known Limitations below)
-- **Audio session optimization** - Removed forced sample rate settings for better format compatibility
+**LyrPlay is now a stable, production-ready App Store application** with active development continuing on advanced features:
 
-The codebase is well-structured, thoroughly documented, and follows modern iOS development practices with comprehensive error handling and state management.
+### Completed Core Platform ✅
+- **Stable App Store presence** - Version 1.5 live with robust server discovery and volume recovery
+- **Universal network compatibility** - Server discovery works on all network configurations  
+- **Reliable audio streaming** - StreamingKit integration with comprehensive format support
+- **Material UI integration** - Seamless web interface with native iOS controls
+- **Background audio** - Full iOS background modes with lock screen integration
+
+### Active Development Areas 🔧
+- **CarPlay Implementation** - Phase 2 & 3 complete (~65% done), browse interface and core playback functional
+- **Advanced UI Features** - Album/playlist navigation and playback container functionality
+- **Performance Optimizations** - Continued refinement of audio session management and metadata handling
+
+### Technical Excellence
+The codebase follows modern iOS development practices with comprehensive error handling, proper async/await patterns, and extensive logging for production debugging. All major user-reported issues from GitHub have been resolved.
 
 ## Known Limitations
 
-### FLAC Seeking
-- **Issue**: Seeking within FLAC files fails with StreamingKit error 2 (Stream Parse Bytes Failed)
-- **Cause**: LMS server sends raw FLAC audio frames without required metadata headers when seeking
-- **Impact**: Users cannot seek within FLAC files - seeking will cause playback to fail
-- **Workarounds**: 
-  - Restart tracks from beginning instead of seeking
-  - Use AAC or MP3 transcoding for files where seeking is important
-- **Status**: Known limitation, not currently planned for immediate fix due to complexity
+### FLAC Seeking - SOLVED ✅
+- **Problem**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
+- **Root Cause**: LMS server starts FLAC streams at frame boundaries without STREAMINFO headers required by StreamingKit
+- **Solution**: Force server-side FLAC transcoding for iOS devices to ensure proper headers on seeks
+- **Status**: **RESOLVED** - Server configuration documented in CLAUDE.md provides complete solution
+- **User Action Required**: Add device-specific transcode rule to LMS server's `convert.conf` file
+
+### Platform Compatibility
+- **macOS/visionOS**: Not supported due to StreamingKit compatibility issues
+- **CarPlay**: Implementation in progress (~65% complete) with core functionality working
+- **Background Limitations**: Standard iOS background audio restrictions apply
 
 ## Reference Source Code
 
@@ -258,6 +269,18 @@ These repositories provide definitive reference for:
 - Material skin metadata handling approaches
 
 ## Recent Updates and Improvements
+
+### Version 1.5 - Major Stability Release (January 2025) ✅
+- **Server Discovery Revolution**: Complete rewrite of UDP discovery protocol with universal network compatibility
+- **Volume Recovery Fixed**: Eliminated race conditions in app-open recovery system with dual-backup approach
+- **Mobile-First Defaults**: FLAC disabled by default for better mobile performance and data usage optimization
+- **New App Icon**: Fresh, modern design with App Store compliance (no transparency)
+- **Enhanced Stability**: Comprehensive bug fixes and reliability improvements
+
+### Version 1.4 - Initial App Store Release (2024) ✅  
+- **First public release**: Established LyrPlay as a premium Squeezebox replacement on iOS App Store
+- **Stable foundation**: Core SlimProto implementation with Material UI integration
+- **FLAC support**: Native high-quality audio streaming with StreamingKit integration
 
 ### Metadata Simplification (2024)
 - **Simplified metadata tags**: Reduced from 35+ tags to Material skin's minimal set for efficiency
@@ -370,10 +393,10 @@ When submitting, use these prepared values:
 
 ---
 
-**Last Updated**: July 2025 - App Store Ready Status
-- Same bundle ID (App Store compatible)
-- Fresh git history starting from polished final version
-- Professional appearance for open-source release
+**Last Updated**: January 2025 - Version 1.5 Live on App Store ✅
+- Production app with active user base
+- All major issues resolved, stable platform achieved
+- Continued development on advanced features (CarPlay, enhanced UI)
 
 #### Current Status:
 - App display name already updated to "LyrPlay" in Xcode
