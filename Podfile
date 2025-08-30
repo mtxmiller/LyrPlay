@@ -4,7 +4,6 @@ target 'LMS_StreamTest' do
   use_frameworks!
   
   pod 'CocoaAsyncSocket', '~> 7.6'
-  pod 'StreamingKit'
 
   target 'LMS_StreamTestTests' do
     inherit! :search_paths

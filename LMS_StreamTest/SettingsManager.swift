@@ -24,7 +24,7 @@ class SettingsManager: ObservableObject {
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
     @Published var currentActiveServer: ServerType = .primary
-    @Published var flacEnabled: Bool = false
+    @Published var audioFormat: AudioFormat = .compressed
     
     
     // MARK: - Read-only Properties
@@ -42,6 +42,37 @@ class SettingsManager: ObservableObject {
             switch self {
             case .primary: return "Primary"
             case .backup: return "Backup"
+            }
+        }
+    }
+    
+    // MARK: - Audio Format Enum
+    enum AudioFormat: Int, CaseIterable {
+        case compressed = 0
+        case opus = 1
+        case flac = 2
+        
+        var displayName: String {
+            switch self {
+            case .compressed: return "Compressed (AAC/MP3)"
+            case .opus: return "High Quality (Opus)"
+            case .flac: return "Lossless (FLAC)"
+            }
+        }
+        
+        var description: String {
+            switch self {
+            case .compressed: return "Smallest bandwidth, universal compatibility"
+            case .opus: return "Near-lossless quality, efficient streaming"
+            case .flac: return "Native lossless, highest quality, requires server setup"
+            }
+        }
+        
+        var capabilities: String {
+            switch self {
+            case .compressed: return "aac,mp3"
+            case .opus: return "ops,aac,mp3"
+            case .flac: return "flc,ops,aac,mp3"
             }
         }
     }
@@ -64,10 +95,10 @@ class SettingsManager: ObservableObject {
         static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
         static let isBackupServerEnabled = "IsBackupServerEnabled"
         static let currentActiveServer = "CurrentActiveServer"
-        static let flacEnabled = "FLACEnabled"
+        static let audioFormat = "AudioFormat"
     }
     
-    private let currentSettingsVersion = 2 // UPDATED: Increment for FLAC support
+    private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
     
     // MARK: - Singleton
     static let shared = SettingsManager()
@@ -95,7 +126,7 @@ class SettingsManager: ObservableObject {
     var capabilitiesString: String {
         let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=48000"
         // CBass supports FLAC and Opus natively over HTTP streaming
-        let formats = flacEnabled ? "flc,ops,aac,mp3" : "aac,mp3"
+        let formats = audioFormat.capabilities
         return "\(baseCapabilities),\(formats)"
     }
     
@@ -130,10 +161,11 @@ class SettingsManager: ObservableObject {
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
-        flacEnabled = UserDefaults.standard.object(forKey: Keys.flacEnabled) as? Bool ?? false
+        let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
+        audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .compressed
         
-        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, FLAC: %{public}s",
-               serverHost, playerName, isConfigured ? "YES" : "NO", flacEnabled ? "YES" : "NO")
+        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s",
+               serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName)
     }
     
     func saveSettings() {
@@ -155,7 +187,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
-        UserDefaults.standard.set(flacEnabled, forKey: Keys.flacEnabled)
+        UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         
         UserDefaults.standard.synchronize()
         
@@ -170,10 +202,21 @@ class SettingsManager: ObservableObject {
         } else if savedVersion < currentSettingsVersion {
             os_log(.info, log: logger, "Migrating settings from version %d to %d", savedVersion, currentSettingsVersion)
             
-            // MIGRATION: Update format preferences to include FLAC first
-            if savedVersion < 2 {
-                os_log(.info, log: logger, "🎵 Migrating to FLAC-first format preferences")
-                // REMOVED: preferredFormats migration - capabilities hardcoded
+            // MIGRATION: Update format preferences to AudioFormat enum
+            if savedVersion < 3 {
+                os_log(.info, log: logger, "🎵 Migrating to AudioFormat enum from legacy flacEnabled")
+                
+                // Migrate from old flacEnabled boolean to new AudioFormat enum
+                let legacyFlacEnabled = UserDefaults.standard.object(forKey: "FLACEnabled") as? Bool ?? false
+                if legacyFlacEnabled {
+                    UserDefaults.standard.set(AudioFormat.flac.rawValue, forKey: Keys.audioFormat)
+                    os_log(.info, log: logger, "🎵 Migrated legacy FLAC setting to new format enum")
+                } else {
+                    UserDefaults.standard.set(AudioFormat.compressed.rawValue, forKey: Keys.audioFormat) 
+                }
+                
+                // Clean up old key
+                UserDefaults.standard.removeObject(forKey: "FLACEnabled")
             }
         }
     }

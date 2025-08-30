@@ -119,43 +119,41 @@ struct SettingsView: View {
                 
                 // Audio Settings Section
                 Section(header: Text("Audio Settings")) {
-                    // FLAC Support Toggle
-                    HStack {
-                        Image(systemName: "music.note")
-                            .foregroundColor(.blue)
-                            .frame(width: 20)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Enable FLAC Support")
-                                .font(.body)
-                            Text(isReconnecting ? "Reconnecting..." : "Disabled = MP3 transcode • Auto-reconnects")
-                                .font(.caption)
-                                .foregroundColor(isReconnecting ? .blue : .secondary)
-                        }
-                        
-                        Spacer()
-                        
-                        Toggle("", isOn: $settings.flacEnabled)
-                            .disabled(isReconnecting)
-                            .onChange(of: settings.flacEnabled) { _ in
-                                settings.saveSettings()
+                    // Audio Format Picker
+                    NavigationLink(destination: AudioFormatConfigView()) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "music.note")
+                                    .foregroundColor(.blue)
+                                    .frame(width: 20)
                                 
-                                // Restart connection if currently connected
-                                if coordinator.connectionState == "Connected" {
-                                    Task {
-                                        await MainActor.run {
-                                            isReconnecting = true
-                                        }
-                                        
-                                        await coordinator.restartConnection()
-                                        
-                                        await MainActor.run {
-                                            isReconnecting = false
-                                        }
-                                    }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Audio Format")
+                                        .font(.body)
+                                    Text(settings.audioFormat.displayName)
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                }
+                                
+                                Spacer()
+                                
+                                if isReconnecting {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(.secondary)
+                                        .font(.caption)
                                 }
                             }
+                            
+                            Text(settings.audioFormat.description)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
                     }
+                    .disabled(isReconnecting)
                     .padding(.vertical, 2)
                     
                     NavigationLink(destination: BufferConfigView()) {
@@ -1206,5 +1204,167 @@ struct ServerDiscoveryRow: View {
         }
         .buttonStyle(PlainButtonStyle())
         .padding(.horizontal)
+    }
+}
+
+// MARK: - Audio Format Configuration View
+struct AudioFormatConfigView: View {
+    @StateObject private var settings = SettingsManager.shared
+    @EnvironmentObject private var coordinator: SlimProtoCoordinator
+    @Environment(\.presentationMode) var presentationMode
+    @State private var isReconnecting = false
+    
+    var body: some View {
+        Form {
+            Section(header: Text("Audio Format Selection"), 
+                   footer: Text("Changes require reconnection to take effect. Higher quality formats may use more bandwidth.")) {
+                
+                ForEach(SettingsManager.AudioFormat.allCases, id: \.self) { format in
+                    Button(action: {
+                        selectFormat(format)
+                    }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(format.displayName)
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    
+                                    if settings.audioFormat == format {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                
+                                Text(format.description)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            
+                            if settings.audioFormat != format {
+                                Spacer()
+                            }
+                        }
+                    }
+                    .disabled(isReconnecting)
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            
+            Section(header: Text("Server Requirements")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    FormatRequirementRow(
+                        format: "Compressed (AAC/MP3)",
+                        requirement: "No server setup required",
+                        icon: "checkmark.circle.fill",
+                        color: .green
+                    )
+                    
+                    FormatRequirementRow(
+                        format: "High Quality (Opus)",
+                        requirement: "Requires server transcoding setup",
+                        icon: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
+                    
+                    FormatRequirementRow(
+                        format: "Lossless (FLAC)",
+                        requirement: "Requires server transcoding setup",
+                        icon: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
+                }
+                
+                // Server setup instructions link
+                Link(destination: URL(string: "https://github.com/mtxmiller/LyrPlay")!) {
+                    HStack {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.blue)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Server Setup Instructions")
+                                .font(.body)
+                                .foregroundColor(.blue)
+                            
+                            Text("Visit GitHub for FLAC & Opus transcoding setup")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            
+            if isReconnecting {
+                Section {
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Reconnecting with new format...")
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Audio Format")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+    
+    private func selectFormat(_ format: SettingsManager.AudioFormat) {
+        guard settings.audioFormat != format else { return }
+        
+        settings.audioFormat = format
+        settings.saveSettings()
+        
+        // Restart connection if currently connected
+        if coordinator.connectionState == "Connected" {
+            Task {
+                await MainActor.run {
+                    isReconnecting = true
+                }
+                
+                await coordinator.restartConnection()
+                
+                await MainActor.run {
+                    isReconnecting = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Format Requirement Row
+struct FormatRequirementRow: View {
+    let format: String
+    let requirement: String
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+                .frame(width: 20)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(format)
+                    .font(.body)
+                    .fontWeight(.medium)
+                
+                Text(requirement)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+        }
     }
 }

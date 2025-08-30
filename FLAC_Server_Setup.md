@@ -24,13 +24,13 @@ EOF'
 docker exec lms cat /lms/custom-convert.conf
 ```
 
-### FLAC to Opus Transcoding (Server works, AVPlayer won't play)
+### FLAC to Opus Transcoding (CBass Compatible)
 ```bash
 docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
-# LyrPlay FLAC to high-quality Opus transcoding for AVPlayer
+# LyrPlay FLAC to high-quality Opus transcoding for CBass
 flc ops * 02:70:68:8c:51:41
     # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t opus -C 10 -
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
 EOF'
 ```
 
@@ -51,8 +51,8 @@ docker ps | grep lms
 ## What This Rule Does
 
 - **Target**: Only affects device with MAC address `02:70:68:8c:51:41` (your iOS device)
-- **Process**: Decodes FLAC file from seek position → Encodes as high-quality Opus
-- **Output**: Opus stream that AVPlayer can handle natively
+- **Process**: Decodes FLAC file from seek position → Encodes as Opus in OGG container
+- **Output**: OGG/Opus stream that CBass can handle natively
 - **Quality**: Near-lossless quality (-C 10 = maximum quality setting)
 - **Performance**: Real-time transcoding using sox with x86_64 architecture
 
@@ -68,8 +68,8 @@ let formats = flacEnabled ? "ops,aac,mp3" : "aac,mp3"  // ops = Opus format
 
 1. Run the Docker commands above
 2. Build and test your iOS app with a FLAC file
-3. Check server logs - should show successful ALAC transcoding
-4. AVPlayer should accept the ALAC stream without errors
+3. Check server logs - should show successful Opus transcoding
+4. CBass should accept the OGG/Opus stream without errors
 
 ## Alternative Option 1: FLAC to AIFF Transcoding (Server works, AVPlayer won't play)
 
@@ -98,9 +98,35 @@ let formats = flacEnabled ? "aif,aac,mp3" : "aac,mp3"  // aif = AIFF format
 - ✅ **Uses sox** - Tool we know works in your container  
 - ✅ **Apple's lossless format** - Optimized for iOS ecosystem
 
-## Alternative Option 2: Original FLAC Transcoding (if other options fail)
+## CBass Implementation: Combined FLAC and Opus Support
 
-Fall back to FLAC-to-FLAC transcoding with proper headers:
+For CBass implementation with user-selectable formats in iOS settings:
+
+```bash
+docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
+# LyrPlay CBass implementation - Multiple format support
+# Replace 02:70:68:8c:51:41 with your device MAC address
+
+# FLAC seeking support - FLAC to FLAC with proper headers for native playback
+flc flc * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+
+# High-quality Opus in OGG container for CBass compatibility
+flc ops * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
+EOF'
+```
+
+This configuration provides:
+- **Native FLAC**: For highest quality and native seeking capability  
+- **Opus transcoding**: For efficient streaming with near-lossless quality
+- **Both rules active**: User can select format preference in iOS app settings
+
+## Alternative Option 2: Original FLAC-Only Transcoding (if simpler setup needed)
+
+Fall back to FLAC-to-FLAC transcoding only:
 
 ```bash
 docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
@@ -111,13 +137,15 @@ flc flc * 02:70:68:8c:51:41
 EOF'
 ```
 
+
 ## Expected Results
 
-With Opus transcoding, you should see in LMS logs:
-- ✅ No "couldn't find binary" errors
-- ✅ Successful FLAC→Opus conversion using sox
-- ✅ iOS app plays FLAC files without "format not supported" errors
-- ✅ Near-lossless quality maintained (Opus -C 10 setting)
+With combined FLAC and Opus transcoding setup, you should see in LMS logs:
+- ✅ No "couldn't find binary" errors for sox
+- ✅ Successful FLAC→FLAC conversion with proper headers (native seeking)
+- ✅ Successful FLAC→Opus conversion for bandwidth efficiency
+- ✅ CBass plays both FLAC and Opus formats without errors
+- ✅ iOS app can switch between formats based on user preference
 
 ## Opus Quality Benefits
 
