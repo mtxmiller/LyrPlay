@@ -112,17 +112,70 @@ flc flc * 02:70:68:8c:51:41
     # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
     [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
 
-# High-quality Opus in OGG container for CBass compatibility
+# Option A: High-quality OGG Vorbis (Current - Known Working)
 flc ops * 02:70:68:8c:51:41
     # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
     [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
+
+# Option B: True Opus Maximum Quality (Experimental - Test with CBass)
+# flc ops * 02:70:68:8c:51:41
+#     # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+#     [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -r 48000 -t opus -C 10 -
 EOF'
 ```
 
 This configuration provides:
 - **Native FLAC**: For highest quality and native seeking capability  
-- **Opus transcoding**: For efficient streaming with near-lossless quality
+- **Option A**: High-quality OGG Vorbis (~320kbps) - guaranteed CBass compatibility
+- **Option B**: True Opus codec (~256-320kbps) - requires CBass raw Opus support
 - **Both rules active**: User can select format preference in iOS app settings
+
+### Testing True Opus Support
+
+To test if CBass supports raw Opus streams, try Option B by replacing Option A:
+
+```bash
+# Test raw Opus transcoding - replace your current rule with this:
+docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
+# LyrPlay CBass implementation - True Opus Maximum Quality Test
+# Replace 02:70:68:8c:51:41 with your device MAC address
+
+# FLAC seeking support - FLAC to FLAC with proper headers
+flc flc * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+
+# True Opus Maximum Quality (48kHz, ~256-320kbps VBR)
+flc ops * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -r 48000 -t opus -C 10 -
+
+EOF'
+```
+
+**Expected Results:**
+- ✅ **If it works**: You get true Opus codec with maximum quality
+- ❌ **If CBass errors**: Fall back to Option A (OGG Vorbis) which is guaranteed to work
+
+**To revert back to OGG Vorbis if Opus fails:**
+```bash
+# Fallback to proven OGG Vorbis transcoding
+docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
+# LyrPlay CBass implementation - Proven OGG Vorbis
+# Replace 02:70:68:8c:51:41 with your device MAC address
+
+# FLAC seeking support
+flc flc * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+
+# High-quality OGG Vorbis (~320kbps)
+flc ops * 02:70:68:8c:51:41
+    # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
+
+EOF'
+```
 
 ## Alternative Option 2: Original FLAC-Only Transcoding (if simpler setup needed)
 

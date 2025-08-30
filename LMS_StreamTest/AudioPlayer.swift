@@ -42,6 +42,9 @@ class AudioPlayer: NSObject, ObservableObject {
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 1.0  // Max 1 update per second
     
+    // MARK: - Lock Screen Controls (avoid duplicate setup)
+    private var lockScreenControlsConfigured = false
+    
     weak var commandHandler: SlimProtoCommandHandler?
 
     // MARK: - Initialization
@@ -143,8 +146,11 @@ class AudioPlayer: NSObject, ObservableObject {
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d", currentStream)
             
-            // Setup lock screen on first successful playback
-            setupLockScreenControls()
+            // Setup lock screen controls once only
+            if !lockScreenControlsConfigured {
+                setupLockScreenControls()
+                lockScreenControlsConfigured = true
+            }
             updateNowPlayingInfo(title: "LyrPlay Stream", artist: "Lyrion Music Server")
             
             commandHandler?.handleStreamConnected()
