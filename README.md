@@ -6,6 +6,19 @@
 
 A Squeezebox player for iOS devices that transforms your iPhone or iPad into a high-quality network audio player for Lyrion Media Server (LMS).
 
+## 💖 Support LyrPlay Development
+
+LyrPlay is free and open source. If it's been useful to you, consider supporting continued development:
+
+- ⭐ **Star this repository** (helps with visibility)
+- ☕ **[Buy me a coffee](https://ko-fi.com/mtxmiller)** (one-time support)
+- 🐛 **Report issues** and suggest features
+- 🤝 **Contribute code** if you're a developer
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mtxmiller)
+
+Your support helps maintain LyrPlay and add community-requested features!
+
 ---
 
 ## Features
