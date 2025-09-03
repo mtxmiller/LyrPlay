@@ -164,7 +164,7 @@
 				6B9C4D4B2DEB81F500D22FD6 /* Frameworks */,
 				6B9C4D4C2DEB81F500D22FD6 /* Resources */,
 				F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */,
-				6B88C8B02E63301D008CF64E /* ShellScript */,
+				6B751C552E67D24B0064FDFE /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -322,7 +322,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		6B88C8B02E63301D008CF64E /* ShellScript */ = {
+		6B751C552E67D24B0064FDFE /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -337,7 +337,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n# Type a script or drag a script file from your workspace to insert its path.\n# Fix CBass Framework Info.plist files during build\necho \"🔧 Fixing CBass frameworks during build...\"\n\n# Fix frameworks in the built app\nif [ -d \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\" ]; then\n  cd \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\"\n\n  for framework in bass.framework bassflac.framework bassopus.framework; do\n      if [ -d \"$framework\" ]; then\n          info_plist=\"$framework/Info.plist\"\n          if [ -f \"$info_plist\" ]; then\n              echo \"Fixing $framework\"\n              # Add CFBundleVersion if missing\n              if ! /usr/libexec/PlistBuddy -c \"Print CFBundleVersion\" \"$info_plist\" >/dev/null 2>&1; then\n                  /usr/libexec/PlistBuddy -c \"Add CFBundleVersion string 24.17\" \"$info_plist\"\n                  echo \"✅ Added CFBundleVersion to $framework\"\n              else\n                  echo \"✅ CFBundleVersion already exists in $framework\"\n              fi\n          fi\n      fi\n  done\nfi\n\necho \"🎉 Framework fixes completed during build\"\n";
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n# Fix CBass Framework Info.plist files during build\necho \"🔧 Fixing CBass frameworks during build...\"\n\n# Fix frameworks in the built app\nif [ -d \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\" ]; then\n  cd \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\"\n\n  for framework in bass.framework bassflac.framework bassopus.framework; do\n      if [ -d \"$framework\" ]; then\n          info_plist=\"$framework/Info.plist\"\n          if [ -f \"$info_plist\" ]; then\n              echo \"Fixing $framework\"\n              # Add CFBundleVersion if missing\n              if ! /usr/libexec/PlistBuddy -c \"Print CFBundleVersion\" \"$info_plist\" >/dev/null 2>&1; then\n                  /usr/libexec/PlistBuddy -c \"Add CFBundleVersion string 24.17\" \"$info_plist\"\n                  echo \"✅ Added CFBundleVersion to $framework\"\n              else\n                  echo \"✅ CFBundleVersion already exists in $framework\"\n              fi\n          fi\n      fi\n  done\nfi\n\necho \"🎉 Framework fixes completed during build\"\n";
 		};
 		72F8206890725D915803646B /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -583,7 +583,7 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -622,7 +622,7 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

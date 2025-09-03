@@ -107,6 +107,13 @@ struct ContentView: View {
             Color(red: 0.25, green: 0.25, blue: 0.25) // Dark gray like Material
                 .ignoresSafeArea(.all)
             
+            // Loading screen overlay that covers the entire view when loading
+            if isLoading && loadError == nil {
+                lyrPlayLoadingScreen
+                    .ignoresSafeArea(.all)
+                    .zIndex(1) // Ensure it appears above WebView
+            }
+            
             // WebView that respects TOP safe area but ignores bottom
             if let url = URL(string: materialWebURL), !hasConnectionError {
                 WebView(
@@ -119,6 +126,8 @@ struct ContentView: View {
                     }
                 )
                 .ignoresSafeArea(.container, edges: .bottom)
+                .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
+                .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
                     // Pass webView reference to coordinator for Material UI refresh
                     if let webView = newWebView {
@@ -129,9 +138,9 @@ struct ContentView: View {
                 serverErrorView
             }
             
-            // Status overlay
-            if isLoading || loadError != nil {
-                statusOverlay
+            // Error overlay (only show when there's an error)
+            if loadError != nil {
+                errorOverlay
             }
             
         }
@@ -245,51 +254,114 @@ struct ContentView: View {
         .padding()
     }
     
-    private var statusOverlay: some View {
+    // MARK: - LyrPlay Loading Screen
+    private var lyrPlayLoadingScreen: some View {
+        ZStack {
+            // Dark background matching Material skin - fills entire screen
+            LinearGradient(
+                gradient: Gradient(colors: [
+                    Color(red: 0.12, green: 0.12, blue: 0.12), // Darker top
+                    Color(red: 0.20, green: 0.20, blue: 0.20), // Slightly lighter middle  
+                    Color(red: 0.15, green: 0.15, blue: 0.15)  // Dark bottom
+                ]),
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea(.all) // Ensure it fills the entire screen including safe areas
+            
+            VStack(spacing: 40) {
+                Spacer()
+                
+                // LyrPlay PNG Logo - Transparent background, inverted black to white
+                Image("lyrplay-logo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 400) // ~2x larger than previous 200
+                    .colorInvert() // Convert black logo to white for dark background
+                    .scaleEffect(isLoading ? 1.03 : 1.0)
+                    .animation(
+                        .easeInOut(duration: 2.5).repeatForever(autoreverses: true),
+                        value: isLoading
+                    )
+                
+                Spacer()
+                
+                // Loading indicator and status
+                VStack(spacing: 16) {
+                    // Elegant progress indicator
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.9)))
+                        .scaleEffect(1.2)
+                    
+                    // Loading text with animation
+                    HStack(spacing: 8) {
+                        Text("Loading Material Interface")
+                            .font(.system(size: 20, weight: .light))
+                            .foregroundColor(.white.opacity(0.9))
+                        
+                        // Animated dots
+                        HStack(spacing: 2) {
+                            ForEach(0..<3) { index in
+                                Circle()
+                                    .fill(.white.opacity(0.6))
+                                    .frame(width: 4, height: 4)
+                                    .scaleEffect(isLoading ? 1.0 : 0.5)
+                                    .animation(
+                                        .easeInOut(duration: 0.6)
+                                        .repeatForever(autoreverses: true)
+                                        .delay(Double(index) * 0.2),
+                                        value: isLoading
+                                    )
+                            }
+                        }
+                    }
+                }
+                
+                Spacer()
+                    .frame(height: 80) // Space for home indicator
+            }
+            .padding(.horizontal, 40)
+        }
+    }
+    
+    // MARK: - Error Overlay (Separate from loading screen)
+    private var errorOverlay: some View {
         VStack {
             Spacer()
             
-            if isLoading {
-                HStack {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .scaleEffect(0.8)
-                    Text("Loading Material Interface...")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 12)
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(8)
-            }
-            
             if let error = loadError, !hasHandledError {
-                VStack(spacing: 8) {
+                VStack(spacing: 12) {
                     HStack {
-                        Image(systemName: "exclamationmark.circle")
+                        Image(systemName: "exclamationmark.circle.fill")
                             .foregroundColor(.red)
+                            .font(.title2)
                         Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                            .lineLimit(2)
+                            .font(.body)
+                            .foregroundColor(.white)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.center)
                     }
                     
                     Button("Check Settings") {
                         showingSettings = true
                     }
-                    .font(.caption)
+                    .buttonStyle(.bordered)
                     .foregroundColor(.blue)
                 }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 12)
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(8)
+                .padding(.vertical, 20)
+                .padding(.horizontal, 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.black.opacity(0.85))
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(.white.opacity(0.2), lineWidth: 1)
+                        )
+                )
                 .onAppear {
                     // Only handle the error ONCE
                     hasHandledError = true
                     hasConnectionError = true
-                    //slimProtoCoordinator.disconnect()
                     
                     // Auto-show settings after 10 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
@@ -405,8 +477,10 @@ struct ContentView: View {
         slimProtoCoordinator.connect()
         hasConnected = true
     }
+    
 
 }
+
 
 struct WebView: UIViewRepresentable {
     let url: URL
@@ -435,9 +509,10 @@ struct WebView: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         
-        // Set background color to match LMS skin
-        webView.backgroundColor = UIColor.black
-        webView.scrollView.backgroundColor = UIColor.black
+        // Set background color to match LMS skin - CRITICAL: Set BEFORE loading
+        webView.backgroundColor = UIColor(red: 0.25, green: 0.25, blue: 0.25, alpha: 1.0)
+        webView.scrollView.backgroundColor = UIColor(red: 0.25, green: 0.25, blue: 0.25, alpha: 1.0)
+        webView.isOpaque = false
         
         // ADD THESE CRITICAL LINES:
         webView.scrollView.contentInsetAdjustmentBehavior = .never
