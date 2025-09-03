@@ -7,12 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **LyrPlay** (formerly LMS_StreamTest) is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
 
 ### Current Status: **LIVE ON APP STORE** 🌟
-- ✅ **Version 1.5 approved and live** - Major improvements now available for download
-- ✅ **Version 1.4 successfully deployed** - First stable release established user base
-- ✅ **Server discovery completely fixed** - Universal network compatibility achieved
-- ✅ **Volume recovery improved** - Race conditions resolved for reliable audio restoration
+- ✅ **Version 1.6 CBass Migration** - Major audio engine upgrade with CBass framework integration
+- ✅ **Version 1.5 approved and live** - Major stability improvements deployed to App Store
+- ✅ **CBass Audio Framework** - Complete migration from StreamingKit to CBass for superior performance
+- ✅ **Enhanced Loading Experience** - Professional LyrPlay loading screen with animated branding
+- ✅ **iOS 18.2 Compatibility** - Updated for latest iOS features and deployment target
 - ✅ **Professional GitHub repository** - https://github.com/mtxmiller/LyrPlay
 - ✅ **Active user support** - https://github.com/mtxmiller/LyrPlay/issues
+- ✅ **GitHub Sponsorship** - Community funding support established
 
 ### Repository Information
 - **GitHub Repository**: https://github.com/mtxmiller/LyrPlay
@@ -60,17 +62,19 @@ The app follows a coordinator pattern with `SlimProtoCoordinator` as the main or
 - **SettingsManager**: Configuration and server management singleton
 
 ### Audio Architecture
-The audio system is modular with clear separation of concerns:
+The audio system is built on the CBass framework with modular design:
 
-- **AudioPlayer**: StreamingKit-based player with native FLAC support
+- **AudioPlayer**: CBass-based player with native BASS audio library integration
+- **CBass Framework**: High-performance audio library with native FLAC, Opus, and multi-format support
 - **AudioSessionManager**: iOS audio session management and interruption handling
 - **NowPlayingManager**: Lock screen and Control Center integration
 - **InterruptionManager**: Specialized handling for audio interruptions
 
 ### Key Dependencies
 - **CocoaAsyncSocket**: Network socket communication for SlimProto
-- **StreamingKit**: Audio streaming with native FLAC support
+- **CBass**: Swift Package Manager integration of BASS audio library (Bass, BassFLAC, BassOpus)
 - **WebKit**: Embedded Material LMS interface
+- **Build Automation**: Automated CBundleVersion fixes for App Store compliance
 
 ### SlimProto Protocol Implementation
 The SlimProto protocol is implemented across several specialized components:
@@ -133,16 +137,16 @@ The app maintains SlimProto connections in the background:
 ## App Store Readiness Status
 
 ### Platform Exclusions (COMPLETED)
-The project has been configured to **prevent macOS and visionOS downloads** due to StreamingKit compatibility issues:
+The project has been configured to **prevent macOS and visionOS downloads** due to CBass framework compatibility:
 
 ```
 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 SUPPORTS_MACCATALYST = NO;
-SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 ```
 
-**Why this was needed**: StreamingKit (used for native FLAC support) doesn't work properly on macOS, causing crashes. These settings ensure the app only appears for iPhone/iPad users in the App Store.
+**Why this is needed**: CBass framework (BASS audio library) is optimized for iOS and may have compatibility issues on other platforms. These settings ensure the app only appears for iPhone/iPad users in the App Store while maintaining proper iOS compatibility.
 
 ### App Store Metadata (COMPLETED)
 Ready-to-use content for App Store Connect:
@@ -171,7 +175,7 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Version**: 1.5 (Latest)
+- **Version**: 1.6 (Latest - CBass Migration)
 
 ## Testing Structure
 
@@ -210,9 +214,10 @@ Comprehensive error handling with user-friendly recovery:
 ## Build Configuration
 
 ### Minimum Requirements
-- iOS 14.0 minimum deployment target
-- Xcode 12.0+ for SwiftUI support
-- CocoaPods for dependency management
+- iOS 18.2 deployment target (latest iOS features)
+- Xcode 15.0+ for SwiftUI and Swift Package Manager support
+- CocoaPods for CocoaAsyncSocket dependency
+- Swift Package Manager for CBass framework integration
 
 ### Key Build Settings
 - Background modes: Audio, fetch, processing
@@ -224,11 +229,13 @@ Comprehensive error handling with user-friendly recovery:
 **LyrPlay is now a stable, production-ready App Store application** with active development continuing on advanced features:
 
 ### Completed Core Platform ✅
-- **Stable App Store presence** - Version 1.5 live with robust server discovery and volume recovery
+- **Stable App Store presence** - Version 1.5 live, Version 1.6 CBass migration ready for submission
+- **CBass Audio Framework** - Complete migration from StreamingKit to high-performance BASS library
 - **Universal network compatibility** - Server discovery works on all network configurations  
-- **Reliable audio streaming** - StreamingKit integration with comprehensive format support
-- **Material UI integration** - Seamless web interface with native iOS controls
+- **Enhanced audio streaming** - CBass integration with superior FLAC, Opus, and multi-format support
+- **Professional UI Experience** - LyrPlay loading screen with animated branding and Material integration
 - **Background audio** - Full iOS background modes with lock screen integration
+- **iOS 18.2 Ready** - Updated for latest iOS features and modern deployment target
 
 ### Active Development Areas 🔧
 - **CarPlay Implementation** - Phase 2 & 3 complete (~65% done), browse interface and core playback functional
@@ -240,15 +247,20 @@ The codebase follows modern iOS development practices with comprehensive error h
 
 ## Known Limitations
 
-### FLAC Seeking - SOLVED ✅
-- **Problem**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
-- **Root Cause**: LMS server starts FLAC streams at frame boundaries without STREAMINFO headers required by StreamingKit
-- **Solution**: Force server-side FLAC transcoding for iOS devices to ensure proper headers on seeks
-- **Status**: **RESOLVED** - Server configuration documented in CLAUDE.md provides complete solution
-- **User Action Required**: Add device-specific transcode rule to LMS server's `convert.conf` file
+### CBass Migration Benefits ✅
+- **Problem**: StreamingKit limitations with FLAC seeking and multi-format support
+- **Solution**: Complete migration to CBass framework (BASS audio library)
+- **Benefits**: 
+  - Superior FLAC support with native seeking
+  - Enhanced Opus codec support
+  - Better multi-format audio handling
+  - Improved performance and reliability
+  - App Store validation compliance
+- **Status**: **COMPLETED** - CBass v1.6 migration fully implemented and tested
+- **Legacy FLAC Server Configuration**: Still available for server-side optimization if needed
 
 ### Platform Compatibility
-- **macOS/visionOS**: Not supported due to StreamingKit compatibility issues
+- **macOS/visionOS**: Not supported due to CBass framework targeting iOS optimization
 - **CarPlay**: Implementation in progress (~65% complete) with core functionality working
 - **Background Limitations**: Standard iOS background audio restrictions apply
 
@@ -260,7 +272,8 @@ When updating the application, reference the following source code repositories 
 - **slimserver** folder: Complete Lyrion Music Server source code for protocol understanding
 - **squeezelite** folder: Reference Squeezebox player implementation
 - **lms-material** folder: Material skin web interface source code
-- **StreamingKit** source in CocoaPods: Audio streaming implementation details
+- **CBass Framework**: Swift Package Manager integration of BASS audio library
+- **BASS Documentation**: https://github.com/Treata11/CBass - CBass Swift wrapper documentation
 
 These repositories provide definitive reference for:
 - SlimProto protocol implementation
@@ -269,6 +282,15 @@ These repositories provide definitive reference for:
 - Material skin metadata handling approaches
 
 ## Recent Updates and Improvements
+
+### Version 1.6 - CBass Migration Release (January 2025) ✅
+- **Complete Audio Engine Upgrade**: Migration from StreamingKit to CBass framework
+- **Enhanced FLAC Support**: Native BASS library integration with superior codec handling
+- **Professional Loading Screen**: LyrPlay branded loading experience with animations
+- **iOS 18.2 Compatibility**: Updated deployment target for latest iOS features
+- **App Store Ready**: All framework validation issues resolved with automated build fixes
+- **Build Automation**: Automated CBundleVersion fixes for seamless App Store submission
+- **Repository Cleanup**: Organized codebase with GitHub sponsorship support
 
 ### Version 1.5 - Major Stability Release (January 2025) ✅
 - **Server Discovery Revolution**: Complete rewrite of UDP discovery protocol with universal network compatibility
@@ -297,10 +319,19 @@ These repositories provide definitive reference for:
 
 ### Major Fixes Completed
 
-#### FLAC Seeking Issue - SOLVED with Server-Side Configuration
-- **Problem**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
-- **Root Cause**: When seeking, LMS server starts FLAC streams at frame boundaries without STREAMINFO headers, which StreamingKit requires for decoder initialization
-- **Solution**: Force server-side FLAC transcoding for iOS devices to ensure proper headers on seeks
+#### CBass Audio Framework Migration - COMPLETED ✅
+- **Previous Issue**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
+- **Root Cause**: StreamingKit limitations with FLAC seeking and multi-format support
+- **New Solution**: Complete migration to CBass framework (BASS audio library)
+- **Benefits**:
+  - Native FLAC seeking without server-side configuration requirements
+  - Enhanced Opus codec support
+  - Superior multi-format audio handling
+  - Better performance and App Store compliance
+  - Eliminates need for complex server-side transcoding rules
+
+#### Legacy FLAC Server Configuration (Still Available)
+For users who want additional server-side optimization, the previous server configuration method is still documented:
 - **Implementation**: Add device-specific transcode rule to LMS server's `convert.conf` file
 - **Server Configuration Required**:
   ```
@@ -393,13 +424,17 @@ When submitting, use these prepared values:
 
 ---
 
-**Last Updated**: January 2025 - Version 1.5 Live on App Store ✅
-- Production app with active user base
-- All major issues resolved, stable platform achieved
-- Continued development on advanced features (CarPlay, enhanced UI)
+**Last Updated**: January 2025 - Version 1.6 CBass Migration Completed ✅
+- **Production app** with active user base on App Store (Version 1.5)
+- **Version 1.6** with CBass migration ready for App Store submission
+- **Complete audio engine upgrade** from StreamingKit to CBass framework
+- **Enhanced user experience** with professional loading screen and iOS 18.2 support
+- **Repository optimized** with GitHub sponsorship and clean organization
+- **All major technical challenges resolved** with CBass framework migration
 
 #### Current Status:
-- App display name already updated to "LyrPlay" in Xcode
-- All source code references updated from "LMS Stream" to "LyrPlay"
-- Bundle ID remains `elm.LMS-StreamTest` for App Store compatibility
-- Ready for clean repository creation when development is complete
+- **Audio Engine**: CBass framework (BASS library) with native FLAC/Opus support
+- **App Version**: 1.6 ready for next App Store release
+- **Repository**: Clean, organized, with GitHub sponsorship support
+- **Build System**: Automated framework fixes and App Store compliance
+- **iOS Target**: 18.2 with latest iOS features
