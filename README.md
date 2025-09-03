@@ -84,6 +84,39 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
 
 **Performance Impact**: Minimal - transcoding happens in real-time with efficient compression.
 
+## TestFlight v1.6 Users - CBass Framework Setup
+
+**For TestFlight beta testers using Version 1.6 with CBass audio framework**, use this enhanced server configuration that supports both native FLAC and high-quality OGG Vorbis transcoding:
+
+### Combined FLAC + OGG Vorbis Configuration
+
+1. **Find your device's MAC address** in the LMS web interface (Settings → Information)
+
+2. **Add this enhanced transcoding configuration** (replace `[YOUR_DEVICE_MAC_ADDRESS]` with actual MAC):
+
+   ```bash
+   # For Docker users:
+   docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
+   # LyrPlay v1.6 CBass - Combined FLAC and OGG Vorbis support
+   # Replace [YOUR_DEVICE_MAC_ADDRESS] with your device MAC address
+   
+   # Native FLAC seeking support - maintains lossless quality
+   flc flc * [YOUR_DEVICE_MAC_ADDRESS]
+       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+   
+   # High-quality OGG Vorbis for bandwidth efficiency (~320kbps)
+   flc ops * [YOUR_DEVICE_MAC_ADDRESS]
+       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
+   EOF'
+   
+   # Restart LMS server
+   docker restart lms
+   ```
+
+3. **Restart your LMS server** for changes to take effect
+
 ## Usage
 
 ### Material Skin Integration
