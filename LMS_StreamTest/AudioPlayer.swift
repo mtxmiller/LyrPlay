@@ -1,7 +1,8 @@
 // File: AudioPlayer.swift
-// Updated to use StreamingKit for native FLAC support
+// Updated to use CBass for minimal native FLAC support
 import Foundation
-import StreamingKit
+import Bass
+import MediaPlayer
 import os.log
 
 protocol AudioPlayerDelegate: AnyObject {
@@ -16,8 +17,8 @@ protocol AudioPlayerDelegate: AnyObject {
 
 class AudioPlayer: NSObject, ObservableObject {
     
-    // MARK: - Core Components (UPDATED)
-    private var audioPlayer: STKAudioPlayer!
+    // MARK: - Core Components (MINIMAL CBASS)
+    private var currentStream: HSTREAM = 0
     
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
@@ -38,45 +39,48 @@ class AudioPlayer: NSObject, ObservableObject {
     weak var delegate: AudioPlayerDelegate?
     
     // MARK: - State Tracking
-    private var lastReportedState: STKAudioPlayerState = []
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 1.0  // Max 1 update per second
     
+    // MARK: - Lock Screen Controls (avoid duplicate setup)
+    private var lockScreenControlsConfigured = false
+    
     weak var commandHandler: SlimProtoCommandHandler?
 
-    // REMOVED: private var customURLSessionTask: URLSessionDataTask?
-    
     // MARK: - Initialization
     override init() {
         super.init()
-        setupStreamingKit()
-        os_log(.info, log: logger, "AudioPlayer initialized with StreamingKit")
+        setupCBass()
+        os_log(.info, log: logger, "AudioPlayer initialized with CBass")
     }
     
-    // MARK: - Core Setup (UPDATED)
-    private func setupStreamingKit() {
-        let userBufferSize = settings.bufferSize
-        let bufferSeconds = Float32(bufferSizeToSeconds(userBufferSize))
-        let readBufferSize = UInt32(max(userBufferSize / 4, 262144)) // At least 256KB
+    // MARK: - Core Setup (MINIMAL CBASS)
+    private func setupCBass() {
+        // Minimal BASS initialization - keep it simple
+        let result = BASS_Init(-1, 44100, 0, nil, nil)
         
-        // CORRECT: Using the actual struct from your header file
-        var options = STKAudioPlayerOptions()
-        options.flushQueueOnSeek = true
-        options.enableVolumeMixer = true  // We handle volume elsewhere
-        options.readBufferSize = readBufferSize
-        options.bufferSizeInSeconds = bufferSeconds
-        options.secondsRequiredToStartPlaying = Float32(min(Double(bufferSeconds) * 0.3, 2.0)) // Start at 30% or 2s max
-        options.gracePeriodAfterSeekInSeconds = 1.0
-        options.secondsRequiredToStartPlayingAfterBufferUnderun = Float32(min(Double(bufferSeconds) * 0.5, 3.0)) // Resume at 50% or 3s max
+        if result == 0 {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
+            return
+        }
         
-        // Create player with properly configured options
-        audioPlayer = STKAudioPlayer(options: options)
-        audioPlayer.delegate = self
-        audioPlayer.meteringEnabled = false
-        audioPlayer.volume = 1.0
+        // Basic network configuration for LMS streaming  
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s timeout
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))     // 64KB network buffer
+        BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
         
-        os_log(.info, log: logger, "✅ StreamingKit configured - Read Buffer: %dKB, Buffer Time: %.1fs, Start: %.1fs",
-               readBufferSize / 1024, bufferSeconds, options.secondsRequiredToStartPlaying)
+        // Configure iOS audio session for background and lock screen
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "✅ iOS audio session configured for lock screen")
+        } catch {
+            os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
+        }
+        
+        os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
 
     
@@ -100,30 +104,16 @@ class AudioPlayer: NSObject, ObservableObject {
         return max(2.0, min(30.0, bufferSeconds))
     }
     
-    // REMOVED: HTTP response handling - no longer needed
-    // private func handleHTTPResponse(_ response: URLResponse?) { ... }
-    
-    // REMOVED: HTTP header interception - StreamingKit handles format detection naturally
-    // private func interceptHTTPHeaders(for url: URL) { ... }
-    
-    // REMOVED: HTTP header formatting - no longer needed
-    // private func formatHTTPHeaders(_ response: HTTPURLResponse) -> String { ... }
-
-
-    
-    // MARK: - Stream Playback (SIMPLIFIED)
+    // MARK: - Stream Playback (MINIMAL CBASS)
     func playStream(urlString: String) {
-        guard let url = URL(string: urlString) else {
-            os_log(.error, log: logger, "Invalid URL: %{public}s", urlString)
+        guard !urlString.isEmpty else {
+            os_log(.error, log: logger, "Empty URL provided")
             return
         }
         
-        os_log(.info, log: logger, "🎵 Playing stream with StreamingKit: %{public}s", urlString)
+        os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString)
         
         prepareForNewStream()
-        
-        // REMOVED: HTTP header interception - let StreamingKit handle format detection naturally
-        // interceptHTTPHeaders(for: url)
         
         // Reset track end detection protection
         trackEndDetectionEnabled = false
@@ -135,39 +125,50 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
         }
         
-        // StreamingKit handles everything
-        audioPlayer.play(url)
+        // MINIMAL CBASS: Create and play stream
+        currentStream = BASS_StreamCreateURL(
+            urlString,
+            0,                           // offset
+            DWORD(BASS_STREAM_STATUS) |  // enable status info
+            DWORD(BASS_STREAM_AUTOFREE), // auto-free when stopped
+            nil, nil                     // no callbacks yet
+        )
         
-        os_log(.info, log: logger, "✅ StreamingKit playback started")
+        guard currentStream != 0 else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d", errorCode)
+            return
+        }
+        
+        setupCallbacks()
+        
+        let playResult = BASS_ChannelPlay(currentStream, 0)
+        if playResult != 0 {
+            os_log(.info, log: logger, "✅ CBass playback started - Handle: %d", currentStream)
+            
+            // Setup lock screen controls once only
+            if !lockScreenControlsConfigured {
+                setupLockScreenControls()
+                lockScreenControlsConfigured = true
+            }
+            updateNowPlayingInfo(title: "LyrPlay Stream", artist: "Lyrion Music Server")
+            
+            commandHandler?.handleStreamConnected()
+            delegate?.audioPlayerDidStartPlaying()
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BASS_ChannelPlay failed: %d", errorCode)
+        }
     }
     
     func playStreamWithFormat(urlString: String, format: String) {
-        guard let url = URL(string: urlString) else {
-            os_log(.error, log: logger, "Invalid URL: %{public}s", urlString)
-            return
-        }
-        
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s", format, urlString)
         
-        prepareForNewStream()
+        // Format-specific configuration could go here
+        configureForFormat(format)
         
-        // REMOVED: HTTP header interception - let StreamingKit handle format detection naturally
-        // interceptHTTPHeaders(for: url)
-        
-        // Reset track end detection protection
-        trackEndDetectionEnabled = false
-        trackStartTime = Date()
-        
-        // Enable track end detection after minimum duration
-        DispatchQueue.main.asyncAfter(deadline: .now() + minimumTrackDuration) {
-            self.trackEndDetectionEnabled = true
-            os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
-        }
-        
-        // StreamingKit handles the format automatically
-        audioPlayer.play(url)
-        
-        os_log(.info, log: logger, "✅ StreamingKit %{public}s playback started", format)
+        // Use the main playStream method
+        playStream(urlString: urlString)
     }
     
     func playStreamAtPosition(urlString: String, startTime: Double) {
@@ -186,40 +187,64 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Playback Control (UPDATED)
+    // MARK: - Playback Control (MINIMAL CBASS)
     func play() {
+        guard currentStream != 0 else { return }
+        
         isIntentionallyPaused = false
-        audioPlayer.resume()
-        delegate?.audioPlayerDidStartPlaying()
-        os_log(.info, log: logger, "▶️ StreamingKit resumed playback")
+        let result = BASS_ChannelPlay(currentStream, 0)
+        
+        if result != 0 {
+            delegate?.audioPlayerDidStartPlaying()
+            os_log(.info, log: logger, "▶️ CBass resumed playback")
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ CBass resume failed: %d", errorCode)
+        }
     }
     
     func pause() {
+        guard currentStream != 0 else { return }
+        
         isIntentionallyPaused = true
-        audioPlayer.pause()
-        delegate?.audioPlayerDidPause()
-        os_log(.info, log: logger, "⏸️ StreamingKit paused playback")
+        let result = BASS_ChannelPause(currentStream)
+        
+        if result != 0 {
+            delegate?.audioPlayerDidPause()
+            os_log(.info, log: logger, "⏸️ CBass paused playback")
+        }
     }
     
     func stop() {
         isIntentionallyStopped = true
         isIntentionallyPaused = false
-        audioPlayer.stop()
+        
+        if currentStream != 0 {
+            BASS_ChannelStop(currentStream)
+            currentStream = 0
+        }
+        
         delegate?.audioPlayerDidStop()
-        os_log(.debug, log: logger, "⏹️ StreamingKit stopped playback")
+        os_log(.debug, log: logger, "⏹️ CBass stopped playback")
     }
     
-    // MARK: - Time and State (UPDATED)
+    // MARK: - Time and State (MINIMAL CBASS)
     func getCurrentTime() -> Double {
-        return audioPlayer.progress  // StreamingKit provides this
+        guard currentStream != 0 else { return 0.0 }
+        let bytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+        return BASS_ChannelBytes2Seconds(currentStream, bytes)
     }
     
     func getDuration() -> Double {
-        // Prefer metadata duration, fallback to StreamingKit
+        // Prefer metadata duration if available
         if metadataDuration > 0 {
             return metadataDuration
         }
-        return audioPlayer.duration
+        
+        guard currentStream != 0 else { return 0.0 }
+        let bytes = BASS_ChannelGetLength(currentStream, DWORD(BASS_POS_BYTE))
+        let duration = BASS_ChannelBytes2Seconds(currentStream, bytes)
+        return duration.isFinite && duration > 0 ? duration : 0.0
     }
     
     func getPosition() -> Float {
@@ -229,43 +254,60 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     func getPlayerState() -> String {
-        let state = audioPlayer.state
+        guard currentStream != 0 else { return "No Stream" }
         
-        if state.contains(.error) { return "Failed" }
-        if state.contains(.playing) { return "Playing" }
-        if state.contains(.paused) { return "Paused" }
-        if state.contains(.stopped) { return "Stopped" }
-        if state.contains(.buffering) { return "Buffering" }
-        
-        return "Ready"
+        let state = BASS_ChannelIsActive(currentStream)
+        switch state {
+        case DWORD(BASS_ACTIVE_STOPPED): return "Stopped"
+        case DWORD(BASS_ACTIVE_PLAYING): return "Playing"  
+        case DWORD(BASS_ACTIVE_PAUSED): return "Paused"
+        case DWORD(BASS_ACTIVE_STALLED): return "Buffering"
+        default: return "Unknown"
+        }
     }
     
-    // MARK: - Volume Control
+    // MARK: - Volume Control (MINIMAL CBASS)
     func setVolume(_ volume: Float) {
+        guard currentStream != 0 else { return }
+        
         let clampedVolume = max(0.0, min(1.0, volume))
-        audioPlayer.volume = clampedVolume
-        // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Volume set to: %.2f", clampedVolume)
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
     }
 
     func getVolume() -> Float {
-        return audioPlayer.volume
+        guard currentStream != 0 else { return 1.0 }
+        
+        var volume: Float = 1.0
+        BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
+        return volume
     }
     
+    // MARK: - Seeking (🎵 NATIVE FLAC SEEKING - KEY BENEFIT!)
     func seekToPosition(_ time: Double) {
-        audioPlayer.seek(toTime: time)
-        lastReportedTime = time
-        os_log(.info, log: logger, "🔄 StreamingKit seeked to position: %.2f seconds", time)
+        guard currentStream != 0 else { return }
+        
+        let bytes = BASS_ChannelSeconds2Bytes(currentStream, time)
+        let result = BASS_ChannelSetPosition(currentStream, bytes, DWORD(BASS_POS_BYTE))
+        
+        if result != 0 {
+            lastReportedTime = time
+            os_log(.info, log: logger, "🔄 CBass NATIVE FLAC SEEK to position: %.2f seconds", time)
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ CBass seek failed: %d", errorCode)
+        }
     }
     
-    // MARK: - Track End Detection (SIMPLIFIED)
+    // MARK: - Track End Detection (MINIMAL CBASS)
     func checkIfTrackEnded() -> Bool {
-        // FROM REFERENCE: Remove manual track end checking entirely
-        // StreamingKit delegate handles this properly
+        // BASS handles track end detection via callbacks
         return false
     }
     
     // MARK: - Private Helpers
     private func prepareForNewStream() {
+        cleanup() // Clean up any existing stream
+        
         isIntentionallyPaused = false
         isIntentionallyStopped = false
         lastReportedTime = 0
@@ -273,6 +315,133 @@ class AudioPlayer: NSObject, ObservableObject {
         // CRITICAL: Reset track end detection protection
         trackEndDetectionEnabled = false
         trackStartTime = Date()
+    }
+    
+    private func cleanup() {
+        if currentStream != 0 {
+            BASS_ChannelStop(currentStream)
+            BASS_StreamFree(currentStream)
+            currentStream = 0
+        }
+    }
+    
+    // MARK: - Lock Screen Integration
+    private func setupLockScreenControls() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        // Play command - maps to existing play() method
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.playCommand.addTarget { [weak self] event in
+            self?.play()
+            return .success
+        }
+        
+        // Pause command - maps to existing pause() method  
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.pauseCommand.addTarget { [weak self] event in
+            self?.pause()
+            return .success
+        }
+        
+        // Disable commands we don't need (server handles seeking)
+        commandCenter.seekForwardCommand.isEnabled = false
+        commandCenter.seekBackwardCommand.isEnabled = false
+        commandCenter.skipForwardCommand.isEnabled = false
+        commandCenter.skipBackwardCommand.isEnabled = false
+        
+        os_log(.info, log: logger, "✅ Lock screen controls configured")
+    }
+    
+    private func updateNowPlayingInfo(title: String? = nil, artist: String? = nil) {
+        var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        
+        // Update track info
+        if let title = title {
+            nowPlayingInfo[MPMediaItemPropertyTitle] = title
+        }
+        if let artist = artist {
+            nowPlayingInfo[MPMediaItemPropertyArtist] = artist
+        }
+        
+        // Use SimpleTimeTracker time for consistency with Material web interface
+        // Note: Time updates are handled by NowPlayingManager's timer - this just sets initial metadata
+        nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = getPlayerState() == "Playing" ? 1.0 : 0.0
+        
+        // Set duration from metadata if available, otherwise use CBass duration  
+        if metadataDuration > 0 {
+            nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = metadataDuration
+        } else {
+            nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = getDuration()
+        }
+        
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+    }
+    
+    // MARK: - BASS Callbacks (MINIMAL)
+    private func setupCallbacks() {
+        guard currentStream != 0 else { return }
+        
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        
+        // Track end detection - CRITICAL for SlimProto integration
+        BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_END), 0, { handle, channel, data, user in
+            guard let user = user else { return }
+            let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
+            
+            DispatchQueue.main.async {
+                if player.trackEndDetectionEnabled && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
+                    os_log(.info, log: player.logger, "🎵 Track ended naturally")
+                    player.commandHandler?.notifyTrackEnded()
+                    player.delegate?.audioPlayerDidReachEnd()
+                }
+            }
+        }, selfPtr)
+        
+        // Stream stall detection
+        BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_STALL), 0, { handle, channel, data, user in
+            guard let user = user else { return }
+            let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
+            
+            DispatchQueue.main.async {
+                player.delegate?.audioPlayerDidStall()
+            }
+        }, selfPtr)
+        
+        // Position updates for UI
+        let oneSecondBytes = BASS_ChannelSeconds2Bytes(currentStream, 1.0)
+        BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_POS), oneSecondBytes, { handle, channel, data, user in
+            guard let user = user else { return }
+            let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
+            
+            let currentTime = player.getCurrentTime()
+            DispatchQueue.main.async {
+                player.delegate?.audioPlayerTimeDidUpdate(currentTime)
+            }
+        }, selfPtr)
+    }
+    
+    // MARK: - Format Configuration (OPTIMIZED FOR FLAC)  
+    private func configureForFormat(_ format: String) {
+        switch format.uppercased() {
+        case "FLAC":
+            // OPTIMIZED: Use settings from successful CBass implementation
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(20000))        // 20s buffer for stability
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(524288))   // 512KB network chunks  
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% pre-buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))    // Slow updates for stability
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
+            os_log(.info, log: logger, "🎵 FLAC optimized: 20s buffer, 512KB network, stable config")
+            
+        case "AAC", "MP3":
+            // Compressed formats - smaller buffer for responsiveness
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))    // 64KB network
+            os_log(.info, log: logger, "🎵 Compressed format optimized")
+            
+        default:
+            // Use defaults from setupCBass()
+            break
+        }
     }
     
     // MARK: - Metadata
@@ -292,191 +461,8 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Cleanup
     deinit {
-        stop()
+        cleanup()
+        BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")
-    }
-}
-
-// MARK: - STKAudioPlayerDelegate (NEW)
-extension AudioPlayer: STKAudioPlayerDelegate {
-    
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, didStartPlayingQueueItemId queueItemId: NSObject) {
-        os_log(.info, log: logger, "▶️ StreamingKit started playing item")
-        
-        // CRITICAL: Only report if this is a new start, not a resume/seek
-        let currentState = audioPlayer.state
-        
-        if !lastReportedState.contains(.playing) {
-            delegate?.audioPlayerDidStartPlaying()
-            lastReportedState = currentState
-            os_log(.info, log: logger, "✅ Reported start playing to delegate")
-        } else {
-            os_log(.debug, log: logger, "🔄 Suppressed duplicate start playing event")
-        }
-    }
-    
-    // Add this method to the STKAudioPlayerDelegate extension in AudioPlayer.swift
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, didReceiveRawAudioData audioData: Data, audioDescription: AudioStreamBasicDescription) {
-        // Check for ICY metadata in the stream
-        checkForICYMetadata(in: audioData)
-    }
-
-    // Add this method to the AudioPlayer class
-    private func checkForICYMetadata(in data: Data) {
-        // Look for ICY metadata patterns in the audio data
-        // This is a simplified implementation - StreamingKit might have better hooks
-        
-        // Convert data to string to look for metadata
-        if let dataString = String(data: data, encoding: .utf8) {
-            // Look for common ICY metadata patterns
-            if dataString.contains("StreamTitle=") {
-                os_log(.info, log: logger, "🎵 ICY metadata detected in stream")
-                
-                // Notify delegate that metadata might have changed
-                DispatchQueue.main.async {
-                    self.delegate?.audioPlayerDidReceiveMetadataUpdate()
-                }
-            }
-        }
-    }
-    
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, didFinishBufferingSourceWithQueueItemId queueItemId: NSObject) {
-        os_log(.info, log: logger, "📡 StreamingKit finished buffering")
-    }
-    
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, didFinishPlayingQueueItemId queueItemId: NSObject, with stopReason: STKAudioPlayerStopReason, andProgress progress: Double, andDuration duration: Double) {
-        
-        let reasonString = stopReasonDescription(stopReason)
-        os_log(.info, log: logger, "🎵 StreamingKit finished playing - Reason: %{public}s, Progress: %.2f/%.2f", reasonString, progress, duration)
-        
-        // FIXED: Enhanced track end detection based on REFERENCE implementation
-        switch stopReason {
-        case .eof: // End of file - natural track end
-            if !isIntentionallyPaused && !isIntentionallyStopped {
-                os_log(.info, log: logger, "🎵 Track ended naturally (EOF)")
-                
-                // INTEGRATION POINT: Send STMd (decode ready) through command handler
-                commandHandler?.notifyTrackEnded()
-                
-                DispatchQueue.main.async {
-                    self.delegate?.audioPlayerDidReachEnd()
-                }
-            } else {
-                os_log(.info, log: logger, "🎵 Track EOF but end detection disabled or intentional stop")
-            }
-        case .none:
-            // CRITICAL: StreamingKit sometimes reports "none" for natural track ends
-            // Check if we have reasonable progress to determine if this was a natural end
-            if progress > 10.0 && !isIntentionallyPaused && !isIntentionallyStopped {
-                os_log(.info, log: logger, "🎵 Track ended naturally (None reason but good progress: %.2f)", progress)
-                
-                // INTEGRATION POINT: Send STMd (decode ready) through command handler
-                commandHandler?.notifyTrackEnded()
-                
-                DispatchQueue.main.async {
-                    self.delegate?.audioPlayerDidReachEnd()
-                }
-            } else {
-                os_log(.info, log: logger, "🎵 Track stopped with 'None' reason but insufficient progress: %.2f", progress)
-            }
-        case .userAction: // User stopped
-            os_log(.info, log: logger, "👤 Track stopped by user action")
-            // No STMd needed for user actions - server initiated the stop
-            
-        case .error: // Error occurred
-            os_log(.error, log: logger, "❌ Track stopped due to error")
-            // Only trigger on error if enough time has passed (real error, not startup issue)
-            if !isIntentionallyPaused && !isIntentionallyStopped && progress > 5.0 {
-                // INTEGRATION POINT: Send STMd even on errors after significant progress
-                commandHandler?.notifyTrackEnded()
-                
-                DispatchQueue.main.async {
-                    self.delegate?.audioPlayerDidReachEnd()
-                }
-            }
-        default:
-            os_log(.info, log: logger, "🎵 Track stopped with reason: %{public}s, progress: %.2f", stopReasonDescription(stopReason), progress)
-            break
-        }
-    }
-    
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, stateChanged state: STKAudioPlayerState, previousState: STKAudioPlayerState) {
-        let stateString = playerStateDescription(state)
-        let previousStateString = playerStateDescription(previousState)
-        os_log(.debug, log: logger, "🔄 StreamingKit state changed: %{public}s → %{public}s", previousStateString, stateString)
-        
-        // INTEGRATION POINT 1: When connection is established
-        if state.contains(.buffering) && !previousState.contains(.buffering) {
-            os_log(.info, log: logger, "🔗 Stream connection established")
-            commandHandler?.handleStreamConnected()  // Sends STMc
-        }
-        
-        // INTEGRATION POINT 2: When playback actually starts
-        if state.contains(.playing) && !previousState.contains(.playing) {
-            // This is when we should send STMs (track started)
-            os_log(.info, log: logger, "🎵 Playback actually started")
-            // Note: STMs should be sent by the coordinator after this delegate call
-        }
-        
-        // Handle other state changes...
-        switch state {
-        case let newState where newState.contains(.playing):
-            if !previousState.contains(.playing) {
-                delegate?.audioPlayerDidStartPlaying()
-            }
-        case let newState where newState.contains(.paused):
-            if !previousState.contains(.paused) {
-                delegate?.audioPlayerDidPause()
-            }
-        case let newState where newState.contains(.stopped):
-            if !previousState.contains(.stopped) {
-                delegate?.audioPlayerDidStop()
-            }
-        default:
-            break
-        }
-    }
-    
-    func audioPlayer(_ audioPlayer: STKAudioPlayer, unexpectedError errorCode: STKAudioPlayerErrorCode) {
-        os_log(.error, log: logger, "❌ StreamingKit unexpected error: %d", errorCode.rawValue)
-        delegate?.audioPlayerDidStall()
-    }
-    
-    // MARK: - Helper Methods
-    private func stopReasonDescription(_ reason: STKAudioPlayerStopReason) -> String {
-        switch reason {
-        case .none:
-            return "None"
-        case .eof:
-            return "End of File"
-        case .userAction:
-            return "User Action"
-        case .pendingNext:
-            return "Pending Next"
-        case .disposed:
-            return "Disposed"
-        case .error:
-            return "Error"
-        @unknown default:
-            return "Unknown(\(reason.rawValue))"
-        }
-    }
-    
-    private func playerStateDescription(_ state: STKAudioPlayerState) -> String {
-        var states: [String] = []
-        
-        if state.contains(.running) { states.append("Running") }
-        if state.contains(.playing) { states.append("Playing") }
-        if state.contains(.buffering) { states.append("Buffering") }
-        if state.contains(.paused) { states.append("Paused") }
-        if state.contains(.stopped) { states.append("Stopped") }
-        if state.contains(.error) { states.append("Error") }
-        if state.contains(.disposed) { states.append("Disposed") }
-        
-        if states.isEmpty {
-            return "Ready"
-        }
-        
-        return states.joined(separator: ", ")
     }
 }

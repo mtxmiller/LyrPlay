@@ -8,6 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
+		6B88C87B2E624437008CF64E /* Bass in Frameworks */ = {isa = PBXBuildFile; productRef = 6B88C87A2E624437008CF64E /* Bass */; };
+		6B88C87D2E624437008CF64E /* BassFLAC in Frameworks */ = {isa = PBXBuildFile; productRef = 6B88C87C2E624437008CF64E /* BassFLAC */; };
+		6B88C87F2E624437008CF64E /* BassOpus in Frameworks */ = {isa = PBXBuildFile; productRef = 6B88C87E2E624437008CF64E /* BassOpus */; };
 		6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
@@ -74,7 +77,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */,
+				6B88C87D2E624437008CF64E /* BassFLAC in Frameworks */,
+				6B88C87B2E624437008CF64E /* Bass in Frameworks */,
 				6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */,
+				6B88C87F2E624437008CF64E /* BassOpus in Frameworks */,
 				78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -158,6 +164,7 @@
 				6B9C4D4B2DEB81F500D22FD6 /* Frameworks */,
 				6B9C4D4C2DEB81F500D22FD6 /* Resources */,
 				F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */,
+				6B751C552E67D24B0064FDFE /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -168,6 +175,9 @@
 			);
 			name = LMS_StreamTest;
 			packageProductDependencies = (
+				6B88C87A2E624437008CF64E /* Bass */,
+				6B88C87C2E624437008CF64E /* BassFLAC */,
+				6B88C87E2E624437008CF64E /* BassOpus */,
 			);
 			productName = LMS_StreamTest;
 			productReference = 6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */;
@@ -250,6 +260,7 @@
 			mainGroup = 6B9C4D452DEB81F500D22FD6;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				6B88C8792E624437008CF64E /* XCRemoteSwiftPackageReference "CBass" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 6B9C4D4F2DEB81F500D22FD6 /* Products */;
@@ -310,6 +321,23 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		6B751C552E67D24B0064FDFE /* ShellScript */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n# Fix CBass Framework Info.plist files during build\necho \"🔧 Fixing CBass frameworks during build...\"\n\n# Fix frameworks in the built app\nif [ -d \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\" ]; then\n  cd \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\"\n\n  for framework in bass.framework bassflac.framework bassopus.framework; do\n      if [ -d \"$framework\" ]; then\n          info_plist=\"$framework/Info.plist\"\n          if [ -f \"$info_plist\" ]; then\n              echo \"Fixing $framework\"\n              # Add CFBundleVersion if missing\n              if ! /usr/libexec/PlistBuddy -c \"Print CFBundleVersion\" \"$info_plist\" >/dev/null 2>&1; then\n                  /usr/libexec/PlistBuddy -c \"Add CFBundleVersion string 24.17\" \"$info_plist\"\n                  echo \"✅ Added CFBundleVersion to $framework\"\n              else\n                  echo \"✅ CFBundleVersion already exists in $framework\"\n              fi\n          fi\n      fi\n  done\nfi\n\necho \"🎉 Framework fixes completed during build\"\n";
 		};
 		72F8206890725D915803646B /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -555,16 +583,18 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5;
+				MARKETING_VERSION = 1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
-				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -592,16 +622,18 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5;
+				MARKETING_VERSION = 1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
-				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -725,6 +757,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		6B88C8792E624437008CF64E /* XCRemoteSwiftPackageReference "CBass" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Treata11/CBass";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		6B88C87A2E624437008CF64E /* Bass */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B88C8792E624437008CF64E /* XCRemoteSwiftPackageReference "CBass" */;
+			productName = Bass;
+		};
+		6B88C87C2E624437008CF64E /* BassFLAC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B88C8792E624437008CF64E /* XCRemoteSwiftPackageReference "CBass" */;
+			productName = BassFLAC;
+		};
+		6B88C87E2E624437008CF64E /* BassOpus */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B88C8792E624437008CF64E /* XCRemoteSwiftPackageReference "CBass" */;
+			productName = BassOpus;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 6B9C4D462DEB81F500D22FD6 /* Project object */;
 }

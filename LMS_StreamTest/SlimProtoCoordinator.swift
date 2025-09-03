@@ -31,6 +31,7 @@ class SlimProtoCoordinator: ObservableObject {
     private var backgroundedWhilePlaying: Bool = false
     private var isSavingVolume = false
     private var isRestoringVolume = false
+    private var isRecoveryInProgress = false
     
     // MARK: - Simple Position Recovery
     private var savedPosition: Double = 0.0
@@ -489,6 +490,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     }
     
     private func performCustomPositionRecovery(to position: Double) {
+        guard !isRecoveryInProgress else {
+            os_log(.info, log: logger, "⚠️ Recovery already in progress - skipping duplicate call")
+            return
+        }
+        
+        isRecoveryInProgress = true
         os_log(.info, log: logger, "🔄 Custom recovery: server-muted play → seek → pause sequence to %.2f", position)
         
         // First, save current server volume and mute it for silent recovery
@@ -513,6 +520,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         self.restoreServerVolume()
                         
+                        // Mark recovery as complete
+                        self.isRecoveryInProgress = false
+                        
                         // Clear the custom preferences since we've recovered
                         self.clearServerPreferencesRecovery()
                         
@@ -527,6 +537,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     
                     // Restore volume even on failure
                     self.restoreServerVolume()
+                    
+                    // Mark recovery as complete even on failure
+                    self.isRecoveryInProgress = false
                     
                     // Clear preferences even on failure
                     self.clearServerPreferencesRecovery()

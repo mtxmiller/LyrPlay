@@ -229,6 +229,13 @@ class SlimProtoCommandHandler: ObservableObject {
                     os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
                 }
                 
+            case 117: // 'u' = Opus
+                formatName = "Opus"
+                shouldAccept = true
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering Opus - CBass native support!")
+                }
+                
             default:
                 // Only log unknown formats for non-status commands
                 if streamCommand != UInt8(ascii: "t") {
