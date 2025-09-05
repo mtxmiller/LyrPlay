@@ -108,7 +108,8 @@ struct ContentView: View {
                 .ignoresSafeArea(.all)
             
             // Loading screen overlay that covers the entire view when loading
-            if isLoading && loadError == nil {
+            // FIXED: Always show loading screen when isLoading=true, regardless of error state
+            if isLoading {
                 lyrPlayLoadingScreen
                     .ignoresSafeArea(.all)
                     .zIndex(1) // Ensure it appears above WebView
@@ -276,7 +277,7 @@ struct ContentView: View {
                 Image("lyrplay-logo")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(height: 400) // ~2x larger than previous 200
+                    .frame(height: 300) // Reduced from 400 to 300
                     .colorInvert() // Convert black logo to white for dark background
                     .scaleEffect(isLoading ? 1.03 : 1.0)
                     .animation(
@@ -579,8 +580,9 @@ struct WebView: UIViewRepresentable {
         }
         
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-            os_log(.info, log: logger, "Started loading Material interface")
+            os_log(.info, log: logger, "📡 WebView: Started loading Material interface")
             DispatchQueue.main.async {
+                os_log(.debug, log: self.logger, "🔄 WebView: Setting isLoading = true")
                 self.parent.isLoading = true
                 self.parent.loadError = nil
             }
@@ -637,27 +639,29 @@ struct WebView: UIViewRepresentable {
             webView.evaluateJavaScript(settingsHandlerScript) { result, error in
                 if let error = error {
                     os_log(.error, log: self.logger, "❌ Failed to inject settings handler: %{public}s", error.localizedDescription)
-                    // Enable fallback settings button
+                    // Enable fallback settings button and ensure loading is hidden
                     DispatchQueue.main.async {
                         SettingsManager.shared.showFallbackSettingsButton = true
+                        self.parent.isLoading = false
+                        os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (JS injection failed)")
                     }
                 } else {
                     os_log(.info, log: self.logger, "✅ Material settings handler injected successfully")
-                    // Disable fallback settings button
+                    // Disable fallback settings button and ensure loading is hidden
                     DispatchQueue.main.async {
                         SettingsManager.shared.showFallbackSettingsButton = false
+                        self.parent.isLoading = false
+                        os_log(.debug, log: self.logger, "✅ WebView: Setting isLoading = false (JS injection success)")
                     }
                 }
             }
             
-            DispatchQueue.main.async {
-                self.parent.isLoading = false
-            }
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed to load Material interface: %{public}s", error.localizedDescription)
             DispatchQueue.main.async {
+                os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (didFail)")
                 self.parent.isLoading = false
                 self.parent.loadError = "Failed to load Material: \(error.localizedDescription)"
                 // Enable fallback settings button on error
@@ -668,6 +672,7 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed provisional navigation: %{public}s", error.localizedDescription)
             DispatchQueue.main.async {
+                os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (didFailProvisionalNavigation)")
                 self.parent.isLoading = false
                 self.parent.loadError = "Connection failed: \(error.localizedDescription)"
                 // Enable fallback settings button on error

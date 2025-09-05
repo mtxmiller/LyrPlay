@@ -34,6 +34,9 @@ class AudioManager: NSObject, ObservableObject {
     private var wasPlayingBeforeInterruption: Bool = false
     private var interruptionPosition: Double = 0.0
     
+    // MARK: - Now Playing Suppression (for clean recovery)
+    var suppressNowPlayingUpdates: Bool = false
+    
     // MARK: - Initialization
     private override init() {
         self.audioPlayer = AudioPlayer()
@@ -219,14 +222,18 @@ extension AudioManager: AudioPlayerDelegate {
         os_log(.info, log: logger, "🔒 Audio player reports pause time: %.2f (NOT using - server is master)", audioTime)
         
         // Update playing state only, let server time synchronizer provide the position
-        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        if !suppressNowPlayingUpdates {
+            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        }
     }
     
     func audioPlayerDidStop() {
         os_log(.debug, log: logger, "⏹️ Audio player stopped")
         
         // Update now playing info
-        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        if !suppressNowPlayingUpdates {
+            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
+        }
     }
     
     func audioPlayerDidReachEnd() {
@@ -242,7 +249,9 @@ extension AudioManager: AudioPlayerDelegate {
         
         // Only update now playing info locally, don't send to server
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
-        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
+        if !suppressNowPlayingUpdates {
+            nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
+        }
         
         // REMOVED: All the complicated throttling and server communication
         os_log(.debug, log: logger, "📍 Local time update only: %.2f", time)
@@ -322,7 +331,9 @@ extension AudioManager {
                 audioPlayer.pause()
                 
                 // Update now playing
-                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                if !suppressNowPlayingUpdates {
+                    nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                }
                 
                 // For CarPlay disconnect, notify server
                 if routeType.contains("CarPlay") && routeType.contains("Disconnected") {
@@ -344,7 +355,7 @@ extension AudioManager {
         // Check if we should auto-resume (based on server state or last known state)
         // For now, we'll let the server tell us what to do
         if let slimClient = slimClient {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.notifyServerOfCarPlayReconnect()
             }
         }
@@ -428,7 +439,9 @@ extension AudioManager: AudioSessionManagerDelegate {
         // Existing foreground logic...
         let currentTime = audioPlayer.getCurrentTime()
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
-        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
+        if !suppressNowPlayingUpdates {
+            nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
+        }
     }
     
     // NEW: Handle interruptions
@@ -459,7 +472,9 @@ extension AudioManager: AudioSessionManagerDelegate {
                 audioPlayer.pause()
                 
                 // Update now playing
-                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                if !suppressNowPlayingUpdates {
+                    nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
+                }
                 
                 // Check for CarPlay disconnection using the proper route change type
                 if routeChangeDescription == "CarPlay Disconnected" {

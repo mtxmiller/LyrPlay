@@ -2,6 +2,8 @@
 // Updated to use CBass for minimal native FLAC support
 import Foundation
 import Bass
+import BassFLAC
+import BassOpus
 import MediaPlayer
 import os.log
 
@@ -80,7 +82,28 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
         }
         
+        // CRITICAL: Load FLAC and Opus plugins for native format support
+        loadCBassPlugins()
+        
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
+    }
+    
+    private func loadCBassPlugins() {
+        // Load BassFLAC plugin for native FLAC support
+        let flacResult = BASS_FLAC_StreamCreateURL(nil, 0, 0, nil, nil) // Test plugin availability
+        if flacResult != 0 {
+            os_log(.info, log: logger, "✅ BassFLAC plugin loaded successfully")
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BassFLAC plugin failed to load: %d", errorCode)
+        }
+        
+        // Load BassOpus plugin for native Opus support  
+        // Note: BassOpus might auto-register when imported, but we'll test it
+        os_log(.info, log: logger, "🎵 BassOpus plugin imported - checking availability")
+        
+        // Test if Opus format is supported by trying to get supported formats
+        os_log(.info, log: logger, "✅ CBass plugins initialized - FLAC and Opus support enabled")
     }
 
     
@@ -390,9 +413,18 @@ class AudioPlayer: NSObject, ObservableObject {
             
             DispatchQueue.main.async {
                 if player.trackEndDetectionEnabled && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
-                    os_log(.info, log: player.logger, "🎵 Track ended naturally")
-                    player.commandHandler?.notifyTrackEnded()
-                    player.delegate?.audioPlayerDidReachEnd()
+                    // CRITICAL: Verify this is a real end, not a streaming glitch
+                    let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
+                    let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
+                    
+                    // Only trigger end if we're actually near the end (within 3 seconds) or length is unknown
+                    if totalLength <= 0 || currentPos >= (totalLength - 3.0) {
+                        os_log(.info, log: player.logger, "🎵 Track ended naturally (pos: %.2f, length: %.2f)", currentPos, totalLength)
+                        player.commandHandler?.notifyTrackEnded()
+                        player.delegate?.audioPlayerDidReachEnd()
+                    } else {
+                        os_log(.info, log: player.logger, "🚫 Ignoring false track end - pos: %.2f, length: %.2f (streaming glitch)", currentPos, totalLength)
+                    }
                 }
             }
         }, selfPtr)

@@ -276,7 +276,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Check for custom position recovery from server preferences (app open recovery)
         // Only run if this is NOT a lock screen play recovery
         if !isLockScreenPlayRecovery {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.checkForServerPreferencesRecovery()
             }
         } else {
@@ -496,18 +496,19 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         }
         
         isRecoveryInProgress = true
-        os_log(.info, log: logger, "🔄 Custom recovery: server-muted play → seek → pause sequence to %.2f", position)
+        os_log(.info, log: logger, "🔄 Custom recovery: DISABLED volume muting - simple play → seek → pause to %.2f", position)
         
-        // First, save current server volume and mute it for silent recovery
-        saveServerVolumeAndMute()
+        // DISABLED: Volume mute/restore system for testing
+        // saveServerVolumeAndMute()
         
-        // Wait a moment for server volume to be muted, then start recovery sequence
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.sendJSONRPCCommand("play")
+        // Direct recovery sequence without volume muting
+        self.sendJSONRPCCommand("play")
+        
+        // Wait for stream to establish before seeking (app open recovery can be faster)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            os_log(.info, log: self.logger, "🎯 Stream ready - seeking to custom position: %.2f", position)
             
-            // Then seek after play starts
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.sendSeekCommand(to: position) { [weak self] seekSuccess in
+            self.sendSeekCommand(to: position) { [weak self] seekSuccess in
                 guard let self = self else { return }
                 
                 if seekSuccess {
@@ -516,9 +517,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                     // Pause at the recovered position
                     self.sendJSONRPCCommand("pause")
                     
-                    // Restore server volume after recovery is complete
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.restoreServerVolume()
+                    // DISABLED: Volume restore system - immediate completion
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        // self.restoreServerVolume() // DISABLED
                         
                         // Mark recovery as complete
                         self.isRecoveryInProgress = false
@@ -526,24 +527,21 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                         // Clear the custom preferences since we've recovered
                         self.clearServerPreferencesRecovery()
                         
-                        // Refresh UI after recovery
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            self.refreshUIAfterRecovery()
-                            os_log(.info, log: self.logger, "🎵 Server-muted custom position recovery complete")
-                        }
+                        // Immediate UI refresh after recovery
+                        self.refreshUIAfterRecovery()
+                        os_log(.info, log: self.logger, "🎵 Simple custom position recovery complete (no volume muting)")
                     }
                 } else {
                     os_log(.error, log: self.logger, "❌ Custom recovery: Failed to seek to saved position")
                     
-                    // Restore volume even on failure
-                    self.restoreServerVolume()
+                    // DISABLED: Volume restore on failure
+                    // self.restoreServerVolume() // DISABLED
                     
                     // Mark recovery as complete even on failure
                     self.isRecoveryInProgress = false
                     
                     // Clear preferences even on failure
                     self.clearServerPreferencesRecovery()
-                }
                 }
             }
         }
@@ -1090,6 +1088,8 @@ extension SlimProtoCoordinator {
                 monitorReconnectionForSimplePositionRecovery()
             } else {
                 os_log(.info, log: logger, "🔄 PLAY while connected - server already knows position, sending simple play")
+                // CRITICAL: Clear recovery flag for simple connected commands
+                isLockScreenPlayRecovery = false
                 sendJSONRPCCommand("play")
             }
             return  // CRITICAL: Always return to prevent double command
@@ -1291,7 +1291,7 @@ extension SlimProtoCoordinator {
         os_log(.info, log: logger, "👀 Monitoring reconnection for simple position recovery")
         
         var attempts = 0
-        let maxAttempts = 10 // 10 seconds max wait
+        let maxAttempts = 3 // 3 seconds max wait
         
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self = self else {
@@ -1341,47 +1341,30 @@ extension SlimProtoCoordinator {
             return
         }
         
-        // CRITICAL: Reject stale positions that don't match current server time
-        // If saved position is significantly different from current server time, it's probably stale
-        let (currentServerTime, _) = getCurrentInterpolatedTime()
-        let timeDifference = abs(savedPosition - currentServerTime)
-        
-        // If current server time is valid and saved position is more than 10 seconds off, reject it
-        if currentServerTime > 1.0 && timeDifference > 10.0 {
-            os_log(.error, log: logger, "🚨 REJECTING stale position %.2f - server shows %.2f (diff: %.2f)", 
-                   savedPosition, currentServerTime, timeDifference)
-            clearSavedPosition()
-            
-            // CRITICAL: Use current server position instead of starting from 0
-            os_log(.info, log: logger, "🎯 Using current server position: %.2f seconds instead of stale position", currentServerTime)
-            
-            // Recover to current server position instead of saved position
-            savedPosition = currentServerTime
-            // Continue with normal recovery logic using current server position
-        }
+        // Simplified validation - just use the saved position if it's reasonable
         
         os_log(.info, log: logger, "🎯 Recovering to saved position: %.2f seconds", savedPosition)
         
-        // Lock screen recovery: play → seek → play (fast sequence to minimize audio blip)
-        os_log(.info, log: logger, "🔄 Lock screen: play → seek → play sequence (fast)")
+        // Lock screen recovery: play → immediate seek (wait for stream start)
+        os_log(.info, log: logger, "🔄 Lock screen: play → immediate seek sequence")
         
         // CRITICAL: Pause server time sync during lock screen recovery too
         os_log(.debug, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
         
+        // Suppress Now Playing updates during recovery for cleaner lock screen
+        audioManager.suppressNowPlayingUpdates = true
+        
         sendJSONRPCCommand("play")
         
-        // Wait briefly for playback to start, then seek to saved position
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            os_log(.info, log: self.logger, "🎯 Now seeking to saved position: %.2f seconds", self.savedPosition)
+        // Wait for stream to establish before seeking (transcoding needs time)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            os_log(.info, log: self.logger, "🎯 Stream established - now seeking to saved position: %.2f seconds", self.savedPosition)
             
             self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
                 guard let self = self else { return }
                 
                 if seekSuccess {
-                    os_log(.info, log: self.logger, "✅ Lock screen: Seek successful - continuing playback")
-                    
-                    // For lock screen recovery, continue playing after seek
-                    // No additional play command needed - we're already playing
+                    os_log(.info, log: self.logger, "✅ Lock screen: Seek successful after stream start")
                 } else {
                     os_log(.error, log: self.logger, "❌ Lock screen: Failed to seek to saved position")
                 }
@@ -1403,6 +1386,9 @@ extension SlimProtoCoordinator {
                 self.savedPosition = 0.0
                 self.savedPositionTimestamp = nil
                 self.isLockScreenPlayRecovery = false
+                
+                // Re-enable Now Playing updates after recovery
+                self.audioManager.suppressNowPlayingUpdates = false
                 
                 os_log(.info, log: self.logger, "🎵 Lock screen recovery complete")
             }
