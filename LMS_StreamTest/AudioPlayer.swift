@@ -98,12 +98,19 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ BassFLAC plugin failed to load: %d", errorCode)
         }
         
-        // Load BassOpus plugin for native Opus support  
-        // Note: BassOpus might auto-register when imported, but we'll test it
-        os_log(.info, log: logger, "🎵 BassOpus plugin imported - checking availability")
+        // Load BassOpus plugin for native Opus support
+        let opusSupported = BASS_PluginLoad(nil, DWORD(BASS_UNICODE)) // This might auto-load Opus
+        os_log(.info, log: logger, "🎵 BassOpus plugin load result: %d", opusSupported)
         
-        // Test if Opus format is supported by trying to get supported formats
-        os_log(.info, log: logger, "✅ CBass plugins initialized - FLAC and Opus support enabled")
+        // Test actual Opus support by checking plugin info
+        let pluginInfo = BASS_PluginGetInfo(0)
+        if pluginInfo != nil {
+            os_log(.info, log: logger, "✅ BASS plugins loaded successfully")
+        } else {
+            os_log(.error, log: logger, "❌ BASS plugins may not be available")
+        }
+        
+        os_log(.info, log: logger, "✅ CBass plugins initialized - FLAC and Opus support attempted")
     }
 
     

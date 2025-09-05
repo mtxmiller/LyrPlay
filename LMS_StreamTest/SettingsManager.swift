@@ -50,12 +50,14 @@ class SettingsManager: ObservableObject {
     enum AudioFormat: Int, CaseIterable {
         case compressed = 0
         case oggVorbis = 1
-        case flac = 2
+        case opus = 2
+        case flac = 3
         
         var displayName: String {
             switch self {
             case .compressed: return "Compressed (AAC/MP3)"
             case .oggVorbis: return "High Quality (OGG Vorbis)"
+            case .opus: return "Premium Quality (Opus)"
             case .flac: return "Lossless (FLAC)"
             }
         }
@@ -64,6 +66,7 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Smallest bandwidth, universal compatibility"
             case .oggVorbis: return "Near-lossless quality, efficient streaming"
+            case .opus: return "Superior quality, modern codec, efficient bandwidth"
             case .flac: return "Native lossless, highest quality, requires server setup"
             }
         }
@@ -72,7 +75,8 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "aac,mp3"
             case .oggVorbis: return "ogg,aac,mp3"
-            case .flac: return "flc,ogg,aac,mp3"
+            case .opus: return "ops,ogg,aac,mp3"
+            case .flac: return "flc,ops,ogg,aac,mp3"
             }
         }
     }

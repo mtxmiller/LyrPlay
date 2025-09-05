@@ -1270,6 +1270,13 @@ struct AudioFormatConfigView: View {
                     )
                     
                     FormatRequirementRow(
+                        format: "Premium Quality (Opus)",
+                        requirement: "Requires server transcoding setup",
+                        icon: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
+                    
+                    FormatRequirementRow(
                         format: "Lossless (FLAC)",
                         requirement: "Requires server transcoding setup",
                         icon: "exclamationmark.triangle.fill",
@@ -1288,7 +1295,7 @@ struct AudioFormatConfigView: View {
                                 .font(.body)
                                 .foregroundColor(.blue)
                             
-                            Text("Visit GitHub for FLAC & OGG Vorbis transcoding setup")
+                            Text("Visit GitHub for FLAC, Opus & OGG Vorbis transcoding setup")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
