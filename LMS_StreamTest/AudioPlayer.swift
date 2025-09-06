@@ -5,6 +5,7 @@ import Bass
 import BassFLAC
 import BassOpus
 import MediaPlayer
+import AVFoundation
 import os.log
 
 protocol AudioPlayerDelegate: AnyObject {
@@ -47,13 +48,18 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Lock Screen Controls (avoid duplicate setup)
     private var lockScreenControlsConfigured = false
     
+    // MARK: - CarPlay Audio Route Integration
+    private var currentStreamURL: String = ""
+    private var audioRouteObserver: NSObjectProtocol?
+    
     weak var commandHandler: SlimProtoCommandHandler?
 
     // MARK: - Initialization
     override init() {
         super.init()
         setupCBass()
-        os_log(.info, log: logger, "AudioPlayer initialized with CBass")
+        setupAudioRouteMonitoring()
+        os_log(.info, log: logger, "AudioPlayer initialized with CBass and CarPlay route monitoring")
     }
     
     // MARK: - Core Setup (MINIMAL CBASS)
@@ -72,6 +78,9 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))     // 64KB network buffer
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
         
+        // CRITICAL: Enable iOS audio session integration for CarPlay
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
+        
         // Configure iOS audio session for background and lock screen
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -82,57 +91,106 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
         }
         
-        // CRITICAL: Load FLAC and Opus plugins for native format support
-        loadCBassPlugins()
-        
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
     
-    private func loadCBassPlugins() {
-        // Load BassFLAC plugin for native FLAC support
-        let flacResult = BASS_FLAC_StreamCreateURL(nil, 0, 0, nil, nil) // Test plugin availability
-        if flacResult != 0 {
-            os_log(.info, log: logger, "✅ BassFLAC plugin loaded successfully")
-        } else {
-            let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ BassFLAC plugin failed to load: %d", errorCode)
+    // MARK: - CarPlay Audio Route Integration
+    private func setupAudioRouteMonitoring() {
+        audioRouteObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleAudioRouteChange(notification)
         }
         
-        // Load BassOpus plugin for native Opus support
-        let opusSupported = BASS_PluginLoad(nil, DWORD(BASS_UNICODE)) // This might auto-load Opus
-        os_log(.info, log: logger, "🎵 BassOpus plugin load result: %d", opusSupported)
-        
-        // Test actual Opus support by checking plugin info
-        let pluginInfo = BASS_PluginGetInfo(0)
-        if pluginInfo != nil {
-            os_log(.info, log: logger, "✅ BASS plugins loaded successfully")
-        } else {
-            os_log(.error, log: logger, "❌ BASS plugins may not be available")
+        os_log(.info, log: logger, "✅ Audio route monitoring setup for CarPlay integration")
+    }
+    
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let routeChangeReason = AVAudioSession.RouteChangeReason(rawValue: reason) else {
+            return
         }
         
-        os_log(.info, log: logger, "✅ CBass plugins initialized - FLAC and Opus support attempted")
+        let reasonString = routeChangeReasonString(routeChangeReason)
+        os_log(.info, log: logger, "🔀 Audio route change detected: %{public}s", reasonString)
+        
+        switch routeChangeReason {
+        case .newDeviceAvailable, .oldDeviceUnavailable:
+            // Check if this is a CarPlay route change
+            let currentRoute = AVAudioSession.sharedInstance().currentRoute
+            let isCarPlay = currentRoute.outputs.contains { output in
+                output.portType == .carAudio
+            }
+            
+            if isCarPlay {
+                os_log(.info, log: logger, "🚗 CarPlay detected - reconfiguring BASS for CarPlay audio routing")
+                reconfigureBassForCarPlay()
+            } else {
+                os_log(.info, log: logger, "📱 Non-CarPlay route - using standard BASS configuration")
+                reconfigureBassForStandardRoute()
+            }
+            
+        case .routeConfigurationChange:
+            os_log(.info, log: logger, "🔧 Route configuration changed - checking CarPlay status")
+            // Handle configuration changes that might affect CarPlay
+            
+        default:
+            os_log(.info, log: logger, "🔀 Other route change: %{public}s", reasonString)
+        }
+    }
+    
+    private func reconfigureBassForCarPlay() {
+        // CRITICAL FIX: Instead of complex BASS reinitialization, simply invalidate current stream
+        // This forces PLAY commands to create fresh streams with proper CarPlay routing
+        // (Same approach that makes NEXT/PREVIOUS commands work)
+        
+        let wasPlaying = (currentStream != 0 && BASS_ChannelIsActive(currentStream) == DWORD(BASS_ACTIVE_PLAYING))
+        let currentPosition = getCurrentTime()
+        
+        os_log(.info, log: logger, "🚗 CarPlay route change - invalidating stream for fresh routing (was playing: %{public}@, position: %.2f)", wasPlaying ? "true" : "false", currentPosition)
+        
+        // CRITICAL: Stop and free current stream to force reinitialization
+        if currentStream != 0 {
+            BASS_ChannelStop(currentStream)
+            BASS_StreamFree(currentStream)
+            currentStream = 0
+            os_log(.info, log: logger, "🚗 Stream invalidated - next PLAY command will create fresh stream with CarPlay routing")
+        }
+        
+        // DON'T restart stream here - let the server's PLAY command trigger fresh stream creation
+        // This ensures PLAY/PAUSE commands behave like NEXT/PREVIOUS (fresh stream = proper routing)
+        
+        // Save state for recovery if needed
+        if wasPlaying && !currentStreamURL.isEmpty {
+            os_log(.info, log: logger, "🚗 Stream will be recreated on next PLAY command: %{public}s at position %.2f", currentStreamURL, currentPosition)
+            
+            // Notify command handler that stream was invalidated for CarPlay
+            commandHandler?.notifyStreamInvalidatedForCarPlay()
+        }
+    }
+    
+    private func reconfigureBassForStandardRoute() {
+        // Standard route handling - currently no special action needed
+        // Could be extended for other route types in the future
+        os_log(.info, log: logger, "📱 Standard audio route - no reconfiguration needed")
+    }
+    
+    private func routeChangeReasonString(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .unknown: return "Unknown"
+        case .newDeviceAvailable: return "New Device Available"
+        case .oldDeviceUnavailable: return "Old Device Unavailable"
+        case .categoryChange: return "Category Change"
+        case .override: return "Override"
+        case .wakeFromSleep: return "Wake From Sleep"
+        case .noSuitableRouteForCategory: return "No Suitable Route"
+        case .routeConfigurationChange: return "Route Configuration Change"
+        @unknown default: return "Unknown Route Change"
+        }
     }
 
-    
-    private func bufferSizeToSeconds(_ bufferSizeBytes: Int) -> TimeInterval {
-        // FLAC-aware calculation based on actual bitrates
-        let estimatedBitrate: Double
-        
-        // Use higher bitrate estimate since FLAC is prioritized
-        if bufferSizeBytes >= 2_097_152 { // 2MB+
-            estimatedBitrate = 1_200_000 // 1.2 Mbps - high quality FLAC
-        } else if bufferSizeBytes >= 1_048_576 { // 1MB+
-            estimatedBitrate = 900_000 // 900 kbps - mixed FLAC/AAC
-        } else {
-            estimatedBitrate = 600_000 // 600 kbps - mostly compressed
-        }
-        
-        let bytesPerSecond = estimatedBitrate / 8.0
-        let bufferSeconds = Double(bufferSizeBytes) / bytesPerSecond
-        
-        // FLAC needs longer buffer times, minimum 2 seconds
-        return max(2.0, min(30.0, bufferSeconds))
-    }
     
     // MARK: - Stream Playback (MINIMAL CBASS)
     func playStream(urlString: String) {
@@ -142,6 +200,9 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString)
+        
+        // Store current URL for CarPlay route recovery
+        currentStreamURL = urlString
         
         prepareForNewStream()
         
@@ -219,7 +280,10 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Playback Control (MINIMAL CBASS)
     func play() {
-        guard currentStream != 0 else { return }
+        guard currentStream != 0 else { 
+            os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream was invalidated (likely for CarPlay)")
+            return 
+        }
         
         isIntentionallyPaused = false
         let result = BASS_ChannelPlay(currentStream, 0)
@@ -355,31 +419,13 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Lock Screen Integration
+    // MARK: - Lock Screen Integration (DISABLED - NowPlayingManager handles this)
     private func setupLockScreenControls() {
-        let commandCenter = MPRemoteCommandCenter.shared()
+        // CRITICAL FIX: AudioPlayer should NOT set up MPRemoteCommandCenter
+        // NowPlayingManager already handles lock screen/CarPlay commands via SlimProto
+        // This duplicate setup was causing conflicts and CarPlay issues
         
-        // Play command - maps to existing play() method
-        commandCenter.playCommand.isEnabled = true
-        commandCenter.playCommand.addTarget { [weak self] event in
-            self?.play()
-            return .success
-        }
-        
-        // Pause command - maps to existing pause() method  
-        commandCenter.pauseCommand.isEnabled = true
-        commandCenter.pauseCommand.addTarget { [weak self] event in
-            self?.pause()
-            return .success
-        }
-        
-        // Disable commands we don't need (server handles seeking)
-        commandCenter.seekForwardCommand.isEnabled = false
-        commandCenter.seekBackwardCommand.isEnabled = false
-        commandCenter.skipForwardCommand.isEnabled = false
-        commandCenter.skipBackwardCommand.isEnabled = false
-        
-        os_log(.info, log: logger, "✅ Lock screen controls configured")
+        os_log(.info, log: logger, "⚠️ AudioPlayer MPRemoteCommandCenter setup DISABLED - handled by NowPlayingManager")
     }
     
     private func updateNowPlayingInfo(title: String? = nil, artist: String? = nil) {
@@ -395,7 +441,9 @@ class AudioPlayer: NSObject, ObservableObject {
         
         // Use SimpleTimeTracker time for consistency with Material web interface
         // Note: Time updates are handled by NowPlayingManager's timer - this just sets initial metadata
-        nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = getPlayerState() == "Playing" ? 1.0 : 0.0
+        // CRITICAL FIX: Do NOT set PlaybackRate here - NowPlayingManager controls this via SlimProto
+        // This was causing conflicts where CBass state overrode SlimProto state
+        // nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = getPlayerState() == "Playing" ? 1.0 : 0.0
         
         // Set duration from metadata if available, otherwise use CBass duration  
         if metadataDuration > 0 {
@@ -420,18 +468,13 @@ class AudioPlayer: NSObject, ObservableObject {
             
             DispatchQueue.main.async {
                 if player.trackEndDetectionEnabled && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
-                    // CRITICAL: Verify this is a real end, not a streaming glitch
+                    // BASS detected stream end - trust it for LMS streams
                     let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
                     let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
                     
-                    // Only trigger end if we're actually near the end (within 3 seconds) or length is unknown
-                    if totalLength <= 0 || currentPos >= (totalLength - 3.0) {
-                        os_log(.info, log: player.logger, "🎵 Track ended naturally (pos: %.2f, length: %.2f)", currentPos, totalLength)
-                        player.commandHandler?.notifyTrackEnded()
-                        player.delegate?.audioPlayerDidReachEnd()
-                    } else {
-                        os_log(.info, log: player.logger, "🚫 Ignoring false track end - pos: %.2f, length: %.2f (streaming glitch)", currentPos, totalLength)
-                    }
+                    os_log(.info, log: player.logger, "🎵 Track ended (pos: %.2f, length: %.2f)", currentPos, totalLength)
+                    player.commandHandler?.notifyTrackEnded()
+                    player.delegate?.audioPlayerDidReachEnd()
                 }
             }
         }, selfPtr)
@@ -459,26 +502,39 @@ class AudioPlayer: NSObject, ObservableObject {
         }, selfPtr)
     }
     
-    // MARK: - Format Configuration (OPTIMIZED FOR FLAC)  
+    // MARK: - Format Configuration (USER-CONFIGURABLE CBass BUFFERS)  
     private func configureForFormat(_ format: String) {
         switch format.uppercased() {
         case "FLAC":
-            // OPTIMIZED: Use settings from successful CBass implementation
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(20000))        // 20s buffer for stability
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(524288))   // 512KB network chunks  
+            // Use user-configurable CBass buffer settings
+            let flacBufferMS = settings.flacBufferSeconds * 1000  // Convert to milliseconds
+            let networkBufferBytes = settings.networkBufferKB * 1024  // Convert to bytes
+            
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferBytes))   // User network buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% pre-buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))    // Slow updates for stability
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
-            os_log(.info, log: logger, "🎵 FLAC optimized: 20s buffer, 512KB network, stable config")
             
-        case "AAC", "MP3":
-            // Compressed formats - smaller buffer for responsiveness
+            os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %dKB network", settings.flacBufferSeconds, settings.networkBufferKB)
+            
+        case "AAC", "MP3", "OGG":
+            // Compressed formats that work well - smaller buffer for responsiveness
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))    // 64KB network
-            os_log(.info, log: logger, "🎵 Compressed format optimized")
+            os_log(.info, log: logger, "🎵 Stable compressed format optimized: %{public}s", format)
+            
+        case "OPUS":
+            // Opus needs more buffering than other compressed formats
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s buffer (between compressed and FLAC)
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(131072))   // 128KB network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 10% pre-buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
+            os_log(.info, log: logger, "🎵 Opus configured with enhanced buffering: 5s buffer, 128KB network")
             
         default:
-            // Use defaults from setupCBass()
+            // Use defaults from setupCBass() - 2s buffer, 64KB network
+            os_log(.info, log: logger, "🎵 Using default CBass configuration for format: %{public}s", format)
             break
         }
     }
@@ -501,6 +557,12 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Cleanup
     deinit {
         cleanup()
+        
+        // Clean up audio route observer
+        if let observer = audioRouteObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        
         BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")
     }

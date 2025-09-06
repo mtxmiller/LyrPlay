@@ -149,12 +149,29 @@ struct ContentView: View {
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
+            
+            // CRITICAL FIX: Removed duplicate app open recovery call
+            // App open recovery should only be triggered by willEnterForegroundNotification
+            // Having it in both onAppear and willEnterForeground caused double execution
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             isAppInBackground = true
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
+            
+            // Check for app open recovery when app enters foreground
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                // CRITICAL FIX: Only perform recovery if app is NOT already playing
+                let currentState = audioManager.getPlayerState()
+                
+                if currentState == "Playing" {
+                    os_log(.info, log: logger, "📱 App Open Recovery: Skipping - already playing (state: %{public}s)", currentState)
+                } else {
+                    os_log(.info, log: logger, "📱 App Open Recovery: Proceeding - not playing (state: %{public}s)", currentState)
+                    slimProtoCoordinator.performAppOpenRecovery()
+                }
+            }
         }
         .onReceive(settings.$shouldReloadWebView) { shouldReload in
             print("🔄 shouldReloadWebView changed to: \(shouldReload)")
@@ -595,6 +612,35 @@ struct WebView: UIViewRepresentable {
             let settingsHandlerScript = """
             (function() {
                 console.log('LyrPlay: Injecting Material settings handler...');
+                
+                // CRITICAL: Disable MediaSession/Lock Screen controls to prevent audio conflicts
+                // This prevents Material skin from taking over iOS audio session
+                function disableMediaControls() {
+                    // Wait for Vue app to be available
+                    if (typeof bus !== 'undefined' && bus.$store) {
+                        console.log('LyrPlay: Disabling media controls to prevent audio session conflicts');
+                        
+                        // Force mediaControls to false and prevent changes
+                        bus.$store.state.mediaControls = false;
+                        
+                        // Override the mediaControls getter/setter to always return false
+                        Object.defineProperty(bus.$store.state, 'mediaControls', {
+                            value: false,
+                            writable: false,
+                            configurable: false
+                        });
+                        
+                        return true;
+                    }
+                    return false;
+                }
+                
+                // Try to disable media controls immediately and retry if needed
+                if (!disableMediaControls()) {
+                    setTimeout(disableMediaControls, 500);
+                    setTimeout(disableMediaControls, 1500);
+                    setTimeout(disableMediaControls, 3000);
+                }
                 
                 // Override window.open to catch the appSettings URL
                 const originalOpen = window.open;

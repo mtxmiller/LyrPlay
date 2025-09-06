@@ -14,8 +14,9 @@ class SettingsManager: ObservableObject {
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 8.0
-    // REMOVED: preferredFormats - capabilities are now hardcoded in SlimProtoClient
-    @Published var bufferSize: Int = 2097152  // 2MB
+    // CBass-specific buffer settings for FLAC stability tuning
+    @Published var flacBufferSeconds: Int = 15  // FLAC playback buffer duration (was 20s hardcoded)
+    @Published var networkBufferKB: Int = 512   // Network buffer size in KB (was 512KB hardcoded)
     @Published var isConfigured: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
     @Published var shouldReloadWebView: Bool = false
@@ -89,8 +90,9 @@ class SettingsManager: ObservableObject {
         static let playerName = "PlayerName"
         static let playerMACAddress = "PlayerMACAddress"
         static let connectionTimeout = "ConnectionTimeout"
-        // REMOVED: preferredFormats key - capabilities hardcoded
-        static let bufferSize = "BufferSize"
+        // CBass-specific buffer keys
+        static let flacBufferSeconds = "FlacBufferSeconds"
+        static let networkBufferKB = "NetworkBufferKB"
         static let isConfigured = "IsConfigured"
         static let settingsVersion = "SettingsVersion"
         static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
@@ -155,8 +157,9 @@ class SettingsManager: ObservableObject {
         playerName = UserDefaults.standard.string(forKey: Keys.playerName) ?? ""
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
         connectionTimeout = UserDefaults.standard.object(forKey: Keys.connectionTimeout) as? TimeInterval ?? 10.0
-        // REMOVED: preferredFormats loading - capabilities hardcoded
-        bufferSize = UserDefaults.standard.object(forKey: Keys.bufferSize) as? Int ?? 1048576
+        // Load CBass-specific buffer settings
+        flacBufferSeconds = UserDefaults.standard.object(forKey: Keys.flacBufferSeconds) as? Int ?? 15
+        networkBufferKB = UserDefaults.standard.object(forKey: Keys.networkBufferKB) as? Int ?? 512
         isConfigured = UserDefaults.standard.bool(forKey: Keys.isConfigured)
         showFallbackSettingsButton = UserDefaults.standard.object(forKey: Keys.showFallbackSettingsButton) as? Bool ?? true
         backupServerHost = UserDefaults.standard.string(forKey: Keys.backupServerHost) ?? ""
@@ -181,8 +184,9 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(playerName, forKey: Keys.playerName)
         UserDefaults.standard.set(playerMACAddress, forKey: Keys.playerMACAddress)
         UserDefaults.standard.set(connectionTimeout, forKey: Keys.connectionTimeout)
-        // REMOVED: preferredFormats saving - capabilities hardcoded
-        UserDefaults.standard.set(bufferSize, forKey: Keys.bufferSize)
+        // Save CBass-specific buffer settings
+        UserDefaults.standard.set(flacBufferSeconds, forKey: Keys.flacBufferSeconds)
+        UserDefaults.standard.set(networkBufferKB, forKey: Keys.networkBufferKB)
         UserDefaults.standard.set(isConfigured, forKey: Keys.isConfigured)
         UserDefaults.standard.set(currentSettingsVersion, forKey: Keys.settingsVersion)
         UserDefaults.standard.set(showFallbackSettingsButton, forKey: Keys.showFallbackSettingsButton)
@@ -391,8 +395,9 @@ class SettingsManager: ObservableObject {
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
-        // REMOVED: preferredFormats reset - capabilities hardcoded
-        bufferSize = 2097152
+        // Reset CBass buffer settings to conservative defaults
+        flacBufferSeconds = 15
+        networkBufferKB = 512
         
         saveSettings()
     }

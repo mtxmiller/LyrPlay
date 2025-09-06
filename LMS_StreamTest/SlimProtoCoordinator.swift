@@ -31,13 +31,6 @@ class SlimProtoCoordinator: ObservableObject {
     private var backgroundedWhilePlaying: Bool = false
     private var isSavingVolume = false
     private var isRestoringVolume = false
-    private var isRecoveryInProgress = false
-    
-    // MARK: - Simple Position Recovery
-    private var savedPosition: Double = 0.0
-    private var savedPositionTimestamp: Date?
-    private var shouldResumeOnPlay: Bool = false
-    private var isLockScreenPlayRecovery: Bool = false
     
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
@@ -112,18 +105,18 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     func disconnect() {
-        os_log(.info, log: logger, "🔌 Disconnecting from server")
+        os_log(.info, log: logger, "🔌 Disconnecting from server with position save")
         connectionManager.userInitiatedDisconnection()
         // DON'T stop server time sync immediately - preserve last known good time for lock screen
         // stopServerTimeSync()
-        client.disconnect()
+        client.disconnectWithPositionSave()
     }
     
     func restartConnection() async {
         os_log(.info, log: logger, "🔄 Restarting connection to apply new capabilities...")
         
-        // Disconnect from server
-        disconnect()
+        // Quick disconnect without position saving (just a reconnect)
+        client.disconnect()
         
         // Wait briefly for clean disconnect
         try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
@@ -251,9 +244,200 @@ class SlimProtoCoordinator: ObservableObject {
         stopServerTimeSync()
         stopServerTimeFetching()  // Stop our simplified server time fetching
         stopMetadataRefresh()  // Add this line
-        disconnect()
+        // Use position-saving disconnect when app is being deallocated
+        client.disconnectWithPositionSave()
     }
     
+    // MARK: - Playlist-Based Position Recovery (Home Assistant Approach)
+    
+    /// Save current playback position and playlist state for recovery
+    func saveCurrentPositionForRecovery() {
+        // Get current position from SimpleTimeTracker (most accurate, live position)
+        let currentPosition = getCurrentTimeForSaving()
+        guard currentPosition > 0 else {
+            os_log(.info, log: logger, "💾 No current position to save for recovery")
+            return
+        }
+        
+        // Query server for current playlist state (but use local time for position)
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1, "tags:u"]]
+        ]
+        
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self,
+                  let result = response["result"] as? [String: Any] else {
+                os_log(.info, log: self?.logger ?? OSLog.default, "💾 Could not get server status for recovery")
+                return
+            }
+            
+            // Parse playlist_cur_index - could be Int or String
+            let playlistCurIndex: Int
+            if let indexAsInt = result["playlist_cur_index"] as? Int {
+                playlistCurIndex = indexAsInt
+            } else if let indexAsString = result["playlist_cur_index"] as? String, 
+                      let indexParsed = Int(indexAsString) {
+                playlistCurIndex = indexParsed
+            } else {
+                os_log(.info, log: self.logger, "💾 Could not parse playlist index for recovery: %{public}@", 
+                       String(describing: result["playlist_cur_index"]))
+                return
+            }
+            
+            // Save to user preferences for recovery (using live position, not server time)
+            UserDefaults.standard.set(playlistCurIndex, forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.set(currentPosition, forKey: "lyrplay_recovery_position") 
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            
+            os_log(.info, log: self.logger, "💾 Saved recovery state: track %d at %.2f seconds (live position)", playlistCurIndex, currentPosition)
+        }
+    }
+    
+    /// Perform playlist jump with timeOffset recovery (Home Assistant style)
+    private func performPlaylistRecovery() {
+        // Check if we have recent recovery data
+        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
+              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
+            os_log(.info, log: logger, "🔄 No recent recovery data - using simple play command")
+            sendJSONRPCCommand("play")
+            return
+        }
+        
+        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        
+        guard savedPosition > 0 else {
+            os_log(.info, log: logger, "🔄 No saved position - using simple play command") 
+            sendJSONRPCCommand("play")
+            return
+        }
+        
+        os_log(.info, log: logger, "🎯 Performing playlist recovery: jump to track %d at %.2f seconds", savedIndex, savedPosition)
+        
+        // Use Home Assistant approach: playlist jump with timeOffset
+        let playlistJumpCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, [
+                "playlist", "jump", savedIndex, 1, 0, [
+                    "timeOffset": savedPosition
+                ]
+            ]]
+        ]
+        
+        sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🎯 Playlist jump recovery completed")
+            
+            // Clear recovery data after successful use
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
+        }
+    }
+    
+    /// CarPlay reconnect recovery - connects to server first, then performs playlist jump
+    func performCarPlayRecovery() {
+        // Check if we have recent recovery data
+        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
+              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
+            os_log(.info, log: logger, "🚗 No recent recovery data for CarPlay - connecting and using simple play command")
+            connect()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self.sendJSONRPCCommand("play")
+            }
+            return
+        }
+        
+        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        
+        guard savedPosition > 0 else {
+            os_log(.info, log: logger, "🚗 No saved position for CarPlay - connecting and using simple play command")
+            connect()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self.sendJSONRPCCommand("play")
+            }
+            return
+        }
+        
+        os_log(.info, log: logger, "🚗 Performing CarPlay recovery: connecting first, then jump to track %d at %.2f seconds", savedIndex, savedPosition)
+        
+        // CRITICAL FIX: Establish SlimProto connection first
+        connect()
+        
+        // Wait for connection to establish before attempting playlist recovery
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            os_log(.info, log: self.logger, "🚗 Connection established, executing playlist jump recovery")
+            
+            // Use same Home Assistant approach: playlist jump with timeOffset
+            let playlistJumpCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [self.settings.playerMACAddress, [
+                    "playlist", "jump", savedIndex, 1, 0, [
+                        "timeOffset": savedPosition
+                    ]
+                ]]
+            ]
+            
+            self.sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
+                os_log(.info, log: self?.logger ?? OSLog.default, "🚗 CarPlay recovery completed - continuing playback")
+                
+                // Clear recovery data after successful use
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
+            }
+        }
+    }
+    
+    /// App open recovery - same playlist jump method but pauses after recovery
+    func performAppOpenRecovery() {
+        // Check if we have recent recovery data
+        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
+              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
+            os_log(.info, log: logger, "📱 No recent recovery data for app open - skipping recovery")
+            return
+        }
+        
+        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        
+        guard savedPosition > 0 else {
+            os_log(.info, log: logger, "📱 No saved position for app open - skipping recovery") 
+            return
+        }
+        
+        os_log(.info, log: logger, "📱 Performing app open recovery: jump to track %d at %.2f seconds (will pause)", savedIndex, savedPosition)
+        
+        // Use same Home Assistant approach: playlist jump with timeOffset
+        let playlistJumpCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, [
+                "playlist", "jump", savedIndex, 1, 0, [
+                    "timeOffset": savedPosition
+                ]
+            ]]
+        ]
+        
+        sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery jump completed - pausing playback")
+            
+            // CRITICAL: Pause after recovery for app open scenario
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.sendJSONRPCCommand("pause")
+                os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery complete - paused at correct position")
+            }
+            
+            // Clear recovery data after successful use
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
+        }
+    }
     
 }
 
@@ -270,22 +454,16 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         startServerTimeSync()
         setupNowPlayingManagerIntegration()
         
-        // Check if we need to recover position after reconnection
-        checkForPositionRecoveryAfterConnection()
         
-        // Check for custom position recovery from server preferences (app open recovery)
-        // Only run if this is NOT a lock screen play recovery
-        if !isLockScreenPlayRecovery {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.checkForServerPreferencesRecovery()
-            }
-        } else {
-            os_log(.info, log: logger, "⚠️ Skipping custom position recovery - lock screen recovery in progress")
-        }
+        // Removed custom position recovery - server auto-resume handles position recovery
     }
 
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
+        
+        // CRITICAL: Save position for playlist recovery on any disconnect
+        saveCurrentPositionForRecovery()
+        
         connectionManager.didDisconnect(error: error)
         
         stopPlaybackHeartbeat()  // ← Correct timer
@@ -330,16 +508,16 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         
         os_log(.info, log: logger, "📱 App backgrounded - saving position for potential recovery")
         
+        // CRITICAL: Save current position for playlist recovery
+        saveCurrentPositionForRecovery()
+        
         let isLockScreenPaused = commandHandler.isPausedByLockScreen
         let playerState = audioManager.getPlayerState()
         
         os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
                isLockScreenPaused ? "YES" : "NO", playerState)
         
-        // ALWAYS save position when backgrounding (for lock screen recovery AND app open recovery)
-        os_log(.info, log: logger, "💾 Saving position for potential recovery")
-        saveCurrentPositionLocally()
-        savePositionToServerPreferences()
+        // Position will be saved automatically by server's power management
         
         if playerState == "Paused" || playerState == "Stopped" {
             backgroundedWhilePlaying = false
@@ -359,59 +537,16 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         isAppInBackground = false
         backgroundedWhilePlaying = false
         
-        // CRITICAL: Clear lock screen recovery flag when app opens normally
-        // App-open should use normal app-open recovery, not lock screen recovery
-        isLockScreenPlayRecovery = false
-        os_log(.info, log: logger, "📱 App foregrounded - cleared lock screen recovery flag")
+        os_log(.info, log: logger, "📱 App foregrounded")
         
         if connectionManager.connectionState.isConnected {
-            // Check if we need to recover position after being backgrounded
-            checkForPositionRecoveryOnForeground()
+            os_log(.info, log: logger, "Already connected - server auto-resume will handle position recovery")
         } else {
-            // Will connect and potentially recover position
             connect()
         }
     }
     
-    // MARK: - Simple Position Recovery Methods
     
-    private func saveCurrentPositionLocally() {
-        // Use current time immediately (no server fetch needed - we have SimpleTimeTracker)
-        let currentTime = self.getCurrentTimeForSaving()
-        let audioTime = self.audioManager.getCurrentTime()
-        
-        os_log(.info, log: self.logger, "🔍 Position sources - Server: %.2f, Audio: %.2f", 
-               currentTime, audioTime)
-        
-        // Use SimpleTimeTracker time as primary source (reliable even when disconnected)
-        var positionToSave: Double = 0.0
-        var sourceUsed: String = "none"
-        
-        if currentTime > 0.1 {
-            positionToSave = currentTime
-            sourceUsed = "SimpleTimeTracker"
-            os_log(.info, log: self.logger, "✅ Using SimpleTimeTracker time: %.2f", currentTime)
-        }
-        // Fallback to audio time only if SimpleTimeTracker unavailable
-        else if audioTime > 0.1 {
-            positionToSave = audioTime
-            sourceUsed = "audio manager (fallback)"
-            os_log(.info, log: self.logger, "🔄 SimpleTimeTracker unavailable, using audio time: %.2f", audioTime)
-        }
-        
-        // Only save if we got a valid position
-        if positionToSave > 0.1 {
-            self.savedPosition = positionToSave
-            self.savedPositionTimestamp = Date()
-            self.shouldResumeOnPlay = true
-            
-            os_log(.info, log: self.logger, "💾 Saved position locally: %.2f seconds (from %{public}s)", 
-                   positionToSave, sourceUsed)
-        } else {
-            os_log(.error, log: self.logger, "❌ No valid position to save - Server: %.2f, Audio: %.2f", 
-                   currentTime, audioTime)
-        }
-    }
     
     // MARK: - Custom Position Banking (Server Preferences)
     
@@ -456,112 +591,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         sendJSONRPCCommandDirect(saveTimestampCommand) { _ in }
     }
     
-    private func checkForServerPreferencesRecovery() {
-        os_log(.info, log: logger, "🔍 Checking for custom position recovery from server preferences")
-        
-        let playerID = settings.playerMACAddress
-        
-        // Query our saved position
-        let queryPositionCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["playerpref", "lyrPlayLastPosition", "?"]]
-        ]
-        
-        sendJSONRPCCommandDirect(queryPositionCommand) { [weak self] response in
-            self?.handleServerPreferencesRecoveryResponse(response)
-        }
-    }
-    
-    private func handleServerPreferencesRecoveryResponse(_ response: [String: Any]?) {
-        guard let response = response,
-              let result = response["result"] as? [String: Any],
-              let positionString = result["_p2"] as? String,
-              let savedPosition = Double(positionString),
-              savedPosition > 0.1 else {
-            os_log(.info, log: logger, "ℹ️ No custom position found in server preferences")
-            return
-        }
-        
-        os_log(.info, log: logger, "🎯 Found custom saved position: %.2f seconds - starting recovery", savedPosition)
-        
-        // Perform custom position recovery
-        performCustomPositionRecovery(to: savedPosition)
-    }
-    
-    private func performCustomPositionRecovery(to position: Double) {
-        guard !isRecoveryInProgress else {
-            os_log(.info, log: logger, "⚠️ Recovery already in progress - skipping duplicate call")
-            return
-        }
-        
-        isRecoveryInProgress = true
-        os_log(.info, log: logger, "🔄 Custom recovery: DISABLED volume muting - simple play → seek → pause to %.2f", position)
-        
-        // DISABLED: Volume mute/restore system for testing
-        // saveServerVolumeAndMute()
-        
-        // Direct recovery sequence without volume muting
-        self.sendJSONRPCCommand("play")
-        
-        // Wait for stream to establish before seeking (app open recovery can be faster)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            os_log(.info, log: self.logger, "🎯 Stream ready - seeking to custom position: %.2f", position)
-            
-            self.sendSeekCommand(to: position) { [weak self] seekSuccess in
-                guard let self = self else { return }
-                
-                if seekSuccess {
-                    os_log(.info, log: self.logger, "✅ Custom recovery: Seek successful - pausing at recovered position")
-                    
-                    // Pause at the recovered position
-                    self.sendJSONRPCCommand("pause")
-                    
-                    // DISABLED: Volume restore system - immediate completion
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        // self.restoreServerVolume() // DISABLED
-                        
-                        // Mark recovery as complete
-                        self.isRecoveryInProgress = false
-                        
-                        // Clear the custom preferences since we've recovered
-                        self.clearServerPreferencesRecovery()
-                        
-                        // Immediate UI refresh after recovery
-                        self.refreshUIAfterRecovery()
-                        os_log(.info, log: self.logger, "🎵 Simple custom position recovery complete (no volume muting)")
-                    }
-                } else {
-                    os_log(.error, log: self.logger, "❌ Custom recovery: Failed to seek to saved position")
-                    
-                    // DISABLED: Volume restore on failure
-                    // self.restoreServerVolume() // DISABLED
-                    
-                    // Mark recovery as complete even on failure
-                    self.isRecoveryInProgress = false
-                    
-                    // Clear preferences even on failure
-                    self.clearServerPreferencesRecovery()
-                }
-            }
-        }
-    }
-    
-    private func clearServerPreferencesRecovery() {
-        os_log(.info, log: logger, "🗑️ Clearing custom position recovery preferences")
-        
-        let playerID = settings.playerMACAddress
-        
-        let clearCommands: [[String: Any]] = [
-            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlayLastPosition", ""]]],
-            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlayLastState", ""]]],
-            ["id": 1, "method": "slim.request", "params": [playerID, ["playerpref", "lyrPlaySaveTime", ""]]]
-        ]
-        
-        for command in clearCommands {
-            sendJSONRPCCommandDirect(command) { _ in }
-        }
-    }
     
     private func saveServerVolumeAndMute() {
         guard !isSavingVolume else {
@@ -713,49 +742,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         os_log(.debug, log: logger, "🔄 Volume flags reset")
     }
     
-    private func checkForPositionRecoveryOnForeground() {
-        // DISABLED: App open recovery disabled - not robust enough for production
-        os_log(.info, log: logger, "⚠️ Foreground recovery disabled - too unreliable")
-        return
-        
-        /* DISABLED RECOVERY CODE:
-        // Check if we have a saved position that needs recovery
-        guard shouldResumeOnPlay,
-              let timestamp = savedPositionTimestamp,
-              savedPosition > 0.1 else {
-            os_log(.info, log: logger, "ℹ️ No position recovery needed on foreground")
-            return
-        }
-        
-        // Check if the saved position is recent (within 10 minutes)
-        let timeSinceSave = Date().timeIntervalSince(timestamp)
-        guard timeSinceSave < 600 else {
-            os_log(.info, log: logger, "⚠️ Saved position too old for foreground recovery - clearing")
-            clearSavedPosition()
-            return
-        }
-        
-        os_log(.info, log: logger, "🔄 App foregrounded with saved position - will recover on next connection")
-        END DISABLED RECOVERY CODE */
-    }
     
-    private func clearSavedPosition() {
-        shouldResumeOnPlay = false
-        savedPosition = 0.0
-        savedPositionTimestamp = nil
-        isLockScreenPlayRecovery = false
-        os_log(.info, log: logger, "🗑️ Cleared saved position")
-    }
-    
-    private func checkForPositionRecoveryAfterConnection() {
-        // REMOVED: Legacy app open recovery - replaced with custom position banking
-        os_log(.info, log: logger, "⚠️ Legacy app open recovery removed - using custom position banking instead")
-    }
-    
-    private func performSimplePositionRecoveryAfterConnection() {
-        // REMOVED: Legacy app open recovery - replaced with custom position banking
-        os_log(.info, log: logger, "⚠️ Legacy app open position recovery removed - using custom position banking instead")
-    }
     
     
     
@@ -784,17 +771,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // No need to send unsolicited status
     }
     
-    func connectionManagerWillSleep() {
-        // iOS background time is expiring - disconnect gracefully
-        os_log(.info, log: logger, "💤 iOS background time expiring - disconnecting gracefully")
-        
-        // Save position locally AND to server preferences for bulletproof recovery
-        saveCurrentPositionLocally()
-        savePositionToServerPreferences()
-        
-        // Disconnect to conserve resources and battery
-        disconnect()
-    }
     
 }
 
@@ -1037,7 +1013,7 @@ extension SlimProtoCoordinator {
     
     /// Public method to refresh Material UI (can be called externally)
     func refreshMaterialInterface() {
-        refreshMaterialUI()
+        // Removed refreshMaterialUI() method - server auto-resume handles position recovery
     }
     
     /// Start periodic server time fetching
@@ -1069,91 +1045,43 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
-        // CRITICAL: Handle all lock screen play commands to prevent double commands
-        if command.lowercased() == "play" {
-            isLockScreenPlayRecovery = true
-            os_log(.info, log: logger, "🔒 Lock screen play - marked for position recovery")
-            
-            // Only do position recovery if disconnected - otherwise server knows current position
-            if !connectionManager.connectionState.isConnected {
-                os_log(.info, log: logger, "🔄 PLAY after disconnect - using simple position recovery")
-                
-                // CRITICAL: Ensure audio session is active for background playback
-                audioManager.activateAudioSession()
-                
-                // Reconnect and handle position recovery manually
-                connect()
-                
-                // Monitor reconnection and apply saved position
-                monitorReconnectionForSimplePositionRecovery()
-            } else {
-                os_log(.info, log: logger, "🔄 PLAY while connected - server already knows position, sending simple play")
-                // CRITICAL: Clear recovery flag for simple connected commands
-                isLockScreenPlayRecovery = false
-                sendJSONRPCCommand("play")
-            }
-            return  // CRITICAL: Always return to prevent double command
-        }
-        
-        // For other commands or when connected, use JSON-RPC
+        // Ensure connection and send command
         if !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "❌ No SlimProto connection - starting full reconnection sequence")
-            handleDisconnectedLockScreenCommand(command)
-            return
-        }
-        
-        // If connected, send command via JSON-RPC (faster) but ensure SlimProto stays connected
-        
-        // CRITICAL: Track if this is a lock screen pause
-        if command.lowercased() == "pause" {
-            os_log(.info, log: logger, "🔒 Lock screen PAUSE - marking as lock screen pause")
-            commandHandler.isPausedByLockScreen = true
-        }
-        
-        sendJSONRPCCommand(command)
-    }
-    
-    private func handleDisconnectedLockScreenCommand(_ command: String) {
-        os_log(.info, log: logger, "🔄 Starting FULL reconnection sequence for: %{public}s", command)
-        
-        // Step 1: Force stop any existing broken connections
-        disconnect()
-        
-        // Step 2: Wait a moment for cleanup
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            // Step 3: Start fresh connection
-            self.connectionManager.resetReconnectionAttempts()
-            self.connect()
+            os_log(.info, log: logger, "🔄 Reconnecting for lock screen command")
+            audioManager.activateAudioSession()
+            connect()
             
-            // Step 4: Monitor connection and send command
-            self.waitForConnectionAndExecute(command: command)
-        }
-    }
-    
-    private func waitForConnectionAndExecute(command: String, attempt: Int = 0) {
-        let maxAttempts = 20 // 20 seconds total wait
-        
-        if connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "✅ SlimProto reconnected after %d seconds", attempt)
-            
-            // Send the command via JSON-RPC (faster response)
-            sendJSONRPCCommand(command)
-            
-            // CRITICAL: Also send a SlimProto status to ensure the connection works
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.client.sendStatus("STMt")
-                os_log(.info, log: self.logger, "📡 Sent SlimProto heartbeat to verify connection")
-            }
-            
-        } else if attempt < maxAttempts {
-            // Keep waiting
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.waitForConnectionAndExecute(command: command, attempt: attempt + 1)
+            // Queue command to send after connection
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                if command.lowercased() == "play" {
+                    // Use playlist jump with timeOffset for position recovery
+                    self.performPlaylistRecovery()
+                } else {
+                    self.sendJSONRPCCommand(command)
+                }
             }
         } else {
-            // Timeout - try JSON-RPC only as fallback
-            os_log(.error, log: logger, "⏰ SlimProto connection timeout - using JSON-RPC fallback")
+            // Connected - send command immediately (no position saving needed)
+            os_log(.info, log: logger, "🔒 Already connected - sending lock screen command directly")
             sendJSONRPCCommand(command)
+        }
+        
+        // Track lock screen pause state
+        if command.lowercased() == "pause" {
+            commandHandler.isPausedByLockScreen = true
+        }
+    }
+    
+    private func sendPowerCommand(_ state: String) {
+        let playerID = settings.playerMACAddress
+        let powerCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["power", state]]
+        ]
+        
+        sendJSONRPCCommandDirect(powerCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔌 Power command sent: power %{public}s", state)
         }
     }
     
@@ -1261,6 +1189,19 @@ extension SlimProtoCoordinator {
                     // CRITICAL: For play commands, ensure we have a working SlimProto connection
                     if command.lowercased() == "play" {
                         self.ensureSlimProtoConnection()
+                        
+                        // CRITICAL FIX: Check if stream was invalidated for CarPlay
+                        if self.audioManager.getPlayerState() == "No Stream" {
+                            os_log(.info, log: self.logger, "🚗 PLAY command with no active stream - likely invalidated for CarPlay")
+                            os_log(.info, log: self.logger, "🚗 Forcing fresh stream creation like NEXT/PREVIOUS commands")
+                            
+                            // Force fresh stream creation by requesting current track status
+                            // This mimics what NEXT/PREVIOUS commands do to get fresh streams
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                os_log(.info, log: self.logger, "🚗 Requesting fresh metadata to trigger stream creation")
+                                self.fetchCurrentTrackMetadata()
+                            }
+                        }
                     }
                     
                     // For skip commands, refresh metadata and resume server time sync
@@ -1286,165 +1227,8 @@ extension SlimProtoCoordinator {
         os_log(.info, log: logger, "🌐 Sent JSON-RPC %{public}s command to LMS", command)
     }
     
-    // Monitor reconnection and apply simple position recovery
-    private func monitorReconnectionForSimplePositionRecovery() {
-        os_log(.info, log: logger, "👀 Monitoring reconnection for simple position recovery")
-        
-        var attempts = 0
-        let maxAttempts = 3 // 3 seconds max wait
-        
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            guard let self = self else {
-                timer.invalidate()
-                return
-            }
-            
-            attempts += 1
-            
-            if self.connectionManager.connectionState.isConnected {
-                os_log(.info, log: self.logger, "✅ Reconnected - applying simple position recovery")
-                timer.invalidate()
-                
-                // Wait a moment for connection to stabilize, then seek and play
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.performSimplePositionRecovery()
-                }
-                
-            } else if attempts >= maxAttempts {
-                os_log(.error, log: self.logger, "❌ Reconnection timeout for position recovery")
-                timer.invalidate()
-            }
-        }
-    }
     
-    private func performSimplePositionRecovery() {
-        // DEBUG: Log the current state of saved position variables
-        os_log(.info, log: logger, "🔍 Lock screen recovery check - shouldResumeOnPlay: %{public}s, savedPosition: %.2f, timestamp: %{public}s", 
-               shouldResumeOnPlay ? "YES" : "NO", savedPosition, 
-               savedPositionTimestamp?.description ?? "nil")
-        
-        // Check if we have a saved position to recover
-        guard shouldResumeOnPlay,
-              let timestamp = savedPositionTimestamp,
-              savedPosition > 0.1 else {
-            os_log(.info, log: logger, "ℹ️ No saved position to recover - playing from current position")
-            sendJSONRPCCommand("play")
-            return
-        }
-        
-        // Check if the saved position is recent (within 10 minutes)
-        let timeSinceSave = Date().timeIntervalSince(timestamp)
-        guard timeSinceSave < 600 else {
-            os_log(.info, log: logger, "⚠️ Saved position too old (%.0f seconds) - playing from current position", timeSinceSave)
-            shouldResumeOnPlay = false
-            sendJSONRPCCommand("play")
-            return
-        }
-        
-        // Simplified validation - just use the saved position if it's reasonable
-        
-        os_log(.info, log: logger, "🎯 Recovering to saved position: %.2f seconds", savedPosition)
-        
-        // Lock screen recovery: play → immediate seek (wait for stream start)
-        os_log(.info, log: logger, "🔄 Lock screen: play → immediate seek sequence")
-        
-        // CRITICAL: Pause server time sync during lock screen recovery too
-        os_log(.debug, log: logger, "⏸️ Pausing server time sync during lock screen recovery")
-        
-        // Suppress Now Playing updates during recovery for cleaner lock screen
-        audioManager.suppressNowPlayingUpdates = true
-        
-        sendJSONRPCCommand("play")
-        
-        // Wait for stream to establish before seeking (transcoding needs time)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            os_log(.info, log: self.logger, "🎯 Stream established - now seeking to saved position: %.2f seconds", self.savedPosition)
-            
-            self.sendSeekCommand(to: self.savedPosition) { [weak self] seekSuccess in
-                guard let self = self else { return }
-                
-                if seekSuccess {
-                    os_log(.info, log: self.logger, "✅ Lock screen: Seek successful after stream start")
-                } else {
-                    os_log(.error, log: self.logger, "❌ Lock screen: Failed to seek to saved position")
-                }
-                
-                // CRITICAL: Resume server time sync after lock screen recovery
-                // Wait longer for seek to complete on server before resuming sync
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    os_log(.debug, log: self.logger, "▶️ Resuming server time sync after lock screen recovery")
-                    
-                    // Force immediate sync to get fresh server time after seek
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        os_log(.debug, log: self.logger, "🔄 Forcing server time sync after seek")
-                        // Server time sync will continue automatically
-                    }
-                }
-                
-                // Clear the saved position and reset lock screen flag
-                self.shouldResumeOnPlay = false
-                self.savedPosition = 0.0
-                self.savedPositionTimestamp = nil
-                self.isLockScreenPlayRecovery = false
-                
-                // Re-enable Now Playing updates after recovery
-                self.audioManager.suppressNowPlayingUpdates = false
-                
-                os_log(.info, log: self.logger, "🎵 Lock screen recovery complete")
-            }
-        }
-    }
     
-    // MARK: - UI Refresh After Recovery
-    private func refreshUIAfterRecovery() {
-        // CRITICAL: Refresh Material web interface to show correct position after recovery
-        DispatchQueue.main.async {
-            // Try to refresh Material UI via JavaScript first
-            self.refreshMaterialUI()
-            
-            // Also trigger server time sync as backup
-            self.fetchServerTime()
-            
-            // Notify observers that state may have changed
-            self.objectWillChange.send()
-            
-            os_log(.info, log: self.logger, "✅ Material UI refreshed after recovery")
-        }
-    }
-    
-    /// Refresh Material web interface via JavaScript
-    private func refreshMaterialUI() {
-        guard let webView = webView else {
-            os_log(.error, log: logger, "❌ Cannot refresh Material UI - no webView reference")
-            return
-        }
-        
-        // Execute JavaScript to trigger Material's refresh mechanism
-        let refreshScript = """
-        try {
-            // Material uses bus.$emit('refreshStatus') to refresh player status
-            if (typeof bus !== 'undefined' && bus.$emit) {
-                bus.$emit('refreshStatus');
-                console.log('✅ Material UI refresh triggered via bus.$emit');
-            } else if (typeof refreshStatus === 'function') {
-                refreshStatus();
-                console.log('✅ Material UI refresh triggered via refreshStatus()');
-            } else {
-                console.log('❌ Material refresh methods not available');
-            }
-        } catch (error) {
-            console.log('❌ Material refresh error:', error);
-        }
-        """
-        
-        webView.evaluateJavaScript(refreshScript) { result, error in
-            if let error = error {
-                os_log(.error, log: self.logger, "❌ Failed to refresh Material UI: %{public}s", error.localizedDescription)
-            } else {
-                os_log(.info, log: self.logger, "✅ Material UI refresh JavaScript executed")
-            }
-        }
-    }
     
     // Direct JSON-RPC command sender for preference testing
     private func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
@@ -1712,8 +1496,8 @@ extension SlimProtoCoordinator {
     func connectionManagerShouldStorePosition() {
         os_log(.info, log: logger, "🔒 Connection lost - storing current position for recovery")
         
-        // Use the same position saving logic as background handling
-        saveCurrentPositionLocally()
+        // Save position to server for auto-resume functionality
+        savePositionToServerPreferences()
     }
 
     func connectionManagerDidReconnectAfterTimeout() {
@@ -1721,21 +1505,11 @@ extension SlimProtoCoordinator {
         
         // Wait a moment for connection to stabilize
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.attemptPositionRecovery()
+            // Server auto-resume handles position recovery
         }
     }
 
-    // Add this new method for position recovery
-    private func attemptPositionRecovery() {
-        os_log(.info, log: logger, "🔒 Position recovery temporarily disabled during SlimProto standardization")
-        // The server will handle position management through proper SlimProto
-        return
-    }
 
-    private func performFallbackRecovery(recoveryInfo: (position: Double, wasPlaying: Bool, isValid: Bool), nowPlayingManager: NowPlayingManager) {
-        os_log(.info, log: logger, "🔒 Fallback recovery temporarily disabled during SlimProto standardization")
-        return
-    }
 
 
     // Add this new method for seeking via JSON-RPC

@@ -156,11 +156,11 @@ struct SettingsView: View {
                     .disabled(isReconnecting)
                     .padding(.vertical, 2)
                     
-                    NavigationLink(destination: BufferConfigView()) {
+                    NavigationLink(destination: CBassConfigView()) {
                         SettingsRow(
-                            icon: "memorychip",
-                            title: "Buffer Settings",
-                            value: bufferSummary,
+                            icon: "hifispeaker",
+                            title: "FLAC Buffer Settings",
+                            value: flacBufferSummary,
                             valueColor: .secondary
                         )
                     }
@@ -240,9 +240,8 @@ struct SettingsView: View {
     
     // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
     
-    private var bufferSummary: String {
-        let bufferKB = settings.bufferSize / 1024
-        return "\(bufferKB)KB"
+    private var flacBufferSummary: String {
+        return "\(settings.flacBufferSeconds)s, \(settings.networkBufferKB)KB"
     }
     
     
@@ -496,74 +495,123 @@ struct FormatRow: View {
 }
 
 // MARK: - Buffer Configuration View
-struct BufferConfigView: View {
+struct CBassConfigView: View {
     @StateObject private var settings = SettingsManager.shared
     @Environment(\.presentationMode) var presentationMode
     
-    @State private var bufferSize: Double = 262144
+    @State private var flacBufferSeconds: Double = 15
+    @State private var networkBufferKB: Double = 512
     @State private var hasChanges = false
     
-    private let bufferSizes: [(Int, String, String)] = [
-        (262144, "256 KB", "Minimum - AAC/MP3 only"),
-        (524288, "512 KB", "Small - Good for AAC"),
-        (1048576, "1 MB", "Standard - Mixed content"),        // Remove "Default"
-        (2097152, "2 MB", "Default - Optimal for FLAC"),     // Add "Default" here
-        (4194304, "4 MB", "Large - High bitrate FLAC"),
-        (8388608, "8 MB", "Maximum - Studio quality")
+    // FLAC playback buffer presets (in seconds)
+    private let flacBufferPresets: [(Int, String, String)] = [
+        (5, "5 seconds", "Minimum - Fast response, may skip"),
+        (10, "10 seconds", "Conservative - Good for stable networks"),
+        (15, "15 seconds", "Default - Balanced stability"),
+        (20, "20 seconds", "Aggressive - Maximum stability"),
+        (30, "30 seconds", "Maximum - Very stable networks only")
+    ]
+    
+    // Network buffer presets (in KB)
+    private let networkBufferPresets: [(Int, String, String)] = [
+        (256, "256 KB", "Small - Low memory usage"),
+        (512, "512 KB", "Default - Balanced performance"),
+        (1024, "1 MB", "Large - High bitrate FLAC")
     ]
     
     var body: some View {
         Form {
-            Section(header: Text("Buffer Size")) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Current: \(formatBufferSize(Int(bufferSize)))")  // ← Use the helper function
+            Section(header: Text("FLAC Playback Buffer"), 
+                    footer: Text("Controls how much FLAC audio CBass buffers before playback. Lower values = faster response but may cause track skipping on unstable networks.")) {
+                
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Current: \(Int(flacBufferSeconds)) seconds")
                         .font(.headline)
                     
                     Slider(
-                        value: $bufferSize,
-                        in: 262144...8388608,  // ← Update range: 256KB to 8MB
-                        step: 262144           // ← Update step: 256KB increments
+                        value: $flacBufferSeconds,
+                        in: 5...30,
+                        step: 5
                     ) {
-                        Text("Buffer Size")
+                        Text("FLAC Buffer Duration")
                     }
-                    .onChange(of: bufferSize) { _ in hasChanges = true }
+                    .onChange(of: flacBufferSeconds) { _ in hasChanges = true }
                 }
                 
-                Text("Larger buffers provide smoother FLAC playback but use more memory. 2MB+ recommended for FLAC streaming.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            
-            Section(header: Text("Presets")) {
-                ForEach(bufferSizes, id: \.0) { size, title, description in
+                // FLAC Buffer Presets
+                ForEach(flacBufferPresets, id: \.0) { seconds, title, description in
                     Button(action: {
-                        bufferSize = Double(size)
+                        flacBufferSeconds = Double(seconds)
                         hasChanges = true
                     }) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(title)  // ← Use title instead of description
-                                    .font(.headline)
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(title)
+                                    .font(.body)
                                     .foregroundColor(.primary)
-                                
-                                Spacer()
-                                
-                                if Int(bufferSize) == size {
-                                    Image(systemName: "checkmark")
-                                        .foregroundColor(.blue)
-                                }
+                                Text(description)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                             
-                            Text(description)  // ← Add the description below
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            Spacer()
+                            
+                            if Int(flacBufferSeconds) == seconds {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            
+            Section(header: Text("Network Buffer"),
+                    footer: Text("Controls CBass network chunk size. Larger values may help with high-bitrate FLAC but use more memory.")) {
+                
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Current: \(Int(networkBufferKB)) KB")
+                        .font(.headline)
+                    
+                    Slider(
+                        value: $networkBufferKB,
+                        in: 256...1024,
+                        step: 256
+                    ) {
+                        Text("Network Buffer Size")
+                    }
+                    .onChange(of: networkBufferKB) { _ in hasChanges = true }
+                }
+                
+                // Network Buffer Presets
+                ForEach(networkBufferPresets, id: \.0) { kb, title, description in
+                    Button(action: {
+                        networkBufferKB = Double(kb)
+                        hasChanges = true
+                    }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(title)
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                Text(description)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            if Int(networkBufferKB) == kb {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
             }
         }
-        .navigationTitle("Buffer Settings")
+        .navigationTitle("FLAC Buffer Settings")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -574,24 +622,18 @@ struct BufferConfigView: View {
             }
         }
         .onAppear {
-            bufferSize = Double(settings.bufferSize)
+            flacBufferSeconds = Double(settings.flacBufferSeconds)
+            networkBufferKB = Double(settings.networkBufferKB)
         }
     }
     
     private func saveSettings() {
-        settings.bufferSize = Int(bufferSize)
+        settings.flacBufferSeconds = Int(flacBufferSeconds)
+        settings.networkBufferKB = Int(networkBufferKB)
         settings.saveSettings()
         hasChanges = false
         
         presentationMode.wrappedValue.dismiss()
-    }
-    
-    private func formatBufferSize(_ bytes: Int) -> String {
-        if bytes >= 1048576 {
-            return "\(bytes / 1048576) MB"
-        } else {
-            return "\(bytes / 1024) KB"
-        }
     }
 }
 

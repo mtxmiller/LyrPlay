@@ -146,6 +146,33 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.info, log: logger, "Disconnected and reset connection state")
     }
     
+    func disconnectWithPositionSave() {
+        if socket.isConnected {
+            // Send SHUT command to trigger server's persistPlaybackStateForPowerOff()
+            sendShutCommand()
+            
+            // Give server a moment to process SHUT, then disconnect
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.socket.disconnect()
+            }
+        }
+        isConnected = false
+        hasRequestedInitialStatus = false
+        os_log(.info, log: logger, "Sent SHUT command and disconnected to trigger server position saving")
+    }
+    
+    private func sendShutCommand() {
+        let command = "SHUT"
+        let length = UInt32(0) // No additional data
+        
+        var frame = Data()
+        frame.append(command.data(using: .ascii)!)
+        frame.append(withUnsafeBytes(of: length.bigEndian) { Data($0) })
+        
+        socket.write(frame, withTimeout: 1.0, tag: 0)
+        os_log(.info, log: logger, "🔌 Sent SHUT command to trigger server position saving")
+    }
+    
     // MARK: - Socket Delegate Methods
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
         lastSuccessfulConnection = Date()  // ADD THIS LINE
@@ -324,7 +351,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         }
         
         // Buffer info (8 bytes total)
-        let bufferSize = UInt32(settings.bufferSize)
+        // Network buffer size in bytes (not playback buffer duration)
+        let bufferSize = UInt32(settings.networkBufferKB * 1024)
         statusData.append(Data([
             UInt8((bufferSize >> 24) & 0xff),
             UInt8((bufferSize >> 16) & 0xff),
