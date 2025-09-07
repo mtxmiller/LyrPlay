@@ -74,9 +74,19 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         // Basic network configuration for LMS streaming  
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s timeout
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))     // 64KB network buffer
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))        // 75% pre-buffer (BASS default) for stable streaming
+        
+        // Enable stream verification for proper format detection (FLAC headers now handled by server transcoding)
+        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 1)                    // Enable file verification
+        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 1)               // Enable network stream verification  
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
+        BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
+        BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
         // CRITICAL: Enable iOS audio session integration for CarPlay
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
@@ -216,18 +226,28 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
         }
         
-        // MINIMAL CBASS: Create and play stream
+        // CBass configured for streaming FLAC tolerance (like squeezelite)
+        let streamFlags = DWORD(BASS_STREAM_STATUS) |    // enable status info
+                         DWORD(BASS_STREAM_AUTOFREE) |   // auto-free when stopped  
+                         DWORD(BASS_SAMPLE_FLOAT) |      // use float samples (like squeezelite)
+                         DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
+        
+        // CBass stream creation with tolerance for incomplete data
         currentStream = BASS_StreamCreateURL(
             urlString,
             0,                           // offset
-            DWORD(BASS_STREAM_STATUS) |  // enable status info
-            DWORD(BASS_STREAM_AUTOFREE), // auto-free when stopped
-            nil, nil                     // no callbacks yet
+            streamFlags,                 // streaming tolerance flags
+            nil, nil                     // no callbacks
         )
         
         guard currentStream != 0 else {
             let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d", errorCode)
+            os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString)
+            
+            // Specific handling for error 41 (unsupported format)
+            if errorCode == 41 {
+                os_log(.error, log: logger, "❌ Error 41: Unsupported audio format - may need plugin support")
+            }
             return
         }
         
@@ -507,30 +527,34 @@ class AudioPlayer: NSObject, ObservableObject {
         switch format.uppercased() {
         case "FLAC":
             // Use user-configurable CBass buffer settings
-            let flacBufferMS = settings.flacBufferSeconds * 1000  // Convert to milliseconds
-            let networkBufferBytes = settings.networkBufferKB * 1024  // Convert to bytes
+            let flacBufferMS = settings.flacBufferSeconds * 1000     // Playback buffer in milliseconds
+            let networkBufferMS = settings.networkBufferKB * 1000   // Network buffer in milliseconds (using KB setting as seconds)
             
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferBytes))   // User network buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% pre-buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferMS))   // Network buffer in milliseconds
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))    // Slow updates for stability
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
             
-            os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %dKB network", settings.flacBufferSeconds, settings.networkBufferKB)
+            os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
             
         case "AAC", "MP3", "OGG":
             // Compressed formats that work well - smaller buffer for responsiveness
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(65536))    // 64KB network
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))     // 5s network buffer
+            
+            
             os_log(.info, log: logger, "🎵 Stable compressed format optimized: %{public}s", format)
             
         case "OPUS":
             // Opus needs more buffering than other compressed formats
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s buffer (between compressed and FLAC)
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(131072))   // 128KB network buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 10% pre-buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8000))     // 8s network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
-            os_log(.info, log: logger, "🎵 Opus configured with enhanced buffering: 5s buffer, 128KB network")
+            
+            
+            os_log(.info, log: logger, "🎵 Opus configured with enhanced buffering and stream verification: 5s buffer, 8s network")
             
         default:
             // Use defaults from setupCBass() - 2s buffer, 64KB network

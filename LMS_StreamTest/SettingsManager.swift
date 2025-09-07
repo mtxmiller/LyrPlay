@@ -48,11 +48,16 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - Audio Format Enum
-    enum AudioFormat: Int, CaseIterable {
+    enum AudioFormat: Int {
         case compressed = 0
         case oggVorbis = 1
-        case opus = 2
+        case opus = 2        // Hidden from user menu
         case flac = 3
+        
+        // Only show stable formats to users
+        static var allCases: [AudioFormat] {
+            return [.compressed, .oggVorbis, .flac]
+        }
         
         var displayName: String {
             switch self {
@@ -77,7 +82,7 @@ class SettingsManager: ObservableObject {
             case .compressed: return "aac,mp3"
             case .oggVorbis: return "ogg,aac,mp3"
             case .opus: return "ops,ogg,aac,mp3"
-            case .flac: return "flc,ops,ogg,aac,mp3"
+            case .flac: return "flc,ogg,aac,mp3"
             }
         }
     }
@@ -130,7 +135,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Dynamic Capabilities String
     var capabilitiesString: String {
-        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=48000"
+        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=192000"
         // CBass supports FLAC and Opus natively over HTTP streaming
         let formats = audioFormat.capabilities
         return "\(baseCapabilities),\(formats)"

@@ -161,7 +161,7 @@ struct ContentView: View {
             isAppInBackground = false
             
             // Check for app open recovery when app enters foreground
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                 // CRITICAL FIX: Only perform recovery if app is NOT already playing
                 let currentState = audioManager.getPlayerState()
                 
@@ -241,6 +241,7 @@ struct ContentView: View {
         let timestamp = Int(Date().timeIntervalSince1970)
         
         // REMOVED: player parameter - let Material control default player selection
+        // Use & since baseURL already contains ?hide=notif
         return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
     }
 
@@ -613,34 +614,8 @@ struct WebView: UIViewRepresentable {
             (function() {
                 console.log('LyrPlay: Injecting Material settings handler...');
                 
-                // CRITICAL: Disable MediaSession/Lock Screen controls to prevent audio conflicts
-                // This prevents Material skin from taking over iOS audio session
-                function disableMediaControls() {
-                    // Wait for Vue app to be available
-                    if (typeof bus !== 'undefined' && bus.$store) {
-                        console.log('LyrPlay: Disabling media controls to prevent audio session conflicts');
-                        
-                        // Force mediaControls to false and prevent changes
-                        bus.$store.state.mediaControls = false;
-                        
-                        // Override the mediaControls getter/setter to always return false
-                        Object.defineProperty(bus.$store.state, 'mediaControls', {
-                            value: false,
-                            writable: false,
-                            configurable: false
-                        });
-                        
-                        return true;
-                    }
-                    return false;
-                }
-                
-                // Try to disable media controls immediately and retry if needed
-                if (!disableMediaControls()) {
-                    setTimeout(disableMediaControls, 500);
-                    setTimeout(disableMediaControls, 1500);
-                    setTimeout(disableMediaControls, 3000);
-                }
+                // Note: Lock screen/notification controls are now hidden via Material's hide=notif parameter
+                // Native iOS media controls are handled entirely by LyrPlay's NowPlayingManager
                 
                 // Override window.open to catch the appSettings URL
                 const originalOpen = window.open;

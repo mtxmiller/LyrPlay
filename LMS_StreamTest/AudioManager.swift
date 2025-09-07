@@ -34,8 +34,6 @@ class AudioManager: NSObject, ObservableObject {
     private var wasPlayingBeforeInterruption: Bool = false
     private var interruptionPosition: Double = 0.0
     
-    // MARK: - Now Playing Suppression (for clean recovery)
-    var suppressNowPlayingUpdates: Bool = false
     
     // MARK: - Initialization
     private override init() {
@@ -222,18 +220,14 @@ extension AudioManager: AudioPlayerDelegate {
         os_log(.info, log: logger, "🔒 Audio player reports pause time: %.2f (NOT using - server is master)", audioTime)
         
         // Update playing state only, let server time synchronizer provide the position
-        if !suppressNowPlayingUpdates {
-            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
-        }
+        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
     }
     
     func audioPlayerDidStop() {
         os_log(.debug, log: logger, "⏹️ Audio player stopped")
         
         // Update now playing info
-        if !suppressNowPlayingUpdates {
-            nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
-        }
+        nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
     }
     
     func audioPlayerDidReachEnd() {
@@ -249,9 +243,7 @@ extension AudioManager: AudioPlayerDelegate {
         
         // Only update now playing info locally, don't send to server
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
-        if !suppressNowPlayingUpdates {
-            nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
-        }
+        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
         
         // REMOVED: All the complicated throttling and server communication
         os_log(.debug, log: logger, "📍 Local time update only: %.2f", time)
@@ -331,35 +323,24 @@ extension AudioManager {
                 audioPlayer.pause()
                 
                 // Update now playing
-                if !suppressNowPlayingUpdates {
-                    nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                }
+                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
                 
-                // For CarPlay disconnect, notify server
+                // For CarPlay disconnect, notify server using SimpleTimeTracker position
                 if routeType.contains("CarPlay") && routeType.contains("Disconnected") {
-                    notifyServerOfCarPlayDisconnect(position: currentPosition)
+                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
+                    notifyServerOfCarPlayDisconnect(position: serverPosition)
                 }
                 
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeType)
             }
         } else if routeType.contains("CarPlay") && routeType.contains("Connected") {
-            // Special handling for CarPlay reconnection
-            handleCarPlayReconnection()
+            // CarPlay reconnected - use playlist recovery instead of server auto-resume
+            os_log(.info, log: logger, "🚗 CarPlay reconnected (OLD method) - performing playlist recovery")
+            slimClient?.performCarPlayRecovery()
         }
     }
     
-    // MARK: - CarPlay Specific Handling
-    private func handleCarPlayReconnection() {
-        os_log(.info, log: logger, "🚗 CarPlay reconnected - checking for auto-resume")
-        
-        // Check if we should auto-resume (based on server state or last known state)
-        // For now, we'll let the server tell us what to do
-        if let slimClient = slimClient {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.notifyServerOfCarPlayReconnect()
-            }
-        }
-    }
+    // MARK: - CarPlay Specific Handling (REMOVED - using server auto-resume)
     
     // MARK: - Server Communication for Interruptions
     private func notifyServerOfInterruption(isPaused: Bool) {
@@ -381,16 +362,13 @@ extension AudioManager {
         
         // Send pause command specifically for CarPlay disconnect
         slimClient.sendLockScreenCommand("pause")
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect (position: %.2f)", position)
+        
+        // NEW: Save position for playlist recovery
+        slimClient.saveCurrentPositionForRecovery()
+        
+        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect and saved position for recovery (%.2f)", position)
     }
     
-    private func notifyServerOfCarPlayReconnect() {
-        guard let slimClient = slimClient else { return }
-        
-        // Send resume command for CarPlay reconnect
-        slimClient.sendLockScreenCommand("play")
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay reconnect")
-    }
     
     // MARK: - Utility Methods
     private func getCurrentAudioFormat() -> String {
@@ -439,9 +417,7 @@ extension AudioManager: AudioSessionManagerDelegate {
         // Existing foreground logic...
         let currentTime = audioPlayer.getCurrentTime()
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
-        if !suppressNowPlayingUpdates {
-            nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
-        }
+        nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
     }
     
     // NEW: Handle interruptions
@@ -472,14 +448,13 @@ extension AudioManager: AudioSessionManagerDelegate {
                 audioPlayer.pause()
                 
                 // Update now playing
-                if !suppressNowPlayingUpdates {
-                    nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                }
+                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
                 
                 // Check for CarPlay disconnection using the proper route change type
                 if routeChangeDescription == "CarPlay Disconnected" {
                     os_log(.info, log: logger, "🚗 CarPlay disconnection detected - notifying server")
-                    notifyServerOfCarPlayDisconnect(position: currentPosition)
+                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
+                    notifyServerOfCarPlayDisconnect(position: serverPosition)
                 } else {
                     os_log(.info, log: logger, "⏸️ Non-CarPlay route change pause: %{public}s", routeChangeDescription)
                 }
@@ -487,9 +462,12 @@ extension AudioManager: AudioSessionManagerDelegate {
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
             }
         } else if routeChangeDescription == "CarPlay Connected" {
-            // Special handling for CarPlay reconnection
-            os_log(.info, log: logger, "🚗 CarPlay connection detected")
-            handleCarPlayReconnection()
+            // CarPlay reconnected - use playlist recovery instead of server auto-resume
+            os_log(.info, log: logger, "🚗 CarPlay connection detected - performing playlist recovery")
+            slimClient?.performCarPlayRecovery()
+        } else {
+            // DEBUG: Log all other route changes to see what CarPlay reconnect actually looks like
+            os_log(.info, log: logger, "🔍 DEBUG: Route change detected: '%{public}s'", routeChangeDescription)
         }
     }
 }

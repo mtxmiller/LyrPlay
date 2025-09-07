@@ -1306,23 +1306,23 @@ struct AudioFormatConfigView: View {
                     
                     FormatRequirementRow(
                         format: "High Quality (OGG Vorbis)",
-                        requirement: "Requires server transcoding setup",
-                        icon: "exclamationmark.triangle.fill",
-                        color: .orange
+                        requirement: "Requires server transcoding setup to work",
+                        icon: "info.circle.fill",
+                        color: .blue
                     )
                     
-                    FormatRequirementRow(
-                        format: "Premium Quality (Opus)",
-                        requirement: "Requires server transcoding setup",
-                        icon: "exclamationmark.triangle.fill",
-                        color: .orange
-                    )
+               //     FormatRequirementRow(
+              //          format: "Premium Quality (Opus)",
+             //           requirement: "Requires server transcoding setup",
+             //           icon: "exclamationmark.triangle.fill",
+             //           color: .orange
+             //       )
                     
                     FormatRequirementRow(
                         format: "Lossless (FLAC)",
-                        requirement: "Requires server transcoding setup",
-                        icon: "exclamationmark.triangle.fill",
-                        color: .orange
+                        requirement: "Requires server transcoding setup for seek/recovery",
+                        icon: "info.circle.fill",
+                        color: .blue
                     )
                 }
                 

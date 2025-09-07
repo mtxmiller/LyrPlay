@@ -5,8 +5,13 @@
       "Bash(grep:*)",
       "Bash(rg:*)",
       "Bash(ls:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Read(/Users/ericmiller/Downloads/bassopus24-ios/**)"
     ],
-    "deny": []
+    "deny": [],
+    "additionalDirectories": [
+      "/Users/ericmiller/Downloads/slimserver",
+      "/Users/ericmiller/Downloads/squeezelite"
+    ]
   }
 }

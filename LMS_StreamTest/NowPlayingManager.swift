@@ -84,10 +84,8 @@ class NowPlayingManager: ObservableObject {
                currentTime, timeSource.description, isPlaying ? "YES" : "NO")
         
         
-        // Update now playing info with current time (unless suppressed during recovery)
-        if !AudioManager.shared.suppressNowPlayingUpdates {
-            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        }
+        // Update now playing info with current time
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         
         // Log time source changes
         let newUsingServerTime = (timeSource == .serverTime)

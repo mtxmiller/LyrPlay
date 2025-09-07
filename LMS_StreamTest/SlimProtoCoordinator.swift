@@ -29,6 +29,7 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Background State Tracking
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
+    private var wasDisconnectedWhileInBackground: Bool = false
     private var isSavingVolume = false
     private var isRestoringVolume = false
     
@@ -248,6 +249,10 @@ class SlimProtoCoordinator: ObservableObject {
         client.disconnectWithPositionSave()
     }
     
+    // MARK: - Recovery State Management
+    private var isRecoveryInProgress = false
+    private let recoveryQueue = DispatchQueue(label: "recovery.queue", qos: .userInitiated)
+    
     // MARK: - Playlist-Based Position Recovery (Home Assistant Approach)
     
     /// Save current playback position and playlist state for recovery
@@ -297,11 +302,31 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// Perform playlist jump with timeOffset recovery (Home Assistant style)
     private func performPlaylistRecovery() {
-        // Check if we have recent recovery data
-        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
-              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
-            os_log(.info, log: logger, "🔄 No recent recovery data - using simple play command")
+        recoveryQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Check if recovery is already in progress
+            guard !self.isRecoveryInProgress else {
+                os_log(.info, log: self.logger, "🔒 Lock Screen Recovery: Skipping - recovery already in progress")
+                return
+            }
+            
+            // Set recovery in progress
+            self.isRecoveryInProgress = true
+            os_log(.info, log: self.logger, "🔒 Lock Screen Recovery: Starting (blocking other recovery methods)")
+            
+            DispatchQueue.main.async { [weak self] in
+                self?.executeLockScreenRecovery()
+            }
+        }
+    }
+    
+    private func executeLockScreenRecovery() {
+        // Check if we have recovery data (no time limit - like other music players)
+        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+            os_log(.info, log: logger, "🔄 No recovery data - using simple play command")
             sendJSONRPCCommand("play")
+            isRecoveryInProgress = false // Clear recovery flag
             return
         }
         
@@ -311,6 +336,7 @@ class SlimProtoCoordinator: ObservableObject {
         guard savedPosition > 0 else {
             os_log(.info, log: logger, "🔄 No saved position - using simple play command") 
             sendJSONRPCCommand("play")
+            isRecoveryInProgress = false // Clear recovery flag
             return
         }
         
@@ -330,6 +356,10 @@ class SlimProtoCoordinator: ObservableObject {
         sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
             os_log(.info, log: self?.logger ?? OSLog.default, "🎯 Playlist jump recovery completed")
             
+            // Clear recovery flag after completion
+            self?.isRecoveryInProgress = false
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔒 Recovery state cleared - other recovery methods can now proceed")
+            
             // Clear recovery data after successful use
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
@@ -339,10 +369,9 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// CarPlay reconnect recovery - connects to server first, then performs playlist jump
     func performCarPlayRecovery() {
-        // Check if we have recent recovery data
-        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
-              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
-            os_log(.info, log: logger, "🚗 No recent recovery data for CarPlay - connecting and using simple play command")
+        // Check if we have recovery data (no time limit - like other music players)
+        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+            os_log(.info, log: logger, "🚗 No recovery data for CarPlay - connecting and using simple play command")
             connect()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.sendJSONRPCCommand("play")
@@ -395,24 +424,52 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// App open recovery - same playlist jump method but pauses after recovery
     func performAppOpenRecovery() {
-        // Check if we have recent recovery data
-        guard let recoveryTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") as? Date,
-              Date().timeIntervalSince(recoveryTimestamp) < 300 else { // 5 minute grace period
-            os_log(.info, log: logger, "📱 No recent recovery data for app open - skipping recovery")
-            return
+        recoveryQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Check if recovery is already in progress
+            guard !self.isRecoveryInProgress else {
+                os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - recovery already in progress")
+                return
+            }
+            
+            // Check if we were disconnected while in background - this indicates recovery is needed
+            guard self.wasDisconnectedWhileInBackground else {
+                os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - was not disconnected while in background")
+                return
+            }
+            
+            // Check if we have recovery data (no time limit - like other music players)
+            guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+                os_log(.info, log: self.logger, "📱 No recovery data for app open - skipping recovery")
+                return
+            }
+            
+            // Set recovery in progress and clear background disconnection flag
+            self.isRecoveryInProgress = true
+            self.wasDisconnectedWhileInBackground = false
+            os_log(.info, log: self.logger, "📱 App Open Recovery: Starting (blocking other recovery methods)")
+            
+            DispatchQueue.main.async { [weak self] in
+                self?.executeAppOpenRecovery()
+            }
         }
+    }
+    
+    private func executeAppOpenRecovery() {
         
         let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
         
         guard savedPosition > 0 else {
-            os_log(.info, log: logger, "📱 No saved position for app open - skipping recovery") 
+            os_log(.info, log: logger, "📱 No saved position for app open - skipping recovery")
+            isRecoveryInProgress = false // Clear recovery flag
             return
         }
         
         os_log(.info, log: logger, "📱 Performing app open recovery: jump to track %d at %.2f seconds (will pause)", savedIndex, savedPosition)
         
-        // Use same Home Assistant approach: playlist jump with timeOffset
+        // Use Home Assistant approach: playlist jump with timeOffset AND pause
         let playlistJumpCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
@@ -427,9 +484,19 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery jump completed - pausing playback")
             
             // CRITICAL: Pause after recovery for app open scenario
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.sendJSONRPCCommand("pause")
                 os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery complete - paused at correct position")
+                
+                // Refresh WebView to show updated position/state
+        //        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+         //           SettingsManager.shared.shouldReloadWebView = true
+         //           os_log(.info, log: self?.logger ?? OSLog.default, "🔄 WebView refresh triggered after app open recovery")
+         //       }
+                
+                // Clear recovery flag after completion
+                self?.isRecoveryInProgress = false
+                os_log(.info, log: self?.logger ?? OSLog.default, "📱 Recovery state cleared - other recovery methods can now proceed")
             }
             
             // Clear recovery data after successful use
@@ -460,6 +527,12 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
+        
+        // Track if we were disconnected while in background (for app open recovery)
+        if isAppInBackground {
+            wasDisconnectedWhileInBackground = true
+            os_log(.info, log: logger, "📱 Disconnected while in background - recovery will be needed")
+        }
         
         // CRITICAL: Save position for playlist recovery on any disconnect
         saveCurrentPositionForRecovery()
@@ -536,6 +609,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     func connectionManagerDidEnterForeground() {
         isAppInBackground = false
         backgroundedWhilePlaying = false
+        // Note: Don't clear wasDisconnectedWhileInBackground here - let recovery handle it
         
         os_log(.info, log: logger, "📱 App foregrounded")
         
