@@ -241,7 +241,7 @@ struct SettingsView: View {
     // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
     
     private var flacBufferSummary: String {
-        return "\(settings.flacBufferSeconds)s, \(settings.networkBufferKB)KB"
+        return "\(settings.flacBufferSeconds)s playback, \(settings.networkBufferKB)s network"
     }
     
     
@@ -512,11 +512,12 @@ struct CBassConfigView: View {
         (30, "30 seconds", "Maximum - Very stable networks only")
     ]
     
-    // Network buffer presets (in KB)
+    // Network buffer presets (actually used as seconds despite the "KB" variable name)
+    // NOTE: Values below 512s cause FLAC streaming failures - keep minimum at 512s
     private let networkBufferPresets: [(Int, String, String)] = [
-        (256, "256 KB", "Small - Low memory usage"),
-        (512, "512 KB", "Default - Balanced performance"),
-        (1024, "1 MB", "Large - High bitrate FLAC")
+        (512, "512 seconds", "~8.5 minutes - Minimum for stable FLAC"),
+        (768, "768 seconds", "~12.8 minutes - More resilient"),
+        (1024, "1024 seconds", "~17 minutes - Maximum buffer")
     ]
     
     var body: some View {
@@ -567,16 +568,16 @@ struct CBassConfigView: View {
             }
             
             Section(header: Text("Network Buffer"),
-                    footer: Text("Controls CBass network chunk size. Larger values may help with high-bitrate FLAC but use more memory.")) {
+                    footer: Text("Controls network streaming buffer size. FLAC requires minimum 512 seconds (~8.5 minutes) for stable playback due to high bitrate. Larger values improve resilience but use more memory.")) {
                 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Current: \(Int(networkBufferKB)) KB")
+                    Text("Current: \(Int(networkBufferKB)) (used as seconds)")
                         .font(.headline)
                     
                     Slider(
                         value: $networkBufferKB,
-                        in: 256...1024,
-                        step: 256
+                        in: 512...1024,
+                        step: 128
                     ) {
                         Text("Network Buffer Size")
                     }

@@ -33,10 +33,8 @@ class AudioPlayer: NSObject, ObservableObject {
     private var isIntentionallyStopped = false
     private var metadataDuration: TimeInterval = 0.0
     
-    // CRITICAL: Track end detection protection from REFERENCE
-    private var trackEndDetectionEnabled = false
+    // Track timing (for reference only - track end detection now handled by NowPlayingManager with server time)
     private var trackStartTime: Date = Date()
-    private let minimumTrackDuration: TimeInterval = 5.0 // Minimum 5 seconds before allowing track end detection
     
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
@@ -85,8 +83,6 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 1)               // Enable network stream verification  
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
-        BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
-        BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
         // CRITICAL: Enable iOS audio session integration for CarPlay
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
@@ -216,15 +212,8 @@ class AudioPlayer: NSObject, ObservableObject {
         
         prepareForNewStream()
         
-        // Reset track end detection protection
-        trackEndDetectionEnabled = false
+        // Track timing for reference
         trackStartTime = Date()
-        
-        // Enable track end detection after minimum duration
-        DispatchQueue.main.asyncAfter(deadline: .now() + minimumTrackDuration) {
-            self.trackEndDetectionEnabled = true
-            os_log(.info, log: self.logger, "✅ Track end detection enabled after %.1f seconds", self.minimumTrackDuration)
-        }
         
         // CBass configured for streaming FLAC tolerance (like squeezelite)
         let streamFlags = DWORD(BASS_STREAM_STATUS) |    // enable status info
@@ -412,9 +401,9 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Track End Detection (MINIMAL CBASS)
+    // MARK: - Track End Detection (Server-Time Based)
     func checkIfTrackEnded() -> Bool {
-        // BASS handles track end detection via callbacks
+        // Track end detection now handled by NowPlayingManager using server time
         return false
     }
     
@@ -426,8 +415,7 @@ class AudioPlayer: NSObject, ObservableObject {
         isIntentionallyStopped = false
         lastReportedTime = 0
         
-        // CRITICAL: Reset track end detection protection
-        trackEndDetectionEnabled = false
+        // Reset track timing
         trackStartTime = Date()
     }
     
@@ -481,23 +469,8 @@ class AudioPlayer: NSObject, ObservableObject {
         
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         
-        // Track end detection - CRITICAL for SlimProto integration
-        BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_END), 0, { handle, channel, data, user in
-            guard let user = user else { return }
-            let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
-            
-            DispatchQueue.main.async {
-                if player.trackEndDetectionEnabled && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
-                    // BASS detected stream end - trust it for LMS streams
-                    let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    
-                    os_log(.info, log: player.logger, "🎵 Track ended (pos: %.2f, length: %.2f)", currentPos, totalLength)
-                    player.commandHandler?.notifyTrackEnded()
-                    player.delegate?.audioPlayerDidReachEnd()
-                }
-            }
-        }, selfPtr)
+        // REMOVED: BASS_SYNC_END - unreliable with FLAC/large buffers
+        // Track end detection now handled by server-time-based timer
         
         // Stream stall detection
         BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_STALL), 0, { handle, channel, data, user in
@@ -539,22 +512,22 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
             
         case "AAC", "MP3", "OGG":
-            // Compressed formats that work well - smaller buffer for responsiveness
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))     // 5s network buffer
+            // Compressed formats - larger network buffer for reliability
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s playback buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(120000))   // 120s network buffer (~5MB memory)
             
             
-            os_log(.info, log: logger, "🎵 Stable compressed format optimized: %{public}s", format)
+            os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 120s network)", format)
             
         case "OPUS":
-            // Opus needs more buffering than other compressed formats
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s buffer (between compressed and FLAC)
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(8000))     // 8s network buffer
+            // Opus - larger network buffer for reliability  
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s playback buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(120000))   // 120s network buffer (~4MB memory)
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
             
             
-            os_log(.info, log: logger, "🎵 Opus configured with enhanced buffering and stream verification: 5s buffer, 8s network")
+            os_log(.info, log: logger, "🎵 Opus configured with reliable buffering: 5s playback, 120s network")
             
         default:
             // Use defaults from setupCBass() - 2s buffer, 64KB network

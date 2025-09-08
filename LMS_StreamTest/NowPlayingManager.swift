@@ -87,6 +87,9 @@ class NowPlayingManager: ObservableObject {
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         
+        // Check for track end using server time (replaces unreliable BASS_SYNC_END)
+        checkForTrackEnd(currentTime: currentTime, isPlaying: isPlaying, timeSource: timeSource)
+        
         // Log time source changes
         let newUsingServerTime = (timeSource == .serverTime)
         if newUsingServerTime != isUsingServerTime {
@@ -538,6 +541,36 @@ class NowPlayingManager: ObservableObject {
         commandCenter.previousTrackCommand.isEnabled = enable
         
         os_log(.info, log: logger, "🎛️ Remote commands %{public}s", enable ? "enabled" : "disabled")
+    }
+    
+    // MARK: - Track End Detection (Server-Time Based)
+    private var lastTrackEndTime: Date?
+    private let trackEndCooldown: TimeInterval = 10.0  // 10 second cooldown between track ends
+    
+    private func checkForTrackEnd(currentTime: Double, isPlaying: Bool, timeSource: TimeSource) {
+        // Only check for track end if we have server time and are playing
+        guard timeSource == .serverTime && isPlaying && metadataDuration > 0 else {
+            return
+        }
+        
+        // Check cooldown period - prevent double track ends during transitions
+        if let lastEndTime = lastTrackEndTime {
+            let timeSinceLastEnd = Date().timeIntervalSince(lastEndTime)
+            if timeSinceLastEnd < trackEndCooldown {
+                return // Still in cooldown period
+            }
+        }
+        
+        // Check if we've reached the end of the track (with 2-second tolerance)
+        if currentTime >= (metadataDuration - 2.0) {
+            os_log(.info, log: logger, "🎵 Track end detected via server time (%.2f >= %.2f)", currentTime, metadataDuration - 2.0)
+            
+            // Record the time we triggered track end
+            lastTrackEndTime = Date()
+            
+            // Notify the coordinator to handle track end
+            slimClient?.handleTrackEndFromServerTime()
+        }
     }
     
     // MARK: - Debug Information
