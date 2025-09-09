@@ -73,7 +73,7 @@ class AudioPlayer: NSObject, ObservableObject {
         
         // Basic network configuration for LMS streaming  
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))        // 75% pre-buffer (BASS default) for stable streaming
@@ -83,6 +83,9 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 1)               // Enable network stream verification  
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
+        // REMOVED: Aggressive DSP settings that may interfere with iOS integration
+        // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
+        // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
         // CRITICAL: Enable iOS audio session integration for CarPlay
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
@@ -469,8 +472,26 @@ class AudioPlayer: NSObject, ObservableObject {
         
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         
-        // REMOVED: BASS_SYNC_END - unreliable with FLAC/large buffers
-        // Track end detection now handled by server-time-based timer
+        // Track end detection with data parameter filtering - CRITICAL for SlimProto integration
+        BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_END), 0, { handle, channel, data, user in
+            guard let user = user else { return }
+            let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
+            
+            DispatchQueue.main.async {
+                // CRITICAL: Only treat data=0 as natural track completion (fixes cellular false positives)
+                if data == 0 && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
+                    // Natural track end detected
+                    let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
+                    let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
+                    
+                    os_log(.info, log: player.logger, "🎵 Track ended naturally (data=0, pos: %.2f, length: %.2f)", currentPos, totalLength)
+                    player.delegate?.audioPlayerDidReachEnd()
+                } else if data != 0 {
+                    // Network/stream issue - ignore (fixes cellular FLAC premature skipping)
+                    os_log(.info, log: player.logger, "⚠️ BASS_SYNC_END data=%d (ignoring - not natural track end)", data)
+                }
+            }
+        }, selfPtr)
         
         // Stream stall detection
         BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_STALL), 0, { handle, channel, data, user in
@@ -505,19 +526,19 @@ class AudioPlayer: NSObject, ObservableObject {
             
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferMS))   // Network buffer in milliseconds
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(250))    // Slow updates for stability
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 75% pre-buffer (BASS default)
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Slow updates for stability
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
             
             os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
             
         case "AAC", "MP3", "OGG":
-            // Compressed formats - larger network buffer for reliability
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s playback buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(120000))   // 120s network buffer (~5MB memory)
+            // Compressed formats that work well - smaller buffer for responsiveness
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))     // 50s network buffer
             
             
-            os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 120s network)", format)
+            os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 50s network)", format)
             
         case "OPUS":
             // Opus - larger network buffer for reliability  

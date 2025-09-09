@@ -512,12 +512,12 @@ struct CBassConfigView: View {
         (30, "30 seconds", "Maximum - Very stable networks only")
     ]
     
-    // Network buffer presets (actually used as seconds despite the "KB" variable name)
+    // Network buffer presets (actually used as seconds despite variable name)
     // NOTE: Values below 512s cause FLAC streaming failures - keep minimum at 512s
     private let networkBufferPresets: [(Int, String, String)] = [
-        (512, "512 seconds", "~8.5 minutes - Minimum for stable FLAC"),
-        (768, "768 seconds", "~12.8 minutes - More resilient"),
-        (1024, "1024 seconds", "~17 minutes - Maximum buffer")
+        (512, "512 seconds", "Minimum for stable FLAC"),
+        (768, "768 seconds", "More resilient"),
+        (1024, "1024 seconds", "Maximum buffer")
     ]
     
     var body: some View {
@@ -577,7 +577,7 @@ struct CBassConfigView: View {
                     Slider(
                         value: $networkBufferKB,
                         in: 512...1024,
-                        step: 128
+                        step: 256
                     ) {
                         Text("Network Buffer Size")
                     }
