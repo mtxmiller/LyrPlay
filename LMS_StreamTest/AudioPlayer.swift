@@ -76,7 +76,7 @@ class AudioPlayer: NSObject, ObservableObject {
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))        // 75% pre-buffer (BASS default) for stable streaming
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
         
         // Enable stream verification for proper format detection (FLAC headers now handled by server transcoding)
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 1)                    // Enable file verification
@@ -87,18 +87,15 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
         // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
-        // CRITICAL: Enable iOS audio session integration for CarPlay
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
+        // CRITICAL: Configure iOS audio session for CarPlay A2DP support
+        let iosSessionFlags = BASS_IOS_SESSION_MIX |        // Allow other apps to be heard
+                             BASS_IOS_SESSION_BTHFP |       // Allow Bluetooth HFP devices  
+                             BASS_IOS_SESSION_BTA2DP        // Allow Bluetooth A2DP devices (CarPlay!)
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(iosSessionFlags))
         
-        // Configure iOS audio session for background and lock screen
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [])
-            try audioSession.setActive(true)
-            os_log(.info, log: logger, "✅ iOS audio session configured for lock screen")
-        } catch {
-            os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
-        }
+        // REMOVED: BASS now handles iOS audio session setup and activation automatically
+        // Manual session configuration would conflict with BASS_CONFIG_IOS_SESSION
+        os_log(.info, log: logger, "✅ iOS audio session managed by BASS automatically")
         
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
@@ -536,6 +533,7 @@ class AudioPlayer: NSObject, ObservableObject {
             // Compressed formats that work well - smaller buffer for responsiveness
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))     // 50s network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf = 7.5s startup (faster than default)
             
             
             os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 50s network)", format)
@@ -544,7 +542,7 @@ class AudioPlayer: NSObject, ObservableObject {
             // Opus - larger network buffer for reliability  
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s playback buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(120000))   // 120s network buffer (~4MB memory)
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 10% prebuf = 12s startup (same as FLAC)
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
             
             

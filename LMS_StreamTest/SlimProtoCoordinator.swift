@@ -369,12 +369,23 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// CarPlay reconnect recovery - connects to server first, then performs playlist jump
     func performCarPlayRecovery() {
+        // Check if recovery is already in progress
+        guard !isRecoveryInProgress else {
+            os_log(.info, log: logger, "🚗 CarPlay Recovery: Skipping - recovery already in progress")
+            return
+        }
+        
+        // Set recovery in progress
+        isRecoveryInProgress = true
+        os_log(.info, log: logger, "🚗 CarPlay Recovery: Starting (blocking other recovery methods)")
+        
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
             os_log(.info, log: logger, "🚗 No recovery data for CarPlay - connecting and using simple play command")
             connect()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.sendJSONRPCCommand("play")
+                self.isRecoveryInProgress = false // Clear recovery flag
             }
             return
         }
@@ -387,6 +398,7 @@ class SlimProtoCoordinator: ObservableObject {
             connect()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.sendJSONRPCCommand("play")
+                self.isRecoveryInProgress = false // Clear recovery flag
             }
             return
         }
@@ -413,6 +425,10 @@ class SlimProtoCoordinator: ObservableObject {
             
             self.sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
                 os_log(.info, log: self?.logger ?? OSLog.default, "🚗 CarPlay recovery completed - continuing playback")
+                
+                // Clear recovery flag after completion
+                self?.isRecoveryInProgress = false
+                os_log(.info, log: self?.logger ?? OSLog.default, "🚗 Recovery state cleared - other recovery methods can now proceed")
                 
                 // Clear recovery data after successful use
                 UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
@@ -474,30 +490,25 @@ class SlimProtoCoordinator: ObservableObject {
             "id": 1,
             "method": "slim.request",
             "params": [settings.playerMACAddress, [
-                "playlist", "jump", savedIndex, 1, 0, [
+                "playlist", "jump", savedIndex, 1, 1, [
                     "timeOffset": savedPosition
                 ]
             ]]
         ]
         
         sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery jump completed - pausing playback")
+            os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery completed - positioned silently with noplay=1")
             
-            // CRITICAL: Pause after recovery for app open scenario
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self?.sendJSONRPCCommand("pause")
-                os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery complete - paused at correct position")
-                
-                // Refresh WebView to show updated position/state
-        //        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-         //           SettingsManager.shared.shouldReloadWebView = true
-         //           os_log(.info, log: self?.logger ?? OSLog.default, "🔄 WebView refresh triggered after app open recovery")
-         //       }
-                
-                // Clear recovery flag after completion
-                self?.isRecoveryInProgress = false
-                os_log(.info, log: self?.logger ?? OSLog.default, "📱 Recovery state cleared - other recovery methods can now proceed")
+            // No pause needed since noplay=1 keeps it paused automatically
+            // Refresh WebView to show updated position/state
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                SettingsManager.shared.shouldReloadWebView = true
+                os_log(.info, log: self?.logger ?? OSLog.default, "🔄 WebView refresh triggered after app open recovery")
             }
+            
+            // Clear recovery flag after completion
+            self?.isRecoveryInProgress = false
+            os_log(.info, log: self?.logger ?? OSLog.default, "📱 Recovery state cleared - other recovery methods can now proceed")
             
             // Clear recovery data after successful use
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
@@ -1128,7 +1139,8 @@ extension SlimProtoCoordinator {
         // Ensure connection and send command
         if !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "🔄 Reconnecting for lock screen command")
-            audioManager.activateAudioSession()
+            // REMOVED: BASS now handles audio session activation automatically
+            // audioManager.activateAudioSession()
             connect()
             
             // Queue command to send after connection

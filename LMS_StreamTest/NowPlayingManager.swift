@@ -48,6 +48,7 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
+        // Re-enabled: BASS only handles AVAudioSession, not MPRemoteCommandCenter
         setupRemoteCommandCenter()
         startUpdateTimer()
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")

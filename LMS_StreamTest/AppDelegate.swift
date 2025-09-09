@@ -12,15 +12,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let settings = SettingsManager.shared
         os_log(.info, log: logger, "Settings loaded - Configured: %{public}s", settings.isConfigured ? "YES" : "NO")
         
-        // Configure AVAudioSession for background playback
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            os_log(.info, log: logger, "AVAudioSession category set to playback")
-            try AVAudioSession.sharedInstance().setActive(true)
-            os_log(.info, log: logger, "AVAudioSession activated")
-        } catch {
-            os_log(.error, log: logger, "Audio session setup error: %{public}s", error.localizedDescription)
-        }
+        // REMOVED: BASS will handle audio session configuration when initialized
+        // Manual session setup in AppDelegate would conflict with BASS_CONFIG_IOS_SESSION
+        os_log(.info, log: logger, "AVAudioSession will be managed by BASS framework")
         
         os_log(.info, log: logger, "App launch completed")
         return true
