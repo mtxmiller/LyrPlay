@@ -87,15 +87,27 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
         // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
-        // CRITICAL: Configure iOS audio session for CarPlay A2DP support
+        // Configure BASS iOS session for CarPlay support
         let iosSessionFlags = BASS_IOS_SESSION_MIX |        // Allow other apps to be heard
-                             BASS_IOS_SESSION_BTHFP |       // Allow Bluetooth HFP devices  
-                             BASS_IOS_SESSION_BTA2DP        // Allow Bluetooth A2DP devices (CarPlay!)
+                             BASS_IOS_SESSION_BTHFP |       // Allow Bluetooth HFP devices
+                             BASS_IOS_SESSION_BTA2DP |      // Allow Bluetooth A2DP devices (CarPlay!)
+                             BASS_IOS_SESSION_AIRPLAY       // Allow AirPlay devices (CarPlay wireless!)
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(iosSessionFlags))
+
+        // ORIGINAL WORKING CODE: Configure iOS audio session AFTER BASS flags
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "✅ iOS audio session configured for lock screen")
+        } catch {
+            os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
+        }
+
+        os_log(.info, log: logger, "✅ BASS iOS session configured for CarPlay - letting BASS handle AVAudioSession")
+
+        os_log(.info, log: logger, "✅ CBass iOS session configured for CarPlay (A2DP + AirPlay)")
         
-        // REMOVED: BASS now handles iOS audio session setup and activation automatically
-        // Manual session configuration would conflict with BASS_CONFIG_IOS_SESSION
-        os_log(.info, log: logger, "✅ iOS audio session managed by BASS automatically")
         
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
@@ -148,33 +160,20 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     private func reconfigureBassForCarPlay() {
-        // CRITICAL FIX: Instead of complex BASS reinitialization, simply invalidate current stream
-        // This forces PLAY commands to create fresh streams with proper CarPlay routing
-        // (Same approach that makes NEXT/PREVIOUS commands work)
-        
-        let wasPlaying = (currentStream != 0 && BASS_ChannelIsActive(currentStream) == DWORD(BASS_ACTIVE_PLAYING))
-        let currentPosition = getCurrentTime()
-        
-        os_log(.info, log: logger, "🚗 CarPlay route change - invalidating stream for fresh routing (was playing: %{public}@, position: %.2f)", wasPlaying ? "true" : "false", currentPosition)
-        
-        // CRITICAL: Stop and free current stream to force reinitialization
-        if currentStream != 0 {
-            BASS_ChannelStop(currentStream)
-            BASS_StreamFree(currentStream)
-            currentStream = 0
-            os_log(.info, log: logger, "🚗 Stream invalidated - next PLAY command will create fresh stream with CarPlay routing")
-        }
-        
-        // DON'T restart stream here - let the server's PLAY command trigger fresh stream creation
-        // This ensures PLAY/PAUSE commands behave like NEXT/PREVIOUS (fresh stream = proper routing)
-        
-        // Save state for recovery if needed
-        if wasPlaying && !currentStreamURL.isEmpty {
-            os_log(.info, log: logger, "🚗 Stream will be recreated on next PLAY command: %{public}s at position %.2f", currentStreamURL, currentPosition)
-            
-            // Notify command handler that stream was invalidated for CarPlay
-            commandHandler?.notifyStreamInvalidatedForCarPlay()
-        }
+        os_log(.info, log: logger, "🚗 CarPlay detected - updating BASS session configuration")
+
+        // Update BASS iOS session flags for CarPlay (ensure all flags are set)
+        let carPlayFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP |
+                          BASS_IOS_SESSION_BTA2DP | BASS_IOS_SESSION_AIRPLAY
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(carPlayFlags))
+
+        // Let BASS handle the route change internally - don't stop/free streams
+        // This prevents audio gaps and ensures smooth CarPlay handoff
+        os_log(.info, log: logger, "🚗 BASS session updated for CarPlay - maintaining current stream")
+
+        // Verify the configuration was applied
+        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
+        os_log(.info, log: logger, "🚗 BASS iOS session flags: 0x%08X", currentFlags)
     }
     
     private func reconfigureBassForStandardRoute() {
@@ -289,9 +288,9 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Playback Control (MINIMAL CBASS)
     func play() {
-        guard currentStream != 0 else { 
-            os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream was invalidated (likely for CarPlay)")
-            return 
+        guard currentStream != 0 else {
+            os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream may have ended or failed")
+            return
         }
         
         isIntentionallyPaused = false

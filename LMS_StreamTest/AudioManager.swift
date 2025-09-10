@@ -44,7 +44,11 @@ class AudioManager: NSObject, ObservableObject {
         super.init()
         
         setupDelegation()
-        os_log(.info, log: logger, "✅ Refactored AudioManager initialized with modular architecture")
+        
+        // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
+        nowPlayingManager.setAudioManager(self)
+        
+        os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
     }
     
     // MARK: - Component Integration
@@ -173,6 +177,13 @@ class AudioManager: NSObject, ObservableObject {
     
     // MARK: - Private Audio Session Configuration
     private func configureAudioSessionForFormat(_ format: String) {
+        // DISABLED: Format-specific audio session configuration
+        // BASS now handles AVAudioSession exclusively via BASS_CONFIG_IOS_SESSION
+        // This prevents conflicts and error -50
+
+        os_log(.info, log: logger, "🎵 Format: %{public}s - BASS handles audio session automatically", format)
+
+        /*
         switch format.uppercased() {
         case "ALAC", "FLAC":
             audioSessionManager.setupForLosslessAudio()
@@ -181,6 +192,7 @@ class AudioManager: NSObject, ObservableObject {
         default:
             audioSessionManager.setupForCompressedAudio()
         }
+        */
     }
     
     // MARK: - Lock Screen Integration (Preserved Interface)

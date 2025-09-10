@@ -30,7 +30,7 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        setupInitialAudioSession()
+        //setupInitialAudioSession()
         setupBackgroundObservers()
         setupInterruptionManager()
         os_log(.info, log: logger, "Enhanced AudioSessionManager initialized")

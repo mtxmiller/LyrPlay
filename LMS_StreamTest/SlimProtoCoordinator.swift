@@ -440,32 +440,36 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// App open recovery - same playlist jump method but pauses after recovery
     func performAppOpenRecovery() {
+        // 🚫 DISABLED: App open recovery temporarily disabled for testing
+        os_log(.info, log: logger, "📱 App Open Recovery: DISABLED for testing")
+        return
+
         recoveryQueue.async { [weak self] in
             guard let self = self else { return }
-            
+
             // Check if recovery is already in progress
             guard !self.isRecoveryInProgress else {
                 os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - recovery already in progress")
                 return
             }
-            
+
             // Check if we were disconnected while in background - this indicates recovery is needed
             guard self.wasDisconnectedWhileInBackground else {
                 os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - was not disconnected while in background")
                 return
             }
-            
+
             // Check if we have recovery data (no time limit - like other music players)
             guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
                 os_log(.info, log: self.logger, "📱 No recovery data for app open - skipping recovery")
-                return
+                 return
             }
-            
+
             // Set recovery in progress and clear background disconnection flag
             self.isRecoveryInProgress = true
             self.wasDisconnectedWhileInBackground = false
             os_log(.info, log: self.logger, "📱 App Open Recovery: Starting (blocking other recovery methods)")
-            
+
             DispatchQueue.main.async { [weak self] in
                 self?.executeAppOpenRecovery()
             }
