@@ -132,34 +132,14 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         let reasonString = routeChangeReasonString(routeChangeReason)
-        os_log(.info, log: logger, "🔀 Audio route change detected: %{public}s", reasonString)
+        os_log(.info, log: logger, "🔀 Audio route change: %{public}s (handled by InterruptionManager)", reasonString)
         
-        switch routeChangeReason {
-        case .newDeviceAvailable, .oldDeviceUnavailable:
-            // Check if this is a CarPlay route change
-            let currentRoute = AVAudioSession.sharedInstance().currentRoute
-            let isCarPlay = currentRoute.outputs.contains { output in
-                output.portType == .carAudio
-            }
-            
-            if isCarPlay {
-                os_log(.info, log: logger, "🚗 CarPlay detected - reconfiguring BASS for CarPlay audio routing")
-                reconfigureBassForCarPlay()
-            } else {
-                os_log(.info, log: logger, "📱 Non-CarPlay route - using standard BASS configuration")
-                reconfigureBassForStandardRoute()
-            }
-            
-        case .routeConfigurationChange:
-            os_log(.info, log: logger, "🔧 Route configuration changed - checking CarPlay status")
-            // Handle configuration changes that might affect CarPlay
-            
-        default:
-            os_log(.info, log: logger, "🔀 Other route change: %{public}s", reasonString)
-        }
+        // CarPlay detection and management removed - now handled by AudioManager
+        // This maintains general route change logging for debugging purposes
     }
     
-    private func reconfigureBassForCarPlay() {
+    // MARK: - Public BASS Configuration (called by AudioManager)
+    func reconfigureBassForCarPlay() {
         os_log(.info, log: logger, "🚗 CarPlay detected - updating BASS session configuration")
 
         // Update BASS iOS session flags for CarPlay (ensure all flags are set)
@@ -176,7 +156,7 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "🚗 BASS iOS session flags: 0x%08X", currentFlags)
     }
     
-    private func reconfigureBassForStandardRoute() {
+    func reconfigureBassForStandardRoute() {
         // Standard route handling - currently no special action needed
         // Could be extended for other route types in the future
         os_log(.info, log: logger, "📱 Standard audio route - no reconfiguration needed")

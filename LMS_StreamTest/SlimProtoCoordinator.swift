@@ -179,6 +179,10 @@ class SlimProtoCoordinator: ObservableObject {
         return connectionManager.connectionState.displayName
     }
     
+    var isConnected: Bool {
+        return connectionManager.connectionState.isConnected
+    }
+    
     var streamState: String {
         return commandHandler.streamState
     }

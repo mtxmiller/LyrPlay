@@ -97,3 +97,8 @@ iOSInjectionProject/
 
 # LocalPlayer caching development plugin
 lms-remotecache-plugin/
+
+#reference-files
+slimserver/
+bass24-ios-2/
+.claude/

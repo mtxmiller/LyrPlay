@@ -381,6 +381,54 @@ extension AudioManager {
         os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect and saved position for recovery (%.2f)", position)
     }
     
+    // MARK: - Smart CarPlay Connect Logic
+    private func handleCarPlayConnect() {
+        os_log(.info, log: logger, "🚗 CarPlay connected - starting smart connect sequence")
+        
+        // Step 1: Update BASS configuration for CarPlay
+        configureBassForCarPlay()
+        
+        // Step 2: Wait for BASS to settle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.executeSmartCarPlayConnect()
+        }
+    }
+    
+    private func executeSmartCarPlayConnect() {
+        guard let slimClient = slimClient else {
+            os_log(.error, log: logger, "🚗 No SlimProto client available")
+            return
+        }
+        
+        // Step 3: Check server connection status
+        let isConnected = slimClient.isConnected
+        
+        os_log(.info, log: logger, "🚗 BASS settled - server connected: %{public}s", isConnected ? "YES" : "NO")
+        
+        if isConnected {
+            // Step 4a: Connected → Simple PLAY command
+            os_log(.info, log: logger, "🚗 Server connected - sending PLAY command for auto-resume")
+            slimClient.sendLockScreenCommand("play")
+        } else {
+            // Step 4b: Not connected → Full playlist recovery
+            os_log(.info, log: logger, "🚗 Server not connected - performing playlist recovery")
+            slimClient.performCarPlayRecovery()
+        }
+    }
+    
+    // MARK: - BASS CarPlay Configuration (delegate to AudioPlayer)
+    private func configureBassForCarPlay() {
+        // Delegate to AudioPlayer which handles the BASS configuration
+        audioPlayer.reconfigureBassForCarPlay()
+        os_log(.info, log: logger, "🚗 AudioManager delegated BASS CarPlay configuration")
+    }
+    
+    private func configureBassForStandardRoute() {
+        // Delegate to AudioPlayer which handles the BASS configuration
+        audioPlayer.reconfigureBassForStandardRoute()
+        os_log(.info, log: logger, "📱 AudioManager delegated BASS standard configuration")
+    }
+    
     
     // MARK: - Utility Methods
     private func getCurrentAudioFormat() -> String {
@@ -442,44 +490,33 @@ extension AudioManager: AudioSessionManagerDelegate {
         handleInterruptionEnded(shouldResume: shouldResume)
     }
     
-    // NEW: Handle route changes
+    // NEW: Handle route changes with smart CarPlay logic
     func audioSessionRouteChanged(shouldPause: Bool) {
         // Get the actual route change type from InterruptionManager
         let routeChangeDescription = audioSessionManager.interruptionManager?.lastRouteChange?.description ?? "Unknown"
         
-        os_log(.info, log: logger, "🔀 Route change detected: %{public}s (shouldPause: %{public}s)",
+        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
                routeChangeDescription, shouldPause ? "YES" : "NO")
         
         if shouldPause {
-            let currentState = getPlayerState()
-            let wasPlaying = (currentState == "Playing")
-            let currentPosition = getCurrentTime()
-            
-            if wasPlaying {
-                // Pause due to route change
+            // Handle disconnections (CarPlay disconnect, headphones, etc.)
+            if getPlayerState() == "Playing" {
+                let currentPosition = getCurrentTime()
                 audioPlayer.pause()
-                
-                // Update now playing
                 nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
                 
-                // Check for CarPlay disconnection using the proper route change type
                 if routeChangeDescription == "CarPlay Disconnected" {
-                    os_log(.info, log: logger, "🚗 CarPlay disconnection detected - notifying server")
                     let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
                     notifyServerOfCarPlayDisconnect(position: serverPosition)
-                } else {
-                    os_log(.info, log: logger, "⏸️ Non-CarPlay route change pause: %{public}s", routeChangeDescription)
                 }
                 
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
             }
         } else if routeChangeDescription == "CarPlay Connected" {
-            // CarPlay reconnected - use playlist recovery instead of server auto-resume
-            os_log(.info, log: logger, "🚗 CarPlay connection detected - performing playlist recovery")
-            slimClient?.performCarPlayRecovery()
+            // SMART CONNECT LOGIC - your requested flow
+            handleCarPlayConnect()
         } else {
-            // DEBUG: Log all other route changes to see what CarPlay reconnect actually looks like
-            os_log(.info, log: logger, "🔍 DEBUG: Route change detected: '%{public}s'", routeChangeDescription)
+            os_log(.info, log: logger, "🔍 DEBUG: Route change: '%{public}s'", routeChangeDescription)
         }
     }
 }
