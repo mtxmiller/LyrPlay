@@ -442,7 +442,6 @@ class SlimProtoCoordinator: ObservableObject {
     func performAppOpenRecovery() {
         // 🚫 DISABLED: App open recovery temporarily disabled for testing
         os_log(.info, log: logger, "📱 App Open Recovery: DISABLED for testing")
-        return
 
         recoveryQueue.async { [weak self] in
             guard let self = self else { return }

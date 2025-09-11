@@ -169,7 +169,7 @@ struct ContentView: View {
                     os_log(.info, log: logger, "📱 App Open Recovery: Skipping - already playing (state: %{public}s)", currentState)
                 } else {
                     os_log(.info, log: logger, "📱 App Open Recovery: Proceeding - not playing (state: %{public}s)", currentState)
-                    slimProtoCoordinator.performAppOpenRecovery()
+                    //slimProtoCoordinator.performAppOpenRecovery() - HOLD FOR NOW - NOT READY
                 }
             }
         }
