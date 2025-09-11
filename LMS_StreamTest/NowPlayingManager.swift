@@ -371,6 +371,16 @@ class NowPlayingManager: ObservableObject {
         os_log(.info, log: logger, "✅ Remote Command Center configured with track skip controls")
     }
     
+    // MARK: - Media Control Refresh (called after audio session changes)
+    func refreshRemoteCommandCenter() {
+        os_log(.info, log: logger, "🔄 Refreshing MPRemoteCommandCenter connections after audio session change")
+        
+        // Re-run the complete setup to refresh all connections
+        setupRemoteCommandCenter()
+        
+        os_log(.info, log: logger, "✅ MPRemoteCommandCenter refreshed for CarPlay/lock screen compatibility")
+    }
+    
     // MARK: - Track Metadata Management
     func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval? = nil) {
         // Only update duration if explicitly provided (Material skin approach)

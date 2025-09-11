@@ -51,6 +51,7 @@ class AudioPlayer: NSObject, ObservableObject {
     private var audioRouteObserver: NSObjectProtocol?
     
     weak var commandHandler: SlimProtoCommandHandler?
+    weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
     // MARK: - Initialization
     override init() {
@@ -147,6 +148,22 @@ class AudioPlayer: NSObject, ObservableObject {
                           BASS_IOS_SESSION_BTA2DP | BASS_IOS_SESSION_AIRPLAY
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(carPlayFlags))
 
+        // CRITICAL FIX: Reinitialize iOS audio session for CarPlay media controls
+        // Use exact same setup that works for lock screen controls
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "🚗 iOS audio session reinitialized for CarPlay media controls")
+            
+            // CRITICAL: Re-establish MPRemoteCommandCenter connections after audio session change
+            // This fixes the issue where CarPlay media controls sometimes don't respond
+            notifyAudioManagerToRefreshMediaControls()
+            
+        } catch {
+            os_log(.error, log: logger, "❌ CarPlay audio session setup failed: %{public}s", error.localizedDescription)
+        }
+
         // Let BASS handle the route change internally - don't stop/free streams
         // This prevents audio gaps and ensures smooth CarPlay handoff
         os_log(.info, log: logger, "🚗 BASS session updated for CarPlay - maintaining current stream")
@@ -157,9 +174,36 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     func reconfigureBassForStandardRoute() {
-        // Standard route handling - currently no special action needed
-        // Could be extended for other route types in the future
-        os_log(.info, log: logger, "📱 Standard audio route - no reconfiguration needed")
+        os_log(.info, log: logger, "📱 Standard route detected - updating BASS session configuration")
+        
+        // Update BASS iOS session flags for standard route (remove CarPlay-specific flags)
+        let standardFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP | BASS_IOS_SESSION_BTA2DP
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(standardFlags))
+        
+        // CRITICAL FIX: Reinitialize iOS audio session for standard lock screen controls
+        // Use exact same setup that works for lock screen controls
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "📱 iOS audio session reinitialized for standard lock screen controls")
+        } catch {
+            os_log(.error, log: logger, "❌ Standard audio session setup failed: %{public}s", error.localizedDescription)
+        }
+        
+        os_log(.info, log: logger, "📱 BASS session updated for standard route")
+        
+        // Verify the configuration was applied
+        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
+        os_log(.info, log: logger, "📱 BASS iOS session flags: 0x%08X", currentFlags)
+    }
+    
+    // MARK: - Media Control Refresh Notification
+    private func notifyAudioManagerToRefreshMediaControls() {
+        // Notify AudioManager that media controls need to be refreshed
+        DispatchQueue.main.async { [weak self] in
+            self?.audioManager?.refreshMediaControlsAfterAudioSessionChange()
+        }
     }
     
     private func routeChangeReasonString(_ reason: AVAudioSession.RouteChangeReason) -> String {

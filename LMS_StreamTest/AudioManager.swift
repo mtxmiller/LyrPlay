@@ -55,6 +55,7 @@ class AudioManager: NSObject, ObservableObject {
     private func setupDelegation() {
         // Connect AudioPlayer to AudioManager
         audioPlayer.delegate = self
+        audioPlayer.audioManager = self  // Set back-reference for media control refresh
         
         // Connect AudioSessionManager to AudioManager - ENHANCED
         audioSessionManager.delegate = self
@@ -427,6 +428,16 @@ extension AudioManager {
         // Delegate to AudioPlayer which handles the BASS configuration
         audioPlayer.reconfigureBassForStandardRoute()
         os_log(.info, log: logger, "📱 AudioManager delegated BASS standard configuration")
+    }
+    
+    // MARK: - Media Control Refresh (called by AudioPlayer after audio session changes)
+    func refreshMediaControlsAfterAudioSessionChange() {
+        os_log(.info, log: logger, "🔄 Refreshing media controls after audio session change")
+        
+        // Re-establish MPRemoteCommandCenter connections via NowPlayingManager
+        nowPlayingManager.refreshRemoteCommandCenter()
+        
+        os_log(.info, log: logger, "✅ Media controls refreshed for CarPlay/lock screen compatibility")
     }
     
     
