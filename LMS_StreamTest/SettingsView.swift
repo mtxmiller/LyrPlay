@@ -1312,12 +1312,12 @@ struct AudioFormatConfigView: View {
                         color: .blue
                     )
                     
-               //     FormatRequirementRow(
-              //          format: "Premium Quality (Opus)",
-             //           requirement: "Requires server transcoding setup",
-             //           icon: "exclamationmark.triangle.fill",
-             //           color: .orange
-             //       )
+                    FormatRequirementRow(
+                        format: "Premium Quality (Opus)",
+                        requirement: "Requires server transcoding setup",
+                        icon: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
                     
                     FormatRequirementRow(
                         format: "Lossless (FLAC)",
