@@ -51,12 +51,12 @@ class SettingsManager: ObservableObject {
     enum AudioFormat: Int {
         case compressed = 0
         case oggVorbis = 1
-        case opus = 2        // Hidden from user menu
+        case opus = 2
         case flac = 3
         
-        // Only show stable formats to users
+        // Show all supported formats to users
         static var allCases: [AudioFormat] {
-            return [.compressed, .oggVorbis, .flac]
+            return [.compressed, .oggVorbis, .opus, .flac]
         }
         
         var displayName: String {

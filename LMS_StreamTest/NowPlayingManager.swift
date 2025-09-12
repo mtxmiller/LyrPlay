@@ -48,6 +48,7 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
+        // Re-enabled: BASS only handles AVAudioSession, not MPRemoteCommandCenter
         setupRemoteCommandCenter()
         startUpdateTimer()
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
@@ -368,6 +369,16 @@ class NowPlayingManager: ObservableObject {
         }
         
         os_log(.info, log: logger, "✅ Remote Command Center configured with track skip controls")
+    }
+    
+    // MARK: - Media Control Refresh (called after audio session changes)
+    func refreshRemoteCommandCenter() {
+        os_log(.info, log: logger, "🔄 Refreshing MPRemoteCommandCenter connections after audio session change")
+        
+        // Re-run the complete setup to refresh all connections
+        setupRemoteCommandCenter()
+        
+        os_log(.info, log: logger, "✅ MPRemoteCommandCenter refreshed for CarPlay/lock screen compatibility")
     }
     
     // MARK: - Track Metadata Management

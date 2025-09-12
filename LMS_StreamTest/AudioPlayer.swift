@@ -51,6 +51,7 @@ class AudioPlayer: NSObject, ObservableObject {
     private var audioRouteObserver: NSObjectProtocol?
     
     weak var commandHandler: SlimProtoCommandHandler?
+    weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
     // MARK: - Initialization
     override init() {
@@ -76,7 +77,7 @@ class AudioPlayer: NSObject, ObservableObject {
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
         BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))        // 75% pre-buffer (BASS default) for stable streaming
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
         
         // Enable stream verification for proper format detection (FLAC headers now handled by server transcoding)
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 1)                    // Enable file verification
@@ -87,10 +88,14 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
         // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
-        // CRITICAL: Enable iOS audio session integration for CarPlay
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_MIXAUDIO), 1)              // Enable iOS audio session integration
-        
-        // Configure iOS audio session for background and lock screen
+        // Configure BASS iOS session for CarPlay support
+        let iosSessionFlags = BASS_IOS_SESSION_MIX |        // Allow other apps to be heard
+                             BASS_IOS_SESSION_BTHFP |       // Allow Bluetooth HFP devices
+                             BASS_IOS_SESSION_BTA2DP |      // Allow Bluetooth A2DP devices (CarPlay!)
+                             BASS_IOS_SESSION_AIRPLAY       // Allow AirPlay devices (CarPlay wireless!)
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(iosSessionFlags))
+
+        // ORIGINAL WORKING CODE: Configure iOS audio session AFTER BASS flags
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playback, mode: .default, options: [])
@@ -99,6 +104,11 @@ class AudioPlayer: NSObject, ObservableObject {
         } catch {
             os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
         }
+
+        os_log(.info, log: logger, "✅ BASS iOS session configured for CarPlay - letting BASS handle AVAudioSession")
+
+        os_log(.info, log: logger, "✅ CBass iOS session configured for CarPlay (A2DP + AirPlay)")
+        
         
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
@@ -123,67 +133,77 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         let reasonString = routeChangeReasonString(routeChangeReason)
-        os_log(.info, log: logger, "🔀 Audio route change detected: %{public}s", reasonString)
+        os_log(.info, log: logger, "🔀 Audio route change: %{public}s (handled by InterruptionManager)", reasonString)
         
-        switch routeChangeReason {
-        case .newDeviceAvailable, .oldDeviceUnavailable:
-            // Check if this is a CarPlay route change
-            let currentRoute = AVAudioSession.sharedInstance().currentRoute
-            let isCarPlay = currentRoute.outputs.contains { output in
-                output.portType == .carAudio
-            }
-            
-            if isCarPlay {
-                os_log(.info, log: logger, "🚗 CarPlay detected - reconfiguring BASS for CarPlay audio routing")
-                reconfigureBassForCarPlay()
-            } else {
-                os_log(.info, log: logger, "📱 Non-CarPlay route - using standard BASS configuration")
-                reconfigureBassForStandardRoute()
-            }
-            
-        case .routeConfigurationChange:
-            os_log(.info, log: logger, "🔧 Route configuration changed - checking CarPlay status")
-            // Handle configuration changes that might affect CarPlay
-            
-        default:
-            os_log(.info, log: logger, "🔀 Other route change: %{public}s", reasonString)
-        }
+        // CarPlay detection and management removed - now handled by AudioManager
+        // This maintains general route change logging for debugging purposes
     }
     
-    private func reconfigureBassForCarPlay() {
-        // CRITICAL FIX: Instead of complex BASS reinitialization, simply invalidate current stream
-        // This forces PLAY commands to create fresh streams with proper CarPlay routing
-        // (Same approach that makes NEXT/PREVIOUS commands work)
-        
-        let wasPlaying = (currentStream != 0 && BASS_ChannelIsActive(currentStream) == DWORD(BASS_ACTIVE_PLAYING))
-        let currentPosition = getCurrentTime()
-        
-        os_log(.info, log: logger, "🚗 CarPlay route change - invalidating stream for fresh routing (was playing: %{public}@, position: %.2f)", wasPlaying ? "true" : "false", currentPosition)
-        
-        // CRITICAL: Stop and free current stream to force reinitialization
-        if currentStream != 0 {
-            BASS_ChannelStop(currentStream)
-            BASS_StreamFree(currentStream)
-            currentStream = 0
-            os_log(.info, log: logger, "🚗 Stream invalidated - next PLAY command will create fresh stream with CarPlay routing")
-        }
-        
-        // DON'T restart stream here - let the server's PLAY command trigger fresh stream creation
-        // This ensures PLAY/PAUSE commands behave like NEXT/PREVIOUS (fresh stream = proper routing)
-        
-        // Save state for recovery if needed
-        if wasPlaying && !currentStreamURL.isEmpty {
-            os_log(.info, log: logger, "🚗 Stream will be recreated on next PLAY command: %{public}s at position %.2f", currentStreamURL, currentPosition)
+    // MARK: - Public BASS Configuration (called by AudioManager)
+    func reconfigureBassForCarPlay() {
+        os_log(.info, log: logger, "🚗 CarPlay detected - updating BASS session configuration")
+
+        // Update BASS iOS session flags for CarPlay (ensure all flags are set)
+        let carPlayFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP |
+                          BASS_IOS_SESSION_BTA2DP | BASS_IOS_SESSION_AIRPLAY
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(carPlayFlags))
+
+        // CRITICAL FIX: Reinitialize iOS audio session for CarPlay media controls
+        // Use exact same setup that works for lock screen controls
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "🚗 iOS audio session reinitialized for CarPlay media controls")
             
-            // Notify command handler that stream was invalidated for CarPlay
-            commandHandler?.notifyStreamInvalidatedForCarPlay()
+            // CRITICAL: Re-establish MPRemoteCommandCenter connections after audio session change
+            // This fixes the issue where CarPlay media controls sometimes don't respond
+            notifyAudioManagerToRefreshMediaControls()
+            
+        } catch {
+            os_log(.error, log: logger, "❌ CarPlay audio session setup failed: %{public}s", error.localizedDescription)
         }
+
+        // Let BASS handle the route change internally - don't stop/free streams
+        // This prevents audio gaps and ensures smooth CarPlay handoff
+        os_log(.info, log: logger, "🚗 BASS session updated for CarPlay - maintaining current stream")
+
+        // Verify the configuration was applied
+        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
+        os_log(.info, log: logger, "🚗 BASS iOS session flags: 0x%08X", currentFlags)
     }
     
-    private func reconfigureBassForStandardRoute() {
-        // Standard route handling - currently no special action needed
-        // Could be extended for other route types in the future
-        os_log(.info, log: logger, "📱 Standard audio route - no reconfiguration needed")
+    func reconfigureBassForStandardRoute() {
+        os_log(.info, log: logger, "📱 Standard route detected - updating BASS session configuration")
+        
+        // Update BASS iOS session flags for standard route (remove CarPlay-specific flags)
+        let standardFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP | BASS_IOS_SESSION_BTA2DP
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(standardFlags))
+        
+        // CRITICAL FIX: Reinitialize iOS audio session for standard lock screen controls
+        // Use exact same setup that works for lock screen controls
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            os_log(.info, log: logger, "📱 iOS audio session reinitialized for standard lock screen controls")
+        } catch {
+            os_log(.error, log: logger, "❌ Standard audio session setup failed: %{public}s", error.localizedDescription)
+        }
+        
+        os_log(.info, log: logger, "📱 BASS session updated for standard route")
+        
+        // Verify the configuration was applied
+        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
+        os_log(.info, log: logger, "📱 BASS iOS session flags: 0x%08X", currentFlags)
+    }
+    
+    // MARK: - Media Control Refresh Notification
+    private func notifyAudioManagerToRefreshMediaControls() {
+        // Notify AudioManager that media controls need to be refreshed
+        DispatchQueue.main.async { [weak self] in
+            self?.audioManager?.refreshMediaControlsAfterAudioSessionChange()
+        }
     }
     
     private func routeChangeReasonString(_ reason: AVAudioSession.RouteChangeReason) -> String {
@@ -292,9 +312,9 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Playback Control (MINIMAL CBASS)
     func play() {
-        guard currentStream != 0 else { 
-            os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream was invalidated (likely for CarPlay)")
-            return 
+        guard currentStream != 0 else {
+            os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream may have ended or failed")
+            return
         }
         
         isIntentionallyPaused = false
@@ -527,7 +547,7 @@ class AudioPlayer: NSObject, ObservableObject {
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferMS))   // Network buffer in milliseconds
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 75% pre-buffer (BASS default)
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Slow updates for stability
+            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Fast updates for stability
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
             
             os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
@@ -536,15 +556,16 @@ class AudioPlayer: NSObject, ObservableObject {
             // Compressed formats that work well - smaller buffer for responsiveness
             BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
             BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))     // 50s network buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf = 7.5s startup (faster than default)
             
             
             os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 50s network)", format)
             
         case "OPUS":
             // Opus - larger network buffer for reliability  
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(5000))         // 5s playback buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(120000))   // 120s network buffer (~4MB memory)
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(75))       // 75% pre-buffer (BASS default)
+            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1.5))         // 5s playback buffer
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))   // 50s
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf
             BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
             
             

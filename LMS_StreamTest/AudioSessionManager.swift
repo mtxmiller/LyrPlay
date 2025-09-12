@@ -30,7 +30,7 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        setupInitialAudioSession()
+        //setupInitialAudioSession()
         setupBackgroundObservers()
         setupInterruptionManager()
         os_log(.info, log: logger, "Enhanced AudioSessionManager initialized")
@@ -175,6 +175,42 @@ class AudioSessionManager: ObservableObject {
         } catch {
             os_log(.error, log: logger, "❌ Failed to reconfigure audio session: %{public}s", error.localizedDescription)
         }
+    }
+    
+    // MARK: - CarPlay Audio Session Readiness (Gentle Approach)
+    func maintainAudioSessionReadinessAfterCarPlayDisconnect() {
+        os_log(.info, log: logger, "🚗 Maintaining audio session readiness after CarPlay disconnect")
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Configure audio session properly but don't force activation
+            // Use the same working configuration from AudioPlayer
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            
+            // DON'T call setActive(true) - let iOS manage activation timing
+            // This prevents crashes with lock screen controls while staying "ready"
+            
+            os_log(.info, log: logger, "✅ Audio session configured for readiness (not activated)")
+            
+            // Refresh background audio capabilities to maintain priority
+            refreshBackgroundAudioCapabilities()
+            
+        } catch {
+            os_log(.error, log: logger, "❌ Failed to configure audio session readiness: %{public}s", error.localizedDescription)
+        }
+    }
+    
+    // MARK: - Background Audio Capabilities Management
+    private func refreshBackgroundAudioCapabilities() {
+        os_log(.info, log: logger, "🔄 Refreshing background audio capabilities")
+        
+        // Restart background task to maintain audio capabilities
+        // This ensures iOS knows we're still an audio app even when backgrounded
+        stopBackgroundTask()
+        startBackgroundTask()
+        
+        os_log(.info, log: logger, "✅ Background audio capabilities refreshed")
     }
     
     func reconfigureAfterMediaServicesReset() {
@@ -322,6 +358,13 @@ extension AudioSessionManager: InterruptionManagerDelegate {
     func routeDidChange(type: InterruptionManager.RouteChangeType, shouldPause: Bool) {
         os_log(.info, log: logger, "🔀 Route changed: %{public}s (shouldPause: %{public}s)",
                type.description, shouldPause ? "YES" : "NO")
+        
+        // GENTLE FIX: Maintain audio session readiness when CarPlay disconnects
+        // This keeps the app ready to receive audio control without aggressively stealing it
+        if type == .carPlayDisconnected {
+            os_log(.info, log: logger, "🚗 CarPlay disconnected - maintaining audio session readiness")
+            maintainAudioSessionReadinessAfterCarPlayDisconnect()
+        }
         
         // Log the new route for debugging
         logCurrentAudioSessionState()

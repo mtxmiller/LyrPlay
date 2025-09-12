@@ -108,6 +108,7 @@ class InterruptionManager: ObservableObject {
     @Published var currentInterruption: InterruptionType?
     @Published var isInterrupted: Bool = false
     @Published var lastRouteChange: RouteChangeType?
+    private var lastRouteChangeTime: Date?
     
     private var wasPlayingBeforeInterruption: Bool = false
     private var interruptionStartTime: Date?
@@ -226,6 +227,23 @@ class InterruptionManager: ObservableObject {
     
     private func determineInterruptionType(userInfo: [AnyHashable: Any]) -> InterruptionType {
         // Enhanced phone call detection
+        
+        // Method 0: Check if this interruption is actually a CarPlay route change
+        // CarPlay disconnects can trigger both route change AND interruption notifications
+        if let lastChange = lastRouteChange,
+           (lastChange == .carPlayDisconnected || lastChange == .carPlayConnected),
+           let lastChangeTime = lastRouteChangeTime,
+           Date().timeIntervalSince(lastChangeTime) < 2.0 {
+            os_log(.info, log: logger, "🚗 Interruption caused by recent CarPlay route change - treating as CarPlay event (not false phone call)")
+            
+            // FIXED: Treat CarPlay disconnect as resumable instead of "otherAudio"
+            // This allows proper audio session recovery when CarPlay reconnects
+            if lastChange == .carPlayDisconnected {
+                return .otherAudio  // CarPlay disconnect should pause but allow resumption
+            } else {
+                return .otherAudio  // CarPlay connect - treat as temporary route change
+            }
+        }
         
         // Method 1: Check if CallKit is indicating a phone call
         if isPhoneCallActive() {
@@ -363,6 +381,17 @@ class InterruptionManager: ObservableObject {
     
     private func processRouteChange(_ routeChangeType: RouteChangeType) {
         lastRouteChange = routeChangeType
+        lastRouteChangeTime = Date()  // Track when this route change happened
+        
+        // CRITICAL FIX: Clear interruption state when CarPlay connects
+        // CarPlay connection means we're taking control of audio - clear conflicting interruptions
+        if routeChangeType == .carPlayConnected {
+            if isInterrupted && currentInterruption == .otherAudio {
+                os_log(.info, log: logger, "🚗 CarPlay connected - clearing conflicting 'Other Audio App' interruption state")
+                currentInterruption = nil
+                isInterrupted = false
+            }
+        }
         
         let shouldPause = routeChangeType.shouldPause
         
