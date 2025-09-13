@@ -1143,11 +1143,12 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
+        // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
+        audioManager.activateAudioSession()
+        
         // Ensure connection and send command
         if !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "🔄 Reconnecting for lock screen command")
-            // REMOVED: BASS now handles audio session activation automatically
-            // audioManager.activateAudioSession()
             connect()
             
             // Queue command to send after connection

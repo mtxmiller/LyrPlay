@@ -50,6 +50,9 @@ class AudioPlayer: NSObject, ObservableObject {
     private var currentStreamURL: String = ""
     private var audioRouteObserver: NSObjectProtocol?
     
+    // MARK: - Format Tracking for Plugin-Specific Stream Creation
+    private var currentStreamFormat: String = "UNKNOWN"
+    
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
@@ -73,27 +76,23 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         // Basic network configuration for LMS streaming  
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
-        BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
+        //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
         
         // Enable stream verification for proper format detection (FLAC headers now handled by server transcoding)
-        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 1)                    // Enable file verification
-        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 1)               // Enable network stream verification  
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
+        //BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 0)                    // Enable file verification
+        //BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 0)               // Enable network stream verification
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
         // REMOVED: Aggressive DSP settings that may interfere with iOS integration
         // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
         // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
-        // Configure BASS iOS session for CarPlay support
-        let iosSessionFlags = BASS_IOS_SESSION_MIX |        // Allow other apps to be heard
-                             BASS_IOS_SESSION_BTHFP |       // Allow Bluetooth HFP devices
-                             BASS_IOS_SESSION_BTA2DP |      // Allow Bluetooth A2DP devices (CarPlay!)
-                             BASS_IOS_SESSION_AIRPLAY       // Allow AirPlay devices (CarPlay wireless!)
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(iosSessionFlags))
+        // Let BASS use default iOS session integration (BASS_IOS_SESSION_MIX + BASS_IOS_SESSION_BTHFP)
+        // This allows proper Now Playing controls while maintaining Bluetooth headphone compatibility
 
         // ORIGINAL WORKING CODE: Configure iOS audio session AFTER BASS flags
         do {
@@ -105,9 +104,7 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Audio session setup failed: %{public}s", error.localizedDescription)
         }
 
-        os_log(.info, log: logger, "✅ BASS iOS session configured for CarPlay - letting BASS handle AVAudioSession")
-
-        os_log(.info, log: logger, "✅ CBass iOS session configured for CarPlay (A2DP + AirPlay)")
+        os_log(.info, log: logger, "✅ BASS using default iOS session integration (MIX + BTHFP)")
         
         
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
@@ -141,12 +138,7 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Public BASS Configuration (called by AudioManager)
     func reconfigureBassForCarPlay() {
-        os_log(.info, log: logger, "🚗 CarPlay detected - updating BASS session configuration")
-
-        // Update BASS iOS session flags for CarPlay (ensure all flags are set)
-        let carPlayFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP |
-                          BASS_IOS_SESSION_BTA2DP | BASS_IOS_SESSION_AIRPLAY
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(carPlayFlags))
+        os_log(.info, log: logger, "🚗 CarPlay detected - configuring iOS audio session")
 
         // CRITICAL FIX: Reinitialize iOS audio session for CarPlay media controls
         // Use exact same setup that works for lock screen controls
@@ -164,21 +156,13 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ CarPlay audio session setup failed: %{public}s", error.localizedDescription)
         }
 
-        // Let BASS handle the route change internally - don't stop/free streams
-        // This prevents audio gaps and ensures smooth CarPlay handoff
-        os_log(.info, log: logger, "🚗 BASS session updated for CarPlay - maintaining current stream")
-
-        // Verify the configuration was applied
-        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
-        os_log(.info, log: logger, "🚗 BASS iOS session flags: 0x%08X", currentFlags)
+        // BASS session management is disabled - iOS handles everything
+        // This prevents conflicts and ensures clean CarPlay handoff
+        os_log(.info, log: logger, "🚗 iOS audio session configured for CarPlay - BASS session management disabled")
     }
     
     func reconfigureBassForStandardRoute() {
-        os_log(.info, log: logger, "📱 Standard route detected - updating BASS session configuration")
-        
-        // Update BASS iOS session flags for standard route (remove CarPlay-specific flags)
-        let standardFlags = BASS_IOS_SESSION_MIX | BASS_IOS_SESSION_BTHFP | BASS_IOS_SESSION_BTA2DP
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(standardFlags))
+        os_log(.info, log: logger, "📱 Standard route detected - configuring iOS audio session")
         
         // CRITICAL FIX: Reinitialize iOS audio session for standard lock screen controls
         // Use exact same setup that works for lock screen controls
@@ -191,11 +175,8 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Standard audio session setup failed: %{public}s", error.localizedDescription)
         }
         
-        os_log(.info, log: logger, "📱 BASS session updated for standard route")
-        
-        // Verify the configuration was applied
-        let currentFlags = BASS_GetConfig(DWORD(BASS_CONFIG_IOS_SESSION))
-        os_log(.info, log: logger, "📱 BASS iOS session flags: 0x%08X", currentFlags)
+        // BASS session management is disabled - iOS handles everything
+        os_log(.info, log: logger, "📱 iOS audio session configured for standard route - BASS session management disabled")
     }
     
     // MARK: - Media Control Refresh Notification
@@ -233,24 +214,24 @@ class AudioPlayer: NSObject, ObservableObject {
         // Store current URL for CarPlay route recovery
         currentStreamURL = urlString
         
+        // If no format was explicitly set, try to detect from URL as fallback
+        if currentStreamFormat == "UNKNOWN" {
+            os_log(.info, log: logger, "⚠️ No format set - using generic stream creation")
+        }
+        
         prepareForNewStream()
         
         // Track timing for reference
         trackStartTime = Date()
         
         // CBass configured for streaming FLAC tolerance (like squeezelite)
-        let streamFlags = DWORD(BASS_STREAM_STATUS) |    // enable status info
-                         DWORD(BASS_STREAM_AUTOFREE) |   // auto-free when stopped  
-                         DWORD(BASS_SAMPLE_FLOAT) |      // use float samples (like squeezelite)
-                         DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
+        let streamFlags = DWORD(BASS_STREAM_STATUS)     // enable status info
+        //                 DWORD(BASS_STREAM_AUTOFREE) |   // auto-free when stopped
+         //                DWORD(BASS_SAMPLE_FLOAT) |      // use float samples (like squeezelite)
+          //               DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
         
-        // CBass stream creation with tolerance for incomplete data
-        currentStream = BASS_StreamCreateURL(
-            urlString,
-            0,                           // offset
-            streamFlags,                 // streaming tolerance flags
-            nil, nil                     // no callbacks
-        )
+        // FORMAT-SPECIFIC stream creation - CRITICAL FIX for Opus seeking
+        currentStream = createStreamForFormat(urlString: urlString, streamFlags: streamFlags)
         
         guard currentStream != 0 else {
             let errorCode = BASS_ErrorGetCode()
@@ -287,10 +268,13 @@ class AudioPlayer: NSObject, ObservableObject {
     func playStreamWithFormat(urlString: String, format: String) {
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s", format, urlString)
         
-        // Format-specific configuration could go here
+        // CRITICAL: Store format for plugin-specific stream creation
+        currentStreamFormat = format
+        
+        // Format-specific configuration
         configureForFormat(format)
         
-        // Use the main playStream method
+        // Use the main playStream method (which will use the stored format)
         playStream(urlString: urlString)
     }
     
@@ -536,37 +520,80 @@ class AudioPlayer: NSObject, ObservableObject {
         }, selfPtr)
     }
     
+    // MARK: - Format-Specific Stream Creation (CRITICAL FIX for Opus)
+    private func createStreamForFormat(urlString: String, streamFlags: DWORD) -> HSTREAM {
+        // Use the format provided by SlimProto STRM command
+        let format = currentStreamFormat
+        
+        os_log(.info, log: logger, "🎵 Creating %{public}s stream with format-specific function", format)
+        
+        switch format.uppercased() {
+        case "OPUS":
+            // Use BASS_OPUS_StreamCreateURL for Opus files
+            os_log(.info, log: logger, "🎵 Using BASS_OPUS_StreamCreateURL for Opus stream")
+            return BASS_OPUS_StreamCreateURL(
+                urlString,
+                0,                    // offset
+                streamFlags,          // flags
+                nil,                 // no download callback
+                nil                  // no user data
+            )
+            
+        case "FLAC":
+            // Use BASS_FLAC_StreamCreateURL for FLAC files
+            os_log(.info, log: logger, "🎵 Using BASS_FLAC_StreamCreateURL for FLAC stream")
+            return BASS_FLAC_StreamCreateURL(
+                urlString,
+                0,                    // offset
+                streamFlags,          // flags
+                nil,                 // no download callback
+                nil                  // no user data
+            )
+            
+        default:
+            // Use generic BASS_StreamCreateURL for other formats (AAC, MP3, OGG)
+            os_log(.info, log: logger, "🎵 Using generic BASS_StreamCreateURL for %{public}s stream", format)
+            return BASS_StreamCreateURL(
+                urlString,
+                0,                    // offset
+                streamFlags,          // flags
+                nil, nil             // no callbacks
+            )
+        }
+    }
+    
+    
     // MARK: - Format Configuration (USER-CONFIGURABLE CBass BUFFERS)  
     private func configureForFormat(_ format: String) {
         switch format.uppercased() {
         case "FLAC":
             // Use user-configurable CBass buffer settings
-            let flacBufferMS = settings.flacBufferSeconds * 1000     // Playback buffer in milliseconds
-            let networkBufferMS = settings.networkBufferKB * 1000   // Network buffer in milliseconds (using KB setting as seconds)
+            //let flacBufferMS = settings.flacBufferSeconds * 1000     // Playback buffer in milliseconds
+            //let networkBufferMS = settings.networkBufferKB * 1000   // Network buffer in milliseconds (using KB setting as seconds)
             
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferMS))   // Network buffer in milliseconds
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(10))       // 75% pre-buffer (BASS default)
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Fast updates for stability
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
+            //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(flacBufferMS))        // User FLAC buffer
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(networkBufferMS))   // Network buffer in milliseconds
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(5))       // 75% pre-buffer (BASS default)
+            //BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Fast updates for stability
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
             
             os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
             
         case "AAC", "MP3", "OGG":
             // Compressed formats that work well - smaller buffer for responsiveness
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))     // 50s network buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf = 7.5s startup (faster than default)
+            //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1500))         // 1.5s buffer
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))     // 50s network buffer
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf = 7.5s startup (faster than default)
             
             
             os_log(.info, log: logger, "🎵 Compressed format with reliable buffering: %{public}s (1.5s playback, 50s network)", format)
             
         case "OPUS":
             // Opus - larger network buffer for reliability  
-            BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1.5))         // 5s playback buffer
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))   // 50s
-            BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf
-            BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
+            //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(1.5))         // 5s playback buffer
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(50000))   // 50s
+            //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(15))       // 15% prebuf
+            //BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
             
             
             os_log(.info, log: logger, "🎵 Opus configured with reliable buffering: 5s playback, 120s network")

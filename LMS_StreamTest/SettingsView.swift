@@ -1314,9 +1314,9 @@ struct AudioFormatConfigView: View {
                     
                     FormatRequirementRow(
                         format: "Premium Quality (Opus)",
-                        requirement: "Requires server transcoding setup",
-                        icon: "exclamationmark.triangle.fill",
-                        color: .orange
+                        requirement: "Requires server transcoding setup to work",
+                        icon: "info.circle.fill",
+                        color: .blue
                     )
                     
                     FormatRequirementRow(

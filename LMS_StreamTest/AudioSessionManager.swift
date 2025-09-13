@@ -43,162 +43,53 @@ class AudioSessionManager: ObservableObject {
         os_log(.info, log: logger, "✅ Interruption manager integrated")
     }
     
-    // MARK: - Audio Session Setup
+    // MARK: - Audio Session Setup (DISABLED)
     private func setupInitialAudioSession() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            try audioSession.setCategory(
-                .playback,
-                mode: .default,
-                options: [.allowBluetooth, .allowAirPlay]
-            )
-            try audioSession.setActive(true)
-            
-            os_log(.info, log: logger, "✅ Initial audio session configured")
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to setup initial audio session: %{public}s", error.localizedDescription)
-        }
+        // DISABLED: AudioPlayer handles initial session setup with BASS_IOS_SESSION_DISABLE
+        os_log(.info, log: logger, "✅ Initial audio session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
     }
     
-    // MARK: - Format-Specific Audio Session Configuration
+    // MARK: - Format-Specific Audio Session Configuration (DISABLED)
     func setupForLosslessAudio() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            let currentCategory = audioSession.category
-            let currentOptions = audioSession.categoryOptions
-            
-            let desiredOptions: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
-                .allowAirPlay
-            ]
-            
-            // Only change if different
-            if currentCategory != .playback || currentOptions != desiredOptions {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: desiredOptions
-                )
-                os_log(.info, log: logger, "🔧 Updated audio session for lossless")
-            }
-            
-            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
-            // if !audioSession.isOtherAudioPlaying {
-            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
-            //     os_log(.info, log: logger, "🔧 Activated audio session")
-            // }
-            
-            os_log(.info, log: logger, "✅ Lossless audio session configured (StreamingKit handles activation)")
-        } catch {
-            os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
-        }
+        // DISABLED: AudioPlayer handles all session configuration with BASS_IOS_SESSION_DISABLE
+        os_log(.info, log: logger, "✅ Lossless audio - session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
     }
     
     func setupForCompressedAudio() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            let currentCategory = audioSession.category
-            let currentOptions = audioSession.categoryOptions
-            
-            let desiredOptions: AVAudioSession.CategoryOptions = [
-                .allowBluetooth,
-                .allowAirPlay,
-                .allowBluetoothA2DP
-            ]
-            
-            // Only change if different
-            if currentCategory != .playback || currentOptions != desiredOptions {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: desiredOptions
-                )
-                
-                os_log(.info, log: logger, "🔧 Updated audio session category for compressed audio")
-            }
-            
-            // CRITICAL FIX: Don't force activation - let StreamingKit handle timing
-            // if !audioSession.isOtherAudioPlaying {
-            //     try audioSession.setActive(true)  // REMOVED - this conflicts with StreamingKit
-            //     os_log(.info, log: logger, "🔧 Activated audio session")
-            // }
-            
-            os_log(.info, log: logger, "✅ Compressed audio session configured (StreamingKit handles activation)")
-        } catch {
-            os_log(.error, log: logger, "⚠️ Audio session setup warning: %{public}s (continuing anyway)", error.localizedDescription)
-        }
+        // DISABLED: AudioPlayer handles all session configuration with BASS_IOS_SESSION_DISABLE
+        os_log(.info, log: logger, "✅ Compressed audio - session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
     }
     
-    // MARK: - Enhanced Audio Session Control
+    // MARK: - Enhanced Audio Session Control (DISABLED)
     func activateAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            os_log(.info, log: logger, "✅ Audio session activated")
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to activate audio session: %{public}s", error.localizedDescription)
-        }
+        // DISABLED: BASS handles activation with BASS_IOS_SESSION_DISABLE
+        os_log(.info, log: logger, "✅ Audio session activation handled by BASS")
     }
     
     func deactivateAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            os_log(.info, log: logger, "✅ Audio session deactivated")
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to deactivate audio session: %{public}s", error.localizedDescription)
-        }
+        // DISABLED: BASS handles deactivation with BASS_IOS_SESSION_DISABLE  
+        os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS")
     }
     
-    // MARK: - Interruption Recovery
+    // MARK: - Interruption Recovery (DISABLED)
     func reconfigureAfterInterruption() {
-        os_log(.info, log: logger, "🔄 Reconfiguring audio session after interruption")
-        
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            // Reactivate the audio session
-            try audioSession.setActive(true)
-            
-            // Verify our category and options are still correct
-            if audioSession.category != .playback {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: [.allowBluetooth, .allowAirPlay, .allowBluetoothA2DP]
-                )
-                os_log(.info, log: logger, "🔧 Restored audio session category after interruption")
-            }
-            
-            os_log(.info, log: logger, "✅ Audio session reconfigured successfully")
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to reconfigure audio session: %{public}s", error.localizedDescription)
-        }
+        // DISABLED: BASS handles interruption recovery with BASS_IOS_SESSION_DISABLE
+        // AudioPlayer maintains session configuration, BASS handles activation
+        os_log(.info, log: logger, "✅ Interruption recovery handled by BASS (BASS_IOS_SESSION_DISABLE)")
     }
     
-    // MARK: - CarPlay Audio Session Readiness (Gentle Approach)
+    // MARK: - CarPlay Audio Session Readiness (DISABLED)
     func maintainAudioSessionReadinessAfterCarPlayDisconnect() {
-        os_log(.info, log: logger, "🚗 Maintaining audio session readiness after CarPlay disconnect")
+        os_log(.info, log: logger, "🚗 CarPlay disconnected - activating audio session for phone readiness")
         
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            
-            // Configure audio session properly but don't force activation
-            // Use the same working configuration from AudioPlayer
-            try audioSession.setCategory(.playback, mode: .default, options: [])
-            
-            // DON'T call setActive(true) - let iOS manage activation timing
-            // This prevents crashes with lock screen controls while staying "ready"
-            
-            os_log(.info, log: logger, "✅ Audio session configured for readiness (not activated)")
-            
-            // Refresh background audio capabilities to maintain priority
-            refreshBackgroundAudioCapabilities()
-            
-        } catch {
-            os_log(.error, log: logger, "❌ Failed to configure audio session readiness: %{public}s", error.localizedDescription)
+        // Use AudioManager's session activation (same as lock screen recovery)
+        // This ensures consistent session handling across all recovery scenarios
+        if let delegate = delegate as? AudioManager {
+            delegate.activateAudioSession()
         }
+        
+        // Keep background task management active
+        refreshBackgroundAudioCapabilities()
     }
     
     // MARK: - Background Audio Capabilities Management
@@ -214,14 +105,9 @@ class AudioSessionManager: ObservableObject {
     }
     
     func reconfigureAfterMediaServicesReset() {
-        os_log(.info, log: logger, "🔄 Reconfiguring audio session after media services reset")
-        
-        // Complete reconfiguration is needed after media services reset
-        setupInitialAudioSession()
-        
-        // Apply format-specific settings if we had them
-        // This should be called by the AudioManager based on current format
-        os_log(.info, log: logger, "✅ Audio session fully reconfigured after media services reset")
+        // DISABLED: BASS handles media services reset recovery with BASS_IOS_SESSION_DISABLE
+        // AudioPlayer maintains session configuration, BASS handles reset recovery
+        os_log(.info, log: logger, "✅ Media services reset handled by BASS (BASS_IOS_SESSION_DISABLE)")
     }
     
     // MARK: - Background Observers
