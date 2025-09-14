@@ -79,10 +79,10 @@ class SettingsManager: ObservableObject {
         
         var capabilities: String {
             switch self {
-            case .compressed: return "aac,mp3"
-            case .oggVorbis: return "ogg,aac,mp3"
-            case .opus: return "ops,ogg,aac,mp3"
-            case .flac: return "flc,ogg,aac,mp3"
+            case .compressed: return "aac,m4a,mp3"
+            case .oggVorbis: return "ogg,aac,m4a,mp3"
+            case .opus: return "ops,ogg,aac,m4a,mp3"
+            case .flac: return "flc,ogg,aac,m4a,mp3"
             }
         }
     }

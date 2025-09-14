@@ -357,17 +357,13 @@ class SlimProtoConnectionManager: ObservableObject {
     }
     
     private func prepareForBackgroundSuspension() {
-        os_log(.info, log: logger, "📱 Background task expiring - disconnecting cleanly")
+        os_log(.info, log: logger, "📱 Background task expiring - preparing for suspension (keeping connection if audio playing)")
         
-        // Simple disconnect when background task expires
-        if connectionState.isConnected {
-            lastDisconnectionReason = .appBackgrounded
-            // Set state to trigger disconnection in coordinator
-            connectionState = .disconnected
-        }
-        
-        // Stop health monitoring to avoid unnecessary activity
+        // DON'T force disconnect for audio apps - iOS gives extended background time for audio playback
+        // Only stop health monitoring to reduce background activity
         stopHealthMonitoring()
+        
+        os_log(.info, log: logger, "✅ Background suspension prepared - connection maintained for audio continuity")
     }
     
     // MARK: - Health Monitoring
