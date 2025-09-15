@@ -156,14 +156,15 @@ struct SettingsView: View {
                     .disabled(isReconnecting)
                     .padding(.vertical, 2)
                     
-                    NavigationLink(destination: CBassConfigView()) {
-                        SettingsRow(
-                            icon: "hifispeaker",
-                            title: "FLAC Buffer Settings",
-                            value: flacBufferSummary,
-                            valueColor: .secondary
-                        )
-                    }
+                    // HIDDEN: FLAC Buffer Settings - not currently functional with CBass
+                    // NavigationLink(destination: CBassConfigView()) {
+                    //     SettingsRow(
+                    //         icon: "hifispeaker",
+                    //         title: "FLAC Buffer Settings",
+                    //         value: flacBufferSummary,
+                    //         valueColor: .secondary
+                    //     )
+                    // }
                 }
                 
                 // Advanced Section
