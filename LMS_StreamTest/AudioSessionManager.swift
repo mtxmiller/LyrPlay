@@ -71,11 +71,16 @@ class AudioSessionManager: ObservableObject {
         os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS")
     }
     
-    // MARK: - Interruption Recovery (DISABLED)
+    // MARK: - Interruption Recovery (RESTORED)
     func reconfigureAfterInterruption() {
-        // DISABLED: BASS handles interruption recovery with BASS_IOS_SESSION_DISABLE
-        // AudioPlayer maintains session configuration, BASS handles activation
-        os_log(.info, log: logger, "✅ Interruption recovery handled by BASS (BASS_IOS_SESSION_DISABLE)")
+        // RESTORED: With BASS_IOS_SESSION_DISABLE, we need manual session management
+        // Delegate to AudioPlayer's unified session management
+        if let audioManager = delegate as? AudioManager {
+            audioManager.activateAudioSession() // Now delegates to AudioPlayer.configureAudioSessionIfNeeded()
+            os_log(.info, log: logger, "✅ Interruption recovery delegated to AudioPlayer")
+        } else {
+            os_log(.error, log: logger, "❌ Cannot access AudioManager for interruption recovery")
+        }
     }
     
     // MARK: - CarPlay Audio Session Readiness (DISABLED)

@@ -86,7 +86,7 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
 
 ## Version 1.6 Users - CBass Framework Setup
 
-**For Version 1.6 users with CBass audio framework**, use this enhanced server configuration that supports both native FLAC and high-quality OGG Vorbis transcoding:
+**For Version 1.6 users with CBass audio framework**, use this enhanced server configuration that supports both native FLAC and high-quality OPUS / OGG Vorbis transcoding:
 
 ### Easy Setup with Custom Configuration File
 
@@ -98,31 +98,51 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
    - Change `xx:xx:xx:xx:xx:xx` to your actual device MAC address (all lowercase)
    - Use the same MAC address for both FLAC and OGG rules
 
-4. **Add the configuration** to your LMS server:
+4. **Install Opus Tools** (required for Opus transcoding):
 
    ```bash
-   # For Docker users - copy the rules to your LMS container:
+   # Install opus-tools in your LMS container
+   docker exec -it lms bash -c "apt-get update && apt-get install -y opus-tools"
+
+   # Verify installation
+   docker exec lms opusenc --version
+   ```
+
+5. **Add the configuration** to your LMS server:
+
+   For Docker users (single copy-paste command):
+   ```bash
+   # Replace xx:xx:xx:xx:xx:xx with your device's MAC address (all lowercase)
    docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
-   # FLAC transcoding with minimal headers for CBass seeking compatibility
-   flc flc * [YOUR_DEVICE_MAC_ADDRESS]
+   # Custom convert.conf for LyrPlay iOS App
+   # Replace xx:xx:xx:xx:xx:xx with your iOS device's MAC address (ALL LOWER CASE)
+
+   # FLAC transcoding with headers for seek capability
+   flc flc * xx:xx:xx:xx:xx:xx
        # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -C 0 -
-   
-   # High-quality OGG Vorbis transcoding for bandwidth-efficient streaming  
-   flc ogg * [YOUR_DEVICE_MAC_ADDRESS]
+       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+
+   # High-quality Opus transcoding for superior bandwidth efficiency
+   flc ops * xx:xx:xx:xx:xx:xx
+       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [opusenc] --raw --raw-bits=$SAMPLESIZE$ --raw-rate=$SAMPLERATE$ --raw-chan=$CHANNELS$ --bitrate=256 - -
+
+   # High-quality OGG Vorbis transcoding for bandwidth-efficient streaming
+   flc ogg * xx:xx:xx:xx:xx:xx
        # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
        [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
    EOF'
-   
+
    # Restart LMS server
    docker restart lms
    ```
 
-5. **Restart your LMS server** for changes to take effect
+6. **Restart your LMS server** for changes to take effect
 
 **Benefits:**
 - **Native FLAC seeking** - Perfect seeking without audio gaps or errors
 - **High-quality OGG Vorbis** - Bandwidth-efficient streaming (~320kbps equivalent quality)
+- **Opus 256kbps** - Bandwidth efficient modern codec - Enabled by Bass
 - **CBass optimized** - Enhanced performance with the CBass audio framework
 
 ## Usage

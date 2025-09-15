@@ -1,6 +1,7 @@
 // File: AudioManager.swift (Refactored)
 // Coordinator that manages all audio components while preserving the exact same public interface
 import Foundation
+import AVFoundation
 import os.log
 
 class AudioManager: NSObject, ObservableObject {
@@ -153,7 +154,9 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func activateAudioSession() {
-        audioSessionManager.activateAudioSession()
+        // Delegate to AudioPlayer since it owns session management with BASS_IOS_SESSION_DISABLE
+        audioPlayer.configureAudioSessionIfNeeded()
+        os_log(.info, log: logger, "🔒 Audio session activation delegated to AudioPlayer")
     }
     
     // Metadata management
@@ -346,11 +349,8 @@ extension AudioManager {
                 
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeType)
             }
-        } else if routeType.contains("CarPlay") && routeType.contains("Connected") {
-            // CarPlay reconnected - use playlist recovery instead of server auto-resume
-            os_log(.info, log: logger, "🚗 CarPlay reconnected (OLD method) - performing playlist recovery")
-            slimClient?.performCarPlayRecovery()
         }
+        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
     }
     
     // MARK: - CarPlay Specific Handling (REMOVED - using server auto-resume)
@@ -383,62 +383,7 @@ extension AudioManager {
     }
     
     // MARK: - Smart CarPlay Connect Logic
-    private func handleCarPlayConnect() {
-        os_log(.info, log: logger, "🚗 CarPlay connected - starting smart connect sequence")
-        
-        // Step 1: Update BASS configuration for CarPlay
-        configureBassForCarPlay()
-        
-        // Step 2: Wait for BASS to settle
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.executeSmartCarPlayConnect()
-        }
-    }
-    
-    private func executeSmartCarPlayConnect() {
-        guard let slimClient = slimClient else {
-            os_log(.error, log: logger, "🚗 No SlimProto client available")
-            return
-        }
-        
-        // Step 3: Check server connection status
-        let isConnected = slimClient.isConnected
-        
-        os_log(.info, log: logger, "🚗 BASS settled - server connected: %{public}s", isConnected ? "YES" : "NO")
-        
-        if isConnected {
-            // Step 4a: Connected → Simple PLAY command
-            os_log(.info, log: logger, "🚗 Server connected - sending PLAY command for auto-resume")
-            slimClient.sendLockScreenCommand("play")
-        } else {
-            // Step 4b: Not connected → Full playlist recovery
-            os_log(.info, log: logger, "🚗 Server not connected - performing playlist recovery")
-            slimClient.performCarPlayRecovery()
-        }
-    }
-    
-    // MARK: - BASS CarPlay Configuration (delegate to AudioPlayer)
-    private func configureBassForCarPlay() {
-        // Delegate to AudioPlayer which handles the BASS configuration
-        audioPlayer.reconfigureBassForCarPlay()
-        os_log(.info, log: logger, "🚗 AudioManager delegated BASS CarPlay configuration")
-    }
-    
-    private func configureBassForStandardRoute() {
-        // Delegate to AudioPlayer which handles the BASS configuration
-        audioPlayer.reconfigureBassForStandardRoute()
-        os_log(.info, log: logger, "📱 AudioManager delegated BASS standard configuration")
-    }
-    
-    // MARK: - Media Control Refresh (called by AudioPlayer after audio session changes)
-    func refreshMediaControlsAfterAudioSessionChange() {
-        os_log(.info, log: logger, "🔄 Refreshing media controls after audio session change")
-        
-        // Re-establish MPRemoteCommandCenter connections via NowPlayingManager
-        nowPlayingManager.refreshRemoteCommandCenter()
-        
-        os_log(.info, log: logger, "✅ Media controls refreshed for CarPlay/lock screen compatibility")
-    }
+    // REMOVED: OLD CarPlay connect methods - now handled by AudioPlayer with proper session timing
     
     
     // MARK: - Utility Methods
@@ -523,10 +468,9 @@ extension AudioManager: AudioSessionManagerDelegate {
                 
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
             }
-        } else if routeChangeDescription == "CarPlay Connected" {
-            // SMART CONNECT LOGIC - your requested flow
-            handleCarPlayConnect()
-        } else {
+        }
+        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
+        else {
             os_log(.info, log: logger, "🔍 DEBUG: Route change: '%{public}s'", routeChangeDescription)
         }
     }

@@ -382,7 +382,7 @@ class InterruptionManager: ObservableObject {
     private func processRouteChange(_ routeChangeType: RouteChangeType) {
         lastRouteChange = routeChangeType
         lastRouteChangeTime = Date()  // Track when this route change happened
-        
+
         // CRITICAL FIX: Clear interruption state when CarPlay connects
         // CarPlay connection means we're taking control of audio - clear conflicting interruptions
         if routeChangeType == .carPlayConnected {
@@ -392,15 +392,24 @@ class InterruptionManager: ObservableObject {
                 isInterrupted = false
             }
         }
-        
-        let shouldPause = routeChangeType.shouldPause
-        
-        os_log(.info, log: logger, "🔀 Processing route change: %{public}s (shouldPause: %{public}s)",
-               routeChangeType.description, shouldPause ? "YES" : "NO")
-        
-        // Notify delegate
-        delegate?.routeDidChange(type: routeChangeType, shouldPause: shouldPause)
-        
+
+        // CRITICAL: Still handle interruptions that require pause/resume
+        switch routeChangeType {
+        case .headphonesDisconnected, .bluetoothDisconnected:
+            // These should pause playback (PRESERVE CURRENT BEHAVIOR)
+            delegate?.routeDidChange(type: routeChangeType, shouldPause: true)
+
+        case .carPlayConnected, .carPlayDisconnected:
+            // Don't pause - let AudioPlayer handle session management with proper timing
+            // But still notify for UI updates
+            delegate?.routeDidChange(type: routeChangeType, shouldPause: false)
+            os_log(.info, log: logger, "🚗 CarPlay route change - session handled by AudioPlayer")
+
+        default:
+            // Preserve existing behavior for all other route changes
+            delegate?.routeDidChange(type: routeChangeType, shouldPause: routeChangeType.shouldPause)
+        }
+
         // Handle auto-resume for route reconnections
         if routeChangeType.shouldAutoResume {
             os_log(.info, log: logger, "🔀 Route change suggests auto-resume")

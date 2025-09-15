@@ -73,7 +73,7 @@ class SettingsManager: ObservableObject {
             case .compressed: return "Smallest bandwidth, universal compatibility"
             case .oggVorbis: return "Near-lossless quality, efficient streaming"
             case .opus: return "Superior quality, modern codec, efficient bandwidth"
-            case .flac: return "Native lossless, highest quality, requires server setup"
+            case .flac: return "Native lossless, highest quality"
             }
         }
         

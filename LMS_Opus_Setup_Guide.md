@@ -55,7 +55,7 @@ flc ogg * <YOUR_MAC_ADDRESS>
 # Premium Quality Opus Transcoding - Handles all sample rates/bit depths
 flc ops * <YOUR_MAC_ADDRESS>
     # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [opusenc] --raw --raw-bits=$SAMPLESIZE$ --raw-rate=$SAMPLERATE$ --raw-chan=$CHANNELS$ --bitrate=160 --complexity=5 - -
+    [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [opusenc] --raw --raw-bits=$SAMPLESIZE$ --raw-rate=$SAMPLERATE$ --raw-chan=$CHANNELS$ --bitrate=256 - -
 EOF'
 ```
 

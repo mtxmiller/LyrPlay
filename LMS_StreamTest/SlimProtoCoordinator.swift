@@ -378,70 +378,77 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.info, log: logger, "🚗 CarPlay Recovery: Skipping - recovery already in progress")
             return
         }
-        
+
         // Set recovery in progress
         isRecoveryInProgress = true
         os_log(.info, log: logger, "🚗 CarPlay Recovery: Starting (blocking other recovery methods)")
-        
-        // Check if we have recovery data (no time limit - like other music players)
-        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-            os_log(.info, log: logger, "🚗 No recovery data for CarPlay - connecting and using simple play command")
+
+        // CRITICAL: Always activate audio session for CarPlay recovery (same as lock screen)
+        audioManager.activateAudioSession()
+
+        // CRITICAL: Check connection status first (same logic as lock screen recovery)
+        if !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "🚗 CarPlay disconnected from server - will perform playlist jump recovery")
             connect()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.sendJSONRPCCommand("play")
-                self.isRecoveryInProgress = false // Clear recovery flag
+
+            // Queue recovery after connection
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                self.executeCarPlayPlaylistJump()
             }
-            return
-        }
-        
-        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
-        
-        guard savedPosition > 0 else {
-            os_log(.info, log: logger, "🚗 No saved position for CarPlay - connecting and using simple play command")
-            connect()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.sendJSONRPCCommand("play")
-                self.isRecoveryInProgress = false // Clear recovery flag
-            }
-            return
-        }
-        
-        os_log(.info, log: logger, "🚗 Performing CarPlay recovery: connecting first, then jump to track %d at %.2f seconds", savedIndex, savedPosition)
-        
-        // CRITICAL FIX: Establish SlimProto connection first
-        connect()
-        
-        // Wait for connection to establish before attempting playlist recovery
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            os_log(.info, log: self.logger, "🚗 Connection established, executing playlist jump recovery")
-            
-            // Use same Home Assistant approach: playlist jump with timeOffset
-            let playlistJumpCommand: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [self.settings.playerMACAddress, [
-                    "playlist", "jump", savedIndex, 1, 0, [
-                        "timeOffset": savedPosition
-                    ]
-                ]]
-            ]
-            
-            self.sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-                os_log(.info, log: self?.logger ?? OSLog.default, "🚗 CarPlay recovery completed - continuing playback")
-                
-                // Clear recovery flag after completion
-                self?.isRecoveryInProgress = false
-                os_log(.info, log: self?.logger ?? OSLog.default, "🚗 Recovery state cleared - other recovery methods can now proceed")
-                
-                // Clear recovery data after successful use
-                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
-                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
-                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
-            }
+        } else {
+            os_log(.info, log: logger, "🚗 CarPlay connected to server - using simple play command")
+            sendJSONRPCCommand("play")
+            isRecoveryInProgress = false // Clear recovery flag
         }
     }
-    
+
+    /// Execute CarPlay playlist jump recovery (matches lock screen recovery logic)
+    private func executeCarPlayPlaylistJump() {
+        // Check if we have recovery data (no time limit - like other music players)
+        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+            os_log(.info, log: logger, "🚗 No recovery data for CarPlay - using simple play command")
+            sendJSONRPCCommand("play")
+            isRecoveryInProgress = false // Clear recovery flag
+            return
+        }
+
+        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+
+        guard savedPosition > 0 else {
+            os_log(.info, log: logger, "🚗 No saved position for CarPlay - using simple play command")
+            sendJSONRPCCommand("play")
+            isRecoveryInProgress = false // Clear recovery flag
+            return
+        }
+
+        os_log(.info, log: logger, "🚗 Performing CarPlay playlist recovery: jump to track %d at %.2f seconds", savedIndex, savedPosition)
+
+        // Use same Home Assistant approach: playlist jump with timeOffset
+        let playlistJumpCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, [
+                "playlist", "jump", savedIndex, 1, 0, [
+                    "timeOffset": savedPosition
+                ]
+            ]]
+        ]
+
+        sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🚗 CarPlay playlist jump recovery completed")
+
+            // Clear recovery flag after completion
+            self?.isRecoveryInProgress = false
+            os_log(.info, log: self?.logger ?? OSLog.default, "🚗 Recovery state cleared - other recovery methods can now proceed")
+
+            // Clear recovery data after successful use
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
+        }
+    }
+
     /// App open recovery - same playlist jump method but pauses after recovery
     func performAppOpenRecovery() {
         // 🚫 DISABLED: App open recovery temporarily disabled for testing
