@@ -135,7 +135,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Dynamic Capabilities String
     var capabilitiesString: String {
-        let baseCapabilities = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=192000"
+        let baseCapabilities = "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=192000"
         // CBass supports FLAC and Opus natively over HTTP streaming
         let formats = audioFormat.capabilities
         return "\(baseCapabilities),\(formats)"
