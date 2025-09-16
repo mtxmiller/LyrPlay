@@ -272,7 +272,7 @@ class SlimProtoCoordinator: ObservableObject {
         let statusCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["status", "-", 1, "tags:u"]]
+            "params": [settings.playerMACAddress, ["status", "-", 1, "tags:u,K,c"]]
         ]
         
         sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
@@ -1030,7 +1030,7 @@ extension SlimProtoCoordinator {
             "method": "slim.request",
             "params": [
                 playerID,
-                ["status", "-", "1", "tags:u,d,t"]
+                ["status", "-", "1", "tags:u,d,t,K,c"]
             ]
         ] as [String : Any]
         
