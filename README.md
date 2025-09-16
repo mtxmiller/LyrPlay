@@ -88,17 +88,13 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
 
 **For Version 1.6 users with CBass audio framework**, use this enhanced server configuration that supports both native FLAC and high-quality OPUS / OGG Vorbis transcoding:
 
-### Easy Setup with Custom Configuration File
+### Universal Setup (Recommended)
 
-1. **Download our pre-configured file**: Use the [`custom-convert.conf`](custom-convert.conf) file from this repository as a template
+**No MAC address configuration needed!** These rules automatically work for ALL LyrPlay devices on your network.
 
-2. **Find your device's MAC address** in the LMS web interface (Settings → Information → Player Information)
+1. **Download our universal configuration**: Use the [`custom-convert.conf`](custom-convert.conf) file from this repository
 
-3. **Replace the MAC address placeholders** in the file:
-   - Change `xx:xx:xx:xx:xx:xx` to your actual device MAC address (all lowercase)
-   - Use the same MAC address for both FLAC and OGG rules
-
-4. **Install Opus Tools** (required for Opus transcoding):
+2. **Install Opus Tools** (required for Opus transcoding):
 
    ```bash
    # Install opus-tools in your LMS container
@@ -108,36 +104,39 @@ This configuration forces FLAC files to be transcoded with proper headers on eve
    docker exec lms opusenc --version
    ```
 
-5. **Add the configuration** to your LMS server:
+3. **Add the universal configuration** to your LMS server:
 
    For Docker users (single copy-paste command):
    ```bash
-   # Replace xx:xx:xx:xx:xx:xx with your device's MAC address (all lowercase)
    docker exec lms bash -c 'cat > /lms/custom-convert.conf << "EOF"
-   # Custom convert.conf for LyrPlay iOS App
-   # Replace xx:xx:xx:xx:xx:xx with your iOS device's MAC address (ALL LOWER CASE)
+   # Universal LyrPlay Transcoding Rules for Lyrion Media Server
+   # Works for ALL LyrPlay devices automatically - no configuration needed
 
    # FLAC transcoding with headers for seek capability
-   flc flc * xx:xx:xx:xx:xx:xx
-       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+   flc flc LyrPlay *
+   	# IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+   	[flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
 
    # High-quality Opus transcoding for superior bandwidth efficiency
-   flc ops * xx:xx:xx:xx:xx:xx
-       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [opusenc] --raw --raw-bits=$SAMPLESIZE$ --raw-rate=$SAMPLERATE$ --raw-chan=$CHANNELS$ --bitrate=256 - -
+   flc ops LyrPlay *
+   	# IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+   	[flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [opusenc] --raw --raw-bits=$SAMPLESIZE$ --raw-rate=$SAMPLERATE$ --raw-chan=$CHANNELS$ --bitrate=256 - -
 
    # High-quality OGG Vorbis transcoding for bandwidth-efficient streaming
-   flc ogg * xx:xx:xx:xx:xx:xx
-       # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-       [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
+   flc ogg LyrPlay *
+   	# IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+   	[flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t ogg -C 10 -
    EOF'
 
    # Restart LMS server
    docker restart lms
    ```
 
-6. **Restart your LMS server** for changes to take effect
+4. **Restart your LMS server** for changes to take effect
+
+### How Universal Targeting Works
+
+LyrPlay identifies itself to LMS with `ModelName=LyrPlay` in its capabilities string. These rules use this identifier to automatically apply optimized transcoding to ANY LyrPlay device on your network - no MAC addresses or device-specific configuration required!
 
 **Benefits:**
 - **Native FLAC seeking** - Perfect seeking without audio gaps or errors
