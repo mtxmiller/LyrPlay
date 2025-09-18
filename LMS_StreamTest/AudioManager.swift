@@ -268,8 +268,15 @@ extension AudioManager: AudioPlayerDelegate {
     
     func audioPlayerDidStall() {
         os_log(.error, log: logger, "⚠️ Audio player stalled")
-        
+
         // Could add retry logic here in the future
+    }
+
+    func audioPlayerRequestsSeek(_ timeOffset: Double) {
+        os_log(.info, log: logger, "🔧 Audio player requests seek to %{public}.2f seconds for transcoding fix", timeOffset)
+
+        // Forward to coordinator for server-side seek command
+        slimClient?.requestSeekToTime(timeOffset)
     }
     
     func audioPlayerDidReceiveMetadataUpdate() {

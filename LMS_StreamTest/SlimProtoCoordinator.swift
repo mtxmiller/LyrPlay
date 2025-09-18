@@ -134,11 +134,27 @@ class SlimProtoCoordinator: ObservableObject {
         // Store current settings for change detection
         lastKnownHost = host
         lastKnownPort = port
-        
+
         // Update the client
         client.updateServerSettings(host: host, port: port)
-        
+
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
+    }
+
+    /// Request server-side seek for transcoding pipeline fixes
+    func requestSeekToTime(_ timeOffset: Double) {
+        os_log(.info, log: logger, "🔧 Requesting server seek to %{public}.2f seconds for transcoding fix", timeOffset)
+
+        // Use proper JSON-RPC structure like existing recovery methods
+        let seekCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["time", timeOffset]]
+        ]
+
+        sendJSONRPCCommandDirect(seekCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔧 Server seek command completed")
+        }
     }
     
     // MARK: - Server Time Sync Management (Using SimpleTimeTracker)

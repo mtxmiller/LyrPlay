@@ -16,6 +16,7 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerTimeDidUpdate(_ time: Double)
     func audioPlayerDidStall()
     func audioPlayerDidReceiveMetadataUpdate()
+    func audioPlayerRequestsSeek(_ timeOffset: Double)  // For transcoding pipeline fixes
 }
 
 class AudioPlayer: NSObject, ObservableObject {
@@ -295,7 +296,14 @@ class AudioPlayer: NSObject, ObservableObject {
         guard currentStream != 0 else {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString)
-            
+
+            // Handle timeout error (Error 40) with auto-seek fix
+            if errorCode == DWORD(40) {  // BASS_ERROR_TIMEOUT
+                os_log(.info, log: logger, "🔧 BASS timeout detected - requesting minimal seek to fix transcoding")
+                delegate?.audioPlayerRequestsSeek(0.05)
+                return
+            }
+
             // Specific handling for error 41 (unsupported format)
             if errorCode == 41 {
                 os_log(.error, log: logger, "❌ Error 41: Unsupported audio format - may need plugin support")
@@ -680,14 +688,15 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     // MARK: - Cleanup
+
     deinit {
         cleanup()
-        
+
         // Clean up audio route observer
         if let observer = audioRouteObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        
+
         BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")
     }
