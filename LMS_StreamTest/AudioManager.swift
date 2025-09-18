@@ -79,31 +79,36 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStream(urlString: String) {
+        activateAudioSession()
         audioPlayer.playStream(urlString: urlString)
     }
-    
+
     func playStreamWithFormat(urlString: String, format: String) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
-        
+
         // Start playback
+        activateAudioSession()
         audioPlayer.playStreamWithFormat(urlString: urlString, format: format)
     }
-    
+
     func playStreamAtPosition(urlString: String, startTime: Double) {
+        activateAudioSession()
         audioPlayer.playStreamAtPosition(urlString: urlString, startTime: startTime)
     }
-    
+
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
-        
+
         // Start playback
+        activateAudioSession()
         audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format)
     }
-    
+
     // Playback control
     func play() {
+        activateAudioSession()
         audioPlayer.play()
     }
     

@@ -117,27 +117,27 @@ class AudioPlayer: NSObject, ObservableObject {
         do {
             let audioSession = AVAudioSession.sharedInstance()
 
-            // Only configure if not already set to playback
-            if audioSession.category != .playback {
+            if audioSession.category != .playback || audioSession.mode != .default {
                 try audioSession.setCategory(
                     .playback,
                     mode: .default,
-                    options: []  // EMPTY options required for lock screen controls
+                    options: []
                 )
                 os_log(.info, log: logger, "✅ Configured audio session for playback")
             }
 
-            // Always ensure session is active when needed
-            if !audioSession.isOtherAudioPlaying {
-                try audioSession.setActive(true)
-                os_log(.info, log: logger, "✅ Audio session activated")
-            } else {
-                os_log(.debug, log: logger, "ℹ️ Other audio playing - session already active")
-            }
+            try reactivateAudioSession()
 
         } catch {
             os_log(.error, log: logger, "❌ Session configuration failed: %{public}s", error.localizedDescription)
         }
+    }
+
+    /// Explicit session activation helper used by CarPlay recovery and resume paths
+    func reactivateAudioSession() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setActive(true, options: [.notifyOthersOnDeactivation])
+        os_log(.info, log: logger, "🔈 Audio session active for playback")
     }
 
     // MARK: - CarPlay Audio Route Integration
@@ -161,9 +161,6 @@ class AudioPlayer: NSObject, ObservableObject {
 
         os_log(.info, log: logger, "🔀 Route change: %{public}s", routeChangeReasonString(routeChangeReason))
 
-        // Only handle route configuration changes (CarPlay/device changes)
-        guard routeChangeReason == .routeConfigurationChange else { return }
-
         let isCarPlayActive = isCarPlayRoute()
 
         if isCarPlayActive != wasCarPlayActive {
@@ -181,6 +178,8 @@ class AudioPlayer: NSObject, ObservableObject {
             // CarPlay connecting - brief delay for iOS to settle routing
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.configureAudioSessionIfNeeded()
+                self.audioManager?.activateAudioSession()
+                self.logSessionActivationState(context: "CarPlayConnected")
                 self.triggerCarPlayRecovery()
             }
         } else {
@@ -188,33 +187,9 @@ class AudioPlayer: NSObject, ObservableObject {
             // This prevents session conflicts during rapid reconnects
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.configureAudioSessionIfNeeded()
-
-                // CRITICAL: Force audio player to reconnect to new route after CarPlay disconnect
-                // This fixes the issue where session is configured but audio player isn't connected
-                self.reconnectAudioPlayerToCurrentRoute()
-
-                os_log(.info, log: self.logger, "📱 Session and audio player reconfigured after CarPlay disconnect")
-            }
-        }
-    }
-
-    /// Force audio player to reconnect to current audio route after CarPlay transitions
-    private func reconnectAudioPlayerToCurrentRoute() {
-        os_log(.info, log: logger, "🔄 Refreshing audio player route connection after CarPlay disconnect")
-
-        // Simple approach: Brief pause→play cycle to refresh routing regardless of current state
-        // This ensures audio player connects to current route (iPhone speakers vs old CarPlay route)
-        pause()
-
-        // Longer delay to ensure JSON command completes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // Play briefly to establish connection to current audio route
-            self.play()
-
-            // Then pause again after route is established
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.pause()
-                os_log(.info, log: self.logger, "✅ Audio route refreshed - ready for lock screen commands")
+                self.audioManager?.activateAudioSession()
+                self.logSessionActivationState(context: "CarPlayDisconnected")
+                os_log(.info, log: self.logger, "📱 Session reconfigured after CarPlay disconnect")
             }
         }
     }
@@ -259,6 +234,21 @@ class AudioPlayer: NSObject, ObservableObject {
         case .routeConfigurationChange: return "Route Configuration Change"
         @unknown default: return "Unknown Route Change"
         }
+    }
+
+    private func logSessionActivationState(context: String) {
+        let audioSession = AVAudioSession.sharedInstance()
+        let outputs = audioSession.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")
+        os_log(
+            .info,
+            log: logger,
+            "🎧 Session state [%{public}s]: category=%{public}s mode=%{public}s otherAudio=%{public}s route=%{public}s",
+            context,
+            audioSession.category.rawValue,
+            audioSession.mode.rawValue,
+            audioSession.isOtherAudioPlaying ? "YES" : "NO",
+            outputs.isEmpty ? "none" : outputs
+        )
     }
 
     

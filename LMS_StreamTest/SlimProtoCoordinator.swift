@@ -951,13 +951,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
-        
+
         // CRITICAL FIX: Update SimpleTimeTracker with resume state
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
         simpleTimeTracker.updateFromServer(time: currentTime, playing: true)
-        
+
+        audioManager.activateAudioSession()
         audioManager.play()
-        
+
         // Restart heartbeat when resumed
         startPlaybackHeartbeat()
         

@@ -92,9 +92,11 @@ class AudioSessionManager: ObservableObject {
         if let delegate = delegate as? AudioManager {
             delegate.activateAudioSession()
         }
-        
+
         // Keep background task management active
         refreshBackgroundAudioCapabilities()
+
+        logCurrentAudioSessionState()
     }
     
     // MARK: - Background Audio Capabilities Management

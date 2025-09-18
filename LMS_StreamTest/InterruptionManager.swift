@@ -399,11 +399,15 @@ class InterruptionManager: ObservableObject {
             // These should pause playback (PRESERVE CURRENT BEHAVIOR)
             delegate?.routeDidChange(type: routeChangeType, shouldPause: true)
 
-        case .carPlayConnected, .carPlayDisconnected:
-            // Don't pause - let AudioPlayer handle session management with proper timing
-            // But still notify for UI updates
+        case .carPlayConnected:
+            // Notify without forcing pause so CarPlay can resume seamlessly
             delegate?.routeDidChange(type: routeChangeType, shouldPause: false)
-            os_log(.info, log: logger, "🚗 CarPlay route change - session handled by AudioPlayer")
+            os_log(.info, log: logger, "🚗 CarPlay connected - notifying delegate")
+
+        case .carPlayDisconnected:
+            // Pause via delegate so server state stays aligned
+            delegate?.routeDidChange(type: routeChangeType, shouldPause: true)
+            os_log(.info, log: logger, "🚗 CarPlay disconnected - requesting pause")
 
         default:
             // Preserve existing behavior for all other route changes
