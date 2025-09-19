@@ -51,11 +51,17 @@ final class PlaybackSessionControllerTests: XCTestCase {
     }
 
     func testInterruptionPausesAndResumesWhenIndicated() {
+        fakePlaybackController.isPlayingStub = true
+
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
                                 userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
 
-        XCTAssertEqual(fakePlaybackController.pauseCount, 1)
+        let pauseExpectation = expectation(description: "pause")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
+            pauseExpectation.fulfill()
+        }
 
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
@@ -71,17 +77,22 @@ final class PlaybackSessionControllerTests: XCTestCase {
             exp.fulfill()
         }
 
-        waitForExpectations(timeout: 1.0)
+        wait(for: [pauseExpectation, exp], timeout: 1.0)
     }
 
     func testInterruptionFromOtherAudioDoesNotAutoResume() {
         fakeAudioSession.otherAudioIsPlayingStub = true
+        fakePlaybackController.isPlayingStub = true
 
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
                                 userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
 
-        XCTAssertEqual(fakePlaybackController.pauseCount, 1)
+        let pauseExpectation = expectation(description: "pause")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
+            pauseExpectation.fulfill()
+        }
 
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
@@ -96,7 +107,7 @@ final class PlaybackSessionControllerTests: XCTestCase {
             exp.fulfill()
         }
 
-        waitForExpectations(timeout: 1.0)
+        wait(for: [pauseExpectation, exp], timeout: 1.0)
     }
 
     func testCarPlayRouteChangeTriggersConnectAndPause() {
@@ -109,13 +120,14 @@ final class PlaybackSessionControllerTests: XCTestCase {
         let connectExpectation = expectation(description: "connect")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
             XCTAssertTrue(self.fakeSlimProto.connectCalled)
-            XCTAssertEqual(self.fakeSlimProto.commandsSent, ["play"])
+            XCTAssertEqual(self.fakeSlimProto.commandsSent, [])
             connectExpectation.fulfill()
         }
 
         wait(for: [connectExpectation], timeout: 1.2)
 
         // Simulate CarPlay disconnect
+        fakePlaybackController.isPlayingStub = true
         fakeAudioSession.currentOutputsStub = [.builtInSpeaker]
         notificationCenter.post(name: AVAudioSession.routeChangeNotification,
                                 object: nil,
@@ -123,9 +135,15 @@ final class PlaybackSessionControllerTests: XCTestCase {
                                     AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
                                 ])
 
-        XCTAssertEqual(fakePlaybackController.pauseCount, 2)
-        XCTAssertTrue(fakeSlimProto.savedPosition)
-        XCTAssertEqual(fakeSlimProto.commandsSent.last, "pause")
+        let disconnectExpectation = expectation(description: "disconnect")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
+            XCTAssertTrue(self.fakeSlimProto.savedPosition)
+            XCTAssertEqual(self.fakeSlimProto.commandsSent, ["pause"])
+            disconnectExpectation.fulfill()
+        }
+
+        wait(for: [disconnectExpectation], timeout: 0.2)
     }
 }
 
@@ -182,12 +200,17 @@ private final class FakeSlimProtoCoordinator: SlimProtoControlling {
 private final class FakePlaybackController: AudioPlaybackControlling {
     private(set) var playCount = 0
     private(set) var pauseCount = 0
+    var isPlayingStub = false
 
     func play() {
         playCount += 1
+        isPlayingStub = true
     }
 
     func pause() {
         pauseCount += 1
+        isPlayingStub = false
     }
+
+    var isPlaying: Bool { isPlayingStub }
 }

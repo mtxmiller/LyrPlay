@@ -4,6 +4,7 @@
 import Foundation
 import AVFoundation
 import MediaPlayer
+import UIKit
 import os.log
 
 // MARK: - Protocol Abstractions
@@ -44,9 +45,12 @@ extension SlimProtoCoordinator: SlimProtoControlling {}
 protocol AudioPlaybackControlling: AnyObject {
     func play()
     func pause()
+    var isPlaying: Bool { get }
 }
 
-extension AudioManager: AudioPlaybackControlling {}
+extension AudioManager: AudioPlaybackControlling {
+    var isPlaying: Bool { getPlayerState() == "Playing" }
+}
 
 // MARK: - PlaybackSessionController
 final class PlaybackSessionController {
@@ -90,6 +94,7 @@ final class PlaybackSessionController {
         let type: InterruptionType
         let beganAt: Date
         let shouldAutoResume: Bool
+        let wasPlaying: Bool
     }
 
     static let shared = PlaybackSessionController()
@@ -106,6 +111,9 @@ final class PlaybackSessionController {
     private var observersRegistered = false
     private var isCarPlayActive = false
     private var interruptionContext: InterruptionContext?
+    private var wasPlayingBeforeCarPlayDetach = false
+    private var lastCarPlayEvent: Date?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init(audioSession: AudioSessionManaging = AVAudioSession.sharedInstance(),
          notificationCenter: NotificationCenter = .default,
@@ -254,15 +262,19 @@ final class PlaybackSessionController {
         switch interruptionType {
         case .began:
             let interruptionKind = determineInterruptionType(userInfo: userInfo)
-            let shouldResume = shouldAutoResume(after: interruptionKind)
+            let wasPlaying = playbackController?.isPlaying ?? false
+            let shouldResume = shouldAutoResume(after: interruptionKind, wasPlaying: wasPlaying)
             interruptionContext = InterruptionContext(type: interruptionKind,
                                                       beganAt: Date(),
-                                                      shouldAutoResume: shouldResume)
+                                                      shouldAutoResume: shouldResume,
+                                                      wasPlaying: wasPlaying)
 
             os_log(.info, log: logger, "🚫 Interruption began (%{public}s, autoResume=%{public}s)",
                    interruptionKind.rawValue, shouldResume ? "YES" : "NO")
-            DispatchQueue.main.async { [weak self] in
-                self?.playbackController?.pause()
+            if wasPlaying {
+                DispatchQueue.main.async { [weak self] in
+                    self?.playbackController?.pause()
+                }
             }
         case .ended:
             let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -316,8 +328,12 @@ final class PlaybackSessionController {
 
     // MARK: - CarPlay Handling
     private func handleCarPlayConnected() {
+        guard !shouldThrottleCarPlayEvent() else { return }
         os_log(.info, log: logger, "🚗 CarPlay connected - ensuring session active and syncing with LMS")
         ensureActive(context: .userInitiatedPlay)
+
+        let shouldResume = wasPlayingBeforeCarPlayDetach
+        wasPlayingBeforeCarPlayDetach = false
 
         workQueue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self = self else { return }
@@ -328,21 +344,29 @@ final class PlaybackSessionController {
                     coordinator.connect()
                 }
 
-                coordinator.sendLockScreenCommand("play")
+                if shouldResume {
+                    coordinator.sendLockScreenCommand("play")
+                }
             }
         }
     }
 
     private func handleCarPlayDisconnected() {
+        guard !shouldThrottleCarPlayEvent() else { return }
         os_log(.info, log: logger, "🚗 CarPlay disconnected - pausing playback and saving state")
+        wasPlayingBeforeCarPlayDetach = playbackController?.isPlaying ?? false
+        beginBackgroundTask(named: "CarPlayDisconnect")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.playbackController?.pause()
+            if self.wasPlayingBeforeCarPlayDetach {
+                self.playbackController?.pause()
+            }
 
             if let coordinator = self.slimProtoProvider?() {
                 coordinator.saveCurrentPositionForRecovery()
                 coordinator.sendLockScreenCommand("pause")
             }
+            self.endBackgroundTask()
         }
     }
 
@@ -353,25 +377,65 @@ final class PlaybackSessionController {
             switch reason {
             case .appWasSuspended, .builtInMicMuted:
                 return .otherAudio
+            case .default:
+                break
             default:
                 break
             }
+        }
+
+        if let suspended = userInfo[AVAudioSessionInterruptionWasSuspendedKey] as? Bool, suspended {
+            return .otherAudio
         }
 
         if audioSession.otherAudioIsPlaying {
             return .otherAudio
         }
 
+        let outputs = audioSession.currentOutputs
+        if outputs.contains(.builtInReceiver) || outputs.contains(.bluetoothHFP) {
+            return .phoneCall
+        }
+
+        if UIApplication.shared.applicationState != .active {
+            return .phoneCall
+        }
+
         return .unknown
     }
 
-    private func shouldAutoResume(after type: InterruptionType) -> Bool {
+    private func shouldAutoResume(after type: InterruptionType, wasPlaying: Bool) -> Bool {
+        guard wasPlaying else { return false }
+
         switch type {
         case .otherAudio:
             return false
         default:
             return true
         }
+    }
+
+    private func shouldThrottleCarPlayEvent() -> Bool {
+        let now = Date()
+        if let last = lastCarPlayEvent, now.timeIntervalSince(last) < 0.6 {
+            os_log(.info, log: logger, "🚗 Ignoring rapid CarPlay route change (debounced)")
+            return true
+        }
+        lastCarPlayEvent = now
+        return false
+    }
+
+    private func beginBackgroundTask(named name: String) {
+        endBackgroundTask()
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            self?.endBackgroundTask()
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 }
 
