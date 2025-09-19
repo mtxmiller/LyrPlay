@@ -5,7 +5,6 @@ import Bass
 import BassFLAC
 import BassOpus
 import MediaPlayer
-import AVFoundation
 import os.log
 
 protocol AudioPlayerDelegate: AnyObject {
@@ -47,15 +46,8 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Lock Screen Controls (avoid duplicate setup)
     private var lockScreenControlsConfigured = false
     
-    // MARK: - CarPlay Audio Route Integration
     private var currentStreamURL: String = ""
-    private var audioRouteObserver: NSObjectProtocol?
-    
-    // MARK: - Format Tracking for Plugin-Specific Stream Creation
     private var currentStreamFormat: String = "UNKNOWN"
-
-    // MARK: - CarPlay State Tracking
-    private var wasCarPlayActive: Bool = false
     
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
@@ -64,8 +56,7 @@ class AudioPlayer: NSObject, ObservableObject {
     override init() {
         super.init()
         setupCBass()
-        setupAudioRouteMonitoring()
-        os_log(.info, log: logger, "AudioPlayer initialized with CBass and CarPlay route monitoring")
+        os_log(.info, log: logger, "AudioPlayer initialized with CBass")
     }
     
     // MARK: - Core Setup (MINIMAL CBASS)
@@ -108,147 +99,12 @@ class AudioPlayer: NSObject, ObservableObject {
     }
 
     private func setupManualAudioSession() {
-        // Use unified session management method
-        configureAudioSessionIfNeeded()
+        configureAudioSessionIfNeeded(context: .backgroundRefresh)
     }
 
-    /// Unified audio session configuration - single source of truth for all session management
-    func configureAudioSessionIfNeeded() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-
-            if audioSession.category != .playback || audioSession.mode != .default {
-                try audioSession.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: []
-                )
-                os_log(.info, log: logger, "✅ Configured audio session for playback")
-            }
-
-            try reactivateAudioSession()
-
-        } catch {
-            os_log(.error, log: logger, "❌ Session configuration failed: %{public}s", error.localizedDescription)
-        }
-    }
-
-    /// Explicit session activation helper used by CarPlay recovery and resume paths
-    func reactivateAudioSession() throws {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setActive(true, options: [.notifyOthersOnDeactivation])
-        os_log(.info, log: logger, "🔈 Audio session active for playback")
-    }
-
-    // MARK: - CarPlay Audio Route Integration
-    private func setupAudioRouteMonitoring() {
-        audioRouteObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.handleAudioRouteChange(notification)
-        }
-        
-        os_log(.info, log: logger, "✅ Audio route monitoring setup for CarPlay integration")
-    }
-    
-    @objc private func handleAudioRouteChange(_ notification: Notification) {
-        guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-              let routeChangeReason = AVAudioSession.RouteChangeReason(rawValue: reason) else {
-            return
-        }
-
-        os_log(.info, log: logger, "🔀 Route change: %{public}s", routeChangeReasonString(routeChangeReason))
-
-        let isCarPlayActive = isCarPlayRoute()
-
-        if isCarPlayActive != wasCarPlayActive {
-            // CarPlay state changed - handle with proper timing
-            handleCarPlayTransition(connecting: isCarPlayActive)
-            wasCarPlayActive = isCarPlayActive
-        }
-    }
-
-    private func handleCarPlayTransition(connecting: Bool) {
-        os_log(.info, log: logger, "🚗 CarPlay %{public}s - handling with iOS settling time",
-               connecting ? "connecting" : "disconnecting")
-
-        if connecting {
-            // CarPlay connecting - brief delay for iOS to settle routing
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.configureAudioSessionIfNeeded()
-                self.audioManager?.activateAudioSession()
-                self.logSessionActivationState(context: "CarPlayConnected")
-                self.triggerCarPlayRecovery()
-            }
-        } else {
-            // CarPlay disconnecting - longer delay for iOS to clean up CarPlay routing
-            // This prevents session conflicts during rapid reconnects
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.configureAudioSessionIfNeeded()
-                self.audioManager?.activateAudioSession()
-                self.logSessionActivationState(context: "CarPlayDisconnected")
-                os_log(.info, log: self.logger, "📱 Session reconfigured after CarPlay disconnect")
-            }
-        }
-    }
-
-    private func isCarPlayRoute() -> Bool {
-        let currentRoute = AVAudioSession.sharedInstance().currentRoute
-
-        for output in currentRoute.outputs {
-            if output.portType == .carAudio {
-                return true
-            }
-        }
-
-        return false
-    }
-
-    private func triggerCarPlayRecovery() {
-        // Coordinate with AudioManager to trigger recovery through proper channels
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-
-            // Use AudioManager's coordinator to trigger recovery
-            if let audioManager = self.audioManager,
-               let coordinator = audioManager.slimClient {
-                os_log(.info, log: self.logger, "🚗 Triggering CarPlay recovery through coordinator")
-                coordinator.performCarPlayRecovery()
-            } else {
-                os_log(.error, log: self.logger, "❌ Cannot trigger CarPlay recovery - missing coordinator")
-            }
-        }
-    }
-
-    private func routeChangeReasonString(_ reason: AVAudioSession.RouteChangeReason) -> String {
-        switch reason {
-        case .unknown: return "Unknown"
-        case .newDeviceAvailable: return "New Device Available"
-        case .oldDeviceUnavailable: return "Old Device Unavailable"
-        case .categoryChange: return "Category Change"
-        case .override: return "Override"
-        case .wakeFromSleep: return "Wake From Sleep"
-        case .noSuitableRouteForCategory: return "No Suitable Route"
-        case .routeConfigurationChange: return "Route Configuration Change"
-        @unknown default: return "Unknown Route Change"
-        }
-    }
-
-    private func logSessionActivationState(context: String) {
-        let audioSession = AVAudioSession.sharedInstance()
-        let outputs = audioSession.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")
-        os_log(
-            .info,
-            log: logger,
-            "🎧 Session state [%{public}s]: category=%{public}s mode=%{public}s otherAudio=%{public}s route=%{public}s",
-            context,
-            audioSession.category.rawValue,
-            audioSession.mode.rawValue,
-            audioSession.isOtherAudioPlaying ? "YES" : "NO",
-            outputs.isEmpty ? "none" : outputs
-        )
+    /// Unified audio session configuration now delegated to PlaybackSessionController
+    func configureAudioSessionIfNeeded(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
+        PlaybackSessionController.shared.ensureActive(context: context)
     }
 
     
@@ -261,7 +117,7 @@ class AudioPlayer: NSObject, ObservableObject {
         
         os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString)
         
-        // Store current URL for CarPlay route recovery
+        // Track current URL for potential recovery scenarios
         currentStreamURL = urlString
         
         // If no format was explicitly set, try to detect from URL as fallback
@@ -494,7 +350,7 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Lock Screen Integration (DISABLED - NowPlayingManager handles this)
     private func setupLockScreenControls() {
         // CRITICAL FIX: AudioPlayer should NOT set up MPRemoteCommandCenter
-        // NowPlayingManager already handles lock screen/CarPlay commands via SlimProto
+        // PlaybackSessionController owns lock screen / CarPlay command routing
         // This duplicate setup was causing conflicts and CarPlay issues
         
         os_log(.info, log: logger, "⚠️ AudioPlayer MPRemoteCommandCenter setup DISABLED - handled by NowPlayingManager")
@@ -681,11 +537,6 @@ class AudioPlayer: NSObject, ObservableObject {
 
     deinit {
         cleanup()
-
-        // Clean up audio route observer
-        if let observer = audioRouteObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
 
         BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")

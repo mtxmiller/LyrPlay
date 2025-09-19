@@ -48,8 +48,6 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
-        // Re-enabled: BASS only handles AVAudioSession, not MPRemoteCommandCenter
-        setupRemoteCommandCenter()
         startUpdateTimer()
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
     }
@@ -291,96 +289,6 @@ class NowPlayingManager: ObservableObject {
         os_log(.info, log: logger, "✅ Initial now playing info configured")
     }
     
-    // MARK: - Remote Command Center Setup
-    private func setupRemoteCommandCenter() {
-        let commandCenter = MPRemoteCommandCenter.shared()
-        
-        // Disable all controls first
-        commandCenter.playCommand.isEnabled = false
-        commandCenter.pauseCommand.isEnabled = false
-        commandCenter.stopCommand.isEnabled = false
-        commandCenter.nextTrackCommand.isEnabled = false
-        commandCenter.previousTrackCommand.isEnabled = false
-        commandCenter.skipForwardCommand.isEnabled = false
-        commandCenter.skipBackwardCommand.isEnabled = false
-        commandCenter.changePlaybackPositionCommand.isEnabled = false
-        commandCenter.seekForwardCommand.isEnabled = false
-        commandCenter.seekBackwardCommand.isEnabled = false
-        
-        // Remove all existing targets
-        commandCenter.playCommand.removeTarget(nil)
-        commandCenter.pauseCommand.removeTarget(nil)
-        commandCenter.stopCommand.removeTarget(nil)
-        commandCenter.nextTrackCommand.removeTarget(nil)
-        commandCenter.previousTrackCommand.removeTarget(nil)
-        commandCenter.skipForwardCommand.removeTarget(nil)
-        commandCenter.skipBackwardCommand.removeTarget(nil)
-        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
-        
-        // Enable only the controls we want
-        commandCenter.playCommand.isEnabled = true
-        commandCenter.pauseCommand.isEnabled = true
-        commandCenter.nextTrackCommand.isEnabled = true
-        commandCenter.previousTrackCommand.isEnabled = true
-        
-        // Add handlers for enabled controls - SERVER CONTROL ONLY
-        commandCenter.playCommand.addTarget { [weak self] _ in
-            os_log(.info, log: self?.logger ?? OSLog.disabled, "🎵 Lock Screen PLAY command received")
-            if self?.slimClient != nil {
-                os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Sending PLAY command to server")
-                self?.slimClient?.sendLockScreenCommand("play")
-            } else {
-                os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ slimClient is nil - cannot send PLAY command")
-            }
-            return .success
-        }
-        
-        commandCenter.pauseCommand.addTarget { [weak self] _ in
-            os_log(.info, log: self?.logger ?? OSLog.disabled, "⏸️ Lock Screen PAUSE command received")
-            if self?.slimClient != nil {
-                os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Sending PAUSE command to server")
-                self?.slimClient?.sendLockScreenCommand("pause")
-            } else {
-                os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ slimClient is nil - cannot send PAUSE command")
-            }
-            return .success
-        }
-        
-        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-            os_log(.info, log: self?.logger ?? OSLog.disabled, "⏭️ Lock Screen NEXT TRACK command received")
-            if self?.slimClient != nil {
-                os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Sending NEXT command to server")
-                self?.slimClient?.sendLockScreenCommand("next")
-            } else {
-                os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ slimClient is nil - cannot send NEXT command")
-            }
-            return .success
-        }
-        
-        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
-            os_log(.info, log: self?.logger ?? OSLog.disabled, "⏮️ Lock Screen PREVIOUS TRACK command received")
-            if self?.slimClient != nil {
-                os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Sending PREVIOUS command to server")
-                self?.slimClient?.sendLockScreenCommand("previous")
-            } else {
-                os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ slimClient is nil - cannot send PREVIOUS command")
-            }
-            return .success
-        }
-        
-        os_log(.info, log: logger, "✅ Remote Command Center configured with track skip controls")
-    }
-    
-    // MARK: - Media Control Refresh (called after audio session changes)
-    func refreshRemoteCommandCenter() {
-        os_log(.info, log: logger, "🔄 Refreshing MPRemoteCommandCenter connections after audio session change")
-        
-        // Re-run the complete setup to refresh all connections
-        setupRemoteCommandCenter()
-        
-        os_log(.info, log: logger, "✅ MPRemoteCommandCenter refreshed for CarPlay/lock screen compatibility")
-    }
-    
     // MARK: - Track Metadata Management
     func updateTrackMetadata(title: String, artist: String, album: String, artworkURL: String? = nil, duration: TimeInterval? = nil) {
         // Only update duration if explicitly provided (Material skin approach)
@@ -605,4 +513,3 @@ class NowPlayingManager: ObservableObject {
         os_log(.info, log: logger, "Enhanced NowPlayingManager deinitialized")
     }
 }
-

@@ -45,10 +45,14 @@ class AudioManager: NSObject, ObservableObject {
         super.init()
         
         setupDelegation()
-        
+
         // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
         nowPlayingManager.setAudioManager(self)
-        
+
+        PlaybackSessionController.shared.configure(audioManager: self) { [weak self] in
+            self?.slimClient
+        }
+
         os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
     }
     
@@ -158,10 +162,9 @@ class AudioManager: NSObject, ObservableObject {
         return audioPlayer.getVolume()
     }
     
-    func activateAudioSession() {
-        // Delegate to AudioPlayer since it owns session management with BASS_IOS_SESSION_DISABLE
-        audioPlayer.configureAudioSessionIfNeeded()
-        os_log(.info, log: logger, "🔒 Audio session activation delegated to AudioPlayer")
+    func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
+        audioPlayer.configureAudioSessionIfNeeded(context: context)
+        os_log(.info, log: logger, "🔒 Audio session activation requested (%{public}s)", context.rawValue)
     }
     
     // Metadata management
@@ -347,25 +350,13 @@ extension AudioManager {
             let currentPosition = getCurrentTime()
             
             if wasPlaying {
-                // Pause due to route change
                 audioPlayer.pause()
-                
-                // Update now playing
                 nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                
-                // For CarPlay disconnect, notify server using SimpleTimeTracker position
-                if routeType.contains("CarPlay") && routeType.contains("Disconnected") {
-                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
-                    notifyServerOfCarPlayDisconnect(position: serverPosition)
-                }
-                
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeType)
             }
         }
-        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
+        // Legacy CarPlay handling removed; new session controller will manage reconnect logic
     }
-    
-    // MARK: - CarPlay Specific Handling (REMOVED - using server auto-resume)
     
     // MARK: - Server Communication for Interruptions
     private func notifyServerOfInterruption(isPaused: Bool) {
@@ -381,22 +372,6 @@ extension AudioManager {
             os_log(.info, log: logger, "📡 Notified server of interruption resume")
         }
     }
-    
-    private func notifyServerOfCarPlayDisconnect(position: Double) {
-        guard let slimClient = slimClient else { return }
-        
-        // Send pause command specifically for CarPlay disconnect
-        slimClient.sendLockScreenCommand("pause")
-        
-        // NEW: Save position for playlist recovery
-        slimClient.saveCurrentPositionForRecovery()
-        
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect and saved position for recovery (%.2f)", position)
-    }
-    
-    // MARK: - Smart CarPlay Connect Logic
-    // REMOVED: OLD CarPlay connect methods - now handled by AudioPlayer with proper session timing
-    
     
     // MARK: - Utility Methods
     private func getCurrentAudioFormat() -> String {
@@ -467,23 +442,14 @@ extension AudioManager: AudioSessionManagerDelegate {
                routeChangeDescription, shouldPause ? "YES" : "NO")
         
         if shouldPause {
-            // Handle disconnections (CarPlay disconnect, headphones, etc.)
             if getPlayerState() == "Playing" {
                 let currentPosition = getCurrentTime()
                 audioPlayer.pause()
                 nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                
-                if routeChangeDescription == "CarPlay Disconnected" {
-                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
-                    notifyServerOfCarPlayDisconnect(position: serverPosition)
-                }
-                
                 os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
             }
-        }
-        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
-        else {
-            os_log(.info, log: logger, "🔍 DEBUG: Route change: '%{public}s'", routeChangeDescription)
+        } else {
+            os_log(.info, log: logger, "🔀 Route change observed: '%{public}s'", routeChangeDescription)
         }
     }
 }

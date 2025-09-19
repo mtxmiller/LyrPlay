@@ -62,10 +62,10 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Enhanced Audio Session Control (DISABLED)
     func activateAudioSession() {
-        // DISABLED: BASS handles activation with BASS_IOS_SESSION_DISABLE
-        os_log(.info, log: logger, "✅ Audio session activation handled by BASS")
+        PlaybackSessionController.shared.ensureActive(context: .backgroundRefresh)
+        os_log(.info, log: logger, "✅ Audio session activation requested via controller")
     }
-    
+
     func deactivateAudioSession() {
         // DISABLED: BASS handles deactivation with BASS_IOS_SESSION_DISABLE  
         os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS")
@@ -76,27 +76,11 @@ class AudioSessionManager: ObservableObject {
         // RESTORED: With BASS_IOS_SESSION_DISABLE, we need manual session management
         // Delegate to AudioPlayer's unified session management
         if let audioManager = delegate as? AudioManager {
-            audioManager.activateAudioSession() // Now delegates to AudioPlayer.configureAudioSessionIfNeeded()
-            os_log(.info, log: logger, "✅ Interruption recovery delegated to AudioPlayer")
+            audioManager.activateAudioSession(context: .serverResume)
+            os_log(.info, log: logger, "✅ Interruption recovery delegated to PlaybackSessionController")
         } else {
             os_log(.error, log: logger, "❌ Cannot access AudioManager for interruption recovery")
         }
-    }
-    
-    // MARK: - CarPlay Audio Session Readiness (DISABLED)
-    func maintainAudioSessionReadinessAfterCarPlayDisconnect() {
-        os_log(.info, log: logger, "🚗 CarPlay disconnected - activating audio session for phone readiness")
-        
-        // Use AudioManager's session activation (same as lock screen recovery)
-        // This ensures consistent session handling across all recovery scenarios
-        if let delegate = delegate as? AudioManager {
-            delegate.activateAudioSession()
-        }
-
-        // Keep background task management active
-        refreshBackgroundAudioCapabilities()
-
-        logCurrentAudioSessionState()
     }
     
     // MARK: - Background Audio Capabilities Management
@@ -252,11 +236,9 @@ extension AudioSessionManager: InterruptionManagerDelegate {
         os_log(.info, log: logger, "🔀 Route changed: %{public}s (shouldPause: %{public}s)",
                type.description, shouldPause ? "YES" : "NO")
         
-        // GENTLE FIX: Maintain audio session readiness when CarPlay disconnects
-        // This keeps the app ready to receive audio control without aggressively stealing it
+        // TODO: CarPlay-specific routing to be reimplemented via PlaybackSessionController
         if type == .carPlayDisconnected {
-            os_log(.info, log: logger, "🚗 CarPlay disconnected - maintaining audio session readiness")
-            maintainAudioSessionReadinessAfterCarPlayDisconnect()
+            os_log(.info, log: logger, "🚗 Route change: CarPlay disconnected (placeholder no-op)")
         }
         
         // Log the new route for debugging

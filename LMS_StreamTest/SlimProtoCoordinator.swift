@@ -387,84 +387,6 @@ class SlimProtoCoordinator: ObservableObject {
         }
     }
     
-    /// CarPlay reconnect recovery - connects to server first, then performs playlist jump
-    func performCarPlayRecovery() {
-        // Check if recovery is already in progress
-        guard !isRecoveryInProgress else {
-            os_log(.info, log: logger, "🚗 CarPlay Recovery: Skipping - recovery already in progress")
-            return
-        }
-
-        // Set recovery in progress
-        isRecoveryInProgress = true
-        os_log(.info, log: logger, "🚗 CarPlay Recovery: Starting (blocking other recovery methods)")
-
-        // CRITICAL: Always activate audio session for CarPlay recovery (same as lock screen)
-        audioManager.activateAudioSession()
-
-        // CRITICAL: Check connection status first (same logic as lock screen recovery)
-        if !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "🚗 CarPlay disconnected from server - will perform playlist jump recovery")
-            connect()
-
-            // Queue recovery after connection
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                self.executeCarPlayPlaylistJump()
-            }
-        } else {
-            os_log(.info, log: logger, "🚗 CarPlay connected to server - using simple play command")
-            sendJSONRPCCommand("play")
-            isRecoveryInProgress = false // Clear recovery flag
-        }
-    }
-
-    /// Execute CarPlay playlist jump recovery (matches lock screen recovery logic)
-    private func executeCarPlayPlaylistJump() {
-        // Check if we have recovery data (no time limit - like other music players)
-        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-            os_log(.info, log: logger, "🚗 No recovery data for CarPlay - using simple play command")
-            sendJSONRPCCommand("play")
-            isRecoveryInProgress = false // Clear recovery flag
-            return
-        }
-
-        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
-
-        guard savedPosition > 0 else {
-            os_log(.info, log: logger, "🚗 No saved position for CarPlay - using simple play command")
-            sendJSONRPCCommand("play")
-            isRecoveryInProgress = false // Clear recovery flag
-            return
-        }
-
-        os_log(.info, log: logger, "🚗 Performing CarPlay playlist recovery: jump to track %d at %.2f seconds", savedIndex, savedPosition)
-
-        // Use same Home Assistant approach: playlist jump with timeOffset
-        let playlistJumpCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [settings.playerMACAddress, [
-                "playlist", "jump", savedIndex, 1, 0, [
-                    "timeOffset": savedPosition
-                ]
-            ]]
-        ]
-
-        sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🚗 CarPlay playlist jump recovery completed")
-
-            // Clear recovery flag after completion
-            self?.isRecoveryInProgress = false
-            os_log(.info, log: self?.logger ?? OSLog.default, "🚗 Recovery state cleared - other recovery methods can now proceed")
-
-            // Clear recovery data after successful use
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
-        }
-    }
-
     /// App open recovery - same playlist jump method but pauses after recovery
     func performAppOpenRecovery() {
         // 🚫 DISABLED: App open recovery temporarily disabled for testing
@@ -956,7 +878,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
         simpleTimeTracker.updateFromServer(time: currentTime, playing: true)
 
-        audioManager.activateAudioSession()
+        audioManager.activateAudioSession(context: .serverResume)
         audioManager.play()
 
         // Restart heartbeat when resumed
@@ -1168,7 +1090,8 @@ extension SlimProtoCoordinator {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
         
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
-        audioManager.activateAudioSession()
+        let context: PlaybackSessionController.ActivationContext = command.lowercased() == "play" ? .userInitiatedPlay : .backgroundRefresh
+        audioManager.activateAudioSession(context: context)
         
         // Ensure connection and send command
         if !connectionManager.connectionState.isConnected {
@@ -1313,19 +1236,6 @@ extension SlimProtoCoordinator {
                     // CRITICAL: For play commands, ensure we have a working SlimProto connection
                     if command.lowercased() == "play" {
                         self.ensureSlimProtoConnection()
-                        
-                        // CRITICAL FIX: Check if stream was invalidated for CarPlay
-                        if self.audioManager.getPlayerState() == "No Stream" {
-                            os_log(.info, log: self.logger, "🚗 PLAY command with no active stream - likely invalidated for CarPlay")
-                            os_log(.info, log: self.logger, "🚗 Forcing fresh stream creation like NEXT/PREVIOUS commands")
-                            
-                            // Force fresh stream creation by requesting current track status
-                            // This mimics what NEXT/PREVIOUS commands do to get fresh streams
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                os_log(.info, log: self.logger, "🚗 Requesting fresh metadata to trigger stream creation")
-                                self.fetchCurrentTrackMetadata()
-                            }
-                        }
                     }
                     
                     // For skip commands, refresh metadata and resume server time sync
