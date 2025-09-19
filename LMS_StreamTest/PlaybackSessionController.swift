@@ -212,7 +212,12 @@ final class PlaybackSessionController {
     }
 
     private func handleRemoteCommand(_ command: RemoteCommand) -> MPRemoteCommandHandlerStatus {
+        beginBackgroundTask(named: "LockScreenCommand")
         ensureActive(context: command.activationContext)
+
+        if command == .play {
+            wasPlayingBeforeCarPlayDetach = false
+        }
 
         guard let coordinator = slimProtoProvider?() else {
             os_log(.error, log: logger, "❌ SlimProto coordinator unavailable for remote command")
@@ -221,6 +226,10 @@ final class PlaybackSessionController {
 
         DispatchQueue.main.async {
             coordinator.sendLockScreenCommand(command.slimCommand)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+            self?.endBackgroundTask()
         }
 
         os_log(.info, log: logger, "🔒 Remote command handled: %{public}s", command.slimCommand)
@@ -329,6 +338,8 @@ final class PlaybackSessionController {
     // MARK: - CarPlay Handling
     private func handleCarPlayConnected() {
         guard !shouldThrottleCarPlayEvent() else { return }
+        refreshRemoteCommandCenter()
+        endBackgroundTask()
         os_log(.info, log: logger, "🚗 CarPlay connected - ensuring session active and syncing with LMS")
         ensureActive(context: .userInitiatedPlay)
 
@@ -366,7 +377,9 @@ final class PlaybackSessionController {
                 coordinator.saveCurrentPositionForRecovery()
                 coordinator.sendLockScreenCommand("pause")
             }
-            self.endBackgroundTask()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                self.endBackgroundTask()
+            }
         }
     }
 
@@ -426,16 +439,20 @@ final class PlaybackSessionController {
     }
 
     private func beginBackgroundTask(named name: String) {
-        endBackgroundTask()
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
-            self?.endBackgroundTask()
+        DispatchQueue.main.async {
+            self.endBackgroundTask()
+            self.backgroundTask = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+                self?.endBackgroundTask()
+            }
         }
     }
 
     private func endBackgroundTask() {
-        guard backgroundTask != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(backgroundTask)
-        backgroundTask = .invalid
+        DispatchQueue.main.async {
+            guard self.backgroundTask != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(self.backgroundTask)
+            self.backgroundTask = .invalid
+        }
     }
 }
 
