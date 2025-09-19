@@ -172,14 +172,6 @@ class AudioSessionManager: ObservableObject {
         return AVAudioSession.sharedInstance().isOtherAudioPlaying
     }
     
-    func getPreferredSampleRate() -> Double {
-        return AVAudioSession.sharedInstance().preferredSampleRate
-    }
-    
-    func getPreferredIOBufferDuration() -> TimeInterval {
-        return AVAudioSession.sharedInstance().preferredIOBufferDuration
-    }
-    
     func getInterruptionStatus() -> String {
         return interruptionManager?.getInterruptionStatus() ?? "Unknown"
     }

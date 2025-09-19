@@ -359,43 +359,7 @@ extension AudioManager {
     }
     
     // MARK: - Server Communication for Interruptions
-    private func notifyServerOfInterruption(isPaused: Bool) {
-        guard let slimClient = slimClient else { return }
-        
-        if isPaused {
-            // Send pause command to server due to interruption
-            slimClient.sendLockScreenCommand("pause")
-            os_log(.info, log: logger, "📡 Notified server of interruption pause")
-        } else {
-            // Send resume command to server after interruption
-            slimClient.sendLockScreenCommand("play")
-            os_log(.info, log: logger, "📡 Notified server of interruption resume")
-        }
-    }
-    
     // MARK: - Utility Methods
-    private func getCurrentAudioFormat() -> String {
-        // Try to determine current format based on player state
-        // This is a simple heuristic - you might want to track this more explicitly
-        let currentURL = getCurrentStreamURL()
-        
-        if currentURL.contains("format=aac") || currentURL.contains("type=aac") {
-            return "AAC"
-        } else if currentURL.contains("format=alac") || currentURL.contains("type=alac") {
-            return "ALAC"
-        } else if currentURL.contains("format=mp3") || currentURL.contains("type=mp3") {
-            return "MP3"
-        } else {
-            return "AAC" // Default fallback
-        }
-    }
-    
-    private func getCurrentStreamURL() -> String {
-        // This would need to be implemented based on how you track current stream URL
-        // For now, return empty string as fallback
-        return ""
-    }
-    
     // MARK: - Public Interruption Status
     func getInterruptionStatus() -> String {
         return audioSessionManager.getInterruptionStatus()
