@@ -147,13 +147,15 @@ class NowPlayingManager: ObservableObject {
             return (time: lastKnownServerTime, isPlaying: false, source: .serverTime)
         }
         
-        // Only fall back to audio manager if we have NO SlimProto time at all
+        // Only fall back to audio player if we have NO SlimProto time at all
+        // FIXED: Use dedicated fallback method since AudioManager.getCurrentTime() is deprecated
         if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
+            let audioTime = audioManager.getAudioPlayerTimeForFallback()  // Fallback only
             let isPlaying = audioManager.getPlayerState() == "Playing"
-            
+
             if audioTime > 0.1 {
                 lastKnownAudioTime = audioTime
+                os_log(.debug, log: logger, "🔒 FALLBACK: Using AudioPlayer time %.2f (server time unavailable)", audioTime)
                 return (time: audioTime, isPlaying: isPlaying, source: .audioManager)
             }
         }
@@ -184,7 +186,7 @@ class NowPlayingManager: ObservableObject {
         }
         
         if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
+            let audioTime = audioManager.getAudioPlayerTimeForFallback()
             //os_log(.info, log: logger, "🔒 AUDIO TIME: %.2f", audioTime)
         }
         
@@ -205,7 +207,7 @@ class NowPlayingManager: ObservableObject {
         }
         // 3. Fall back to audio manager time
         else if let audioManager = audioManager {
-            let audioTime = audioManager.getCurrentTime()
+            let audioTime = audioManager.getAudioPlayerTimeForFallback()
             if audioTime > 0.1 {
                 positionToStore = audioTime
                 sourceUsed = "audio manager time"

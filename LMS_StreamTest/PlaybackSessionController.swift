@@ -46,6 +46,7 @@ protocol AudioPlaybackControlling: AnyObject {
     func play()
     func pause()
     var isPlaying: Bool { get }
+    func handleAudioRouteChange()  // NEW: Route change handling
 }
 
 extension AudioManager: AudioPlaybackControlling {
@@ -321,6 +322,15 @@ final class PlaybackSessionController {
         os_log(.info, log: logger, "🔀 Route change (%{public}s) carPlayPrev=%{public}s carPlayNow=%{public}s",
                describe(reason: reason), previousHadCarPlay ? "YES" : "NO", currentHasCarPlay ? "YES" : "NO")
 
+        // CRITICAL: Reinitialize BASS for route changes (CarPlay, AirPods, speakers, etc.)
+        // This fixes the issue where BASS doesn't automatically follow iOS route changes
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                self.playbackController?.handleAudioRouteChange()
+            }
+        }
+
         if currentHasCarPlay && !isCarPlayActive {
             isCarPlayActive = true
             handleCarPlayConnected()
@@ -343,22 +353,26 @@ final class PlaybackSessionController {
         os_log(.info, log: logger, "🚗 CarPlay connected - ensuring session active and syncing with LMS")
         ensureActive(context: .userInitiatedPlay)
 
-        let shouldResume = wasPlayingBeforeCarPlayDetach
+        // CRITICAL: Force complete audio session transition for CarPlay connection
+        // Step 1: Deactivate current audio session to release previous route
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            os_log(.info, log: logger, "🚗 CarPlay connect: Deactivated audio session")
+        } catch {
+            os_log(.error, log: logger, "🚗 CarPlay connect: Failed to deactivate audio session: %{public}s", error.localizedDescription)
+        }
+
+        // Save resume state for reinitializeBASS to handle
+        // Note: reinitializeBASS() will handle both BASS routing AND recovery
         wasPlayingBeforeCarPlayDetach = false
 
-        workQueue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                guard let coordinator = self.slimProtoProvider?() else { return }
-
-                if !coordinator.isConnected {
-                    coordinator.connect()
-                }
-
-                if shouldResume {
-                    coordinator.sendLockScreenCommand("play")
-                }
-            }
+        // Step 2: Wait for iOS audio session to complete transition to CarPlay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Step 3: Reactivate audio session for CarPlay and reinitialize BASS
+            // reinitializeBASS() will handle both device routing AND playback recovery
+            self.ensureActive(context: .userInitiatedPlay)
+            self.playbackController?.handleAudioRouteChange()
+            os_log(.info, log: self.logger, "🚗 CarPlay connect: Audio session reactivated and BASS reinitialized with recovery")
         }
     }
 
@@ -371,6 +385,23 @@ final class PlaybackSessionController {
             guard let self = self else { return }
             if self.wasPlayingBeforeCarPlayDetach {
                 self.playbackController?.pause()
+            }
+
+            // CRITICAL: Force complete audio session transition for CarPlay disconnect
+            // Step 1: Deactivate audio session to release CarPlay route completely
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                os_log(.info, log: self.logger, "🚗 CarPlay disconnect: Deactivated audio session")
+            } catch {
+                os_log(.error, log: self.logger, "🚗 CarPlay disconnect: Failed to deactivate audio session: %{public}s", error.localizedDescription)
+            }
+
+            // Step 2: Wait for iOS audio session to complete internal transition
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                // Step 3: Reactivate audio session for new route and reinitialize BASS
+                self.ensureActive(context: .backgroundRefresh)
+                self.playbackController?.handleAudioRouteChange()
+                os_log(.info, log: self.logger, "🚗 CarPlay disconnect: Audio session reactivated and BASS reinitialized")
             }
 
             if let coordinator = self.slimProtoProvider?() {

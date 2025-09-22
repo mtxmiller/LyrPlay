@@ -550,8 +550,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         let isLockScreenPaused = commandHandler.isPausedByLockScreen
         let playerState = audioManager.getPlayerState()
         
-        os_log(.info, log: logger, "🔍 Pause state - lockScreen: %{public}s, player: %{public}s", 
-               isLockScreenPaused ? "YES" : "NO", playerState)
         
         // Position will be saved automatically by server's power management
         
@@ -913,7 +911,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
     
     func getCurrentAudioTime() -> Double {
-        return audioManager.getCurrentTime()
+        // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
+        // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
+        // For recovery operations, use getCurrentInterpolatedTime() instead
+        return audioManager.getAudioPlayerTimeForFallback()
     }
 
     func didReceiveStatusRequest() {

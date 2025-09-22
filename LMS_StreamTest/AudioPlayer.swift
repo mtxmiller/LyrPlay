@@ -61,6 +61,10 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Core Setup (MINIMAL CBASS)
     private func setupCBass() {
+        // CRITICAL: Configure BASS iOS session BEFORE initialization
+        // This must be called before BASS_Init() to take effect
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Complete disable for manual control
+
         // Minimal BASS initialization - keep it simple
         let result = BASS_Init(-1, 44100, 0, nil, nil)
         
@@ -86,16 +90,90 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
         // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
         
-        // CRITICAL: Disable BASS iOS session management completely for manual control
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Complete disable
-
         // NOW configure iOS audio session manually (BASS won't interfere)
         setupManualAudioSession()
 
-        os_log(.info, log: logger, "✅ BASS configured with manual iOS session control")
-        
-        
+        os_log(.info, log: logger, "✅ BASS configured with manual iOS session control (config set BEFORE init)")
+
+
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
+    }
+
+    // MARK: - Route Change Handling (iOS equivalent of JL's Android solution)
+    /// Reinitializes BASS audio system for iOS route changes (CarPlay, AirPods, etc.)
+    /// Based on proven Android forum solution by user "JL"
+    func reinitializeBASS() {
+        guard currentStream != 0, !currentStreamURL.isEmpty else {
+            os_log(.info, log: logger, "🔀 No active stream - skipping BASS reinit")
+            return
+        }
+
+        os_log(.info, log: logger, "🔀 Reinitializing BASS for route change...")
+
+        // Step 1: Save current state
+        let wasPlaying = (getPlayerState() == "Playing")
+
+        // CRITICAL: Use server time, not BASS time - server is the master!
+        let serverPosition: Double
+        if let coordinator = audioManager?.slimClient {
+            let interpolatedTime = coordinator.getCurrentInterpolatedTime()
+            serverPosition = interpolatedTime.time
+        } else {
+            // Fallback to BASS time if no coordinator available
+            serverPosition = getCurrentTime()
+        }
+
+        let savedURL = currentStreamURL
+        let savedFormat = currentStreamFormat
+
+        os_log(.info, log: logger, "💾 Saving state: playing=%{public}s, serverPosition=%.2f, bassPosition=%.2f, url=%{public}s",
+               wasPlaying ? "YES" : "NO", serverPosition, getCurrentTime(), savedURL)
+
+        // Step 2: Clean up current stream
+        cleanup()
+
+        // Step 3: Free BASS device (equivalent to Android BASS_Free())
+        BASS_Free()
+        os_log(.info, log: logger, "🔄 BASS device freed")
+
+        // Step 4: Configure and reinitialize BASS (equivalent to Android BASS_Init())
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Configure BEFORE init
+        let result = BASS_Init(-1, 44100, 0, nil, nil)
+
+        if result == 0 {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BASS reinit failed: %d", errorCode)
+            return
+        }
+
+        os_log(.info, log: logger, "✅ BASS reinitialized successfully")
+
+
+        // Step 5: Request playlist jump to current position instead of recreating stream
+        // This tells the server to seek to where we were and start a new stream at that position
+        os_log(.info, log: logger, "🔀 Requesting playlist jump to position %.2f for route change", serverPosition)
+
+        // Clean up any partial stream setup
+        currentStream = 0
+        currentStreamURL = ""
+        currentStreamFormat = "UNKNOWN"
+
+        // Smart recovery based on connection state (same logic as lock screen)
+        if let audioManager = audioManager, let coordinator = audioManager.slimClient {
+            DispatchQueue.main.async {
+                if coordinator.isConnected {
+                    // Connected: Use seek to maintain current stream
+                    coordinator.requestSeekToTime(serverPosition)
+                    os_log(.info, log: self.logger, "🔀 Route change: Using seek (connected) to %.2f", serverPosition)
+                } else {
+                    // Disconnected: Use lock screen play command (handles playlist jump automatically)
+                    os_log(.info, log: self.logger, "🔀 Route change: Using playlist jump (disconnected)")
+                    coordinator.sendLockScreenCommand("play")
+                }
+            }
+        } else {
+            os_log(.error, log: logger, "❌ No coordinator available for route change recovery")
+        }
     }
 
     private func setupManualAudioSession() {
@@ -162,14 +240,15 @@ class AudioPlayer: NSObject, ObservableObject {
         let playResult = BASS_ChannelPlay(currentStream, 0)
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d", currentStream)
-            
+
+
             // Setup lock screen controls once only
             if !lockScreenControlsConfigured {
                 setupLockScreenControls()
                 lockScreenControlsConfigured = true
             }
             updateNowPlayingInfo(title: "LyrPlay Stream", artist: "Lyrion Music Server")
-            
+
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
         } else {
@@ -533,6 +612,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
+
     // MARK: - Cleanup
 
     deinit {
