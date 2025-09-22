@@ -17,6 +17,11 @@ struct SettingsView: View {
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
     @State private var isReconnecting = false
+    private var appVersionDisplay: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "\(version) (\(build))"
+    }
     
     var body: some View {
         NavigationView {
@@ -155,16 +160,6 @@ struct SettingsView: View {
                     }
                     .disabled(isReconnecting)
                     .padding(.vertical, 2)
-                    
-                    // HIDDEN: FLAC Buffer Settings - not currently functional with CBass
-                    // NavigationLink(destination: CBassConfigView()) {
-                    //     SettingsRow(
-                    //         icon: "hifispeaker",
-                    //         title: "FLAC Buffer Settings",
-                    //         value: flacBufferSummary,
-                    //         valueColor: .secondary
-                    //     )
-                    // }
                 }
                 
                 // Advanced Section
@@ -204,6 +199,15 @@ struct SettingsView: View {
                     }
                     .foregroundColor(.red)
                 }
+
+                Section(header: Text("About")) {
+                    SettingsRow(
+                        icon: "info.circle",
+                        title: "Version",
+                        value: appVersionDisplay,
+                        valueColor: .secondary
+                    )
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
@@ -240,11 +244,6 @@ struct SettingsView: View {
     }
     
     // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
-    
-    private var flacBufferSummary: String {
-        return "\(settings.flacBufferSeconds)s playback, \(settings.networkBufferKB)s network"
-    }
-    
     
     private func clearMaterialCache() {
         print("🗑️ Starting cache clear...")

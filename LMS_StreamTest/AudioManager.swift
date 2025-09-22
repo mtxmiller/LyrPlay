@@ -45,10 +45,14 @@ class AudioManager: NSObject, ObservableObject {
         super.init()
         
         setupDelegation()
-        
+
         // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
         nowPlayingManager.setAudioManager(self)
-        
+
+        PlaybackSessionController.shared.configure(audioManager: self) { [weak self] in
+            self?.slimClient
+        }
+
         os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
     }
     
@@ -79,31 +83,36 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStream(urlString: String) {
+        activateAudioSession()
         audioPlayer.playStream(urlString: urlString)
     }
-    
+
     func playStreamWithFormat(urlString: String, format: String) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
-        
+
         // Start playback
+        activateAudioSession()
         audioPlayer.playStreamWithFormat(urlString: urlString, format: format)
     }
-    
+
     func playStreamAtPosition(urlString: String, startTime: Double) {
+        activateAudioSession()
         audioPlayer.playStreamAtPosition(urlString: urlString, startTime: startTime)
     }
-    
+
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
-        
+
         // Start playback
+        activateAudioSession()
         audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format)
     }
-    
+
     // Playback control
     func play() {
+        activateAudioSession()
         audioPlayer.play()
     }
     
@@ -116,7 +125,15 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     // State queries
-    func getCurrentTime() -> Double {
+    // DEPRECATED: Do not use AudioPlayer time for server operations
+    // Use slimClient.getCurrentInterpolatedTime().time instead
+    // func getCurrentTime() -> Double {
+    //     return audioPlayer.getCurrentTime()
+    // }
+
+    /// INTERNAL FALLBACK ONLY: Get AudioPlayer time when server time unavailable
+    /// This should only be used by NowPlayingManager as last resort fallback
+    internal func getAudioPlayerTimeForFallback() -> Double {
         return audioPlayer.getCurrentTime()
     }
     
@@ -153,10 +170,9 @@ class AudioManager: NSObject, ObservableObject {
         return audioPlayer.getVolume()
     }
     
-    func activateAudioSession() {
-        // Delegate to AudioPlayer since it owns session management with BASS_IOS_SESSION_DISABLE
-        audioPlayer.configureAudioSessionIfNeeded()
-        os_log(.info, log: logger, "🔒 Audio session activation delegated to AudioPlayer")
+    func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
+        audioPlayer.configureAudioSessionIfNeeded(context: context)
+        os_log(.info, log: logger, "🔒 Audio session activation requested (%{public}s)", context.rawValue)
     }
     
     // Metadata management
@@ -206,7 +222,15 @@ class AudioManager: NSObject, ObservableObject {
         nowPlayingManager.setSlimClient(slimClient)
         os_log(.info, log: logger, "✅ SlimClient reference set for AudioManager and NowPlayingManager")
     }
-    
+
+    // MARK: - Route Change Handling (NEW)
+    /// Reinitialize BASS audio system for route changes (CarPlay, AirPods, etc.)
+    /// Delegates to AudioPlayer's reinitializeBASS() method
+    func handleAudioRouteChange() {
+        os_log(.info, log: logger, "🔀 AudioManager handling route change - delegating to AudioPlayer")
+        audioPlayer.reinitializeBASS()
+    }
+
     // MARK: - Cleanup
     deinit {
         os_log(.info, log: logger, "Refactored AudioManager deinitialized")
@@ -339,83 +363,27 @@ extension AudioManager {
         if shouldPause {
             let currentState = getPlayerState()
             let wasPlaying = (currentState == "Playing")
-            let currentPosition = getCurrentTime()
-            
+
+            // CRITICAL: Use server time, not AudioPlayer time
+            let currentPosition: Double
+            if let coordinator = slimClient {
+                let interpolatedTime = coordinator.getCurrentInterpolatedTime()
+                currentPosition = interpolatedTime.time
+            } else {
+                currentPosition = 0.0  // Fallback if no coordinator
+            }
+
             if wasPlaying {
-                // Pause due to route change
                 audioPlayer.pause()
-                
-                // Update now playing
                 nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                
-                // For CarPlay disconnect, notify server using SimpleTimeTracker position
-                if routeType.contains("CarPlay") && routeType.contains("Disconnected") {
-                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
-                    notifyServerOfCarPlayDisconnect(position: serverPosition)
-                }
-                
-                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeType)
+                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s (serverTime: %.2f)", routeType, currentPosition)
             }
         }
-        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
+        // Legacy CarPlay handling removed; new session controller will manage reconnect logic
     }
-    
-    // MARK: - CarPlay Specific Handling (REMOVED - using server auto-resume)
     
     // MARK: - Server Communication for Interruptions
-    private func notifyServerOfInterruption(isPaused: Bool) {
-        guard let slimClient = slimClient else { return }
-        
-        if isPaused {
-            // Send pause command to server due to interruption
-            slimClient.sendLockScreenCommand("pause")
-            os_log(.info, log: logger, "📡 Notified server of interruption pause")
-        } else {
-            // Send resume command to server after interruption
-            slimClient.sendLockScreenCommand("play")
-            os_log(.info, log: logger, "📡 Notified server of interruption resume")
-        }
-    }
-    
-    private func notifyServerOfCarPlayDisconnect(position: Double) {
-        guard let slimClient = slimClient else { return }
-        
-        // Send pause command specifically for CarPlay disconnect
-        slimClient.sendLockScreenCommand("pause")
-        
-        // NEW: Save position for playlist recovery
-        slimClient.saveCurrentPositionForRecovery()
-        
-        os_log(.info, log: logger, "🚗 Notified server of CarPlay disconnect and saved position for recovery (%.2f)", position)
-    }
-    
-    // MARK: - Smart CarPlay Connect Logic
-    // REMOVED: OLD CarPlay connect methods - now handled by AudioPlayer with proper session timing
-    
-    
     // MARK: - Utility Methods
-    private func getCurrentAudioFormat() -> String {
-        // Try to determine current format based on player state
-        // This is a simple heuristic - you might want to track this more explicitly
-        let currentURL = getCurrentStreamURL()
-        
-        if currentURL.contains("format=aac") || currentURL.contains("type=aac") {
-            return "AAC"
-        } else if currentURL.contains("format=alac") || currentURL.contains("type=alac") {
-            return "ALAC"
-        } else if currentURL.contains("format=mp3") || currentURL.contains("type=mp3") {
-            return "MP3"
-        } else {
-            return "AAC" // Default fallback
-        }
-    }
-    
-    private func getCurrentStreamURL() -> String {
-        // This would need to be implemented based on how you track current stream URL
-        // For now, return empty string as fallback
-        return ""
-    }
-    
     // MARK: - Public Interruption Status
     func getInterruptionStatus() -> String {
         return audioSessionManager.getInterruptionStatus()
@@ -438,7 +406,14 @@ extension AudioManager: AudioSessionManagerDelegate {
         os_log(.info, log: logger, "📱 Audio session entered foreground")
         
         // Existing foreground logic...
-        let currentTime = audioPlayer.getCurrentTime()
+        // FIXED: Use server time for lock screen consistency
+        let currentTime: Double
+        if let coordinator = slimClient {
+            let interpolatedTime = coordinator.getCurrentInterpolatedTime()
+            currentTime = interpolatedTime.time
+        } else {
+            currentTime = audioPlayer.getCurrentTime()  // Fallback
+        }
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
     }
@@ -462,23 +437,22 @@ extension AudioManager: AudioSessionManagerDelegate {
                routeChangeDescription, shouldPause ? "YES" : "NO")
         
         if shouldPause {
-            // Handle disconnections (CarPlay disconnect, headphones, etc.)
             if getPlayerState() == "Playing" {
-                let currentPosition = getCurrentTime()
+                // CRITICAL: Use server time, not AudioPlayer time
+                let currentPosition: Double
+                if let coordinator = slimClient {
+                    let interpolatedTime = coordinator.getCurrentInterpolatedTime()
+                    currentPosition = interpolatedTime.time
+                } else {
+                    currentPosition = 0.0  // Fallback if no coordinator
+                }
+
                 audioPlayer.pause()
                 nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                
-                if routeChangeDescription == "CarPlay Disconnected" {
-                    let serverPosition = slimClient?.getCurrentTimeForSaving() ?? currentPosition
-                    notifyServerOfCarPlayDisconnect(position: serverPosition)
-                }
-                
-                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s", routeChangeDescription)
+                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s (serverTime: %.2f)", routeChangeDescription, currentPosition)
             }
-        }
-        // REMOVED: OLD CarPlay connected handling - now handled by AudioPlayer with proper timing
-        else {
-            os_log(.info, log: logger, "🔍 DEBUG: Route change: '%{public}s'", routeChangeDescription)
+        } else {
+            os_log(.info, log: logger, "🔀 Route change observed: '%{public}s'", routeChangeDescription)
         }
     }
 }
@@ -513,7 +487,7 @@ extension AudioManager {
     func logDetailedState() {
         os_log(.info, log: logger, "🔍 AudioManager State:")
         os_log(.info, log: logger, "  Player State: %{public}s", getPlayerState())
-        os_log(.info, log: logger, "  Current Time: %.2f", getCurrentTime())
+        os_log(.info, log: logger, "  Current Time: %.2f", getAudioPlayerTimeForFallback())
         os_log(.info, log: logger, "  Duration: %.2f", getDuration())
         os_log(.info, log: logger, "  Position: %.2f", getPosition())
         os_log(.info, log: logger, "  Track: %{public}s - %{public}s",

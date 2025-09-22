@@ -608,11 +608,4 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    // MARK: - CarPlay Integration
-    func notifyStreamInvalidatedForCarPlay() {
-        os_log(.info, log: logger, "🚗 Stream invalidated for CarPlay route change - next PLAY command will create fresh stream")
-        // Mark stream as inactive so PLAY commands trigger new stream creation
-        isStreamActive = false
-        streamPosition = 0.0
-    }
 }
