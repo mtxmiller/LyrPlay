@@ -316,10 +316,7 @@ extension AudioManager: AudioPlayerDelegate {
     }
 
     func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?)) {
-        os_log(.info, log: logger, "🎵 ICY metadata received - title: %{public}s, artist: %{public}s",
-               metadata.title ?? "nil", metadata.artist ?? "nil")
-
-        // Forward ICY metadata to SlimProto coordinator for LMS integration
+        // Forward ICY metadata to SlimProto coordinator (logging handled there)
         slimClient?.handleICYMetadata(metadata)
     }
 }

@@ -156,23 +156,25 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ BASS reinitialized successfully")
 
 
-        // Step 5: Save current position and use playlist jump recovery for all route changes
-        // This provides consistent behavior and handles both track and position correctly
-
+        // Step 5: Request playlist jump to current position instead of recreating stream
+        // This tells the server to seek to where we were and start a new stream at that position
+        os_log(.info, log: logger, "🔀 Requesting playlist jump to position %.2f for route change", serverPosition)
         // Clean up any partial stream setup
         currentStream = 0
         currentStreamURL = ""
         currentStreamFormat = "UNKNOWN"
-
-        // Unified recovery approach: save fresh position then use playlist jump
+        // Smart recovery based on connection state (same logic as lock screen)
         if let audioManager = audioManager, let coordinator = audioManager.slimClient {
             DispatchQueue.main.async {
-                // Save fresh position immediately before recovery
-                coordinator.saveCurrentPositionForRecovery()
-                os_log(.info, log: self.logger, "🔀 Route change: Saved position %.2f, using playlist jump recovery", serverPosition)
-
-                // Use playlist jump for all route changes (handles both track and position)
-                coordinator.performPlaylistRecovery()
+                if coordinator.isConnected {
+                    // Connected: Use seek to maintain current stream
+                    coordinator.requestSeekToTime(serverPosition)
+                    os_log(.info, log: self.logger, "🔀 Route change: Using seek (connected) to %.2f", serverPosition)
+                } else {
+                    // Disconnected: Use lock screen play command (handles playlist jump automatically)
+                    os_log(.info, log: self.logger, "🔀 Route change: Using playlist jump (disconnected)")
+                    coordinator.sendLockScreenCommand("play")
+                }
             }
         } else {
             os_log(.error, log: logger, "❌ No coordinator available for route change recovery")
@@ -557,8 +559,6 @@ class AudioPlayer: NSObject, ObservableObject {
         }
 
         let metaString = String(cString: metaPtr)
-        os_log(.info, log: logger, "🎵 ICY metadata received: %{public}s", metaString)
-
         // Parse ICY metadata format: StreamTitle='Artist - Title';StreamUrl='xxx';
         let metadata = parseICYMetadata(metaString)
 

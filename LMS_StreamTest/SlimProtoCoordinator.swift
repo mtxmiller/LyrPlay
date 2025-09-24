@@ -31,6 +31,9 @@ class SlimProtoCoordinator: ObservableObject {
     private var wasDisconnectedWhileInBackground: Bool = false
     private var isSavingVolume = false
     private var isRestoringVolume = false
+
+    // MARK: - ICY Metadata Tracking
+    private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
     
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
@@ -171,7 +174,20 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     func handleICYMetadata(_ metadata: (title: String?, artist: String?)) {
-        os_log(.info, log: logger, "🎵 Processing ICY metadata for LMS integration")
+        // Filter duplicate metadata to prevent spam
+        let isDuplicate = (metadata.title == lastSentICYMetadata.title &&
+                          metadata.artist == lastSentICYMetadata.artist)
+
+        if isDuplicate {
+            // Skip duplicate without logging (happens constantly)
+            return
+        }
+
+        os_log(.info, log: logger, "🎵 New ICY metadata: title=%{public}s, artist=%{public}s",
+               metadata.title ?? "nil", metadata.artist ?? "nil")
+
+        // Store metadata to prevent future duplicates
+        lastSentICYMetadata = metadata
 
         // Forward ICY metadata to LMS server (similar to squeezelite's sendMETA)
         sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
@@ -343,7 +359,7 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     /// Perform playlist jump with timeOffset recovery (Home Assistant style)
-    private func performPlaylistRecovery() {
+    func performPlaylistRecovery() {
         recoveryQueue.async { [weak self] in
             guard let self = self else { return }
             
