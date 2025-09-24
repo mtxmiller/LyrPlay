@@ -7,11 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **LyrPlay** (formerly LMS_StreamTest) is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
 
 ### Current Status: **LIVE ON APP STORE** 🌟
-- ✅ **Version 1.6 CBass Migration** - Major audio engine upgrade with CBass framework integration
-- ✅ **Version 1.5 approved and live** - Major stability improvements deployed to App Store
-- ✅ **CBass Audio Framework** - Complete migration from StreamingKit to CBass for superior performance
-- ✅ **Enhanced Loading Experience** - Professional LyrPlay loading screen with animated branding
-- ✅ **iOS 18.2 Compatibility** - Updated for latest iOS features and deployment target
+- ✅ **Version 1.5 Live on App Store** - StreamingKit-based stable release with major stability improvements
+- 🚧 **Version 1.6 Build ~20 in TestFlight** - Major audio engine upgrade migrating from StreamingKit to CBass
+- ✅ **CBass Audio Framework Migration** - Active development for superior FLAC, Opus, and multi-format support
+- ✅ **macOS Compatibility** - iPad app runs on macOS via "Designed for iPad" setting
+- ✅ **Enhanced Audio Format Support** - FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS library integration
+- ✅ **Improved Interruption Handling** - Fixed phone call interruptions with proper server pause/resume commands
+- ✅ **Broader Device Support** - iOS 15.0+ deployment target for compatibility with older devices
 - ✅ **Professional GitHub repository** - https://github.com/mtxmiller/LyrPlay
 - ✅ **Active user support** - https://github.com/mtxmiller/LyrPlay/issues
 - ✅ **GitHub Sponsorship** - Community funding support established
@@ -62,13 +64,74 @@ The app follows a coordinator pattern with `SlimProtoCoordinator` as the main or
 - **SettingsManager**: Configuration and server management singleton
 
 ### Audio Architecture
-The audio system is built on the CBass framework with modular design:
+The audio system is built on the CBass framework with centralized session management:
 
-- **AudioPlayer**: CBass-based player with native BASS audio library integration
-- **CBass Framework**: High-performance audio library with native FLAC, Opus, and multi-format support
-- **AudioSessionManager**: iOS audio session management and interruption handling
-- **NowPlayingManager**: Lock screen and Control Center integration
-- **InterruptionManager**: Specialized handling for audio interruptions
+- **AudioPlayer**: CBass-based player with native BASS audio library integration supporting FLAC, AAC, MP4A, MP3, Opus, OGG
+- **CBass Framework**: High-performance audio library with cross-platform support (iOS and macOS)
+- **PlaybackSessionController**: Centralized iOS audio session management, interruption handling, and remote command center
+- **NowPlayingManager**: Lock screen and Control Center integration with MPNowPlayingInfoCenter
+- **InterruptionManager**: Legacy stub - functionality moved to PlaybackSessionController
+
+### Position Recovery Architecture
+The app uses a unified **playlist jump recovery system** that is critical for maintaining playback continuity across various scenarios:
+
+#### **Playlist Jump Recovery (`performPlaylistRecovery`)**
+**Command Structure**:
+```swift
+["playlist", "jump", savedIndex, 1, 0, [
+    "timeOffset": savedPosition
+]]
+```
+- `savedIndex`: Which track in playlist (e.g., track 3)
+- `savedPosition`: Position within that track (e.g., 45.2 seconds)
+- Last `0`: Start playing after jump, `1`: Stay paused after jump
+
+#### **Why Playlist Jump is Critical**
+Unlike simple seek commands that only change position within the current track, playlist jump provides:
+
+1. **Track Protection**: Ensures recovery to the correct track even if playlist position changed
+2. **Position Accuracy**: Handles both track and time offset in a single atomic operation
+3. **Server Synchronization**: Server handles the complex logic of playlist navigation and seeking
+4. **Reliability**: Works consistently across all connection states and scenarios
+
+#### **Position Saving Triggers**
+Position is automatically saved to UserDefaults during:
+- **Pause Commands**: Every pause creates a recovery save point
+- **Route Changes**: All audio route changes (CarPlay, AirPods, speakers) save position via `reinitializeBASS()`
+- **Network Disconnection**: Connection loss saves position for recovery
+- **App Backgrounding**: Position saved when app enters background
+- **CarPlay Events**: Specific handling for CarPlay connect/disconnect scenarios
+
+#### **Unified Recovery Flow**
+All recovery scenarios use the same robust mechanism:
+
+1. **Route Changes** (CarPlay, AirPods, etc.):
+   ```swift
+   // In reinitializeBASS()
+   coordinator.saveCurrentPositionForRecovery()  // Fresh position
+   coordinator.performPlaylistRecovery()         // Playlist jump
+   ```
+
+2. **Lock Screen Recovery**:
+   ```swift
+   // User presses play on lock screen when disconnected
+   sendLockScreenCommand("play") → performPlaylistRecovery()
+   ```
+
+3. **CarPlay Disconnect/Reconnect**:
+   ```swift
+   // Disconnect: Save → Jump → Pause
+   // Reconnect: Save → Jump → Play
+   ```
+
+#### **Recovery Data Storage**
+```swift
+UserDefaults.standard.set(playlistCurIndex, forKey: "lyrplay_recovery_index")
+UserDefaults.standard.set(currentPosition, forKey: "lyrplay_recovery_position")
+UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+```
+
+This unified approach eliminates timing conflicts and provides consistent behavior across all playback interruption scenarios.
 
 ### Key Dependencies
 - **CocoaAsyncSocket**: Network socket communication for SlimProto
@@ -109,11 +172,12 @@ The app embeds the Material LMS web interface with sophisticated integration:
 ## Development Considerations
 
 ### Audio Session Management
-The app handles complex audio session scenarios:
+The app handles complex audio session scenarios through PlaybackSessionController:
 - Background audio playback with proper iOS background modes
-- Interruption recovery (phone calls, other apps)
-- Lock screen integration with Now Playing info
-- Audio format prioritization (FLAC > ALAC > AAC > MP3)
+- Interruption recovery with server pause/resume commands (phone calls, other apps)
+- Lock screen integration with Now Playing info and remote command center
+- Audio format support: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codec integration
+- CarPlay integration with automatic audio route handling
 
 ### Network Architecture
 - Primary/backup server support with automatic failover
@@ -136,8 +200,8 @@ The app maintains SlimProto connections in the background:
 
 ## App Store Readiness Status
 
-### Platform Exclusions (COMPLETED)
-The project has been configured to **prevent macOS and visionOS downloads** due to CBass framework compatibility:
+### Platform Support (UPDATED)
+The project supports iPad app compatibility on macOS with CBass framework:
 
 ```
 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -146,7 +210,7 @@ SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 ```
 
-**Why this is needed**: CBass framework (BASS audio library) is optimized for iOS and may have compatibility issues on other platforms. These settings ensure the app only appears for iPhone/iPad users in the App Store while maintaining proper iOS compatibility.
+**Platform Status**: CBass framework (BASS audio library) enables macOS deployment through "Designed for iPad" compatibility, allowing the iOS app to run on macOS. visionOS remains excluded pending further testing and optimization.
 
 ### App Store Metadata (COMPLETED)
 Ready-to-use content for App Store Connect:
@@ -171,11 +235,13 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Local Storage**: Only app preferences (UserDefaults)
 
 ### Build Configuration
-- **iOS Deployment Target**: 18.2 (latest iOS features)
+- **iOS Deployment Target**: 15.0 (broad compatibility for older devices)
+- **macOS Support**: iPad app compatibility ("Designed for iPad" on Mac)
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Version**: 1.6 (Latest - CBass Migration)
+- **Current Version**: 1.6 Build ~20 (CBass Migration in TestFlight)
+- **Live Version**: 1.5 (StreamingKit-based, App Store)
 
 ## Testing Structure
 
@@ -319,16 +385,16 @@ These repositories provide definitive reference for:
 
 ### Major Fixes Completed
 
-#### CBass Audio Framework Migration - COMPLETED ✅
+#### CBass Audio Framework Migration - IN PROGRESS ✅
 - **Previous Issue**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
 - **Root Cause**: StreamingKit limitations with FLAC seeking and multi-format support
-- **New Solution**: Complete migration to CBass framework (BASS audio library)
-- **Benefits**:
-  - Native FLAC seeking without server-side configuration requirements
-  - Enhanced Opus codec support
-  - Superior multi-format audio handling
-  - Better performance and App Store compliance
-  - Eliminates need for complex server-side transcoding rules
+- **Current Solution**: Active migration to CBass framework (BASS audio library) - Version 1.6 Build ~20
+- **Benefits Achieved**:
+  - Native FLAC seeking with CBass framework
+  - Enhanced support for FLAC, AAC, MP4A, MP3, Opus, OGG formats
+  - Superior multi-format audio handling with BASS codec integration
+  - Cross-platform support (iOS and macOS)
+  - Fixed phone call interruption handling with server pause/resume commands
 
 #### Legacy FLAC Server Configuration (Still Available)
 For users who want additional server-side optimization, the previous server configuration method is still documented:
@@ -349,7 +415,7 @@ For users who want additional server-side optimization, the previous server conf
   - Forces decode→raw→re-encode pipeline that generates complete FLAC headers
   - Uses LMS variables `$SAMPLESIZE$`, `$SAMPLERATE$`, `$CHANNELS$` for automatic bit depth detection
   - Handles both 16-bit and 24-bit FLAC files correctly by detecting source properties
-  - Outputs consistent 16-bit FLAC for StreamingKit compatibility (`-b 16` flag)
+  - Outputs consistent 16-bit FLAC for legacy StreamingKit compatibility (`-b 16` flag) - CBass handles all bit depths natively
   - Uses sox for reliable audio processing and format conversion
   - Only affects the specific iOS device, other players use normal passthrough
 - **Performance Impact**: Minimal - transcoding happens in real-time on server with efficient compression level 0
@@ -424,17 +490,20 @@ When submitting, use these prepared values:
 
 ---
 
-**Last Updated**: January 2025 - Version 1.6 CBass Migration Completed ✅
-- **Production app** with active user base on App Store (Version 1.5)
-- **Version 1.6** with CBass migration ready for App Store submission
-- **Complete audio engine upgrade** from StreamingKit to CBass framework
-- **Enhanced user experience** with professional loading screen and iOS 18.2 support
+**Last Updated**: September 22, 2025 - Version 1.6 CBass Migration In Progress ✅
+- **Production app** with active user base on App Store (Version 1.5 StreamingKit-based)
+- **Version 1.6 Build ~20** with CBass migration in TestFlight testing
+- **Active audio engine upgrade** from StreamingKit to CBass framework
+- **Enhanced platform support** with macOS compatibility via "Designed for iPad" setting
+- **Improved interruption handling** with server pause/resume commands
 - **Repository optimized** with GitHub sponsorship and clean organization
-- **All major technical challenges resolved** with CBass framework migration
 
 #### Current Status:
-- **Audio Engine**: CBass framework (BASS library) with native FLAC/Opus support
-- **App Version**: 1.6 ready for next App Store release
-- **Repository**: Clean, organized, with GitHub sponsorship support
-- **Build System**: Automated framework fixes and App Store compliance
-- **iOS Target**: 18.2 with latest iOS features
+- **Live Audio Engine**: StreamingKit (Version 1.5 on App Store)
+- **Development Audio Engine**: CBass framework (BASS library) with native multi-format support
+- **Current Development Version**: 1.6 Build ~20 (TestFlight)
+- **Next App Store Release**: 1.6 with CBass migration
+- **Platform Support**: iOS 15.0+ and macOS via "Designed for iPad" compatibility
+- **Audio Formats**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS integration
+- **iOS Deployment Target**: 15.0 for broad device compatibility
+- remember playlist jump, where we are using why it is critical on route changes, backgrounding etc

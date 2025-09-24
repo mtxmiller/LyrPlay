@@ -19,7 +19,6 @@ class SlimProtoCoordinator: ObservableObject {
     private let settings = SettingsManager.shared
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SlimProtoCoordinator")
     
-    private var metadataRefreshTimer: Timer?
     
     // MARK: - Settings Tracking (ADD THESE LINES)
     private(set) var lastKnownHost: String = ""
@@ -170,6 +169,46 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "🔄 Requesting fresh metadata due to stream change")
         fetchCurrentTrackMetadata()
     }
+
+    func handleICYMetadata(_ metadata: (title: String?, artist: String?)) {
+        os_log(.info, log: logger, "🎵 Processing ICY metadata for LMS integration")
+
+        // Forward ICY metadata to LMS server (similar to squeezelite's sendMETA)
+        sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
+    }
+
+    private func sendICYMetadataToLMS(title: String?, artist: String?) {
+        let playerID = settings.playerMACAddress
+
+        // Create metadata string in the format LMS expects
+        var metadataArray: [String] = []
+
+        if let title = title {
+            metadataArray.append("title")
+            metadataArray.append(title)
+        }
+
+        if let artist = artist {
+            metadataArray.append("artist")
+            metadataArray.append(artist)
+        }
+
+        guard !metadataArray.isEmpty else {
+            os_log(.debug, log: logger, "🎵 No metadata to send to LMS")
+            return
+        }
+
+        // Send ICY metadata update to LMS (similar to squeezelite META command)
+        let metadataCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["icy"] + metadataArray]
+        ]
+
+        sendJSONRPCCommandDirect(metadataCommand) { [weak self] response in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🎵 ICY metadata sent to LMS server")
+        }
+    }
     
     private func startPlaybackHeartbeat() {
         stopPlaybackHeartbeat()
@@ -228,23 +267,7 @@ class SlimProtoCoordinator: ObservableObject {
         return audioManager.getTimeSourceInfo()
     }
     
-    private func startMetadataRefreshForRadio() {
-        // Stop any existing timer
-        stopMetadataRefresh()
-        
-        // For radio streams, refresh metadata every 15 seconds to catch track changes faster
-        metadataRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            os_log(.debug, log: self?.logger ?? OSLog.default, "🔄 Timer triggered metadata refresh")
-            self?.fetchCurrentTrackMetadata()
-        }
-        
-        os_log(.debug, log: logger, "🎵 Started metadata refresh for radio stream")
-    }
-
-    private func stopMetadataRefresh() {
-        metadataRefreshTimer?.invalidate()
-        metadataRefreshTimer = nil
-    }
+    // REMOVED: Timer-based metadata refresh - replaced with BASS ICY metadata callbacks
     
     // REMOVED: ensureRadioMetadataRefreshIsRunning - redundant with fetchCurrentTrackMetadata
     
@@ -264,7 +287,6 @@ class SlimProtoCoordinator: ObservableObject {
     deinit {
         stopServerTimeSync()
         stopServerTimeFetching()  // Stop our simplified server time fetching
-        stopMetadataRefresh()  // Add this line
         // Use position-saving disconnect when app is being deallocated
         client.disconnectWithPositionSave()
     }
@@ -836,15 +858,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Start the 1-second heartbeat timer (like squeezelite)
         startPlaybackHeartbeat()
         
-        // Get metadata and sync with server
+        // Get initial metadata for new stream
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.fetchCurrentTrackMetadata()
-            
-            // Check if this is a radio stream and start automatic refresh
-            if url.contains("stream") || url.contains("radio") || url.contains("live") ||
-               url.contains(".pls") || url.contains(".m3u") || url.hasPrefix("http") {
-                self.startMetadataRefreshForRadio()
-            }
+            // Note: ICY metadata for radio streams will be handled automatically by BASS callbacks
         }
         
         // Fetch server time after connection stabilizes
@@ -882,12 +899,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Restart heartbeat when resumed
         startPlaybackHeartbeat()
         
-        // Restart metadata refresh for radio streams after resume
+        // Fetch initial metadata after resume
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            // Simplified: Just fetch metadata if timer isn't running
-            if self.metadataRefreshTimer == nil {
-                self.fetchCurrentTrackMetadata()
-            }
+            self.fetchCurrentTrackMetadata()
         }
         
         client.sendStatus("STMr")
@@ -904,8 +918,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Stop heartbeat when stopped
         stopPlaybackHeartbeat()
         
-        // Stop metadata refresh for radio streams
-        stopMetadataRefresh()
+        // Note: ICY metadata callbacks are handled automatically by BASS
         
         client.sendStatus("STMf")
     }
@@ -1089,16 +1102,22 @@ extension SlimProtoCoordinator {
     
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
-        
+
+        // Save position on pause commands (creates save point for future recovery)
+        if command.lowercased() == "pause" {
+            saveCurrentPositionForRecovery()
+            os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
+        }
+
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
         let context: PlaybackSessionController.ActivationContext = command.lowercased() == "play" ? .userInitiatedPlay : .backgroundRefresh
         audioManager.activateAudioSession(context: context)
-        
+
         // Ensure connection and send command
         if !connectionManager.connectionState.isConnected {
             os_log(.info, log: logger, "🔄 Reconnecting for lock screen command")
             connect()
-            
+
             // Queue command to send after connection
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 if command.lowercased() == "play" {
@@ -1109,7 +1128,7 @@ extension SlimProtoCoordinator {
                 }
             }
         } else {
-            // Connected - send command immediately (no position saving needed)
+            // Connected - send command immediately
             os_log(.info, log: logger, "🔒 Already connected - sending lock screen command directly")
             sendJSONRPCCommand(command)
         }
@@ -1239,21 +1258,8 @@ extension SlimProtoCoordinator {
                         self.ensureSlimProtoConnection()
                     }
                     
-                    // For skip commands, refresh metadata and resume server time sync
-                    if command == "next" || command == "previous" {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            self.fetchCurrentTrackMetadata()
-                            
-                            // CRITICAL: Resume server time sync after track skip
-                            // This ensures we get fresh server time for the new track
-                            os_log(.debug, log: self.logger, "▶️ Resuming server time sync after track skip")
-                            
-                            // Force immediate sync to get current position of new track
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                // Server time sync will continue automatically
-                            }
-                        }
-                    }
+                    // Server time sync continues automatically - no additional action needed
+                    // Note: Metadata will be refreshed automatically when server sends new stream
                 }
             }
         }
