@@ -282,9 +282,9 @@ final class PlaybackSessionController {
             os_log(.info, log: logger, "🚫 Interruption began (%{public}s, autoResume=%{public}s)",
                    interruptionKind.rawValue, shouldResume ? "YES" : "NO")
             if wasPlaying {
-                DispatchQueue.main.async { [weak self] in
-                    self?.playbackController?.pause()
-                }
+                // Send server pause command instead of local CBass pause
+                slimProtoProvider?()?.sendLockScreenCommand("pause")
+                os_log(.info, log: logger, "📡 Sent server pause command for interruption")
             }
         case .ended:
             let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -301,9 +301,9 @@ final class PlaybackSessionController {
             guard shouldResume else { return }
 
             ensureActive(context: .serverResume)
-            DispatchQueue.main.async { [weak self] in
-                self?.playbackController?.play()
-            }
+            // Send server play command instead of local CBass play
+            slimProtoProvider?()?.sendLockScreenCommand("play")
+            os_log(.info, log: logger, "📡 Sent server play command for interruption resume")
         @unknown default:
             break
         }
@@ -331,12 +331,22 @@ final class PlaybackSessionController {
             }
         }
 
+        // Handle CarPlay connect/disconnect
         if currentHasCarPlay && !isCarPlayActive {
             isCarPlayActive = true
             handleCarPlayConnected()
         } else if !currentHasCarPlay && (isCarPlayActive || previousHadCarPlay) {
             isCarPlayActive = false
             handleCarPlayDisconnected()
+        }
+
+        // Handle AirPods/headphone disconnection (but not CarPlay, which is handled separately)
+        if reason == .oldDeviceUnavailable && !previousHadCarPlay {
+            let wasPlaying = playbackController?.isPlaying ?? false
+            if wasPlaying {
+                os_log(.info, log: logger, "🎧 AirPods/headphones disconnected - pausing server")
+                slimProtoProvider?()?.sendLockScreenCommand("pause")
+            }
         }
     }
 
@@ -405,7 +415,6 @@ final class PlaybackSessionController {
             }
 
             if let coordinator = self.slimProtoProvider?() {
-                coordinator.saveCurrentPositionForRecovery()
                 coordinator.sendLockScreenCommand("pause")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {

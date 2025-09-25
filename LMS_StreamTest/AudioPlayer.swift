@@ -16,6 +16,7 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerDidStall()
     func audioPlayerDidReceiveMetadataUpdate()
     func audioPlayerRequestsSeek(_ timeOffset: Double)  // For transcoding pipeline fixes
+    func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?))  // ICY metadata from radio streams
 }
 
 class AudioPlayer: NSObject, ObservableObject {
@@ -52,6 +53,9 @@ class AudioPlayer: NSObject, ObservableObject {
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
+    // MARK: - ICY Metadata Handling
+    private var metadataSync: HSYNC = 0
+
     // MARK: - Initialization
     override init() {
         super.init()
@@ -74,7 +78,10 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
         
-        // Basic network configuration for LMS streaming  
+        // Enable ICY metadata for radio streams
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
+
+        // Basic network configuration for LMS streaming
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
@@ -152,12 +159,10 @@ class AudioPlayer: NSObject, ObservableObject {
         // Step 5: Request playlist jump to current position instead of recreating stream
         // This tells the server to seek to where we were and start a new stream at that position
         os_log(.info, log: logger, "🔀 Requesting playlist jump to position %.2f for route change", serverPosition)
-
         // Clean up any partial stream setup
         currentStream = 0
         currentStreamURL = ""
         currentStreamFormat = "UNKNOWN"
-
         // Smart recovery based on connection state (same logic as lock screen)
         if let audioManager = audioManager, let coordinator = audioManager.slimClient {
             DispatchQueue.main.async {
@@ -510,8 +515,86 @@ class AudioPlayer: NSObject, ObservableObject {
                 player.delegate?.audioPlayerTimeDidUpdate(currentTime)
             }
         }, selfPtr)
+
+        // ICY metadata callback for radio streams
+        setupMetadataCallback()
     }
-    
+
+    // MARK: - ICY Metadata Handling
+    private func setupMetadataCallback() {
+        guard currentStream != 0 else { return }
+
+        // Remove any existing metadata sync
+        if metadataSync != 0 {
+            BASS_ChannelRemoveSync(currentStream, metadataSync)
+            metadataSync = 0
+        }
+
+        // Only set up metadata callback for HTTP streams (radio/streaming)
+        if currentStreamURL.hasPrefix("http") {
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+            metadataSync = BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_META), 0, { handle, channel, data, user in
+                guard let user = user else { return }
+                let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
+
+                DispatchQueue.main.async {
+                    player.handleMetadataUpdate()
+                }
+            }, selfPtr)
+
+            if metadataSync != 0 {
+                os_log(.info, log: logger, "🎵 ICY metadata callback set up for radio stream")
+            }
+        }
+    }
+
+    private func handleMetadataUpdate() {
+        guard currentStream != 0 else { return }
+
+        // Get ICY metadata from BASS
+        guard let metaPtr = BASS_ChannelGetTags(currentStream, DWORD(BASS_TAG_META)) else {
+            os_log(.debug, log: logger, "🎵 No ICY metadata available")
+            return
+        }
+
+        let metaString = String(cString: metaPtr)
+        // Parse ICY metadata format: StreamTitle='Artist - Title';StreamUrl='xxx';
+        let metadata = parseICYMetadata(metaString)
+
+        if metadata.title != nil || metadata.artist != nil {
+            delegate?.audioPlayerDidReceiveMetadata(metadata)
+        }
+    }
+
+    private func parseICYMetadata(_ metaString: String) -> (title: String?, artist: String?) {
+        var title: String?
+        var artist: String?
+
+        // Look for StreamTitle='...' in the metadata
+        if let titleRange = metaString.range(of: "StreamTitle='") {
+            let startIndex = titleRange.upperBound
+            if let endRange = metaString[startIndex...].range(of: "';") {
+                let titleContent = String(metaString[startIndex..<endRange.lowerBound])
+
+                // Try to split "Artist - Title" format
+                if titleContent.contains(" - ") {
+                    let components = titleContent.components(separatedBy: " - ")
+                    if components.count >= 2 {
+                        artist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                        title = components[1...].joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else {
+                        title = titleContent
+                    }
+                } else {
+                    title = titleContent
+                }
+            }
+        }
+
+        return (title: title, artist: artist)
+    }
+
     // MARK: - Format-Specific Stream Creation (CRITICAL FIX for Opus)
     private func createStreamForFormat(urlString: String, streamFlags: DWORD) -> HSTREAM {
         // Use the format provided by SlimProto STRM command

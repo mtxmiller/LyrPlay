@@ -305,7 +305,7 @@ extension AudioManager: AudioPlayerDelegate {
     
     func audioPlayerDidReceiveMetadataUpdate() {
         os_log(.info, log: logger, "🎵 Audio player detected metadata update - requesting fresh metadata")
-        
+
         // Notify the coordinator to fetch fresh metadata
         if let slimClient = slimClient {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -313,6 +313,11 @@ extension AudioManager: AudioPlayerDelegate {
                 slimClient.requestFreshMetadata()
             }
         }
+    }
+
+    func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?)) {
+        // Forward ICY metadata to SlimProto coordinator (logging handled there)
+        slimClient?.handleICYMetadata(metadata)
     }
 }
 
