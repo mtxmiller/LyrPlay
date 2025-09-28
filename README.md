@@ -156,15 +156,7 @@ LyrPlay is designed specifically for the **Material Skin** by [CDrummond](https:
 
 ### Performance Optimization
 
-For slower network connections or to reduce bandwidth usage, you can force MP3 transcoding:
-
-1. **Open LMS Web Interface** (Material Skin)
-2. **Go to Player Options** for your LyrPlay device
-3. **Navigate to Extra Settings**
-4. **Select Audio dropdown**
-5. **Choose Bitrate Limiting** and select your preferred bitrate (e.g., 320kbps, 192kbps, 128kbps)
-
-This will transcode all audio formats to MP3 at your chosen bitrate, significantly reducing network usage while maintaining good audio quality.
+For bandwidth control, use the built-in audio quality settings directly in the LyrPlay app rather than server-side bitrate limiting.
 
 ## Development
 
