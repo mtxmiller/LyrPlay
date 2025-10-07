@@ -87,13 +87,13 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.playStream(urlString: urlString)
     }
 
-    func playStreamWithFormat(urlString: String, format: String) {
+    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamWithFormat(urlString: urlString, format: format)
+        audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
     }
 
     func playStreamAtPosition(urlString: String, startTime: Double) {
@@ -101,13 +101,13 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.playStreamAtPosition(urlString: urlString, startTime: startTime)
     }
 
-    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String) {
+    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format)
+        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
     }
 
     // Playback control

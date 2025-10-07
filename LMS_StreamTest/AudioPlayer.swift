@@ -49,7 +49,8 @@ class AudioPlayer: NSObject, ObservableObject {
     
     private var currentStreamURL: String = ""
     private var currentStreamFormat: String = "UNKNOWN"
-    
+    private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
+
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
@@ -241,7 +242,13 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         setupCallbacks()
-        
+
+        // Apply ReplayGain BEFORE starting playback if pending
+        if pendingReplayGain > 0.0 {
+            applyReplayGain(pendingReplayGain)
+            pendingReplayGain = 0.0  // Clear after application
+        }
+
         let playResult = BASS_ChannelPlay(currentStream, 0)
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d", currentStream)
@@ -262,30 +269,33 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    func playStreamWithFormat(urlString: String, format: String) {
-        os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s", format, urlString)
-        
+    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
+        os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s with replayGain %.4f", format, urlString, replayGain)
+
         // CRITICAL: Store format for plugin-specific stream creation
         currentStreamFormat = format
-        
+
+        // Store replayGain for application after stream creation
+        pendingReplayGain = replayGain
+
         // Format-specific configuration
         configureForFormat(format)
-        
-        // Use the main playStream method (which will use the stored format)
+
+        // Use the main playStream method (which will apply replayGain after stream creation)
         playStream(urlString: urlString)
     }
-    
+
     func playStreamAtPosition(urlString: String, startTime: Double) {
         playStream(urlString: urlString)
-        
+
         if startTime > 0 {
             seekToPosition(startTime)
         }
     }
-    
-    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String) {
-        playStreamWithFormat(urlString: urlString, format: format)
-        
+
+    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
+        playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
+
         if startTime > 0 {
             seekToPosition(startTime)
         }
@@ -376,17 +386,46 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Volume Control (MINIMAL CBASS)
     func setVolume(_ volume: Float) {
         guard currentStream != 0 else { return }
-        
+
         let clampedVolume = max(0.0, min(1.0, volume))
         BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
     }
 
     func getVolume() -> Float {
         guard currentStream != 0 else { return 1.0 }
-        
+
         var volume: Float = 1.0
         BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
         return volume
+    }
+
+    // MARK: - ReplayGain Support
+    private func applyReplayGain(_ replayGain: Float) {
+        guard currentStream != 0 else {
+            os_log(.error, log: logger, "❌ Cannot apply ReplayGain: no active stream")
+            return
+        }
+
+        // Server sends replay_gain as 32-bit u32_t in 16.16 fixed point format
+        // Already converted to float by dividing by 65536.0
+        // Represents linear gain multiplier (e.g., 0.501 for -6dB, 1.412 for +3dB)
+
+        // Use BASS_ATTRIB_VOLDSP instead of BASS_ATTRIB_VOL because:
+        // - BASS_ATTRIB_VOLDSP applies gain to sample data (like squeezelite)
+        // - BASS_ATTRIB_VOL controls playback volume and would interfere with user volume
+        // - VOLDSP works on decoding channels and is present in the DSP chain
+
+        // Clamp to reasonable range to prevent distortion
+        let clampedGain = min(replayGain, 2.0)  // Max 2x gain (~6dB boost)
+
+        let success = BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), clampedGain)
+
+        if success != 0 {
+            os_log(.info, log: logger, "✅ Applied ReplayGain DSP: %.4f (clamped: %.4f)", replayGain, clampedGain)
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to apply ReplayGain DSP: BASS error %d", errorCode)
+        }
     }
     
     // MARK: - Seeking (🎵 NATIVE FLAC SEEKING - KEY BENEFIT!)

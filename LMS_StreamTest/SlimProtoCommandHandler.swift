@@ -4,7 +4,7 @@ import Foundation
 import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
-    func didStartStream(url: String, format: String, startTime: Double)
+    func didStartStream(url: String, format: String, startTime: Double, replayGain: Float)
     func didPauseStream()
     func didResumeStream()
     func didStopStream()
@@ -169,18 +169,28 @@ class SlimProtoCommandHandler: ObservableObject {
     // MARK: - Stream Command Processing (UPDATED for FLAC)
     private func processServerCommand(_ command: String, payload: Data) {
         guard command == "strm" else { return }
-        
+
         if payload.count >= 24 {
             let streamCommand = payload[0]
             let autostart = payload[1]
             let format = payload[2]
-            
+
+            // Extract replay_gain from bytes 14-17 (u32_t in 16.16 fixed point format)
+            // Pack format: 'aaaaaaaCCCaCCCNnN' where the first N (4 bytes) is replay_gain at offset 14
+            let replayGainBytes = payload.subdata(in: 14..<18)
+            let replayGainFixed = replayGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+
+            // Convert 16.16 fixed point to float
+            // LMS uses 8.8 fixed point for -30dB to 0dB range for better precision
+            // Upper 16 bits = integer part, lower 16 bits = fractional part
+            let replayGainFloat = Float(replayGainFixed) / 65536.0
+
             let commandChar = String(UnicodeScalar(streamCommand) ?? "?")
-            
+
             // NEW CODE (only log for non-status commands):
             if streamCommand != UInt8(ascii: "t") {  // 't' = status request
-                os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x)",
-                       commandChar, streamCommand, format, format)
+                os_log(.info, log: logger, "🎵 Server strm - command: '%{public}s' (%d), format: %d (0x%02x), replayGain: %.4f",
+                       commandChar, streamCommand, format, format, replayGainFloat)
             }
             
             // UPDATED: Enhanced format handling with FLAC support
@@ -267,7 +277,7 @@ class SlimProtoCommandHandler: ObservableObject {
                         
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
-                            handleStartCommand(url: url, format: formatName, startTime: 0.0)
+                            handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat)
                         case UInt8(ascii: "p"): // pause
                             handlePauseCommand()
                         case UInt8(ascii: "u"): // unpause
@@ -319,18 +329,18 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Individual Command Handlers (existing code...)
-    private func handleStartCommand(url: String, format: String, startTime: Double) {
-        os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f", format, startTime)
-        
+    private func handleStartCommand(url: String, format: String, startTime: Double, replayGain: Float) {
+        os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f with replayGain %.4f", format, startTime, replayGain)
+
         // CRITICAL DEBUG: Log if server is sending unexpected start times
         if startTime > 0.1 && startTime < lastKnownPosition - 5.0 {
-            os_log(.error, log: logger, "🚨 SERVER ANOMALY: Start time %.2f is much less than last known %.2f", 
+            os_log(.error, log: logger, "🚨 SERVER ANOMALY: Start time %.2f is much less than last known %.2f",
                    startTime, lastKnownPosition)
         }
-        
+
         // Send STMf (flush) first, like squeezelite
         slimProtoClient?.sendStatus("STMf")
-        
+
         // Update state
         serverStartTime = Date()
         serverStartPosition = startTime
@@ -338,8 +348,8 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
-        
-        delegate?.didStartStream(url: url, format: format, startTime: startTime)
+
+        delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
     }
 
     // ADD THESE NEW METHODS:

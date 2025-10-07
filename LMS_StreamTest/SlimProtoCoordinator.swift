@@ -850,22 +850,22 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
 // MARK: - SlimProtoCommandHandlerDelegate
 extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
-    func didStartStream(url: String, format: String, startTime: Double) {
-        os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f", format, startTime)
-        
+    func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
+        os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
+
         // Stop any existing playback and timers first
         audioManager.stop()
         stopPlaybackHeartbeat()
-        
+
         // Start the new stream - this will trigger the sequence:
         // 1. handleStartCommand sends STMf (already done by command handler)
         // 2. AudioPlayer intercepts headers → RESP
         // 3. StreamingKit starts buffering → STMc (via delegate)
         // 4. Playback actually starts → STMs (below)
         if startTime > 0 {
-            audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format)
+            audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format, replayGain: replayGain)
         } else {
-            audioManager.playStreamWithFormat(urlString: url, format: format)
+            audioManager.playStreamWithFormat(urlString: url, format: format, replayGain: replayGain)
         }
         
         // Start periodic server time fetching for lock screen updates
