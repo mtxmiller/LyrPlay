@@ -360,7 +360,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             UInt8(bufferSize & 0xff)
         ]))
         
-        let bufferFullness: UInt32 = code == "STMp" ? 0 : bufferSize / 2
+        let bufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : bufferSize / 2
         statusData.append(Data([
             UInt8((bufferFullness >> 24) & 0xff),
             UInt8((bufferFullness >> 16) & 0xff),
@@ -404,7 +404,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         ]))
         
         // Output buffer fullness (4 bytes)
-        let outputBufferFullness: UInt32 = code == "STMp" ? 0 : 4096
+        let outputBufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : 4096
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
             UInt8((outputBufferFullness >> 16) & 0xff),

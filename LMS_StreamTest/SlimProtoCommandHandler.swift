@@ -440,7 +440,7 @@ class SlimProtoCommandHandler: ObservableObject {
         // Extract server timestamp from strm 't' command
         // In strm packets, the replay_gain field (bytes 20-23) contains the timestamp for 't' commands
         var serverTimestamp: UInt32 = 0
-        
+
         if payload.count >= 24 {
             // Extract the replay_gain field which contains the server timestamp for 't' commands
             let timestampBytes = payload.subdata(in: 20..<24)
@@ -448,9 +448,17 @@ class SlimProtoCommandHandler: ObservableObject {
                 bytes.load(as: UInt32.self).bigEndian
             }
         }
-        
+
+        // If stream is not active (track ended, playlist finished), send STMu (underrun)
+        // This tells Material that playback finished naturally (not forced stop)
+        if !isStreamActive {
+            slimProtoClient?.sendStatus("STMu", serverTimestamp: serverTimestamp)
+            os_log(.info, log: logger, "📍 Playlist ended - sent STMu (underrun)")
+            return
+        }
+
         delegate?.didReceiveStatusRequest()
-        
+
         if isPausedByLockScreen {
             slimProtoClient?.sendStatus("STMp", serverTimestamp: serverTimestamp)
             os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
