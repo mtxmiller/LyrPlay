@@ -925,17 +925,20 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
-        
+
         audioManager.stop()
-        
+
+        // CRITICAL FIX: Update both SimpleTimeTracker AND NowPlayingManager to stop interpolating
+        updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
+
         // Stop periodic server time fetching
         stopServerTimeFetching()
-        
+
         // Stop heartbeat when stopped
         stopPlaybackHeartbeat()
-        
+
         // Note: ICY metadata callbacks are handled automatically by BASS
-        
+
         client.sendStatus("STMf")
     }
     

@@ -394,16 +394,26 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Simplified SlimProto Integration
     func updateFromSlimProto(currentTime: Double, duration: Double = 0.0, isPlaying: Bool) {
         // This replaces the complex ServerTimeSynchronizer integration
-        lastKnownServerTime = currentTime
-        
+
+        // CRITICAL FIX: Reset lastKnownServerTime to 0 when playback stops (matches squeezelite behavior)
+        os_log(.info, log: logger, "🔍 updateFromSlimProto called: time=%.2f, duration=%.2f, playing=%{public}s, lastKnown=%.2f",
+               currentTime, duration, isPlaying ? "YES" : "NO", lastKnownServerTime)
+
+        if currentTime == 0.0 && !isPlaying {
+            lastKnownServerTime = 0.0
+            os_log(.info, log: logger, "🔒 Reset lastKnownServerTime to 0.0 (playlist ended)")
+        } else {
+            lastKnownServerTime = currentTime
+        }
+
         // Update duration if provided
         if duration > 0 {
             metadataDuration = duration
         }
-        
+
         // Update now playing info immediately with SlimProto data
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        
+
         os_log(.debug, log: logger, "📍 Updated from SlimProto: %.2f (playing: %{public}s)",
                currentTime, isPlaying ? "YES" : "NO")
     }

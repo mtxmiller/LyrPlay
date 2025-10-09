@@ -311,8 +311,9 @@ class SlimProtoConnectionManager: ObservableObject {
         
         if backgroundTaskID != .invalid {
             let timeRemaining = UIApplication.shared.backgroundTimeRemaining
-            os_log(.info, log: logger, "🎯 Enhanced background task started (ID: %{public}d, time: %.0f sec)",
-                   backgroundTaskID.rawValue, timeRemaining)
+            let timeDescription = timeRemaining.isInfinite ? "unlimited (active audio)" : String(format: "%.0f sec", timeRemaining)
+            os_log(.info, log: logger, "🎯 Enhanced background task started (ID: %{public}d, time: %{public}s)",
+                   backgroundTaskID.rawValue, timeDescription)
             backgroundTimeRemaining = timeRemaining
         } else {
             os_log(.error, log: logger, "❌ Failed to start background task")

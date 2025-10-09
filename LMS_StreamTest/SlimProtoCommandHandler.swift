@@ -30,6 +30,7 @@ class SlimProtoCommandHandler: ObservableObject {
     private var serverStartPosition: Double = 0.0
     private var isManualSkipInProgress = false
     private var skipProtectionTimer: Timer?
+    private var waitingForNextTrack = false  // True after STMd sent, waiting for server's response
     
     // MARK: - Delegation
     weak var delegate: SlimProtoCommandHandlerDelegate?
@@ -348,6 +349,7 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
+        waitingForNextTrack = false  // Reset flag - server sent new track
 
         delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
     }
@@ -449,11 +451,13 @@ class SlimProtoCommandHandler: ObservableObject {
             }
         }
 
-        // If stream is not active (track ended, playlist finished), send STMu (underrun)
-        // This tells Material that playback finished naturally (not forced stop)
-        if !isStreamActive {
+        // Check if we're waiting for next track (after sending STMd)
+        if waitingForNextTrack {
+            // Server sent status request instead of new track → playlist ended
+            os_log(.info, log: logger, "🛑 End of playlist detected - server sent status request after STMd")
+            waitingForNextTrack = false
             slimProtoClient?.sendStatus("STMu", serverTimestamp: serverTimestamp)
-            os_log(.info, log: logger, "📍 Playlist ended - sent STMu (underrun)")
+            delegate?.didStopStream()
             return
         }
 
@@ -536,9 +540,9 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "🛡️ Track end blocked - manual skip in progress")
             return
         }
-        
+
         os_log(.info, log: logger, "🎵 Track ended - sending STMd (decoder ready) to server")
-        
+
         // Reset all tracking state first
         isStreamActive = false
         isStreamPaused = false
@@ -546,11 +550,14 @@ class SlimProtoCommandHandler: ObservableObject {
         lastKnownPosition = 0.0
         serverStartTime = nil
         serverStartPosition = 0.0
-        
+
         // Send STMd (decoder ready)
         slimProtoClient?.sendStatus("STMd")
-        
-        os_log(.info, log: logger, "✅ STMd sent - server should initiate next track")
+
+        // Set flag to track that we're waiting for server's response
+        waitingForNextTrack = true
+
+        os_log(.info, log: logger, "✅ STMd sent - waiting for server response (next track or playlist end)")
     }
     
     func updatePlaybackPosition(_ position: Double) {
