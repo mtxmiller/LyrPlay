@@ -141,10 +141,12 @@ class AudioPlayer: NSObject, ObservableObject {
         cleanup()
 
         // Step 3: Free BASS device (equivalent to Android BASS_Free())
+        // Don't deactivate audio session - iOS will handle route change when BASS reinits
         BASS_Free()
         os_log(.info, log: logger, "🔄 BASS device freed")
 
         // Step 4: Configure and reinitialize BASS (equivalent to Android BASS_Init())
+        // iOS automatically picks up new route (speaker) when BASS reinitializes
         BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Configure BEFORE init
         let result = BASS_Init(-1, 44100, 0, nil, nil)
 
@@ -154,8 +156,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        os_log(.info, log: logger, "✅ BASS reinitialized successfully")
-
+        os_log(.info, log: logger, "✅ BASS reinitialized - iOS will route to available output")
 
         // Step 5: Request playlist jump to current position instead of recreating stream
         // This tells the server to seek to where we were and start a new stream at that position

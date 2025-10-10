@@ -322,16 +322,51 @@ final class PlaybackSessionController {
         os_log(.info, log: logger, "🔀 Route change (%{public}s) carPlayPrev=%{public}s carPlayNow=%{public}s",
                describe(reason: reason), previousHadCarPlay ? "YES" : "NO", currentHasCarPlay ? "YES" : "NO")
 
-        // CRITICAL: Reinitialize BASS for route changes (CarPlay, AirPods, speakers, etc.)
-        // This fixes the issue where BASS doesn't automatically follow iOS route changes
-        workQueue.async { [weak self] in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.playbackController?.handleAudioRouteChange()
+        // Determine if this is a CarPlay event (will be handled by specific CarPlay handlers below)
+        let isCarPlayEvent = (currentHasCarPlay && !isCarPlayActive) || (!currentHasCarPlay && (isCarPlayActive || previousHadCarPlay))
+
+        // CRITICAL: Reinitialize BASS for NON-CarPlay route changes (AirPods, speakers, etc.)
+        // CarPlay events are handled by specific handlers below with proper session management
+        if !isCarPlayEvent {
+            // For device removal (AirPods/headphones), need full deactivate/reactivate cycle
+            if reason == .oldDeviceUnavailable {
+                workQueue.async { [weak self] in
+                    guard let self = self else { return }
+
+                    // Step 1: Deactivate to release Bluetooth route
+                    do {
+                        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                        os_log(.info, log: self.logger, "🔀 AirPods removed: Deactivated audio session")
+                    } catch {
+                        os_log(.error, log: self.logger, "🔀 Failed to deactivate: %{public}s", error.localizedDescription)
+                    }
+
+                    // Step 2: Wait for iOS to complete route transition
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        // Step 3: Reactivate for speaker route
+                        self.ensureActive(context: .backgroundRefresh)
+
+                        // Step 4: Reinitialize BASS for new route
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            self.playbackController?.handleAudioRouteChange()
+                            os_log(.info, log: self.logger, "🔀 AirPods removed: BASS reinitialized for speaker")
+                        }
+                    }
+                }
+            } else {
+                // For new device available (speaker → AirPods), simpler activation
+                workQueue.async { [weak self] in
+                    guard let self = self else { return }
+                    self.ensureActive(context: .backgroundRefresh)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.playbackController?.handleAudioRouteChange()
+                        os_log(.info, log: self.logger, "🔀 Route change: BASS reinitialized with active session")
+                    }
+                }
             }
         }
 
-        // Handle CarPlay connect/disconnect
+        // Handle CarPlay connect/disconnect (these have their own session management)
         if currentHasCarPlay && !isCarPlayActive {
             isCarPlayActive = true
             handleCarPlayConnected()
@@ -393,9 +428,11 @@ final class PlaybackSessionController {
         beginBackgroundTask(named: "CarPlayDisconnect")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if self.wasPlayingBeforeCarPlayDetach {
-                self.playbackController?.pause()
-            }
+
+            // REMOVED: Direct player manipulation - server command below handles pause
+            // if self.wasPlayingBeforeCarPlayDetach {
+            //     self.playbackController?.pause()  // ❌ Bypasses server
+            // }
 
             // CRITICAL: Force complete audio session transition for CarPlay disconnect
             // Step 1: Deactivate audio session to release CarPlay route completely

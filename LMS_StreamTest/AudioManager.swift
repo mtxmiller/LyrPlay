@@ -335,29 +335,26 @@ extension AudioManager {
         
         os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s",
                wasPlayingBeforeInterruption ? "YES" : "NO")
-        
-        if wasPlayingBeforeInterruption {
-            audioPlayer.pause()
-            // REMOVED: position tracking and server notification
-            // Let the server handle position management
-        }
+
+        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
+        // NOTE: PlaybackSessionController (line 286) already sends server pause command for interruptions
+        // This AudioManager method may be redundant - keeping for safety but no action needed
+
+        os_log(.info, log: logger, "ℹ️ Interruption handled by PlaybackSessionController (server command)")
     }
     
     /// Called when audio interruption ends
     func handleInterruptionEnded(shouldResume: Bool) {
         os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s",
                shouldResume ? "YES" : "NO")
-        
-        if shouldResume && wasPlayingBeforeInterruption {
-            // REMOVED: Position restoration - let server tell us where to go
-            audioPlayer.play()
-            
-            // REMOVED: All server communication - let SlimProto handle it
-            os_log(.info, log: logger, "▶️ Resumed playback - server maintains position")
-        }
-        
+
+        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
+        // NOTE: PlaybackSessionController (line 305) already sends server play command for interruption resume
+        // This AudioManager method may be redundant - keeping for safety but no action needed
+
+        os_log(.info, log: logger, "ℹ️ Interruption resume handled by PlaybackSessionController (server command)")
+
         wasPlayingBeforeInterruption = false
-        // REMOVED: interruptionPosition = 0.0
     }
     
     /// Called when audio route changes (headphones, CarPlay, etc.)
@@ -365,25 +362,11 @@ extension AudioManager {
         os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
                routeType, shouldPause ? "YES" : "NO")
         
-        if shouldPause {
-            let currentState = getPlayerState()
-            let wasPlaying = (currentState == "Playing")
+        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
+        // NOTE: PlaybackSessionController (line 348) already sends server pause for AirPods disconnect
+        // This AudioManager method may be redundant - keeping for logging only
 
-            // CRITICAL: Use server time, not AudioPlayer time
-            let currentPosition: Double
-            if let coordinator = slimClient {
-                let interpolatedTime = coordinator.getCurrentInterpolatedTime()
-                currentPosition = interpolatedTime.time
-            } else {
-                currentPosition = 0.0  // Fallback if no coordinator
-            }
-
-            if wasPlaying {
-                audioPlayer.pause()
-                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s (serverTime: %.2f)", routeType, currentPosition)
-            }
-        }
+        os_log(.info, log: logger, "ℹ️ Route change handled by PlaybackSessionController (server command)")
         // Legacy CarPlay handling removed; new session controller will manage reconnect logic
     }
     
@@ -440,25 +423,12 @@ extension AudioManager: AudioSessionManagerDelegate {
         
         os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
                routeChangeDescription, shouldPause ? "YES" : "NO")
-        
-        if shouldPause {
-            if getPlayerState() == "Playing" {
-                // CRITICAL: Use server time, not AudioPlayer time
-                let currentPosition: Double
-                if let coordinator = slimClient {
-                    let interpolatedTime = coordinator.getCurrentInterpolatedTime()
-                    currentPosition = interpolatedTime.time
-                } else {
-                    currentPosition = 0.0  // Fallback if no coordinator
-                }
 
-                audioPlayer.pause()
-                nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: currentPosition)
-                os_log(.info, log: logger, "⏸️ Paused due to route change: %{public}s (serverTime: %.2f)", routeChangeDescription, currentPosition)
-            }
-        } else {
-            os_log(.info, log: logger, "🔀 Route change observed: '%{public}s'", routeChangeDescription)
-        }
+        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
+        // NOTE: This delegate method may be redundant with PlaybackSessionController's route handling
+        // PlaybackSessionController observes AVAudioSession.routeChangeNotification and sends server commands
+
+        os_log(.info, log: logger, "ℹ️ Route change logged - PlaybackSessionController handles server commands")
     }
 }
 
