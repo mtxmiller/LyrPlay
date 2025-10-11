@@ -349,15 +349,26 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
-        waitingForNextTrack = false  // Reset flag - server sent new track
+        waitingForNextTrack = false  // Server responded with new track - playlist NOT ended
 
         delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
     }
 
     // ADD THESE NEW METHODS:
     func handleStreamConnected() {
-        os_log(.info, log: logger, "🔗 Stream connected")
+        os_log(.info, log: logger, "🔗 Stream connected - track transition complete")
+        waitingForNextTrack = false  // Reset flag - stream successfully created
         slimProtoClient?.sendStatus("STMc")
+    }
+
+    func handleStreamFailed() {
+        os_log(.error, log: logger, "❌ Stream creation failed - notifying server")
+        slimProtoClient?.sendStatus("STMn")
+        waitingForNextTrack = false  // Reset flag - stream failed
+    }
+
+    func isInTrackTransition() -> Bool {
+        return waitingForNextTrack
     }
 
     // REMOVED: HTTP header handling - let StreamingKit handle format detection naturally
@@ -538,6 +549,12 @@ class SlimProtoCommandHandler: ObservableObject {
         // CRITICAL: Don't send track end signals during manual skips
         if isManualSkipInProgress {
             os_log(.info, log: logger, "🛡️ Track end blocked - manual skip in progress")
+            return
+        }
+
+        // CRITICAL: Prevent duplicate STMd if we're already waiting for server response
+        if waitingForNextTrack {
+            os_log(.info, log: logger, "🛡️ Track end blocked - already waiting for server response to previous STMd")
             return
         }
 

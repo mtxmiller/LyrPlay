@@ -228,16 +228,24 @@ class AudioPlayer: NSObject, ObservableObject {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString)
 
-            // Handle timeout error (Error 40) with auto-seek fix
-            if errorCode == DWORD(40) {  // BASS_ERROR_TIMEOUT
-                os_log(.info, log: logger, "🔧 BASS timeout detected - requesting minimal seek to fix transcoding")
-                delegate?.audioPlayerRequestsSeek(0.05)
+            // Handle format errors (permanent failures)
+            if errorCode == DWORD(41) {  // BASS_ERROR_FILEFORM - unsupported format
+                os_log(.error, log: logger, "❌ Unsupported audio format - notifying server with STMn")
+                commandHandler?.handleStreamFailed()
                 return
             }
 
-            // Specific handling for error 41 (unsupported format)
-            if errorCode == 41 {
-                os_log(.error, log: logger, "❌ Error 41: Unsupported audio format - may need plugin support")
+            // Handle timeout errors (transient failures)
+            if errorCode == DWORD(40) {  // BASS_ERROR_TIMEOUT
+                // CRITICAL: Check if we're in a track transition
+                if let handler = commandHandler, handler.isInTrackTransition() {
+                    // Track transition - don't send seek, server is already switching tracks
+                    os_log(.info, log: logger, "🔧 BASS timeout during track transition - skipping auto-seek (waitingForNextTrack)")
+                } else {
+                    // Normal playback - send seek to fix transcoding pipeline
+                    os_log(.info, log: logger, "🔧 BASS timeout detected - requesting minimal seek to fix transcoding")
+                    delegate?.audioPlayerRequestsSeek(0.05)
+                }
             }
             return
         }

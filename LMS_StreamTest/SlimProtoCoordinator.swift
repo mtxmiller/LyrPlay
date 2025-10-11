@@ -857,6 +857,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         audioManager.stop()
         stopPlaybackHeartbeat()
 
+        // Track end detection now handled exclusively by BASS_SYNC_END callback
+
         // Start the new stream - this will trigger the sequence:
         // 1. handleStartCommand sends STMf (already done by command handler)
         // 2. AudioPlayer intercepts headers → RESP

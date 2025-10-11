@@ -77,18 +77,18 @@ class NowPlayingManager: ObservableObject {
     
     private func updateNowPlayingTime() {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
-        
+
         // Log every update to see what's changing the lock screen
         os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
                currentTime, timeSource.description, isPlaying ? "YES" : "NO")
-        
-        
+
+
         // Update now playing info with current time
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-        
-        // Check for track end using server time (replaces unreliable BASS_SYNC_END)
-        checkForTrackEnd(currentTime: currentTime, isPlaying: isPlaying, timeSource: timeSource)
-        
+
+        // REMOVED: Server-time based track end detection - now using BASS_SYNC_END exclusively
+        // The duplicate detection was causing spurious STMd signals during track transitions
+
         // Log time source changes
         let newUsingServerTime = (timeSource == .serverTime)
         if newUsingServerTime != isUsingServerTime {
@@ -474,35 +474,9 @@ class NowPlayingManager: ObservableObject {
         os_log(.info, log: logger, "🎛️ Remote commands %{public}s", enable ? "enabled" : "disabled")
     }
     
-    // MARK: - Track End Detection (Server-Time Based)
-    private var lastTrackEndTime: Date?
-    private let trackEndCooldown: TimeInterval = 10.0  // 10 second cooldown between track ends
-    
-    private func checkForTrackEnd(currentTime: Double, isPlaying: Bool, timeSource: TimeSource) {
-        // Only check for track end if we have server time and are playing
-        guard timeSource == .serverTime && isPlaying && metadataDuration > 0 else {
-            return
-        }
-        
-        // Check cooldown period - prevent double track ends during transitions
-        if let lastEndTime = lastTrackEndTime {
-            let timeSinceLastEnd = Date().timeIntervalSince(lastEndTime)
-            if timeSinceLastEnd < trackEndCooldown {
-                return // Still in cooldown period
-            }
-        }
-        
-        // Check if we've reached the end of the track (with 2-second tolerance)
-        if currentTime >= (metadataDuration - 2.0) {
-            os_log(.info, log: logger, "🎵 Track end detected via server time (%.2f >= %.2f)", currentTime, metadataDuration - 2.0)
-            
-            // Record the time we triggered track end
-            lastTrackEndTime = Date()
-            
-            // Notify the coordinator to handle track end
-            slimClient?.handleTrackEndFromServerTime()
-        }
-    }
+    // MARK: - Track End Detection
+    // REMOVED: Server-time based track end detection (was causing duplicate STMd signals)
+    // Now using BASS_SYNC_END exclusively for reliable track end detection
     
     // MARK: - Debug Information
     func getTimeSourceInfo() -> String {
