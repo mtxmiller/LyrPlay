@@ -297,10 +297,8 @@ extension AudioManager: AudioPlayerDelegate {
     }
 
     func audioPlayerRequestsSeek(_ timeOffset: Double) {
-        os_log(.info, log: logger, "🔧 Audio player requests seek to %{public}.2f seconds for transcoding fix", timeOffset)
-
-        // Forward to coordinator for server-side seek command
-        slimClient?.requestSeekToTime(timeOffset)
+        os_log(.info, log: logger, "🔧 Audio player requested seek to %{public}.2f seconds (transcoding fallback disabled)", timeOffset)
+        // Intentionally no-op: rely on larger BASS verification window instead of server seek
     }
     
     func audioPlayerDidReceiveMetadataUpdate() {

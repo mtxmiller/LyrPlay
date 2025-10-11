@@ -78,6 +78,11 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
             return
         }
+
+        let verifyBytes = DWORD(1024 * 1024)
+        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
+        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
+        os_log(.info, log: logger, "🔍 BASS verification window increased to %u bytes", verifyBytes)
         
         // Enable ICY metadata for radio streams
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
