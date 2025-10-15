@@ -38,7 +38,7 @@ For remote access outside your home network, you'll need a secure VPN solution: 
 
 LyrPlay can play MP3/AAC and FLAC without additional plugins, but for an improved experience a transcoding rules plugin has been developed [Mobile Transcode](https://github.com/mtxmiller/MobileTranscode) for ease of setup.  
 
-To install it add below URL to “Additional repositories” on your “Manage Plugs Page” in server configuration (at bottom).  Be sure to RESTART server after install. 
+To install it add below URL to “Additional repositories” on your “Manage Plug-ins page” in server configuration (at bottom).  Be sure to RESTART server after install. 
 
 **Mobile Transcode Plugin URL:** https://raw.githubusercontent.com/mtxmiller/MobileTranscode/main/repo.xml
 
@@ -47,6 +47,13 @@ If you want to **manually** configure your custom-convert.conf please see refere
 **Benefits:**
 - **Opus 256kbps** - Bandwidth efficient modern codec for mobile devices.
 - Scrub / seek for FLAC files improves recovery / state transitions with app
+
+**NOTE — Install Opus Tools** (required for Opus transcoding):
+
+```bash
+# Install opus-tools in your LMS container
+docker exec -it lms bash -c "apt-get update && apt-get install -y opus-tools"
+```
 
 ## Usage
 
