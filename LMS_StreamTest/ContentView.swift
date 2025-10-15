@@ -8,6 +8,7 @@ struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
     @StateObject private var audioManager: AudioManager  // ← FIXED: Remove .shared here
     @StateObject private var slimProtoCoordinator: SlimProtoCoordinator
+    @StateObject private var carPlayManager: CarPlayManager
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var hasConnected = false
@@ -22,7 +23,7 @@ struct ContentView: View {
     @State private var hasShownError = false
     
     init() {
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration and CarPlay support")
         
         // ✅ FIXED: Use the same singleton instance for EVERYTHING
         let audioMgr = AudioManager.shared
@@ -32,10 +33,20 @@ struct ContentView: View {
         let coordinator = SlimProtoCoordinator(audioManager: audioMgr)
         self._slimProtoCoordinator = StateObject(wrappedValue: coordinator)
         
+        // ✅ Create CarPlayManager with dependencies
+        if #available(iOS 14.0, *) {
+            let carPlay = CarPlayManager(settingsManager: SettingsManager.shared, slimProtoCoordinator: coordinator)
+            self._carPlayManager = StateObject(wrappedValue: carPlay)
+        } else {
+            // Fallback for older iOS versions (though we target iOS 14+)
+            let carPlay = CarPlayManager(settingsManager: SettingsManager.shared, slimProtoCoordinator: coordinator)
+            self._carPlayManager = StateObject(wrappedValue: carPlay)
+        }
+        
         // ✅ Connect them using the SAME instances
         audioMgr.slimClient = coordinator
         
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ FIXED: Single AudioManager and SlimProtoCoordinator instances created")
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ FIXED: Single AudioManager, SlimProtoCoordinator, and CarPlayManager instances created")
     }
     
     var body: some View {
@@ -149,10 +160,15 @@ struct ContentView: View {
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
-            
+
             // CRITICAL FIX: Removed duplicate app open recovery call
             // App open recovery should only be triggered by willEnterForegroundNotification
             // Having it in both onAppear and willEnterForeground caused double execution
+
+            // Initialize CarPlay support
+            if #available(iOS 14.0, *) {
+                carPlayManager.initialize()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             isAppInBackground = true
@@ -214,6 +230,11 @@ struct ContentView: View {
             Task {
                 await slimProtoCoordinator.restartConnection()
                 os_log(.info, log: logger, "✅ SlimProto reconnected to: %{public}s:%d", settings.activeServerHost, settings.activeServerSlimProtoPort)
+            }
+            
+            // Update CarPlay content for new server
+            if #available(iOS 14.0, *) {
+                carPlayManager.handleServerChange()
             }
         }
     }
