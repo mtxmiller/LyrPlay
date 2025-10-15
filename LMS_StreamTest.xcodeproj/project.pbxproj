@@ -41,6 +41,7 @@
 		323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTestUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.debug.xcconfig"; sourceTree = "<group>"; };
 		479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.release.xcconfig"; sourceTree = "<group>"; };
+		6B5837BB2E9F352300289080 /* LMS_StreamTest.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LMS_StreamTest.entitlements; sourceTree = "<group>"; };
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -120,6 +121,7 @@
 		6B9C4D452DEB81F500D22FD6 = {
 			isa = PBXGroup;
 			children = (
+				6B5837BB2E9F352300289080 /* LMS_StreamTest.entitlements */,
 				6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */,
 				6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D612DEB81F600D22FD6 /* LMS_StreamTestTests */,
@@ -164,7 +166,6 @@
 				6B9C4D4B2DEB81F500D22FD6 /* Frameworks */,
 				6B9C4D4C2DEB81F500D22FD6 /* Resources */,
 				F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */,
-				6BB003F42E9AAB56002E2CE7 /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -321,23 +322,6 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
-		};
-		6BB003F42E9AAB56002E2CE7 /* ShellScript */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "## build script\n\n# Type a script or drag a script file from your workspace to insert its path.\n# Fix CBass Framework Info.plist files during build\necho \"🔧 Fixing CBass frameworks during build...\"\n\n# Fix frameworks in the built app\nif [ -d \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\" ]; then\n  cd \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Frameworks\"\n\n  for framework in bass.framework bassflac.framework bassopus.framework; do\n      if [ -d \"$framework\" ]; then\n          info_plist=\"$framework/Info.plist\"\n          if [ -f \"$info_plist\" ]; then\n              echo \"Fixing $framework\"\n              # Add CFBundleVersion if missing\n              if ! /usr/libexec/PlistBuddy -c \"Print CFBundleVersion\" \"$info_plist\" >/dev/null 2>&1; then\n                  /usr/libexec/PlistBuddy -c \"Add CFBundleVersion string 24.17\" \"$info_plist\"\n                  echo \"✅ Added CFBundleVersion to $framework\"\n              else\n                  echo \"✅ CFBundleVersion already exists in $framework\"\n              fi\n          fi\n      fi\n  done\nfi\n\necho \"🎉 Framework fixes completed during build\"\n\n";
 		};
 		72F8206890725D915803646B /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -569,6 +553,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
@@ -608,6 +593,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
