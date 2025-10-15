@@ -290,20 +290,38 @@ final class PlaybackSessionController {
             let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
             let context = interruptionContext
-            let shouldResume = options.contains(.shouldResume) && (context?.shouldAutoResume ?? false)
+            // PHONE CALL FIX: Don't rely on iOS .shouldResume flag - it's unreliable for phone calls
+            // Apple docs: "There is no guarantee that a begin interruption will have an end interruption"
+            // Trust our own shouldAutoResume logic instead
+            let shouldResume = context?.shouldAutoResume ?? false
 
-            os_log(.info, log: logger, "✅ Interruption ended (%{public}s, shouldResume=%{public}s)",
+            os_log(.info, log: logger, "✅ Interruption ended (%{public}s, iOS.shouldResume=%{public}s, app.shouldResume=%{public}s)",
                    context?.type.rawValue ?? InterruptionType.unknown.rawValue,
+                   options.contains(.shouldResume) ? "YES" : "NO",
                    shouldResume ? "YES" : "NO")
 
             interruptionContext = nil
 
             guard shouldResume else { return }
 
+            // CRITICAL: Reinitialize BASS after interruption to pick up new audio route
+            // Phone calls and other interruptions change audio routes (receiver → speaker)
+            // Must reinitialize BASS device before resuming playback
             ensureActive(context: .serverResume)
-            // Send server play command instead of local CBass play
-            slimProtoProvider?()?.sendLockScreenCommand("play")
-            os_log(.info, log: logger, "📡 Sent server play command for interruption resume")
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self = self else { return }
+
+                // Reinitialize BASS for post-interruption route
+                self.playbackController?.handleAudioRouteChange()
+                os_log(.info, log: self.logger, "🔄 BASS reinitialized after interruption")
+
+                // Now send play command after BASS is ready
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.slimProtoProvider?()?.sendLockScreenCommand("play")
+                    os_log(.info, log: self.logger, "📡 Sent server play command for interruption resume")
+                }
+            }
         @unknown default:
             break
         }
@@ -325,9 +343,18 @@ final class PlaybackSessionController {
         // Determine if this is a CarPlay event (will be handled by specific CarPlay handlers below)
         let isCarPlayEvent = (currentHasCarPlay && !isCarPlayActive) || (!currentHasCarPlay && (isCarPlayActive || previousHadCarPlay))
 
+        // PHONE CALL FIX: Detect phone call routes to avoid reinitializing BASS during active calls
+        let currentOutputs = audioSession.currentOutputs
+        let previousOutputs = previousRoute?.outputs.map { $0.portType } ?? []
+        let isPhoneCallRoute = currentOutputs.contains(.builtInReceiver) ||
+                               previousOutputs.contains(.builtInReceiver) ||
+                               currentOutputs.contains(.bluetoothHFP) ||
+                               previousOutputs.contains(.bluetoothHFP)
+
         // CRITICAL: Reinitialize BASS for NON-CarPlay route changes (AirPods, speakers, etc.)
         // CarPlay events are handled by specific handlers below with proper session management
-        if !isCarPlayEvent {
+        // PHONE CALL FIX: Skip BASS reinit for phone calls - interruption handler manages playback
+        if !isCarPlayEvent && !isPhoneCallRoute {
             // For device removal (AirPods/headphones), need full deactivate/reactivate cycle
             if reason == .oldDeviceUnavailable {
                 workQueue.async { [weak self] in
@@ -363,6 +390,29 @@ final class PlaybackSessionController {
                         os_log(.info, log: self.logger, "🔀 Route change: BASS reinitialized with active session")
                     }
                 }
+            }
+        }
+
+        // PHONE CALL FIX: Check if we need to resume after interruption (phone call, etc.)
+        // iOS often doesn't fire interruption ended notification - handle resume via route change
+        // If we have an active interruption context AND we're now on a normal (non-phone) route, resume
+        let currentlyOnPhoneRoute = currentOutputs.contains(.builtInReceiver) || currentOutputs.contains(.bluetoothHFP)
+
+        if !currentlyOnPhoneRoute && interruptionContext != nil {
+            if let context = interruptionContext, context.shouldAutoResume {
+                os_log(.info, log: logger, "📞 Interruption ended via route change - auto-resuming")
+
+                // Clear interruption context - we're handling it now
+                interruptionContext = nil
+
+                // Send play command after a delay to allow BASS reinit to complete
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.slimProtoProvider?()?.sendLockScreenCommand("play")
+                    os_log(.info, log: self?.logger ?? OSLog.default, "📞 Sent play command after interruption ended")
+                }
+            } else {
+                os_log(.info, log: logger, "📞 Interruption ended but shouldNotResume")
+                interruptionContext = nil
             }
         }
 
