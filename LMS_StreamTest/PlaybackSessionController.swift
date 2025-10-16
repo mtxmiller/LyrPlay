@@ -343,18 +343,24 @@ final class PlaybackSessionController {
         // Determine if this is a CarPlay event (will be handled by specific CarPlay handlers below)
         let isCarPlayEvent = (currentHasCarPlay && !isCarPlayActive) || (!currentHasCarPlay && (isCarPlayActive || previousHadCarPlay))
 
-        // PHONE CALL FIX: Detect phone call routes to avoid reinitializing BASS during active calls
+        // PHONE CALL FIX v2: Distinguish between ENTERING and EXITING phone call routes
         let currentOutputs = audioSession.currentOutputs
         let previousOutputs = previousRoute?.outputs.map { $0.portType } ?? []
-        let isPhoneCallRoute = currentOutputs.contains(.builtInReceiver) ||
-                               previousOutputs.contains(.builtInReceiver) ||
-                               currentOutputs.contains(.bluetoothHFP) ||
-                               previousOutputs.contains(.bluetoothHFP)
 
-        // CRITICAL: Reinitialize BASS for NON-CarPlay route changes (AirPods, speakers, etc.)
-        // CarPlay events are handled by specific handlers below with proper session management
-        // PHONE CALL FIX: Skip BASS reinit for phone calls - interruption handler manages playback
-        if !isCarPlayEvent && !isPhoneCallRoute {
+        let currentHasPhoneRoute = currentOutputs.contains(.builtInReceiver) || currentOutputs.contains(.bluetoothHFP)
+        let previousHadPhoneRoute = previousOutputs.contains(.builtInReceiver) || previousOutputs.contains(.bluetoothHFP)
+
+        // Only skip BASS reinit when ENTERING phone call (not when exiting)
+        let isEnteringPhoneCall = currentHasPhoneRoute && !previousHadPhoneRoute
+
+        os_log(.info, log: logger, "🔀 Phone call state: entering=%{public}s, current=%{public}s, previous=%{public}s",
+               isEnteringPhoneCall ? "YES" : "NO",
+               currentHasPhoneRoute ? "YES" : "NO",
+               previousHadPhoneRoute ? "YES" : "NO")
+
+        // CRITICAL: Reinitialize BASS for all NON-CarPlay route changes EXCEPT entering phone calls
+        // This now includes EXITING phone calls (HFP → A2DP for AirPods) ✅
+        if !isCarPlayEvent && !isEnteringPhoneCall {
             // For device removal (AirPods/headphones), need full deactivate/reactivate cycle
             if reason == .oldDeviceUnavailable {
                 workQueue.async { [weak self] in
@@ -387,7 +393,13 @@ final class PlaybackSessionController {
                     self.ensureActive(context: .backgroundRefresh)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self.playbackController?.handleAudioRouteChange()
-                        os_log(.info, log: self.logger, "🔀 Route change: BASS reinitialized with active session")
+
+                        // Log if this was exiting a phone call
+                        if previousHadPhoneRoute && !currentHasPhoneRoute {
+                            os_log(.info, log: self.logger, "📞 Exited phone call route - BASS reinitialized for music profile")
+                        } else {
+                            os_log(.info, log: self.logger, "🔀 Route change: BASS reinitialized with active session")
+                        }
                     }
                 }
             }
@@ -396,9 +408,7 @@ final class PlaybackSessionController {
         // PHONE CALL FIX: Check if we need to resume after interruption (phone call, etc.)
         // iOS often doesn't fire interruption ended notification - handle resume via route change
         // If we have an active interruption context AND we're now on a normal (non-phone) route, resume
-        let currentlyOnPhoneRoute = currentOutputs.contains(.builtInReceiver) || currentOutputs.contains(.bluetoothHFP)
-
-        if !currentlyOnPhoneRoute && interruptionContext != nil {
+        if !currentHasPhoneRoute && interruptionContext != nil {
             if let context = interruptionContext, context.shouldAutoResume {
                 os_log(.info, log: logger, "📞 Interruption ended via route change - auto-resuming")
 
@@ -515,7 +525,10 @@ final class PlaybackSessionController {
         if let reasonValue = userInfo[AVAudioSessionInterruptionReasonKey] as? UInt,
            let reason = AVAudioSession.InterruptionReason(rawValue: reasonValue) {
             switch reason {
-            case .appWasSuspended, .builtInMicMuted:
+            case .appWasSuspended:
+                // Siri often shows as appWasSuspended
+                return .siri
+            case .builtInMicMuted:
                 return .otherAudio
             case .default:
                 break
@@ -528,13 +541,15 @@ final class PlaybackSessionController {
             return .otherAudio
         }
 
-        if audioSession.otherAudioIsPlaying {
-            return .otherAudio
-        }
-
+        // Check if route changed to phone call routes
         let outputs = audioSession.currentOutputs
         if outputs.contains(.builtInReceiver) || outputs.contains(.bluetoothHFP) {
             return .phoneCall
+        }
+
+        // Siri/notification: other audio playing but route didn't change to phone
+        if audioSession.otherAudioIsPlaying {
+            return .siri  // Auto-resume for Siri notifications
         }
 
         if UIApplication.shared.applicationState != .active {
@@ -549,9 +564,11 @@ final class PlaybackSessionController {
 
         switch type {
         case .otherAudio:
-            return false
+            return false  // Music apps, podcasts - don't auto-resume
+        case .siri:
+            return true   // Siri notifications - auto-resume ✅
         default:
-            return true
+            return true   // Phone calls, alarms - auto-resume
         }
     }
 
