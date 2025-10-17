@@ -1,9 +1,7 @@
 // File: AudioPlayer.swift
-// Updated to use CBass for minimal native FLAC support
+// Updated to use BASS with plugin loading for FLAC/Opus support
+// BASS API exposed via bridging header (LMS_StreamTest-Bridging-Header.h)
 import Foundation
-import Bass
-import BassFLAC
-import BassOpus
 import MediaPlayer
 import os.log
 
@@ -68,7 +66,8 @@ class AudioPlayer: NSObject, ObservableObject {
     private func setupCBass() {
         // CRITICAL: Configure BASS iOS session BEFORE initialization
         // This must be called before BASS_Init() to take effect
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Complete disable for manual control
+        // Use BASS_IOS_SESSION_DISABLE (16) per Ian@un4seen recommendation (not 0!)
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(BASS_IOS_SESSION_DISABLE))  // Complete disable for manual control
 
         // Minimal BASS initialization - keep it simple
         let result = BASS_Init(-1, 44100, 0, nil, nil)
@@ -83,7 +82,24 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
         BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
         os_log(.info, log: logger, "🔍 BASS verification window increased to %u bytes", verifyBytes)
-        
+
+        // BASS PLUGIN LOADING (per Ian@un4seen recommendation)
+        // Load FLAC and Opus plugins so BASS_StreamCreateURL can handle all formats
+        let flacPlugin = BASS_PluginLoad("bassflac", 0)
+        let opusPlugin = BASS_PluginLoad("bassopus", 0)
+
+        if flacPlugin != 0 {
+            os_log(.info, log: logger, "✅ BASSFLAC plugin loaded: handle=%d", flacPlugin)
+        } else {
+            os_log(.error, log: logger, "❌ Failed to load BASSFLAC plugin: %d", BASS_ErrorGetCode())
+        }
+
+        if opusPlugin != 0 {
+            os_log(.info, log: logger, "✅ BASSOPUS plugin loaded: handle=%d", opusPlugin)
+        } else {
+            os_log(.error, log: logger, "❌ Failed to load BASSOPUS plugin: %d", BASS_ErrorGetCode())
+        }
+
         // Enable ICY metadata for radio streams
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
 
@@ -152,7 +168,8 @@ class AudioPlayer: NSObject, ObservableObject {
 
         // Step 4: Configure and reinitialize BASS (equivalent to Android BASS_Init())
         // iOS automatically picks up new route (speaker) when BASS reinitializes
-        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), 0)  // Configure BEFORE init
+        // Use BASS_IOS_SESSION_DISABLE (16) per Ian@un4seen recommendation (not 0!)
+        BASS_SetConfig(DWORD(BASS_CONFIG_IOS_SESSION), DWORD(BASS_IOS_SESSION_DISABLE))  // Configure BEFORE init
         let result = BASS_Init(-1, 44100, 0, nil, nil)
 
         if result == 0 {
@@ -648,46 +665,21 @@ class AudioPlayer: NSObject, ObservableObject {
         return (title: title, artist: artist)
     }
 
-    // MARK: - Format-Specific Stream Creation (CRITICAL FIX for Opus)
+    // MARK: - Unified Stream Creation (per Ian@un4seen - uses plugin system)
     private func createStreamForFormat(urlString: String, streamFlags: DWORD) -> HSTREAM {
-        // Use the format provided by SlimProto STRM command
+        // Use the format provided by SlimProto STRM command (for logging only)
         let format = currentStreamFormat
-        
-        os_log(.info, log: logger, "🎵 Creating %{public}s stream with format-specific function", format)
-        
-        switch format.uppercased() {
-        case "OPUS":
-            // Use BASS_OPUS_StreamCreateURL for Opus files
-            os_log(.info, log: logger, "🎵 Using BASS_OPUS_StreamCreateURL for Opus stream")
-            return BASS_OPUS_StreamCreateURL(
-                urlString,
-                0,                    // offset
-                streamFlags,          // flags
-                nil,                 // no download callback
-                nil                  // no user data
-            )
-            
-        case "FLAC":
-            // Use BASS_FLAC_StreamCreateURL for FLAC files
-            os_log(.info, log: logger, "🎵 Using BASS_FLAC_StreamCreateURL for FLAC stream")
-            return BASS_FLAC_StreamCreateURL(
-                urlString,
-                0,                    // offset
-                streamFlags,          // flags
-                nil,                 // no download callback
-                nil                  // no user data
-            )
-            
-        default:
-            // Use generic BASS_StreamCreateURL for other formats (AAC, MP3, OGG)
-            os_log(.info, log: logger, "🎵 Using generic BASS_StreamCreateURL for %{public}s stream", format)
-            return BASS_StreamCreateURL(
-                urlString,
-                0,                    // offset
-                streamFlags,          // flags
-                nil, nil             // no callbacks
-            )
-        }
+
+        // UNIFIED APPROACH: BASS_StreamCreateURL automatically uses appropriate plugin
+        // based on file headers after BASS_PluginLoad() has registered FLAC and Opus support
+        os_log(.info, log: logger, "🎵 Creating %{public}s stream with unified BASS_StreamCreateURL (plugin-based)", format)
+
+        return BASS_StreamCreateURL(
+            urlString,
+            0,                    // offset
+            streamFlags,          // flags
+            nil, nil             // no callbacks
+        )
     }
     
     
