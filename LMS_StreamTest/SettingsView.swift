@@ -1295,56 +1295,56 @@ struct AudioFormatConfigView: View {
                     .buttonStyle(PlainButtonStyle())
                 }
             }
-            
-            Section(header: Text("Server Requirements")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    FormatRequirementRow(
-                        format: "Compressed (AAC/MP3)",
-                        requirement: "No server setup required",
-                        icon: "checkmark.circle.fill",
-                        color: .green
-                    )
-                    
-                    FormatRequirementRow(
-                        format: "High Quality (OGG Vorbis)",
-                        requirement: "Requires server transcoding setup to work",
-                        icon: "info.circle.fill",
-                        color: .blue
-                    )
-                    
-                    FormatRequirementRow(
-                        format: "Premium Quality (Opus)",
-                        requirement: "Requires server transcoding setup to work",
-                        icon: "info.circle.fill",
-                        color: .blue
-                    )
-                    
-                    FormatRequirementRow(
-                        format: "Lossless (FLAC)",
-                        requirement: "Requires server transcoding setup for seek/recovery",
-                        icon: "info.circle.fill",
-                        color: .blue
-                    )
+
+            Section(header: Text("Server Setup")) {
+                // Easy Setup: MobileTranscode Plugin
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .foregroundColor(.orange)
+                            .frame(width: 24)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Easy Setup: MobileTranscode Plugin")
+                                .font(.body)
+                                .fontWeight(.semibold)
+
+                            Text("Install from: Server Settings → Manage Plugins → 3rd Party → MobileTranscode Plugin")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Text("Automatically configures FLAC, Opus & OGG Vorbis")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Text("Note: Opus format requires opus-tools installed on your server")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                                .padding(.top, 2)
+                        }
+                    }
                 }
-                
-                // Server setup instructions link
+                .padding(.vertical, 4)
+
+                // Manual setup fallback
                 Link(destination: URL(string: "https://github.com/mtxmiller/LyrPlay")!) {
                     HStack {
-                        Image(systemName: "info.circle")
+                        Image(systemName: "book")
                             .foregroundColor(.blue)
-                        
+                            .frame(width: 24)
+
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Server Setup Instructions")
+                            Text("Manual Setup Instructions")
                                 .font(.body)
                                 .foregroundColor(.blue)
-                            
-                            Text("Visit GitHub for FLAC, Opus & OGG Vorbis transcoding setup")
+
+                            Text("Advanced: Configure transcoding manually")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         Spacer()
-                        
+
                         Image(systemName: "arrow.up.right.square")
                             .font(.caption)
                             .foregroundColor(.blue)
@@ -1391,29 +1391,54 @@ struct AudioFormatConfigView: View {
     }
 }
 
-// MARK: - Format Requirement Row
+// MARK: - Format Requirement Row (Legacy - kept for compatibility)
 struct FormatRequirementRow: View {
     let format: String
     let requirement: String
     let icon: String
     let color: Color
-    
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(color)
                 .frame(width: 20)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(format)
                     .font(.body)
                     .fontWeight(.medium)
-                
+
                 Text(requirement)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Format Requirement Simple (No status indicators)
+struct FormatRequirementSimple: View {
+    let format: String
+    let requirement: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("•")
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(format)
+                    .font(.body)
+                    .fontWeight(.medium)
+
+                Text(requirement)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Spacer()
         }
     }

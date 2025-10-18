@@ -70,10 +70,10 @@ class SettingsManager: ObservableObject {
         
         var description: String {
             switch self {
-            case .compressed: return "Smallest bandwidth, universal compatibility"
-            case .oggVorbis: return "Near-lossless quality, efficient streaming"
-            case .opus: return "Superior quality, modern codec, efficient bandwidth"
-            case .flac: return "Native lossless, highest quality"
+            case .compressed: return "Smallest bandwidth, universal compatibility • Works out of the box"
+            case .oggVorbis: return "Near-lossless quality, efficient streaming • Needs server transcoding (MobileTranscode Plugin)"
+            case .opus: return "Superior quality, modern codec, efficient bandwidth • Needs server transcoding (MobileTranscode Plugin) + opus-tools"
+            case .flac: return "Native lossless, highest quality • Needs server transcoding (MobileTranscode Plugin)"
             }
         }
         
