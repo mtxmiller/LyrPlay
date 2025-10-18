@@ -102,6 +102,7 @@ lms-remotecache-plugin/
 slimserver/
 bass24-ios-2/
 .claude/
+docs/bass_documentation
 
 # Development guides and logs
 LMS_Opus_Setup_Guide.md
