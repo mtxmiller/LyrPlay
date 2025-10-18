@@ -45,42 +45,37 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Audio Session Setup (DISABLED)
     private func setupInitialAudioSession() {
-        // DISABLED: AudioPlayer handles initial session setup with BASS_IOS_SESSION_DISABLE
-        os_log(.info, log: logger, "✅ Initial audio session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
+        // DISABLED: BASS handles initial session setup automatically
+        os_log(.info, log: logger, "✅ Initial audio session handled by BASS auto-management")
     }
-    
+
     // MARK: - Format-Specific Audio Session Configuration (DISABLED)
     func setupForLosslessAudio() {
-        // DISABLED: AudioPlayer handles all session configuration with BASS_IOS_SESSION_DISABLE
-        os_log(.info, log: logger, "✅ Lossless audio - session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
+        // DISABLED: BASS handles all session configuration automatically
+        os_log(.info, log: logger, "✅ Lossless audio - session handled by BASS auto-management")
     }
-    
+
     func setupForCompressedAudio() {
-        // DISABLED: AudioPlayer handles all session configuration with BASS_IOS_SESSION_DISABLE
-        os_log(.info, log: logger, "✅ Compressed audio - session handled by AudioPlayer (BASS_IOS_SESSION_DISABLE)")
+        // DISABLED: BASS handles all session configuration automatically
+        os_log(.info, log: logger, "✅ Compressed audio - session handled by BASS auto-management")
     }
     
     // MARK: - Enhanced Audio Session Control (DISABLED)
     func activateAudioSession() {
-        PlaybackSessionController.shared.ensureActive(context: .backgroundRefresh)
-        os_log(.info, log: logger, "✅ Audio session activation requested via controller")
+        // BASS auto-manages iOS audio session - no manual activation needed
+        os_log(.info, log: logger, "✅ Audio session activation - BASS auto-managed")
     }
 
     func deactivateAudioSession() {
-        // DISABLED: BASS handles deactivation with BASS_IOS_SESSION_DISABLE  
-        os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS")
+        // DISABLED: BASS handles deactivation automatically
+        os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS auto-management")
     }
-    
-    // MARK: - Interruption Recovery (RESTORED)
+
+    // MARK: - Interruption Recovery (DISABLED)
     func reconfigureAfterInterruption() {
-        // RESTORED: With BASS_IOS_SESSION_DISABLE, we need manual session management
-        // Delegate to AudioPlayer's unified session management
-        if let audioManager = delegate as? AudioManager {
-            audioManager.activateAudioSession(context: .serverResume)
-            os_log(.info, log: logger, "✅ Interruption recovery delegated to PlaybackSessionController")
-        } else {
-            os_log(.error, log: logger, "❌ Cannot access AudioManager for interruption recovery")
-        }
+        // DISABLED: BASS handles interruption recovery automatically
+        // No manual session management needed - BASS auto-manages session lifecycle
+        os_log(.info, log: logger, "✅ Interruption recovery handled by BASS auto-management")
     }
     
     // MARK: - Background Audio Capabilities Management
@@ -96,9 +91,9 @@ class AudioSessionManager: ObservableObject {
     }
     
     func reconfigureAfterMediaServicesReset() {
-        // DISABLED: BASS handles media services reset recovery with BASS_IOS_SESSION_DISABLE
-        // AudioPlayer maintains session configuration, BASS handles reset recovery
-        os_log(.info, log: logger, "✅ Media services reset handled by BASS (BASS_IOS_SESSION_DISABLE)")
+        // DISABLED: BASS handles media services reset recovery automatically
+        // BASS auto-manages session lifecycle and reset recovery
+        os_log(.info, log: logger, "✅ Media services reset handled by BASS auto-management")
     }
     
     // MARK: - Background Observers

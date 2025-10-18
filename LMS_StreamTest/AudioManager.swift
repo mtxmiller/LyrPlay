@@ -171,8 +171,8 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
-        audioPlayer.configureAudioSessionIfNeeded(context: context)
-        os_log(.info, log: logger, "🔒 Audio session activation requested (%{public}s)", context.rawValue)
+        // BASS automatically manages iOS audio session - no manual activation needed
+        os_log(.info, log: logger, "🔒 Audio session activation (BASS auto-managed - no action needed)")
     }
     
     // Metadata management
@@ -223,12 +223,12 @@ class AudioManager: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ SlimClient reference set for AudioManager and NowPlayingManager")
     }
 
-    // MARK: - Route Change Handling (NEW)
-    /// Reinitialize BASS audio system for route changes (CarPlay, AirPods, etc.)
-    /// Delegates to AudioPlayer's reinitializeBASS() method
+    // MARK: - Route Change Handling (Simplified - BASS manages automatically)
+    /// BASS automatically handles iOS audio route changes (CarPlay, AirPods, etc.)
+    /// Just delegate to AudioPlayer for logging
     func handleAudioRouteChange() {
-        os_log(.info, log: logger, "🔀 AudioManager handling route change - delegating to AudioPlayer")
-        audioPlayer.reinitializeBASS()
+        os_log(.info, log: logger, "🔀 AudioManager handling route change - BASS manages automatically")
+        audioPlayer.handleAudioRouteChange()
     }
 
     // MARK: - Cleanup

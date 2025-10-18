@@ -352,6 +352,21 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
+		9A1B2C3D4E5F6A7B8C9D0E1F /* Embed BASS Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed BASS Frameworks";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Embed BASS Frameworks into app bundle\nset -e\n\n# Determine which slice to use based on SDK\nif [[ \"$PLATFORM_NAME\" == \"iphonesimulator\" ]]; then\n  SLICE=\"ios-arm64_i386_x86_64-simulator\"\nelse\n  SLICE=\"ios-arm64_armv7_armv7s\"\nfi\n\necho \"Platform: $PLATFORM_NAME\"\necho \"Using slice: $SLICE\"\necho \"Code signing identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n\n# Create Frameworks directory in app bundle\nmkdir -p \"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n\n# Copy and sign each framework\nfor FRAMEWORK in bass bassflac bassopus; do\n  SOURCE=\"${PROJECT_DIR}/Frameworks/${FRAMEWORK}.xcframework/${SLICE}/${FRAMEWORK}.framework\"\n  DEST=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/${FRAMEWORK}.framework\"\n  \n  echo \"Copying ${FRAMEWORK}.framework from ${SLICE}\"\n  rm -rf \"${DEST}\"\n  cp -R \"${SOURCE}\" \"${DEST}\"\n  \n  # Remove extended attributes and resource forks (macOS metadata)\n  echo \"Cleaning macOS metadata from ${FRAMEWORK}.framework\"\n  xattr -cr \"${DEST}\"\n  \n  # Strip any existing signature\n  echo \"Stripping existing signature from ${FRAMEWORK}.framework\"\n  codesign --remove-signature \"${DEST}\" 2>/dev/null || true\n  \n  # Code sign the framework\n  echo \"Code signing ${FRAMEWORK}.framework with identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \\\n    --timestamp=none \\\n    --generate-entitlement-der \\\n    \"${DEST}\"\n  \n  # Verify signature\n  echo \"Verifying signature for ${FRAMEWORK}.framework\"\n  codesign --verify --verbose \"${DEST}\"\ndone\n\necho \"BASS frameworks embedded and signed successfully\"\n";
+			showEnvVarsInLog = 0;
+		};
 		F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -371,21 +386,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest-frameworks.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
-		9A1B2C3D4E5F6A7B8C9D0E1F /* Embed BASS Frameworks */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
-			name = "Embed BASS Frameworks";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# Embed BASS Frameworks into app bundle\nset -e\n\n# Determine which slice to use based on SDK\nif [[ \"$PLATFORM_NAME\" == \"iphonesimulator\" ]]; then\n  SLICE=\"ios-arm64_i386_x86_64-simulator\"\nelse\n  SLICE=\"ios-arm64_armv7_armv7s\"\nfi\n\necho \"Platform: $PLATFORM_NAME\"\necho \"Using slice: $SLICE\"\necho \"Code signing identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n\n# Create Frameworks directory in app bundle\nmkdir -p \"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n\n# Copy and sign each framework\nfor FRAMEWORK in bass bassflac bassopus; do\n  SOURCE=\"${PROJECT_DIR}/Frameworks/${FRAMEWORK}.xcframework/${SLICE}/${FRAMEWORK}.framework\"\n  DEST=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/${FRAMEWORK}.framework\"\n  \n  echo \"Copying ${FRAMEWORK}.framework from ${SLICE}\"\n  rm -rf \"${DEST}\"\n  cp -R \"${SOURCE}\" \"${DEST}\"\n  \n  # Remove extended attributes and resource forks (macOS metadata)\n  echo \"Cleaning macOS metadata from ${FRAMEWORK}.framework\"\n  xattr -cr \"${DEST}\"\n  \n  # Strip any existing signature\n  echo \"Stripping existing signature from ${FRAMEWORK}.framework\"\n  codesign --remove-signature \"${DEST}\" 2>/dev/null || true\n  \n  # Code sign the framework\n  echo \"Code signing ${FRAMEWORK}.framework with identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \\\n    --timestamp=none \\\n    --generate-entitlement-der \\\n    \"${DEST}\"\n  \n  # Verify signature\n  echo \"Verifying signature for ${FRAMEWORK}.framework\"\n  codesign --verify --verbose \"${DEST}\"\ndone\n\necho \"BASS frameworks embedded and signed successfully\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
