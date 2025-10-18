@@ -854,16 +854,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
-        audioManager.stop()
+        //audioManager.stop() - removed - testing faux gapless
         stopPlaybackHeartbeat()
 
         // Track end detection now handled exclusively by BASS_SYNC_END callback
 
-        // Start the new stream - this will trigger the sequence:
-        // 1. handleStartCommand sends STMf (already done by command handler)
-        // 2. AudioPlayer intercepts headers → RESP
-        // 3. StreamingKit starts buffering → STMc (via delegate)
-        // 4. Playback actually starts → STMs (below)
         if startTime > 0 {
             audioManager.playStreamAtPositionWithFormat(urlString: url, startTime: startTime, format: format, replayGain: replayGain)
         } else {
