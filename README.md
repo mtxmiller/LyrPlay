@@ -10,7 +10,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 
 ## Features
 
-- **Native FLAC Support** - High-quality lossless audio streaming with native decoding
+- **Native FLAC / Opus Support** - High-quality lossless or efficiently compressed audio streaming with native decoding
 - **Material Web Interface** - Embedded Material skin for full LMS control
 - **Background Audio** - Continuous playback with lock screen integration
 - **Server Discovery** - Automatic LMS server detection with failover support
@@ -34,11 +34,11 @@ For remote access outside your home network, you'll need a secure VPN solution: 
 
 **Important**: Direct internet exposure of LMS servers is not recommended due to security risks. 
 
-## Enabling FLAC Seek / Opus
+## Enabling Mobile Transcode (OGG/Opus/FLAC)
 
 LyrPlay can play MP3/AAC and FLAC without additional plugins, but for an improved experience a transcoding rules plugin has been developed [Mobile Transcode](https://github.com/mtxmiller/MobileTranscode) for ease of setup.  
 
-To install it add below URL to “Additional repositories” on your “Manage Plug-ins page” in server configuration (at bottom).  Be sure to RESTART server after install. 
+**To install it go to Server Settings -> Manage Plugins -> 3rd Party -> Mobile Transcode**
 
 **Mobile Transcode Plugin URL:** https://raw.githubusercontent.com/mtxmiller/MobileTranscode/main/repo.xml
 
