@@ -103,10 +103,13 @@ class AudioPlayer: NSObject, ObservableObject {
         // Enable ICY metadata for radio streams
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
 
-        // Basic network configuration for LMS streaming
+        // Network buffer configuration - optimized for both LAN and mobile streaming
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
+        os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
+
+        // Additional network configuration (commented - using BASS defaults)
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(5000))      // 5s network buffer (milliseconds)
         //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
         

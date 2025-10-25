@@ -420,11 +420,29 @@ class SlimProtoCommandHandler: ObservableObject {
     
     func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
-        
-        // Don't track position - server will tell us if we need to seek
+
+        // CRITICAL FIX: Check if we have an active stream before unpausing
+        // If no stream (e.g., after disconnect/reconnect), use playlist jump to recover position
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            if !coordinator.hasActiveStream() {
+                os_log(.info, log: logger, "🔄 No active stream after reconnect - using playlist jump for position recovery")
+
+                // CRITICAL: Don't send STMd (that means "next track please")
+                // Instead, use playlist jump which tells server to jump to current track at saved position
+                // This will trigger strm 's' with correct HTTP URL for current track
+                coordinator.performPlaylistRecovery()
+
+                // Don't call didResumeStream() - wait for fresh stream from playlist jump
+                isStreamPaused = false
+                isPausedByLockScreen = false
+                return
+            }
+        }
+
+        // Normal unpause flow - we have an active stream
         isStreamPaused = false
         isPausedByLockScreen = false
-        
+
         delegate?.didResumeStream()
         // REMOVED: client status sending - let coordinator handle it
     }

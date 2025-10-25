@@ -64,7 +64,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     private var lastKnownPosition: Double = 0.0
     
     private var lastSuccessfulConnection: Date?
-    
+
+    // MARK: - Reconnection State
+    // Track if this is a reconnection (for HELO reconnect bit 0x4000)
+    // Set to true after first successful HELO, never reset except on fresh app launch
+    private var isReconnection = false
+
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -143,7 +148,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         }
         isConnected = false
         hasRequestedInitialStatus = false
-        os_log(.info, log: logger, "Disconnected and reset connection state")
+        // IMPORTANT: Do NOT reset isReconnection here!
+        // We want to maintain reconnect state across disconnections
+        // so server recognizes us as the same player when we reconnect
+        os_log(.info, log: logger, "Disconnected and reset connection state (preserving reconnect flag)")
     }
     
     func disconnectWithPositionSave() {
@@ -265,64 +273,74 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     // MARK: - FIXED: Protocol Messages with proper device identification
     private func sendHelo() {
-        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
-        
+        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS (reconnect: %d)", isReconnection)
+
         // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
         // Use device ID 9 (squeezelite) which is better recognized by LMS
         // This prevents the "AppleCoreMedia" identification issue
         let deviceID: UInt8 = 12   // squeezelite - well-supported by LMS
         let revision: UInt8 = 0   // Standard revision
-        
+
         // Get MAC address from settings
         let macString = settings.playerMACAddress
         let macComponents = macString.components(separatedBy: ":")
         let macAddress: [UInt8] = macComponents.compactMap { UInt8($0, radix: 16) }
         let finalMacAddress: [UInt8] = macAddress.count == 6 ? macAddress : [0x00, 0x04, 0x20, 0x12, 0x34, 0x56]
-        
+
         var helloData = Data()
-        
+
         // Device ID (1 byte) - 9 = squeezelite for better LMS compatibility
         helloData.append(deviceID)
-        
+
         // Revision (1 byte)
         helloData.append(revision)
-        
+
         // MAC address (6 bytes)
         helloData.append(Data(finalMacAddress))
-        
+
         // UUID (16 bytes) - optional, using zeros
         helloData.append(Data(repeating: 0, count: 16))
-        
-        // WLan channel list (2 bytes) - 0x0000 for wired connection
-        let wlanChannels: UInt16 = 0x0000  // Wired connection like real squeezelite
+
+        // *** SEAMLESS RECONNECTION FIX: Set reconnect bit (0x4000) like squeezelite ***
+        // This tells LMS server: "I'm the same player reconnecting, preserve my state!"
+        // Server will call playerReconnect() and execute ContinuePlay - no position loss!
+        let wlanChannels: UInt16 = isReconnection ? 0x4000 : 0x0000
         helloData.append(Data([UInt8(wlanChannels >> 8), UInt8(wlanChannels & 0xff)]))
-        
+
         // Bytes received (8 bytes) - optional, starting at 0
         helloData.append(Data(repeating: 0, count: 8))
-        
+
         // Language (2 bytes) - optional, "en"
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
-        
+
         // *** FIXED: Enhanced capabilities string with user-configurable FLAC support ***
         let capabilities = settings.capabilitiesString
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
         }
-        
+
         // Create full message
         let command = "HELO".data(using: .ascii)!
         let length = UInt32(helloData.count).bigEndian
         let lengthData = withUnsafeBytes(of: length) { Data($0) }
-        
+
         var fullMessage = Data()
         fullMessage.append(command)
         fullMessage.append(lengthData)
         fullMessage.append(helloData)
-        
+
         socket.write(fullMessage, withTimeout: 30, tag: 1)
-        os_log(.info, log: logger, "✅ HELO sent as squeezelite with player name: '%{public}s', MAC: %{public}s",
-               settings.effectivePlayerName, settings.formattedMACAddress)
+
+        // After first successful HELO, all future connections are reconnections
+        // This ensures seamless position recovery when app resumes from background
+        if !isReconnection {
+            isReconnection = true
+            os_log(.info, log: logger, "🔄 First HELO sent - future connections will use reconnect bit")
+        }
+
+        os_log(.info, log: logger, "✅ HELO sent (reconnect bit: 0x%04x) as squeezelite with player name: '%{public}s', MAC: %{public}s",
+               wlanChannels, settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
     func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {
@@ -330,7 +348,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
             os_log(.error, log: logger, "Cannot send status - not connected")
             return
         }
-        
+
         os_log(.debug, log: logger, "📤 Sending STAT: %{public}s", code)
         
         var statusData = Data()
@@ -413,7 +431,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         ]))
         
         // CRITICAL: Always include ALL remaining fields for consistent packet structure
-        
+
         // Get current audio position for timing
         let position: Double
         if let commandHandler = commandHandler {

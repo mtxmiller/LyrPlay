@@ -528,18 +528,24 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
-        
+
         // Track if we were disconnected while in background (for app open recovery)
         if isAppInBackground {
             wasDisconnectedWhileInBackground = true
             os_log(.info, log: logger, "📱 Disconnected while in background - recovery will be needed")
         }
-        
+
         // CRITICAL: Save position for playlist recovery on any disconnect
         saveCurrentPositionForRecovery()
-        
+
+        // CRITICAL FIX: Stop and free the BASS stream on disconnect
+        // This prevents trying to resume stale buffered data after reconnection
+        // Server will send fresh stream URL with correct position via HELO reconnect
+        os_log(.info, log: logger, "🛑 Stopping BASS stream on disconnect to prevent stale buffer resume")
+        audioManager.stop()
+
         connectionManager.didDisconnect(error: error)
-        
+
         stopPlaybackHeartbeat()  // ← Correct timer
         stopServerTimeSync()
     }
@@ -944,6 +950,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
         // For recovery operations, use getCurrentInterpolatedTime() instead
         return audioManager.getAudioPlayerTimeForFallback()
+    }
+
+    func hasActiveStream() -> Bool {
+        // Check if we have an active BASS stream (not stale after reconnect)
+        let playerState = audioManager.getPlayerState()
+        return playerState != "No Stream"
     }
 
     func didReceiveStatusRequest() {
