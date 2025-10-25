@@ -1141,24 +1141,69 @@ extension SlimProtoCoordinator {
         let context: PlaybackSessionController.ActivationContext = command.lowercased() == "play" ? .userInitiatedPlay : .backgroundRefresh
         audioManager.activateAudioSession(context: context)
 
-        // Ensure connection and send command
-        if !connectionManager.connectionState.isConnected {
-            os_log(.info, log: logger, "🔄 Reconnecting for lock screen command")
+        // CRITICAL: Lock screen PLAY commands need special handling
+        // Background connections are unreliable - state may say "connected" but socket is stale
+        // For PLAY: Force fresh reconnect to ensure 'strm u' → playlist recovery flow works
+        // For PAUSE/other: Just send command normally (no need to disconnect)
+
+        if command.lowercased() == "play" {
+            // PLAY command: Force fresh reconnect for reliable recovery
+
+            // Disconnect first if we think we're connected (force clean state)
+            if connectionManager.connectionState.isConnected {
+                os_log(.info, log: logger, "🔄 Lock screen PLAY: Disconnecting stale background connection for clean reconnect")
+                client.disconnect()
+            }
+
+            os_log(.info, log: logger, "🔄 Lock screen PLAY: Starting fresh reconnect")
             connect()
 
-            // Queue command to send after connection
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                if command.lowercased() == "play" {
-                    // Use playlist jump with timeOffset for position recovery
-                    self.performPlaylistRecovery()
-                } else {
+            // Wait for confirmed connection before sending command
+            // Check connection state every 0.5s for up to 5 seconds
+            var attempts = 0
+            let maxAttempts = 10  // 5 seconds total (10 x 0.5s)
+
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+
+                attempts += 1
+
+                if self.connectionManager.connectionState.isConnected {
+                    // Connection confirmed! Send the command
+                    timer.invalidate()
+                    os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Fresh connection confirmed, sending command")
+
+                    // IMPORTANT: After HELO reconnect, server sends 'strm u' (unpause)
+                    // handleUnpauseCommand() detects no active stream and calls performPlaylistRecovery()
+                    // So just send the simple command - recovery happens automatically
                     self.sendJSONRPCCommand(command)
+
+                } else if attempts >= maxAttempts {
+                    // Timeout - give up
+                    timer.invalidate()
+                    os_log(.error, log: self.logger, "🔒 Lock screen PLAY: Connection timeout after %d attempts", attempts)
                 }
             }
         } else {
-            // Connected - send command immediately
-            os_log(.info, log: logger, "🔒 Already connected - sending lock screen command directly")
-            sendJSONRPCCommand(command)
+            // PAUSE or other commands: Send normally without forced reconnect
+            // This prevents disconnecting unnecessarily and keeps server interface in sync
+
+            if !connectionManager.connectionState.isConnected {
+                os_log(.info, log: logger, "🔄 Lock screen %{public}s: Not connected, reconnecting", command)
+                connect()
+
+                // Wait briefly for connection
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.sendJSONRPCCommand(command)
+                }
+            } else {
+                // Already connected - send command immediately
+                os_log(.info, log: logger, "🔒 Lock screen %{public}s: Sending on existing connection", command)
+                sendJSONRPCCommand(command)
+            }
         }
         
         // Track lock screen pause state
