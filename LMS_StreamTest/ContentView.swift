@@ -236,13 +236,13 @@ struct ContentView: View {
         
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
-        
-        // Cache busting timestamp
-        let timestamp = Int(Date().timeIntervalSince1970)
-        
+
+        // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
+        // Material skin handles data freshness via its own API calls
+
         // REMOVED: player parameter - let Material control default player selection
         // Use & since baseURL already contains ?hide=notif
-        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
+        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
     }
 
     
@@ -541,10 +541,12 @@ struct WebView: UIViewRepresentable {
         DispatchQueue.main.async {
             webViewReference = webView
         }
-        
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-        request.timeoutInterval = 10.0  // Now you can add this line
-        
+
+        // Use cache for faster loading on subsequent opens
+        // Material skin handles data freshness via API calls, so caching the HTML/CSS/JS is safe
+        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
+        request.timeoutInterval = 30.0  // 30 seconds for remote/slow connections
+
         webView.load(request)
 
         

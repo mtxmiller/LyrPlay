@@ -76,10 +76,12 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        let verifyBytes = DWORD(1024 * 1024)
-        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
-        BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
-        os_log(.info, log: logger, "🔍 BASS verification window increased to %u bytes", verifyBytes)
+        // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
+        // Use BASS defaults instead: VERIFY=16KB, VERIFY_NET=4KB (25% of VERIFY)
+        // let verifyBytes = DWORD(1024 * 1024)
+        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
+        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
+        os_log(.info, log: logger, "✅ Using BASS default verification (16KB local, 4KB network)")
 
         // BASS PLUGIN LOADING (per Ian@un4seen recommendation)
         // Load FLAC and Opus plugins so BASS_StreamCreateURL can handle all formats
@@ -155,10 +157,11 @@ class AudioPlayer: NSObject, ObservableObject {
         trackStartTime = Date()
         
         // CBass configured for streaming FLAC tolerance (like squeezelite)
-        let streamFlags = DWORD(BASS_STREAM_STATUS)     // enable status info
+        // TESTING v1.6.2: BASS_STREAM_BLOCK for better transcoded stream compatibility
+        let streamFlags = DWORD(BASS_STREAM_STATUS) |   // enable status info
+                         DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
         //                 DWORD(BASS_STREAM_AUTOFREE) |   // auto-free when stopped
          //                DWORD(BASS_SAMPLE_FLOAT) |      // use float samples (like squeezelite)
-          //               DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
         
         // FORMAT-SPECIFIC stream creation - CRITICAL FIX for Opus seeking
         currentStream = createStreamForFormat(urlString: urlString, streamFlags: streamFlags)
