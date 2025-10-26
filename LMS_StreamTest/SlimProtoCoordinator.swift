@@ -358,66 +358,95 @@ class SlimProtoCoordinator: ObservableObject {
         }
     }
     
-    /// Perform playlist jump with timeOffset recovery (Home Assistant style)
-    func performPlaylistRecovery() {
+    /// Perform playlist jump recovery with context-aware play/pause behavior
+    /// - Parameter shouldPlay: If true, starts playing after jump (noplay=0). If false, stays paused (noplay=1)
+    func performPlaylistRecovery(shouldPlay: Bool = true) {
         recoveryQueue.async { [weak self] in
             guard let self = self else { return }
-            
+
             // Check if recovery is already in progress
             guard !self.isRecoveryInProgress else {
-                os_log(.info, log: self.logger, "🔒 Lock Screen Recovery: Skipping - recovery already in progress")
+                os_log(.info, log: self.logger, "🔒 Playlist Recovery: Skipping - recovery already in progress")
                 return
             }
-            
+
             // Set recovery in progress
             self.isRecoveryInProgress = true
-            os_log(.info, log: self.logger, "🔒 Lock Screen Recovery: Starting (blocking other recovery methods)")
-            
+            os_log(.info, log: self.logger, "🔒 Playlist Recovery: Starting (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+
             DispatchQueue.main.async { [weak self] in
-                self?.executeLockScreenRecovery()
+                self?.executePlaylistRecovery(shouldPlay: shouldPlay)
             }
         }
     }
-    
-    private func executeLockScreenRecovery() {
+
+    private func executePlaylistRecovery(shouldPlay: Bool) {
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-            os_log(.info, log: logger, "🔄 No recovery data - using simple play command")
-            sendJSONRPCCommand("play")
+            os_log(.info, log: logger, "🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
         }
-        
+
         let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
-        
+
         guard savedPosition > 0 else {
-            os_log(.info, log: logger, "🔄 No saved position - using simple play command") 
-            sendJSONRPCCommand("play")
+            os_log(.info, log: logger, "🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
         }
-        
-        os_log(.info, log: logger, "🎯 Performing playlist recovery: jump to track %d at %.2f seconds", savedIndex, savedPosition)
-        
-        // Use Home Assistant approach: playlist jump with timeOffset
+
+        os_log(.info, log: logger, "🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
+               savedIndex, savedPosition, shouldPlay ? "YES" : "NO")
+
+        // SILENT RECOVERY: Set mute flag BEFORE playlist jump for app foreground recovery
+        if !shouldPlay {
+            audioManager.enableSilentRecoveryMode()
+            os_log(.info, log: logger, "🔇 Silent recovery mode enabled - next stream will be muted")
+        }
+
+        // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
+        // After 300s server forget, new client is STOPPED, and noplay=1 only calls resetSongqueue()
+        // which doesn't actually seek to the position. So we always play, then pause if needed.
+        let noplayFlag = 0  // Always start playing
+
         let playlistJumpCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
             "params": [settings.playerMACAddress, [
-                "playlist", "jump", savedIndex, 1, 0, [
+                "playlist", "jump", savedIndex, 1, noplayFlag, [
                     "timeOffset": savedPosition
                 ]
             ]]
         ]
         
         sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🎯 Playlist jump recovery completed")
-            
+            guard let self = self else { return }
+            os_log(.info, log: self.logger, "🎯 Playlist jump recovery completed")
+
+            // If we jumped with shouldPlay=false, pause after stream establishes (silently muted)
+            // Longer delay (1.5s) ensures stream is fully established before pause
+            if !shouldPlay {
+                os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    // Send pause command
+                    self.sendJSONRPCCommand("pause")
+
+                    // Clear mute flag and restore normal volume after pause
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.audioManager.disableSilentRecoveryMode()
+                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored")
+                    }
+                }
+            }
+
             // Clear recovery flag after completion
-            self?.isRecoveryInProgress = false
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔒 Recovery state cleared - other recovery methods can now proceed")
-            
+            self.isRecoveryInProgress = false
+            os_log(.info, log: self.logger, "🔒 Recovery state cleared - other recovery methods can now proceed")
+
             // Clear recovery data after successful use
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
@@ -1172,14 +1201,14 @@ extension SlimProtoCoordinator {
                 attempts += 1
 
                 if self.connectionManager.connectionState.isConnected {
-                    // Connection confirmed! Send the command
+                    // Connection confirmed! Perform playlist recovery with play
                     timer.invalidate()
-                    os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Fresh connection confirmed, sending command")
+                    os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Fresh connection confirmed, performing recovery")
 
-                    // IMPORTANT: After HELO reconnect, server sends 'strm u' (unpause)
-                    // handleUnpauseCommand() detects no active stream and calls performPlaylistRecovery()
-                    // So just send the simple command - recovery happens automatically
-                    self.sendJSONRPCCommand(command)
+                    // Client-side playlist jump recovery with shouldPlay=true
+                    // Server creates new client (after 300s) or uses existing (< 300s)
+                    // Either way, we control recovery with playlist jump command
+                    self.performPlaylistRecovery(shouldPlay: true)
 
                 } else if attempts >= maxAttempts {
                     // Timeout - give up

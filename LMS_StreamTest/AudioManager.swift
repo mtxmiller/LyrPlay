@@ -169,7 +169,19 @@ class AudioManager: NSObject, ObservableObject {
     func getVolume() -> Float {
         return audioPlayer.getVolume()
     }
-    
+
+    // MARK: - Silent Recovery Support
+    /// Enable silent mode for the next stream (for app foreground recovery)
+    func enableSilentRecoveryMode() {
+        audioPlayer.muteNextStream = true
+    }
+
+    /// Disable silent mode and restore normal volume
+    func disableSilentRecoveryMode() {
+        audioPlayer.muteNextStream = false
+        audioPlayer.setVolume(1.0)
+    }
+
     func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
         // BASS automatically manages iOS audio session - no manual activation needed
         os_log(.info, log: logger, "🔒 Audio session activation (BASS auto-managed - no action needed)")

@@ -65,11 +65,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     private var lastSuccessfulConnection: Date?
 
-    // MARK: - Reconnection State
-    // Track if this is a reconnection (for HELO reconnect bit 0x4000)
-    // Set to true after first successful HELO, never reset except on fresh app launch
-    private var isReconnection = false
-
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -148,10 +143,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         }
         isConnected = false
         hasRequestedInitialStatus = false
-        // IMPORTANT: Do NOT reset isReconnection here!
-        // We want to maintain reconnect state across disconnections
-        // so server recognizes us as the same player when we reconnect
-        os_log(.info, log: logger, "Disconnected and reset connection state (preserving reconnect flag)")
+        os_log(.info, log: logger, "Disconnected and reset connection state")
     }
     
     func disconnectWithPositionSave() {
@@ -273,7 +265,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
     
     // MARK: - FIXED: Protocol Messages with proper device identification
     private func sendHelo() {
-        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS (reconnect: %d)", isReconnection)
+        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
 
         // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
         // Use device ID 9 (squeezelite) which is better recognized by LMS
@@ -301,10 +293,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         // UUID (16 bytes) - optional, using zeros
         helloData.append(Data(repeating: 0, count: 16))
 
-        // *** SEAMLESS RECONNECTION FIX: Set reconnect bit (0x4000) like squeezelite ***
-        // This tells LMS server: "I'm the same player reconnecting, preserve my state!"
-        // Server will call playerReconnect() and execute ContinuePlay - no position loss!
-        let wlanChannels: UInt16 = isReconnection ? 0x4000 : 0x0000
+        // WLAN channel list (2 bytes) - always 0x0000
+        // Client-side playlist jump recovery handles position restoration
+        let wlanChannels: UInt16 = 0x0000
         helloData.append(Data([UInt8(wlanChannels >> 8), UInt8(wlanChannels & 0xff)]))
 
         // Bytes received (8 bytes) - optional, starting at 0
@@ -332,15 +323,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
 
         socket.write(fullMessage, withTimeout: 30, tag: 1)
 
-        // After first successful HELO, all future connections are reconnections
-        // This ensures seamless position recovery when app resumes from background
-        if !isReconnection {
-            isReconnection = true
-            os_log(.info, log: logger, "🔄 First HELO sent - future connections will use reconnect bit")
-        }
-
-        os_log(.info, log: logger, "✅ HELO sent (reconnect bit: 0x%04x) as squeezelite with player name: '%{public}s', MAC: %{public}s",
-               wlanChannels, settings.effectivePlayerName, settings.formattedMACAddress)
+        os_log(.info, log: logger, "✅ HELO sent as squeezelite with player name: '%{public}s', MAC: %{public}s",
+               settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
     func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {

@@ -49,6 +49,11 @@ class AudioPlayer: NSObject, ObservableObject {
     private var currentStreamFormat: String = "UNKNOWN"
     private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
 
+    // MARK: - Silent Recovery Support
+    /// Flag to mute the next stream creation (for silent app foreground recovery)
+    /// When true, stream volume is set to 0 immediately upon creation
+    var muteNextStream: Bool = false
+
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
@@ -196,6 +201,13 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         setupCallbacks()
+
+        // SILENT RECOVERY: Mute stream instantly if requested (before any audio can play)
+        if muteNextStream {
+            BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), 0.0)
+            os_log(.info, log: logger, "🔇 Stream muted instantly for silent recovery (volume = 0)")
+            // Note: Flag will be cleared by recovery flow after pause command sent
+        }
 
         // Apply ReplayGain BEFORE starting playback if pending
         if pendingReplayGain > 0.0 {

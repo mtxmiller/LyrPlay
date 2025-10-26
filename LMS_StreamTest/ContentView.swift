@@ -159,17 +159,34 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
-            
-            // Check for app open recovery when app enters foreground
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                // CRITICAL FIX: Only perform recovery if app is NOT already playing
+
+            // App foreground recovery: reconnect and restore UI position (but don't auto-play)
+            // Wait 2 seconds to ensure connection is stable after foregrounding
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                // CRITICAL: Only perform recovery if app is NOT already playing
                 let currentState = audioManager.getPlayerState()
-                
+
                 if currentState == "Playing" {
-                    os_log(.info, log: logger, "📱 App Open Recovery: Skipping - already playing (state: %{public}s)", currentState)
+                    os_log(.info, log: logger, "📱 App Foreground Recovery: Skipping - already playing (state: %{public}s)", currentState)
+                    return
+                }
+
+                os_log(.info, log: logger, "📱 App Foreground Recovery: Proceeding - not playing (state: %{public}s)", currentState)
+
+                // Ensure we're connected (reconnect if needed)
+                if !slimProtoCoordinator.isConnected {
+                    os_log(.info, log: logger, "📱 App Foreground: Not connected, reconnecting...")
+                    slimProtoCoordinator.connect()
+
+                    // Wait for connection before recovery
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        os_log(.info, log: logger, "📱 App Foreground: Performing position recovery (shouldPlay: false)")
+                        slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
+                    }
                 } else {
-                    os_log(.info, log: logger, "📱 App Open Recovery: Proceeding - not playing (state: %{public}s)", currentState)
-                    //slimProtoCoordinator.performAppOpenRecovery() - HOLD FOR NOW - NOT READY
+                    // Already connected, perform recovery immediately
+                    os_log(.info, log: logger, "📱 App Foreground: Already connected, performing position recovery (shouldPlay: false)")
+                    slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
                 }
             }
         }
