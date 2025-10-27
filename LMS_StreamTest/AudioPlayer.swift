@@ -112,21 +112,6 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
         os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
 
-        // Additional network configuration (commented - using BASS defaults)
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(15000))    // 15s connection timeout
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_READTIMEOUT), DWORD(8000)) // 8s read timeout for streaming reliability
-        //BASS_SetConfig(DWORD(BASS_CONFIG_BUFFER), DWORD(2000))          // 2s playback buffer
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PREBUF), DWORD(25))        // 75% pre-buffer (BASS default) for stable streaming
-        
-        // Enable stream verification for proper format detection (FLAC headers now handled by server transcoding)
-        //BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), 0)                    // Enable file verification
-        //BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), 0)               // Enable network stream verification
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)                 // Disable Shoutcast metadata requests
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_PLAYLIST), 0)             // Don't process playlist URLs
-        // REMOVED: Aggressive DSP settings that may interfere with iOS integration
-        // BASS_SetConfig(DWORD(BASS_CONFIG_FLOATDSP), 1)                 // Enable float processing
-        // BASS_SetConfig(DWORD(BASS_CONFIG_SRC), 4)                      // High-quality sample rate conversion
-
         os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
@@ -170,10 +155,10 @@ class AudioPlayer: NSObject, ObservableObject {
                          DWORD(BASS_STREAM_BLOCK)        // force streaming mode (tolerates incomplete data)
         //                 DWORD(BASS_STREAM_AUTOFREE) |   // auto-free when stopped
          //                DWORD(BASS_SAMPLE_FLOAT) |      // use float samples (like squeezelite)
-        
+
         // FORMAT-SPECIFIC stream creation - CRITICAL FIX for Opus seeking
         currentStream = createStreamForFormat(urlString: urlString, streamFlags: streamFlags)
-        
+
         guard currentStream != 0 else {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString)
@@ -199,15 +184,16 @@ class AudioPlayer: NSObject, ObservableObject {
             }
             return
         }
-        
-        setupCallbacks()
 
-        // SILENT RECOVERY: Mute stream instantly if requested (before any audio can play)
+        // SILENT RECOVERY: Mute using DSP gain (like ReplayGain) instead of volume
+        // BASS_ATTRIB_VOLDSP applies gain to sample data - should actually work!
+        // Use 0.001 instead of 0.0 to avoid any potential edge cases (-60dB = effectively silent)
         if muteNextStream {
-            BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), 0.0)
-            os_log(.info, log: logger, "🔇 Stream muted instantly for silent recovery (volume = 0)")
-            // Note: Flag will be cleared by recovery flow after pause command sent
+            BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+            os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (sample-level muting, -60dB)")
         }
+
+        setupCallbacks()
 
         // Apply ReplayGain BEFORE starting playback if pending
         if pendingReplayGain > 0.0 {
@@ -217,8 +203,7 @@ class AudioPlayer: NSObject, ObservableObject {
 
         let playResult = BASS_ChannelPlay(currentStream, 0)
         if playResult != 0 {
-            os_log(.info, log: logger, "✅ CBass playback started - Handle: %d", currentStream)
-
+            os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
             // Setup lock screen controls once only
             if !lockScreenControlsConfigured {
@@ -363,6 +348,14 @@ class AudioPlayer: NSObject, ObservableObject {
         var volume: Float = 1.0
         BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
         return volume
+    }
+
+    /// Restore DSP gain to 1.0 after silent recovery
+    func restoreDSPGain() {
+        guard currentStream != 0 else { return }
+
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 1.0)
+        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
     }
 
     // MARK: - ReplayGain Support

@@ -31,6 +31,7 @@ class SlimProtoCoordinator: ObservableObject {
     private var wasDisconnectedWhileInBackground: Bool = false
     private var isSavingVolume = false
     private var isRestoringVolume = false
+    private var backgroundedTime: Date?  // Track when app backgrounded for duration-based recovery
 
     // MARK: - ICY Metadata Tracking
     private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
@@ -50,6 +51,7 @@ class SlimProtoCoordinator: ObservableObject {
         setupDelegation()
         setupAudioCallbacks()
         setupAudioPlayerIntegration()
+        setupBackgroundObservers()
 
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
     }
@@ -91,10 +93,27 @@ class SlimProtoCoordinator: ObservableObject {
     func setupNowPlayingManagerIntegration() {
         // Simple integration - just set the coordinator reference
         audioManager.getNowPlayingManager().setSlimClient(self)
-        
+
         os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
     }
-    
+
+    private func setupBackgroundObservers() {
+        // Track app backgrounding for duration-based recovery
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+
+        os_log(.info, log: logger, "✅ Background observers configured for duration-based recovery")
+    }
+
+    @objc private func handleAppDidEnterBackground() {
+        backgroundedTime = Date()
+        os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
+    }
+
     // MARK: - Public Interface
     func connect() {
         os_log(.info, log: logger, "Starting connection to %{public}s server...", settings.currentActiveServer.displayName)
@@ -141,6 +160,11 @@ class SlimProtoCoordinator: ObservableObject {
         client.updateServerSettings(host: host, port: port)
 
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
+    }
+
+    func getBackgroundDuration() -> TimeInterval? {
+        guard let bgTime = backgroundedTime else { return nil }
+        return Date().timeIntervalSince(bgTime)
     }
 
     /// Request server-side seek for transcoding pipeline fixes
@@ -432,13 +456,13 @@ class SlimProtoCoordinator: ObservableObject {
             if !shouldPlay {
                 os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    // Send pause command
+                    // Send pause command (channel still muted)
                     self.sendJSONRPCCommand("pause")
 
-                    // Clear mute flag and restore normal volume after pause
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    // Wait longer for pause to complete, THEN restore channel volume
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                         self.audioManager.disableSilentRecoveryMode()
-                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored")
+                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (3s after pause)")
                     }
                 }
             }
@@ -1170,51 +1194,53 @@ extension SlimProtoCoordinator {
         let context: PlaybackSessionController.ActivationContext = command.lowercased() == "play" ? .userInitiatedPlay : .backgroundRefresh
         audioManager.activateAudioSession(context: context)
 
-        // CRITICAL: Lock screen PLAY commands need special handling
-        // Background connections are unreliable - state may say "connected" but socket is stale
-        // For PLAY: Force fresh reconnect to ensure 'strm u' → playlist recovery flow works
+        // Lock screen PLAY: Use duration-based recovery (only reconnect if long background)
         // For PAUSE/other: Just send command normally (no need to disconnect)
 
         if command.lowercased() == "play" {
-            // PLAY command: Force fresh reconnect for reliable recovery
+            // Check background duration - only reconnect/recover if backgrounded > 45 seconds
+            if let bgTime = backgroundedTime {
+                let duration = Date().timeIntervalSince(bgTime)
+                os_log(.info, log: logger, "🔒 Lock screen PLAY: Backgrounded for %.1f seconds", duration)
 
-            // Disconnect first if we think we're connected (force clean state)
-            if connectionManager.connectionState.isConnected {
-                os_log(.info, log: logger, "🔄 Lock screen PLAY: Disconnecting stale background connection for clean reconnect")
-                client.disconnect()
-            }
+                if duration > 45 {
+                    // Long background (> 45s) - reconnect and recover position
+                    os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - reconnecting and recovering", duration)
+                    connect()
 
-            os_log(.info, log: logger, "🔄 Lock screen PLAY: Starting fresh reconnect")
-            connect()
+                    // Wait for confirmed connection before recovery
+                    var attempts = 0
+                    let maxAttempts = 10  // 5 seconds total (10 x 0.5s)
 
-            // Wait for confirmed connection before sending command
-            // Check connection state every 0.5s for up to 5 seconds
-            var attempts = 0
-            let maxAttempts = 10  // 5 seconds total (10 x 0.5s)
+                    Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                        guard let self = self else {
+                            timer.invalidate()
+                            return
+                        }
 
-            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
-                guard let self = self else {
-                    timer.invalidate()
-                    return
+                        attempts += 1
+
+                        if self.connectionManager.connectionState.isConnected {
+                            // Connection confirmed! Perform playlist recovery with play
+                            timer.invalidate()
+                            os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Reconnected - performing position recovery")
+                            self.performPlaylistRecovery(shouldPlay: true)
+
+                        } else if attempts >= maxAttempts {
+                            // Timeout - give up
+                            timer.invalidate()
+                            os_log(.error, log: self.logger, "🔒 Lock screen PLAY: Connection timeout after %d attempts", attempts)
+                        }
+                    }
+                } else {
+                    // Brief background (< 45s) - just send play command (fast!)
+                    os_log(.info, log: logger, "🔒 Lock screen PLAY: Brief background (%.1fs) - sending play command", duration)
+                    sendJSONRPCCommand(command)
                 }
-
-                attempts += 1
-
-                if self.connectionManager.connectionState.isConnected {
-                    // Connection confirmed! Perform playlist recovery with play
-                    timer.invalidate()
-                    os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Fresh connection confirmed, performing recovery")
-
-                    // Client-side playlist jump recovery with shouldPlay=true
-                    // Server creates new client (after 300s) or uses existing (< 300s)
-                    // Either way, we control recovery with playlist jump command
-                    self.performPlaylistRecovery(shouldPlay: true)
-
-                } else if attempts >= maxAttempts {
-                    // Timeout - give up
-                    timer.invalidate()
-                    os_log(.error, log: self.logger, "🔒 Lock screen PLAY: Connection timeout after %d attempts", attempts)
-                }
+            } else {
+                // No background time tracked - just send play command
+                os_log(.info, log: logger, "🔒 Lock screen PLAY: No background time - sending play command")
+                sendJSONRPCCommand(command)
             }
         } else {
             // PAUSE or other commands: Send normally without forced reconnect

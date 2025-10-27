@@ -160,33 +160,41 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
 
-            // App foreground recovery: reconnect and restore UI position (but don't auto-play)
+            // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                // CRITICAL: Only perform recovery if app is NOT already playing
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                // Skip recovery if already playing (background audio kept connection alive)
                 let currentState = audioManager.getPlayerState()
-
                 if currentState == "Playing" {
-                    os_log(.info, log: logger, "📱 App Foreground Recovery: Skipping - already playing (state: %{public}s)", currentState)
+                    os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
                     return
                 }
 
-                os_log(.info, log: logger, "📱 App Foreground Recovery: Proceeding - not playing (state: %{public}s)", currentState)
+                // Get background duration from coordinator (centralized tracking)
+                guard let duration = slimProtoCoordinator.getBackgroundDuration() else {
+                    os_log(.info, log: logger, "📱 App Foreground: No background time tracked - skipping recovery")
+                    return
+                }
 
-                // Ensure we're connected (reconnect if needed)
-                if !slimProtoCoordinator.isConnected {
-                    os_log(.info, log: logger, "📱 App Foreground: Not connected, reconnecting...")
-                    slimProtoCoordinator.connect()
+                os_log(.info, log: logger, "📱 App Foreground: Backgrounded for %.1f seconds", duration)
+
+                if duration > 45 {
+                    // Long background (> 45s) - likely disconnected, perform recovery
+                    os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)
+
+                    // Reconnect if needed
+                    if !slimProtoCoordinator.isConnected {
+                        slimProtoCoordinator.connect()
+                    }
 
                     // Wait for connection before recovery
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                         os_log(.info, log: logger, "📱 App Foreground: Performing position recovery (shouldPlay: false)")
                         slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
                     }
                 } else {
-                    // Already connected, perform recovery immediately
-                    os_log(.info, log: logger, "📱 App Foreground: Already connected, performing position recovery (shouldPlay: false)")
-                    slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
+                    // Brief background (< 45s) - skip recovery
+                    os_log(.info, log: logger, "📱 App Foreground: Brief background (%.1fs) - no recovery needed", duration)
                 }
             }
         }

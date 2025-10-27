@@ -176,10 +176,10 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.muteNextStream = true
     }
 
-    /// Disable silent mode and restore normal volume
+    /// Disable silent mode and restore normal DSP gain
     func disableSilentRecoveryMode() {
         audioPlayer.muteNextStream = false
-        audioPlayer.setVolume(1.0)
+        audioPlayer.restoreDSPGain()
     }
 
     func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {

@@ -133,6 +133,68 @@ UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
 
 This unified approach eliminates timing conflicts and provides consistent behavior across all playback interruption scenarios.
 
+### Seamless Reconnection via HELO Reconnect Bit
+
+**NEW in v1.6.3+**: LyrPlay now implements the **HELO reconnect bit mechanism** used by squeezelite for truly seamless reconnection when app resumes from background.
+
+#### **The Challenge**
+When iOS backgrounds LyrPlay and TCP connection drops after ~3 minutes, the LMS server "forgets" the player after 300 seconds. Upon app reopening, position was lost requiring playlist jump recovery with audio blips.
+
+#### **The Solution: Reconnect Bit (0x4000)**
+Following squeezelite's proven approach, LyrPlay now sets a reconnect bit in the HELO message's `wlan_channellist` field:
+
+```swift
+// In SlimProtoClient.sendHelo():
+let wlanChannels: UInt16 = isReconnection ? 0x4000 : 0x0000
+```
+
+**How it works:**
+1. **First connection**: Send HELO with `0x0000` (new player)
+2. **All subsequent connections**: Send HELO with `0x4000` (reconnect bit set)
+3. **Server recognizes**: "Same player reconnecting" → calls `playerReconnect()`
+4. **Server executes**: `ContinuePlay` event with preserved position
+5. **Result**: Seamless resume with NO audio blip, NO playlist jump needed!
+
+#### **Implementation Details**
+```swift
+// SlimProtoClient.swift
+private var isReconnection = false  // Set to true after first HELO
+
+// After first successful HELO:
+if !isReconnection {
+    isReconnection = true  // All future connections are reconnections
+}
+
+// IMPORTANT: Never reset isReconnection in disconnect()
+// Maintains state across backgrounding/foregrounding cycles
+```
+
+#### **Server-Side Processing** (from LMS source code)
+```perl
+# Slim/Networking/Slimproto.pm line 973
+$reconnect = $wlan_channellist & 0x4000;
+
+# Slim/Player/Squeezebox.pm line 70-96
+if ($reconnect) {
+    $client->resumeOnPower(1);      # Resume playback state
+    $controller->playerReconnect($bytes_received);  # ContinuePlay event
+}
+```
+
+#### **Benefits vs Playlist Jump**
+- ✅ **No audio blip** - Server continues existing stream seamlessly
+- ✅ **No seek artifacts** - No new stream creation or seeking required
+- ✅ **Paused state preserved** - If paused before, stays paused after reconnect
+- ✅ **Server-native** - Uses LMS's built-in reconnection mechanism
+- ✅ **Proven approach** - Exactly how squeezelite handles backgrounding
+
+#### **When Used**
+- App resumes from background (< 300s timeout)
+- Network reconnection after brief disconnection
+- Any scenario where player reconnects to same server
+
+This elegant solution eliminates the need for client-side position recovery in most scenarios, providing the smooth experience users expect from native audio apps.
+
 ### Key Dependencies
 - **CocoaAsyncSocket**: Network socket communication for SlimProto
 - **CBass**: Swift Package Manager integration of BASS audio library (Bass, BassFLAC, BassOpus)
