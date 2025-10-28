@@ -26,8 +26,9 @@ class SettingsManager: ObservableObject {
     @Published var isBackupServerEnabled: Bool = false
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = .compressed
-    
-    
+    @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
+
+
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
     private(set) var deviceModel: String = "squeezelite"
@@ -107,6 +108,7 @@ class SettingsManager: ObservableObject {
         static let isBackupServerEnabled = "IsBackupServerEnabled"
         static let currentActiveServer = "CurrentActiveServer"
         static let audioFormat = "AudioFormat"
+        static let enableAppOpenRecovery = "EnableAppOpenRecovery"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -175,9 +177,10 @@ class SettingsManager: ObservableObject {
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
         audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .compressed
-        
-        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s",
-               serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName)
+        enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
+
+        os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
+               serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
     }
     
     func saveSettings() {
@@ -201,7 +204,8 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
-        
+        UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
+
         UserDefaults.standard.synchronize()
         
         os_log(.info, log: logger, "Settings saved successfully")

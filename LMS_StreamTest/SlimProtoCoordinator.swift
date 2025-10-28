@@ -460,7 +460,7 @@ class SlimProtoCoordinator: ObservableObject {
                     self.sendJSONRPCCommand("pause")
 
                     // Wait longer for pause to complete, THEN restore channel volume
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                         self.audioManager.disableSilentRecoveryMode()
                         os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (3s after pause)")
                     }

@@ -162,7 +162,7 @@ struct ContentView: View {
 
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 // Skip recovery if already playing (background audio kept connection alive)
                 let currentState = audioManager.getPlayerState()
                 if currentState == "Playing" {
@@ -178,6 +178,12 @@ struct ContentView: View {
 
                 os_log(.info, log: logger, "📱 App Foreground: Backgrounded for %.1f seconds", duration)
 
+                // Check if app open recovery is enabled in settings
+                guard settings.enableAppOpenRecovery else {
+                    os_log(.info, log: logger, "📱 App Foreground: Recovery disabled in settings - skipping")
+                    return
+                }
+
                 if duration > 45 {
                     // Long background (> 45s) - likely disconnected, perform recovery
                     os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)
@@ -188,7 +194,7 @@ struct ContentView: View {
                     }
 
                     // Wait for connection before recovery
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         os_log(.info, log: logger, "📱 App Foreground: Performing position recovery (shouldPlay: false)")
                         slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
                     }
