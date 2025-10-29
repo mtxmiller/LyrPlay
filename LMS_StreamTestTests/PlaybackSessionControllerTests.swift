@@ -213,4 +213,8 @@ private final class FakePlaybackController: AudioPlaybackControlling {
     }
 
     var isPlaying: Bool { isPlayingStub }
+
+    func handleAudioRouteChange() {
+        // No-op for tests
+    }
 }

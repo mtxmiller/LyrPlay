@@ -16,7 +16,6 @@ struct ContentView: View {
     @State private var isAppInBackground = false
     @State private var hasLoadedInitially = false
     @State private var webView: WKWebView?
-    @State private var failureTimer: Timer?
     @State private var hasConnectionError = false
     @State private var hasHandledError = false
     @State private var hasShownError = false
@@ -249,16 +248,6 @@ struct ContentView: View {
         }
     }
     
-    private func handleLoadFailure() {
-        // Auto-show settings after 10 seconds of failure
-        failureTimer?.invalidate()
-        failureTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
-            if self.loadError != nil {
-                self.showingSettings = true
-            }
-        }
-    }
-    
     // MARK: - Material Integration URL
     private var materialWebURL: String {
         let baseURL = settings.webURL
@@ -428,89 +417,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(loadError != nil) // Allow touches only when there's an error
     }
-    
-    // Enhanced debug overlay with server time synchronization info
 
-    
-    private var connectionStateColor: Color {
-        switch slimProtoCoordinator.connectionState {
-        case "Connected":
-            return .green
-        case "Connecting", "Reconnecting":
-            return .yellow
-        case "Failed":
-            return .red
-        case "No Network":
-            return .orange
-        default:
-            return .gray
-        }
-    }
-    
-    private var networkStatusColor: Color {
-        switch slimProtoCoordinator.networkStatus {
-        case "Wi-Fi", "Wired":
-            return .green
-        case "Cellular":
-            return .yellow
-        case "No Network":
-            return .red
-        default:
-            return .gray
-        }
-    }
-    
-    // Server time status color
-    private var serverTimeStatusColor: Color {
-        let status = slimProtoCoordinator.serverTimeStatus
-        if status.contains("Available") {
-            return .green
-        } else if status.contains("Unavailable") {
-            return .red
-        } else {
-            return .yellow
-        }
-    }
-    
-    private var serverTimeStatusIcon: String {
-        let status = slimProtoCoordinator.serverTimeStatus
-        if status.contains("Available") {
-            return "clock.fill"
-        } else if status.contains("Unavailable") {
-            return "clock.badge.xmark"
-        } else {
-            return "clock"
-        }
-    }
-
-    private var serverTimeStatusText: String {
-        let status = slimProtoCoordinator.serverTimeStatus
-        // Extract just the key info, not the full verbose status
-        if status.contains("Available") {
-            // Extract the "last sync: Xs ago" part if present
-            if let range = status.range(of: "last sync: ") {
-                let remaining = String(status[range.upperBound...])
-                if let endRange = remaining.range(of: ")") {
-                    let syncInfo = String(remaining[..<endRange.lowerBound])
-                    return "Server: \(syncInfo)"
-                }
-            }
-            return "Server: Active"
-        } else if status.contains("failures") {
-            // Extract failure count
-            if let range = status.range(of: "(") {
-                let remaining = String(status[range.upperBound...])
-                if let endRange = remaining.range(of: " failures") {
-                    let failureCount = String(remaining[..<endRange.lowerBound])
-                    return "Server: \(failureCount) fails"
-                }
-            }
-            return "Server: Failed"
-        } else {
-            return "Server: Unknown"
-        }
-    }
-    
     private func connectToLMS() {
         guard !hasConnected else { return }
         

@@ -143,15 +143,6 @@ class SettingsManager: ObservableObject {
         return "\(baseCapabilities),\(formats)"
     }
     
-    // MARK: - URL Session Configuration with Custom User-Agent
-    func createCustomURLSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.httpAdditionalHeaders = [
-            "User-Agent": customUserAgent
-        ]
-        return URLSession(configuration: config)
-    }
-    
     // MARK: - Settings Persistence
     private func loadSettings() {
         os_log(.info, log: logger, "Loading settings from UserDefaults")
@@ -443,10 +434,6 @@ class SettingsManager: ObservableObject {
         "http://\(activeServerHost):\(activeServerWebPort)/material/"
     }
 
-    var initialWebURL: String {
-        "http://\(serverHost):\(serverWebPort)/material/"
-    }
-    
     var formattedMACAddress: String {
         playerMACAddress.uppercased()
     }

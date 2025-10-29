@@ -72,14 +72,6 @@ final class PlaybackSessionController {
             case .previous: return "previous"
             }
         }
-
-        var activationContext: ActivationContext {
-            switch self {
-            case .play: return .userInitiatedPlay
-            case .pause: return .backgroundRefresh
-            case .next, .previous: return .userInitiatedPlay
-            }
-        }
     }
 
     private enum InterruptionType: String {
