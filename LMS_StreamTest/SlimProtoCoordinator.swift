@@ -926,7 +926,35 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.fetchServerTime()
         }
     }
-    
+
+    func didStartDirectStream(format: String, startTime: Double, replayGain: Float) {
+        os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
+
+        // Stop any existing playback and timers first
+        stopPlaybackHeartbeat()
+
+        // Start push stream playback with AudioStreamDecoder
+        audioManager.startPushStreamPlayback(format: format, sampleRate: 44100, channels: 2, replayGain: replayGain)
+
+        // Start periodic server time fetching for lock screen updates
+        startServerTimeFetching()
+
+        // Start the 1-second heartbeat timer (like squeezelite)
+        startPlaybackHeartbeat()
+
+        // Get initial metadata for new stream
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.fetchCurrentTrackMetadata()
+        }
+
+        // Fetch server time after connection stabilizes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.fetchServerTime()
+        }
+
+        os_log(.info, log: logger, "✅ Direct stream (push mode) playback started")
+    }
+
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         

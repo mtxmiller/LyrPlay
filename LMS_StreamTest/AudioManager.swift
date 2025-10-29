@@ -12,6 +12,7 @@ class AudioManager: NSObject, ObservableObject {
     private let audioPlayer: AudioPlayer
     private let audioSessionManager: AudioSessionManager
     private let nowPlayingManager: NowPlayingManager
+    private let streamDecoder: AudioStreamDecoder  // NEW: For gapless playback
     
     // MARK: - Time Update Throttling (ADD THIS LINE)
     private var lastTimeUpdateReport: Date = Date()
@@ -41,9 +42,10 @@ class AudioManager: NSObject, ObservableObject {
         self.audioPlayer = AudioPlayer()
         self.audioSessionManager = AudioSessionManager()
         self.nowPlayingManager = NowPlayingManager()
-        
+        self.streamDecoder = AudioStreamDecoder()  // NEW: Initialize decoder
+
         super.init()
-        
+
         setupDelegation()
 
         // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
@@ -61,11 +63,14 @@ class AudioManager: NSObject, ObservableObject {
         // Connect AudioPlayer to AudioManager
         audioPlayer.delegate = self
         audioPlayer.audioManager = self  // Set back-reference for media control refresh
-        
+
         // Connect AudioSessionManager to AudioManager - ENHANCED
         audioSessionManager.delegate = self
 
-        os_log(.info, log: logger, "✅ Component delegation configured with interruption handling")
+        // Connect AudioStreamDecoder to AudioManager - NEW
+        streamDecoder.delegate = self
+
+        os_log(.info, log: logger, "✅ Component delegation configured with interruption handling and gapless decoder")
     }
     
     func setCommandHandler(_ handler: SlimProtoCommandHandler) {
@@ -95,6 +100,30 @@ class AudioManager: NSObject, ObservableObject {
         // Start playback
         activateAudioSession()
         audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
+    }
+
+    // NEW: Push stream playback for gapless
+    func startPushStreamPlayback(format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz", format, sampleRate)
+
+        // Configure audio session
+        configureAudioSessionForFormat(format)
+        activateAudioSession()
+
+        // Initialize push stream
+        streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+
+        // Start playback
+        if streamDecoder.startPlayback() {
+            os_log(.info, log: logger, "✅ Push stream playback started successfully")
+        } else {
+            os_log(.error, log: logger, "❌ Failed to start push stream playback")
+        }
+    }
+
+    func stopPushStreamPlayback() {
+        os_log(.info, log: logger, "🛑 Stopping push stream playback")
+        streamDecoder.cleanup()
     }
 
     // Playback control
@@ -398,5 +427,21 @@ extension AudioManager {
     /// Gets time source information for debugging
     func getTimeSourceInfo() -> String {
         return nowPlayingManager.getTimeSourceInfo()
+    }
+}
+
+// MARK: - AudioStreamDecoder Delegate (NEW - Gapless Playback)
+extension AudioManager: AudioStreamDecoderDelegate {
+    func audioStreamDecoderNeedsMoreData(_ decoder: AudioStreamDecoder) {
+        os_log(.debug, log: logger, "📊 Stream decoder needs more data - buffer low")
+        // TODO: Request more data from SlimProto socket
+        // This will be implemented when we hook up the socket reading
+    }
+
+    func audioStreamDecoderDidReachTrackBoundary(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "🎯 Track boundary reached - gapless transition!")
+        // Update Now Playing metadata for new track
+        // TODO: Notify coordinator of track change when method is implemented
+        // slimClient?.handleTrackBoundary()
     }
 }

@@ -5,6 +5,7 @@ import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float)
+    func didStartDirectStream(format: String, startTime: Double, replayGain: Float) // NEW: For gapless push streams
     func didPauseStream()
     func didResumeStream()
     func didStopStream()
@@ -257,10 +258,19 @@ class SlimProtoCommandHandler: ObservableObject {
                     
                     if let url = extractURLFromHTTPRequest(httpRequest) {
                         os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
-                        
+
+                        // Check if this is a direct stream (autostart='0') or HTTP URL (autostart='3')
+                        let isDirectStream = (autostart == Character("0").asciiValue)
+
+                        if isDirectStream {
+                            os_log(.info, log: logger, "📊 Direct stream detected (autostart=0) - FUTURE: will use push stream for gapless")
+                            // TODO: Route to AudioStreamDecoder for gapless playback
+                            // For now, fall through to URL stream
+                        }
+
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
-                            handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat)
+                            handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat, autostart: autostart)
                         case UInt8(ascii: "p"): // pause
                             handlePauseCommand()
                         case UInt8(ascii: "u"): // unpause
@@ -312,8 +322,10 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Individual Command Handlers (existing code...)
-    private func handleStartCommand(url: String, format: String, startTime: Double, replayGain: Float) {
-        os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f with replayGain %.4f", format, startTime, replayGain)
+    private func handleStartCommand(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
+        let streamMode = (autostart == Character("0").asciiValue) ? "DIRECT" : "HTTP"
+        os_log(.info, log: logger, "▶️ Starting %{public}s stream (%{public}s mode) from %.2f with replayGain %.4f",
+               format, streamMode, startTime, replayGain)
 
         // CRITICAL DEBUG: Log if server is sending unexpected start times
         if startTime > 0.1 && startTime < lastKnownPosition - 5.0 {
@@ -333,7 +345,18 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamActive = true
         waitingForNextTrack = false  // Server responded with new track - playlist NOT ended
 
-        delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+        // Route to appropriate playback mode based on autostart
+        let isDirectStream = (autostart == Character("0").asciiValue)
+
+        if isDirectStream {
+            // Direct stream - use push stream for gapless
+            os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")
+            delegate?.didStartDirectStream(format: format, startTime: startTime, replayGain: replayGain)
+        } else {
+            // HTTP URL stream - use traditional pull stream
+            os_log(.info, log: logger, "🌐 Routing to HTTP stream (traditional URL stream)")
+            delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+        }
     }
 
     // ADD THESE NEW METHODS:
