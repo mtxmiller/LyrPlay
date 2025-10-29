@@ -41,10 +41,7 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - State Tracking
     private var lastTimeUpdateReport: Date = Date()
     private let minimumTimeUpdateInterval: TimeInterval = 1.0  // Max 1 update per second
-    
-    // MARK: - Lock Screen Controls (avoid duplicate setup)
-    private var lockScreenControlsConfigured = false
-    
+
     private var currentStreamURL: String = ""
     private var currentStreamFormat: String = "UNKNOWN"
     private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
@@ -116,17 +113,6 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
 
-    // MARK: - Route Change Handling (Simplified - BASS manages automatically)
-    /// BASS automatically handles iOS audio route changes (CarPlay, AirPods, etc.)
-    /// We just log for debugging - no manual intervention needed
-    func handleAudioRouteChange() {
-        os_log(.info, log: logger, "🔀 Audio route changed - BASS handling automatically")
-        // BASS automatically switches audio device to new route
-        // No BASS_Free/BASS_Init cycle needed
-        // No manual intervention required
-    }
-
-    
     // MARK: - Stream Playback (MINIMAL CBASS)
     func playStream(urlString: String) {
         guard !urlString.isEmpty else {
@@ -205,13 +191,6 @@ class AudioPlayer: NSObject, ObservableObject {
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
-            // Setup lock screen controls once only
-            if !lockScreenControlsConfigured {
-                setupLockScreenControls()
-                lockScreenControlsConfigured = true
-            }
-            updateNowPlayingInfo(title: "LyrPlay Stream", artist: "Lyrion Music Server")
-
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
         } else {
@@ -234,14 +213,6 @@ class AudioPlayer: NSObject, ObservableObject {
 
         // Use the main playStream method (which will apply replayGain after stream creation)
         playStream(urlString: urlString)
-    }
-
-    func playStreamAtPosition(urlString: String, startTime: Double) {
-        playStream(urlString: urlString)
-
-        if startTime > 0 {
-            seekToPosition(startTime)
-        }
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
@@ -403,12 +374,6 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Track End Detection (Server-Time Based)
-    func checkIfTrackEnded() -> Bool {
-        // Track end detection now handled by NowPlayingManager using server time
-        return false
-    }
-    
     // MARK: - Private Helpers
     private func prepareForNewStream() {
         cleanup() // Clean up any existing stream
@@ -427,42 +392,6 @@ class AudioPlayer: NSObject, ObservableObject {
             BASS_StreamFree(currentStream)
             currentStream = 0
         }
-    }
-    
-    // MARK: - Lock Screen Integration (DISABLED - NowPlayingManager handles this)
-    private func setupLockScreenControls() {
-        // CRITICAL FIX: AudioPlayer should NOT set up MPRemoteCommandCenter
-        // PlaybackSessionController owns lock screen / CarPlay command routing
-        // This duplicate setup was causing conflicts and CarPlay issues
-        
-        os_log(.info, log: logger, "⚠️ AudioPlayer MPRemoteCommandCenter setup DISABLED - handled by NowPlayingManager")
-    }
-    
-    private func updateNowPlayingInfo(title: String? = nil, artist: String? = nil) {
-        var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-        
-        // Update track info
-        if let title = title {
-            nowPlayingInfo[MPMediaItemPropertyTitle] = title
-        }
-        if let artist = artist {
-            nowPlayingInfo[MPMediaItemPropertyArtist] = artist
-        }
-        
-        // Use SimpleTimeTracker time for consistency with Material web interface
-        // Note: Time updates are handled by NowPlayingManager's timer - this just sets initial metadata
-        // CRITICAL FIX: Do NOT set PlaybackRate here - NowPlayingManager controls this via SlimProto
-        // This was causing conflicts where CBass state overrode SlimProto state
-        // nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = getPlayerState() == "Playing" ? 1.0 : 0.0
-        
-        // Set duration from metadata if available, otherwise use CBass duration  
-        if metadataDuration > 0 {
-            nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = metadataDuration
-        } else {
-            nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = getDuration()
-        }
-        
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
     
     // MARK: - BASS Callbacks (MINIMAL)

@@ -168,21 +168,6 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     /// Request server-side seek for transcoding pipeline fixes
-    func requestSeekToTime(_ timeOffset: Double) {
-        os_log(.info, log: logger, "🔧 Requesting server seek to %{public}.2f seconds for transcoding fix", timeOffset)
-
-        // Use proper JSON-RPC structure like existing recovery methods
-        let seekCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [settings.playerMACAddress, ["time", timeOffset]]
-        ]
-
-        sendJSONRPCCommandDirect(seekCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔧 Server seek command completed")
-        }
-    }
-    
     // MARK: - Server Time Sync Management (Using SimpleTimeTracker)
     private func startServerTimeSync() {
         os_log(.debug, log: logger, "🔄 Using simplified SlimProto time tracking")
@@ -1133,11 +1118,6 @@ extension SlimProtoCoordinator {
         return time
     }
     
-    /// Get SimpleTimeTracker for debugging (Material-style system)
-    func getSimpleTimeTracker() -> SimpleTimeTracker {
-        return simpleTimeTracker
-    }
-    
     /// Handle track end detection from server time (replaces unreliable BASS_SYNC_END)
     func handleTrackEndFromServerTime() {
         os_log(.info, log: logger, "🎵 Track end detected via server time - forwarding to command handler")
@@ -1151,10 +1131,6 @@ extension SlimProtoCoordinator {
     }
     
     /// Public method to refresh Material UI (can be called externally)
-    func refreshMaterialInterface() {
-        // Removed refreshMaterialUI() method - server auto-resume handles position recovery
-    }
-    
     /// Start periodic server time fetching
     func startServerTimeFetching() {
         stopServerTimeFetching() // Stop any existing timer
@@ -1266,20 +1242,7 @@ extension SlimProtoCoordinator {
             commandHandler.isPausedByLockScreen = true
         }
     }
-    
-    private func sendPowerCommand(_ state: String) {
-        let playerID = settings.playerMACAddress
-        let powerCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["power", state]]
-        ]
-        
-        sendJSONRPCCommandDirect(powerCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔌 Power command sent: power %{public}s", state)
-        }
-    }
-    
+
     private func sendJSONRPCCommand(_ command: String, retryCount: Int = 0) {
         // CRITICAL FIX: For pause commands, get current server position FIRST
         if command.lowercased() == "pause" {
@@ -1614,53 +1577,6 @@ extension SlimProtoCoordinator {
         }
     }    
     // MARK: - Helper Method to Determine Source Type
-    private func determineSourceType(from trackData: [String: Any]) -> String {
-        // Check various indicators to determine the source type
-        
-        // Check for Radio Paradise specific fields
-        if let url = trackData["url"] as? String {
-            if url.contains("radioparadise.com") {
-                return "Radio Paradise"
-            }
-            if url.contains("tunein.com") || url.contains("radiotime.com") {
-                return "TuneIn Radio"
-            }
-            if url.contains("somafm.com") {
-                return "SomaFM"
-            }
-            if url.contains("spotify.com") {
-                return "Spotify"
-            }
-            if url.contains("tidal.com") {
-                return "Tidal"
-            }
-            if url.contains("qobuz.com") {
-                return "Qobuz"
-            }
-            // Generic radio stream detection
-            if url.contains(".pls") || url.contains(".m3u") || url.contains("stream") {
-                return "Internet Radio"
-            }
-        }
-        
-        // Check for remote_title which often indicates streaming
-        if trackData["remote_title"] != nil {
-            return "Internet Radio"
-        }
-        
-        // Check for plugin-specific fields
-        if trackData["icon"] != nil || trackData["image"] != nil {
-            return "Plugin Stream"
-        }
-        
-        // Check if it has a file path (local music)
-        if let trackID = trackData["id"] as? Int, trackID > 0 {
-            return "Local Music"
-        }
-        
-        return "Unknown Source"
-    }
-    
     // Add to SlimProtoConnectionManagerDelegate extension
     func connectionManagerShouldStorePosition() {
         os_log(.info, log: logger, "🔒 Connection lost - storing current position for recovery")
@@ -1681,64 +1597,6 @@ extension SlimProtoCoordinator {
 
 
 
-    // Add this new method for seeking via JSON-RPC
-    private func sendSeekCommand(to position: Double, completion: @escaping (Bool) -> Void) {
-        let playerID = settings.playerMACAddress
-        let clampedPosition = max(0, position)
-        
-        // FIXED: Use correct JSON-RPC format for time seeking
-        let jsonRPC = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["time", clampedPosition]]  // ✅ Pass number directly, not as string
-        ] as [String : Any]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            os_log(.error, log: logger, "Failed to create seek JSON-RPC command")
-            completion(false)
-            return
-        }
-        
-        let webPort = settings.activeServerWebPort
-        let host = settings.activeServerHost
-        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
-            os_log(.error, log: logger, "Invalid server URL for seek command")
-            completion(false)
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = jsonData
-        request.timeoutInterval = 8.0
-        
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    os_log(.error, log: self.logger, "Seek command failed: %{public}s", error.localizedDescription)
-                    completion(false)
-                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                    os_log(.info, log: self.logger, "✅ Seek command sent successfully to %.2f", clampedPosition)
-                    
-                    // Fetch fresh server time after seek to update lock screen
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.fetchServerTime()
-                    }
-                    
-                    completion(true)
-                } else {
-                    os_log(.error, log: self.logger, "Seek command failed with HTTP error")
-                    completion(false)
-                }
-            }
-        }
-        
-        task.resume()
-        os_log(.info, log: logger, "🌐 Sending seek command to %.2f seconds", clampedPosition)
-    }
-    
     // MARK: - Volume Control
     func setPlayerVolume(_ volume: Float) {
         // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
@@ -1747,17 +1605,5 @@ extension SlimProtoCoordinator {
 
     func getPlayerVolume() -> Float {
         return audioManager.getVolume()
-    }
-}
-
-// MARK: - Background Strategy Extension
-extension SlimProtoConnectionManager.BackgroundStrategy {
-    var description: String {
-        switch self {
-        case .normal: return "normal"
-        case .reduced: return "reduced"
-        case .minimal: return "minimal"
-        case .suspended: return "suspended"
-        }
     }
 }

@@ -75,24 +75,6 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
     
-    func getCurrentStreamTime() -> Double {
-        guard !isStreamPaused, let startTime = streamStartTime else {
-            return streamPosition // Return frozen position when paused
-        }
-        
-        // Calculate elapsed time since last update
-        let elapsed = Date().timeIntervalSince(lastStreamUpdate)
-        return streamPosition + elapsed
-    }
-    
-    private func updateStreamPosition(_ position: Double) {
-        streamPosition = position
-        lastStreamUpdate = Date()
-        streamStartTime = isStreamPaused ? nil : Date()
-        
-        os_log(.info, log: logger, "📍 Stream position updated: %.2f", position)
-    }
-    
     // MARK: - SETD Command Processing
     private func processSetdCommand(_ payload: Data) {
         guard payload.count >= 1 else {
@@ -401,23 +383,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
         return lastKnownPosition
     }
-    
-    func syncWithServerPosition(_ serverPosition: Double, isPlaying: Bool) {
-        // Just update our tracking variables
-        lastKnownPosition = serverPosition
-        isStreamPaused = !isPlaying
-        
-        // Update server reference time
-        if isPlaying {
-            serverStartTime = Date()
-            serverStartPosition = serverPosition
-        } else {
-            serverStartTime = nil
-        }
-        
-        os_log(.info, log: logger, "🔄 Synced to server position: %.2f", serverPosition)
-    }
-    
+
     func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
 
@@ -502,50 +468,7 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Utility Methods
-    
-    func getServerProvidedTime() -> Double {
-        // Always prefer server position when paused
-        if isPausedByLockScreen {
-            return lastKnownPosition
-        }
-        
-        // For playing state, only calculate if we have a recent server reference
-        guard let startTime = serverStartTime else {
-            return lastKnownPosition
-        }
-        
-        // Only trust local calculation for short periods (< 30 seconds)
-        let elapsed = Date().timeIntervalSince(startTime)
-        if elapsed < 30.0 {
-            return serverStartPosition + elapsed
-        } else {
-            // Older than 30 seconds - don't trust local calculation
-            return lastKnownPosition
-        }
-    }
-    
 
-    func updateServerTimeFromSlimProto(_ position: Double, isPlaying: Bool) {
-        // CRITICAL FIX: Only update position if it's a meaningful value (> 0.1 seconds)
-        // SlimProto pause commands often send position 0.00 which is wrong
-        
-        if position > 0.1 || isPlaying {
-            // Valid position or we're playing - update everything
-            lastKnownPosition = position
-            isStreamPaused = !isPlaying
-            
-            // Note: SimpleTimeTracker in coordinator handles time updates
-            
-            os_log(.info, log: logger, "🔄 Updated both SlimProto and ServerTime with position: %.2f", position)
-        } else {
-            // Invalid/zero position during pause - only update playing state
-            isStreamPaused = !isPlaying
-            
-            // Note: SimpleTimeTracker in coordinator handles playback state
-            
-            os_log(.info, log: logger, "🔄 Updated playing state only (position %.2f ignored), preserved server time", position)
-        }
-    }
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
         let lines = httpRequest.components(separatedBy: "\n")
         guard let firstLine = lines.first else { return nil }
@@ -594,12 +517,7 @@ class SlimProtoCommandHandler: ObservableObject {
 
         os_log(.info, log: logger, "✅ STMd sent - waiting for server response (next track or playlist end)")
     }
-    
-    func updatePlaybackPosition(_ position: Double) {
-        lastKnownPosition = position
-        // REMOVED: All the complex state management
-    }
-    
+
     func startSkipProtection() {
         os_log(.info, log: logger, "🛡️ Starting skip protection - blocking track end detection")
         isManualSkipInProgress = true

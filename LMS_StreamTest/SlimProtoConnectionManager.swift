@@ -15,16 +15,16 @@ protocol SlimProtoConnectionManagerDelegate: AnyObject {
     func connectionManagerDidReconnectAfterTimeout()
 }
 
-class SlimProtoConnectionManager: ObservableObject {
-    
+class SlimProtoConnectionManager {
+
     // MARK: - Dependencies
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SlimProtoConnectionManager")
-    
-    // MARK: - Published State
-    @Published var connectionState: ConnectionState = .disconnected
-    @Published var isInBackground: Bool = false
-    @Published var networkStatus: NetworkStatus = .unknown
-    @Published var backgroundTimeRemaining: TimeInterval = 0
+
+    // MARK: - State
+    var connectionState: ConnectionState = .disconnected
+    var isInBackground: Bool = false
+    var networkStatus: NetworkStatus = .unknown
+    var backgroundTimeRemaining: TimeInterval = 0
     
     // MARK: - Delegation
     weak var delegate: SlimProtoConnectionManagerDelegate?
@@ -523,22 +523,6 @@ class SlimProtoConnectionManager: ObservableObject {
         delegate?.connectionManagerShouldReconnect()
     }
     
-    private func scheduleReconnectionIfNeeded() {
-        guard shouldAttemptReconnection() else {
-            os_log(.error, log: logger, "❌ Max reconnection attempts reached")
-            connectionState = .failed
-            return
-        }
-        
-        let delay = calculateReconnectionDelay()
-        os_log(.info, log: logger, "⏰ Scheduling reconnection in %.1f seconds (attempt %d)", delay, reconnectionAttempts + 1)
-        
-        stopReconnectionTimer()
-        reconnectionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.attemptReconnection()
-        }
-    }
-    
     private func shouldAttemptReconnection() -> Bool {
         // Don't reconnect if we've exceeded max attempts
         if reconnectionAttempts >= maxReconnectionAttempts {
@@ -587,72 +571,15 @@ class SlimProtoConnectionManager: ObservableObject {
         reconnectionTimer?.invalidate()
         reconnectionTimer = nil
     }
-    
+
     // MARK: - Manual Control
-    func resetReconnectionAttempts() {
-        os_log(.info, log: logger, "🔄 Resetting reconnection attempts")
-        reconnectionAttempts = 0
-        stopReconnectionTimer()
-    }
-    
-    func forceReconnection() {
-        os_log(.info, log: logger, "🔄 Forcing reconnection")
-        lastDisconnectionReason = .userInitiated // Will be reset on next disconnect
-        resetReconnectionAttempts()
-        attemptReconnection()
-    }
-    
     func userInitiatedDisconnection() {
         os_log(.info, log: logger, "🔄 User initiated disconnection")
         lastDisconnectionReason = .userInitiated
         stopReconnectionTimer()
         stopHealthMonitoring()
     }
-    
-    // MARK: - Background Strategy (Enhanced)
-    var backgroundConnectionStrategy: BackgroundStrategy {
-        if !isInBackground {
-            return .normal
-        }
-        
-        // Check how long we've been in background
-        let backgroundDuration = backgroundStartTime?.timeIntervalSinceNow ?? 0
-        let absBackgroundDuration = abs(backgroundDuration)
-        
-        if backgroundTimeRemaining < 30 {
-            return .suspended
-        } else if absBackgroundDuration > 300 || isNetworkExpensive { // 5 minutes
-            return .minimal
-        } else {
-            return .reduced
-        }
-    }
-    
-    enum BackgroundStrategy {
-        case normal    // Full functionality
-        case reduced   // Slightly reduced activity
-        case minimal   // Reduced activity, longer intervals
-        case suspended // Minimal activity only
-        
-        var statusInterval: TimeInterval {
-            switch self {
-            case .normal: return 10.0
-            case .reduced: return 15.0
-            case .minimal: return 30.0
-            case .suspended: return 60.0
-            }
-        }
-        
-        var healthCheckInterval: TimeInterval {
-            switch self {
-            case .normal: return 15.0
-            case .reduced: return 20.0
-            case .minimal: return 30.0
-            case .suspended: return 60.0
-            }
-        }
-    }
-    
+
     // MARK: - Public Status
     var connectionSummary: String {
         var summary = connectionState.displayName

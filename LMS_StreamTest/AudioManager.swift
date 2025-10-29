@@ -64,10 +64,7 @@ class AudioManager: NSObject, ObservableObject {
         
         // Connect AudioSessionManager to AudioManager - ENHANCED
         audioSessionManager.delegate = self
-        
-        // Connect NowPlayingManager to AudioManager
-        nowPlayingManager.delegate = self
-        
+
         os_log(.info, log: logger, "✅ Component delegation configured with interruption handling")
     }
     
@@ -82,11 +79,6 @@ class AudioManager: NSObject, ObservableObject {
     // MARK: - Public Interface (Exact same as original AudioManager)
     
     // Stream playback methods
-    func playStream(urlString: String) {
-        activateAudioSession()
-        audioPlayer.playStream(urlString: urlString)
-    }
-
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
@@ -94,11 +86,6 @@ class AudioManager: NSObject, ObservableObject {
         // Start playback
         activateAudioSession()
         audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
-    }
-
-    func playStreamAtPosition(urlString: String, startTime: Double) {
-        activateAudioSession()
-        audioPlayer.playStreamAtPosition(urlString: urlString, startTime: startTime)
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
@@ -235,12 +222,10 @@ class AudioManager: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ SlimClient reference set for AudioManager and NowPlayingManager")
     }
 
-    // MARK: - Route Change Handling (Simplified - BASS manages automatically)
-    /// BASS automatically handles iOS audio route changes (CarPlay, AirPods, etc.)
-    /// Just delegate to AudioPlayer for logging
+    // MARK: - Route Change Handling (Required by AudioPlaybackControlling protocol)
+    /// BASS automatically handles iOS audio route changes - no action needed
     func handleAudioRouteChange() {
-        os_log(.info, log: logger, "🔀 AudioManager handling route change - BASS manages automatically")
-        audioPlayer.handleAudioRouteChange()
+        os_log(.info, log: logger, "🔀 Route change - BASS manages automatically")
     }
 
     // MARK: - Cleanup
@@ -331,64 +316,12 @@ extension AudioManager: AudioPlayerDelegate {
     }
 }
 
-// MARK: - Interruption State Management (ADD THIS SECTION)
+// MARK: - Interruption State Management
 extension AudioManager {
-    
-    // MARK: - Interruption Handling Integration
-    /// Called when audio session is interrupted (phone calls, etc.)
-    func handleAudioInterruption(shouldPause: Bool) {
-        guard shouldPause else { return }
-        
-        let currentState = getPlayerState()
-        wasPlayingBeforeInterruption = (currentState == "Playing")
-        // REMOVED: interruptionPosition = getCurrentTime() - don't track position
-        
-        os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s",
-               wasPlayingBeforeInterruption ? "YES" : "NO")
 
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
-        // NOTE: PlaybackSessionController (line 286) already sends server pause command for interruptions
-        // This AudioManager method may be redundant - keeping for safety but no action needed
-
-        os_log(.info, log: logger, "ℹ️ Interruption handled by PlaybackSessionController (server command)")
-    }
-    
-    /// Called when audio interruption ends
-    func handleInterruptionEnded(shouldResume: Bool) {
-        os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s",
-               shouldResume ? "YES" : "NO")
-
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
-        // NOTE: PlaybackSessionController (line 305) already sends server play command for interruption resume
-        // This AudioManager method may be redundant - keeping for safety but no action needed
-
-        os_log(.info, log: logger, "ℹ️ Interruption resume handled by PlaybackSessionController (server command)")
-
-        wasPlayingBeforeInterruption = false
-    }
-    
-    /// Called when audio route changes (headphones, CarPlay, etc.)
-    func handleRouteChange(shouldPause: Bool, routeType: String = "Unknown") {
-        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
-               routeType, shouldPause ? "YES" : "NO")
-        
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
-        // NOTE: PlaybackSessionController (line 348) already sends server pause for AirPods disconnect
-        // This AudioManager method may be redundant - keeping for logging only
-
-        os_log(.info, log: logger, "ℹ️ Route change handled by PlaybackSessionController (server command)")
-        // Legacy CarPlay handling removed; new session controller will manage reconnect logic
-    }
-    
-    // MARK: - Server Communication for Interruptions
-    // MARK: - Utility Methods
     // MARK: - Public Interruption Status
     func getInterruptionStatus() -> String {
         return audioSessionManager.getInterruptionStatus()
-    }
-    
-    func isCurrentlyInterrupted() -> Bool {
-        return audioSessionManager.getInterruptionStatus() != "Normal"
     }
 }
 
@@ -416,53 +349,22 @@ extension AudioManager: AudioSessionManagerDelegate {
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
     }
     
-    // NEW: Handle interruptions
+    // AudioSessionManagerDelegate methods - PlaybackSessionController handles actual interruption logic
     func audioSessionWasInterrupted(shouldPause: Bool) {
-        handleAudioInterruption(shouldPause: shouldPause)
+        guard shouldPause else { return }
+        let currentState = getPlayerState()
+        wasPlayingBeforeInterruption = (currentState == "Playing")
+        os_log(.info, log: logger, "🚫 Audio interrupted (PlaybackSessionController handles server commands)")
     }
-    
-    // NEW: Handle interruption end
+
     func audioSessionInterruptionEnded(shouldResume: Bool) {
-        handleInterruptionEnded(shouldResume: shouldResume)
+        os_log(.info, log: logger, "✅ Interruption ended (PlaybackSessionController handles server commands)")
+        wasPlayingBeforeInterruption = false
     }
-    
-    // NEW: Handle route changes with smart CarPlay logic
+
     func audioSessionRouteChanged(shouldPause: Bool) {
-        // Get the actual route change type from InterruptionManager
         let routeChangeDescription = audioSessionManager.interruptionManager?.lastRouteChange?.description ?? "Unknown"
-        
-        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
-               routeChangeDescription, shouldPause ? "YES" : "NO")
-
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
-        // NOTE: This delegate method may be redundant with PlaybackSessionController's route handling
-        // PlaybackSessionController observes AVAudioSession.routeChangeNotification and sends server commands
-
-        os_log(.info, log: logger, "ℹ️ Route change logged - PlaybackSessionController handles server commands")
-    }
-}
-
-// MARK: - NowPlayingManagerDelegate
-extension AudioManager: NowPlayingManagerDelegate {
-    
-    func nowPlayingDidReceivePlayCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "🎵 Lock screen play command (unused)")
-    }
-    
-    func nowPlayingDidReceivePauseCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏸️ Lock screen pause command (unused)")
-    }
-    
-    func nowPlayingDidReceiveNextTrackCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏭️ Lock screen next track command (unused)")
-    }
-    
-    func nowPlayingDidReceivePreviousTrackCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏮️ Lock screen previous track command (unused)")
+        os_log(.info, log: logger, "🔀 Route change: %{public}s (PlaybackSessionController handles server commands)", routeChangeDescription)
     }
 }
 
@@ -493,19 +395,8 @@ extension AudioManager {
 }
 // MARK: - Server Time Integration
 extension AudioManager {
-    /// Server time integration handled by SimpleTimeTracker in coordinator
-    /// This method is no longer needed
-    func setupServerTimeIntegration() {
-        os_log(.info, log: logger, "✅ Server time integration handled by SimpleTimeTracker")
-    }
-    
     /// Gets time source information for debugging
     func getTimeSourceInfo() -> String {
-        return nowPlayingManager.getTimeSourceInfo()
-    }
-    
-    /// Gets server time synchronization status for debugging
-    func getServerTimeStatus() -> String {
         return nowPlayingManager.getTimeSourceInfo()
     }
 }

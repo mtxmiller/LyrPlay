@@ -30,7 +30,6 @@ class AudioSessionManager: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        //setupInitialAudioSession()
         setupBackgroundObservers()
         setupInterruptionManager()
         os_log(.info, log: logger, "Enhanced AudioSessionManager initialized")
@@ -39,63 +38,9 @@ class AudioSessionManager: ObservableObject {
     // MARK: - Interruption Manager Setup
     private func setupInterruptionManager() {
         interruptionManager = InterruptionManager()
-        interruptionManager?.delegate = self
-        os_log(.info, log: logger, "✅ Interruption manager integrated")
-    }
-    
-    // MARK: - Audio Session Setup (DISABLED)
-    private func setupInitialAudioSession() {
-        // DISABLED: BASS handles initial session setup automatically
-        os_log(.info, log: logger, "✅ Initial audio session handled by BASS auto-management")
+        os_log(.info, log: logger, "✅ Interruption manager stub initialized")
     }
 
-    // MARK: - Format-Specific Audio Session Configuration (DISABLED)
-    func setupForLosslessAudio() {
-        // DISABLED: BASS handles all session configuration automatically
-        os_log(.info, log: logger, "✅ Lossless audio - session handled by BASS auto-management")
-    }
-
-    func setupForCompressedAudio() {
-        // DISABLED: BASS handles all session configuration automatically
-        os_log(.info, log: logger, "✅ Compressed audio - session handled by BASS auto-management")
-    }
-    
-    // MARK: - Enhanced Audio Session Control (DISABLED)
-    func activateAudioSession() {
-        // BASS auto-manages iOS audio session - no manual activation needed
-        os_log(.info, log: logger, "✅ Audio session activation - BASS auto-managed")
-    }
-
-    func deactivateAudioSession() {
-        // DISABLED: BASS handles deactivation automatically
-        os_log(.info, log: logger, "✅ Audio session deactivation handled by BASS auto-management")
-    }
-
-    // MARK: - Interruption Recovery (DISABLED)
-    func reconfigureAfterInterruption() {
-        // DISABLED: BASS handles interruption recovery automatically
-        // No manual session management needed - BASS auto-manages session lifecycle
-        os_log(.info, log: logger, "✅ Interruption recovery handled by BASS auto-management")
-    }
-    
-    // MARK: - Background Audio Capabilities Management
-    private func refreshBackgroundAudioCapabilities() {
-        os_log(.info, log: logger, "🔄 Refreshing background audio capabilities")
-        
-        // Restart background task to maintain audio capabilities
-        // This ensures iOS knows we're still an audio app even when backgrounded
-        stopBackgroundTask()
-        startBackgroundTask()
-        
-        os_log(.info, log: logger, "✅ Background audio capabilities refreshed")
-    }
-    
-    func reconfigureAfterMediaServicesReset() {
-        // DISABLED: BASS handles media services reset recovery automatically
-        // BASS auto-manages session lifecycle and reset recovery
-        os_log(.info, log: logger, "✅ Media services reset handled by BASS auto-management")
-    }
-    
     // MARK: - Background Observers
     private func setupBackgroundObservers() {
         NotificationCenter.default.addObserver(
@@ -132,10 +77,9 @@ class AudioSessionManager: ObservableObject {
     
     private func verifyAudioSessionAfterForeground() {
         let audioSession = AVAudioSession.sharedInstance()
-        
+
         if audioSession.category != .playback {
-            os_log(.error, log: logger, "⚠️ Audio session category changed while backgrounded - reconfiguring")
-            reconfigureAfterInterruption()
+            os_log(.error, log: logger, "⚠️ Audio session category changed while backgrounded - BASS will handle reconfiguration")
         } else {
             os_log(.info, log: logger, "✅ Audio session maintained proper configuration in background")
         }
@@ -196,52 +140,3 @@ class AudioSessionManager: ObservableObject {
     }
 }
 
-// MARK: - InterruptionManagerDelegate
-extension AudioSessionManager: InterruptionManagerDelegate {
-    
-    func interruptionDidBegin(type: InterruptionManager.InterruptionType, shouldPause: Bool) {
-        os_log(.info, log: logger, "🚫 Interruption began: %{public}s (shouldPause: %{public}s)",
-               type.description, shouldPause ? "YES" : "NO")
-        
-        if shouldPause {
-            delegate?.audioSessionWasInterrupted(shouldPause: shouldPause)
-        }
-    }
-    
-    func interruptionDidEnd(type: InterruptionManager.InterruptionType, shouldResume: Bool) {
-        os_log(.info, log: logger, "✅ Interruption ended: %{public}s (shouldResume: %{public}s)",
-               type.description, shouldResume ? "YES" : "NO")
-        
-        // Reconfigure audio session after interruption
-        reconfigureAfterInterruption()
-        
-        // Notify delegate about potential resume
-        delegate?.audioSessionInterruptionEnded(shouldResume: shouldResume)
-    }
-    
-    func routeDidChange(type: InterruptionManager.RouteChangeType, shouldPause: Bool) {
-        os_log(.info, log: logger, "🔀 Route changed: %{public}s (shouldPause: %{public}s)",
-               type.description, shouldPause ? "YES" : "NO")
-        
-        // TODO: CarPlay-specific routing to be reimplemented via PlaybackSessionController
-        if type == .carPlayDisconnected {
-            os_log(.info, log: logger, "🚗 Route change: CarPlay disconnected (placeholder no-op)")
-        }
-        
-        // Log the new route for debugging
-        logCurrentAudioSessionState()
-        
-        // Notify delegate
-        delegate?.audioSessionRouteChanged(shouldPause: shouldPause)
-    }
-    
-    func audioSessionWasReset() {
-        os_log(.error, log: logger, "🔄 Media services reset - reconfiguring everything")
-        
-        // Complete reconfiguration needed
-        reconfigureAfterMediaServicesReset()
-        
-        // This is treated as an interruption that requires pause
-        delegate?.audioSessionWasInterrupted(shouldPause: true)
-    }
-}

@@ -5,13 +5,6 @@ import MediaPlayer
 import UIKit
 import os.log
 
-protocol NowPlayingManagerDelegate: AnyObject {
-    func nowPlayingDidReceivePlayCommand()
-    func nowPlayingDidReceivePauseCommand()
-    func nowPlayingDidReceiveNextTrackCommand()
-    func nowPlayingDidReceivePreviousTrackCommand()
-}
-
 class NowPlayingManager: ObservableObject {
     
     // MARK: - Configuration
@@ -34,10 +27,7 @@ class NowPlayingManager: ObservableObject {
     private var lockScreenStoredTimestamp: Date?
     private var lockScreenWasPlaying: Bool = false
     private var connectionLostTime: Date?
-    
-    // MARK: - Delegation
-    weak var delegate: NowPlayingManagerDelegate?
-    
+
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
     
@@ -426,19 +416,7 @@ class NowPlayingManager: ObservableObject {
     func getCurrentArtist() -> String {
         return currentArtist
     }
-    
-    func getCurrentAlbum() -> String {
-        return currentAlbum
-    }
-    
-    func getMetadataDuration() -> TimeInterval {
-        return metadataDuration
-    }
-    
-    func hasArtwork() -> Bool {
-        return currentArtwork != nil
-    }
-    
+
     // MARK: - Lock Screen Integration
     func setSlimClient(_ slimClient: SlimProtoCoordinator) {
         self.slimClient = slimClient

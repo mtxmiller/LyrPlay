@@ -11,12 +11,6 @@ protocol SlimProtoClientDelegate: AnyObject {
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand)
 }
 
-// MARK: - Command Deduplication (ADD THESE LINES)
-private var lastSentCommand: String = ""
-private var lastSentTime: Date = Date()
-private let minimumCommandInterval: TimeInterval = 0.2  // 200ms minimum between commands
-private var lastServerTimestamp: UInt32 = 0
-
 // MARK: - Command Structure
 struct SlimProtoCommand {
     let type: String
@@ -41,7 +35,7 @@ struct SlimProtoCommand {
 }
 
 // MARK: - Core Protocol Handler
-class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
+class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     
     // MARK: - Dependencies
     private let settings = SettingsManager.shared
@@ -478,55 +472,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate, ObservableObject {
         os_log(.debug, log: logger, "STAT packet: %{public}s, position: %.2f, size: %d bytes",
                code, clampedPosition, fullMessage.count)
     }
-    
-    // ADD THESE METHODS:
-    func sendRESP(_ headers: String) {
-        guard isConnected else { return }
-        
-        let respData = headers.data(using: .utf8) ?? Data()
-        let command = "RESP".data(using: .ascii)!
-        let length = UInt32(respData.count).bigEndian
-        let lengthData = withUnsafeBytes(of: length) { Data($0) }
-        
-        var fullMessage = Data()
-        fullMessage.append(command)
-        fullMessage.append(lengthData)
-        fullMessage.append(respData)
-        
-        socket.write(fullMessage, withTimeout: 30, tag: 4)
-        os_log(.debug, log: logger, "📤 RESP sent (%d bytes)", fullMessage.count)
-    }
 
-    func sendMETA(_ metadata: String) {
-        guard isConnected else { return }
-        
-        let metaData = metadata.data(using: .utf8) ?? Data()
-        let command = "META".data(using: .ascii)!
-        let length = UInt32(metaData.count).bigEndian
-        let lengthData = withUnsafeBytes(of: length) { Data($0) }
-        
-        var fullMessage = Data()
-        fullMessage.append(command)
-        fullMessage.append(lengthData)
-        fullMessage.append(metaData)
-        
-        socket.write(fullMessage, withTimeout: 30, tag: 5)
-        os_log(.debug, log: logger, "📤 META sent (%d bytes)", fullMessage.count)
-    }
-
-    
-    func sendSleepStatus() {
-        guard isConnected else {
-            os_log(.error, log: logger, "Cannot send sleep status - not connected")
-            return
-        }
-        
-        os_log(.info, log: logger, "💤 Sending proper PAUSE status before sleep")
-        
-        // Just send a standard pause status - don't invent new protocol codes
-        sendStatus("STMp")
-    }
-    
     // MARK: - Public Interface
     var connectionState: String {
         return isConnected ? "Connected" : "Disconnected"
