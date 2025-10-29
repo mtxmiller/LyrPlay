@@ -6,7 +6,12 @@
       "Bash(rg:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",
-      "Read(/Users/ericmiller/Downloads/bassopus24-ios/**)"
+      "Read(/Users/ericmiller/Downloads/bassopus24-ios/**)",
+      "WebFetch(domain:www.un4seen.com)",
+      "WebSearch",
+      "mcp__sosumi__searchAppleDocumentation",
+      "mcp__sosumi__fetchAppleDocumentation",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "additionalDirectories": [

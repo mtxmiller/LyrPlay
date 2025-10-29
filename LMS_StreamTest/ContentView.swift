@@ -159,17 +159,48 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
-            
-            // Check for app open recovery when app enters foreground
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                // CRITICAL FIX: Only perform recovery if app is NOT already playing
+
+            // App foreground recovery: Use backgrounding duration to determine if recovery needed
+            // Wait 2 seconds to ensure connection is stable after foregrounding
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                // Skip recovery if already playing (background audio kept connection alive)
                 let currentState = audioManager.getPlayerState()
-                
                 if currentState == "Playing" {
-                    os_log(.info, log: logger, "📱 App Open Recovery: Skipping - already playing (state: %{public}s)", currentState)
+                    os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
+                    return
+                }
+
+                // Get background duration from coordinator (centralized tracking)
+                guard let duration = slimProtoCoordinator.getBackgroundDuration() else {
+                    os_log(.info, log: logger, "📱 App Foreground: No background time tracked - skipping recovery")
+                    return
+                }
+
+                os_log(.info, log: logger, "📱 App Foreground: Backgrounded for %.1f seconds", duration)
+
+                // Check if app open recovery is enabled in settings
+                guard settings.enableAppOpenRecovery else {
+                    os_log(.info, log: logger, "📱 App Foreground: Recovery disabled in settings - skipping")
+                    return
+                }
+
+                if duration > 45 {
+                    // Long background (> 45s) - likely disconnected, perform recovery
+                    os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)
+
+                    // Reconnect if needed
+                    if !slimProtoCoordinator.isConnected {
+                        slimProtoCoordinator.connect()
+                    }
+
+                    // Wait for connection before recovery
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        os_log(.info, log: logger, "📱 App Foreground: Performing position recovery (shouldPlay: false)")
+                        slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
+                    }
                 } else {
-                    os_log(.info, log: logger, "📱 App Open Recovery: Proceeding - not playing (state: %{public}s)", currentState)
-                    //slimProtoCoordinator.performAppOpenRecovery() - HOLD FOR NOW - NOT READY
+                    // Brief background (< 45s) - skip recovery
+                    os_log(.info, log: logger, "📱 App Foreground: Brief background (%.1fs) - no recovery needed", duration)
                 }
             }
         }
@@ -236,13 +267,13 @@ struct ContentView: View {
         
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
-        
-        // Cache busting timestamp
-        let timestamp = Int(Date().timeIntervalSince1970)
-        
+
+        // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
+        // Material skin handles data freshness via its own API calls
+
         // REMOVED: player parameter - let Material control default player selection
         // Use & since baseURL already contains ?hide=notif
-        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)&_t=\(timestamp)"
+        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
     }
 
     
@@ -541,10 +572,12 @@ struct WebView: UIViewRepresentable {
         DispatchQueue.main.async {
             webViewReference = webView
         }
-        
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-        request.timeoutInterval = 10.0  // Now you can add this line
-        
+
+        // Use cache for faster loading on subsequent opens
+        // Material skin handles data freshness via API calls, so caching the HTML/CSS/JS is safe
+        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
+        request.timeoutInterval = 30.0  // 30 seconds for remote/slow connections
+
         webView.load(request)
 
         

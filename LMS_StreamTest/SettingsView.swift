@@ -139,16 +139,12 @@ struct SettingsView: View {
                                         .font(.caption)
                                         .foregroundColor(.blue)
                                 }
-                                
+
                                 Spacer()
-                                
+
                                 if isReconnecting {
                                     ProgressView()
                                         .scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: "chevron.right")
-                                        .foregroundColor(.secondary)
-                                        .font(.caption)
                                 }
                             }
                             
@@ -161,7 +157,27 @@ struct SettingsView: View {
                     .disabled(isReconnecting)
                     .padding(.vertical, 2)
                 }
-                
+
+                // Playback Settings Section
+                Section(header: Text("Playback Settings")) {
+                    Toggle(isOn: $settings.enableAppOpenRecovery) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundColor(.green)
+                                    .frame(width: 20)
+                                Text("Resume Position on App Open")
+                                    .font(.body)
+                            }
+                            Text("Automatically restore playback position when returning to app after 45+ seconds in background")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 // Advanced Section
                 Section(header: Text("Advanced")) {
                     NavigationLink(destination: AdvancedConfigView()) {
@@ -709,26 +725,6 @@ struct AdvancedConfigView: View {
                             .font(.caption)
                     }
                 }
-            }
-            
-            Section(header: Text("Device Information")) {
-                HStack {
-                    Text("Model:")
-                    Spacer()
-                    Text(settings.deviceModel)
-                        .foregroundColor(.secondary)
-                }
-                
-                HStack {
-                    Text("Model Name:")
-                    Spacer()
-                    Text(settings.deviceModelName)
-                        .foregroundColor(.secondary)
-                }
-                
-                Text("This information is sent to LMS to identify your device type.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
         }
         .navigationTitle("Advanced")
