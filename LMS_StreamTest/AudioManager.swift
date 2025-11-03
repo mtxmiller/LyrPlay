@@ -102,23 +102,49 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
     }
 
-    // NEW: Push stream playback for gapless
-    func startPushStreamPlayback(format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0) {
-        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz", format, sampleRate)
+    // NEW: Push stream playback for gapless (matches squeezelite architecture)
+    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d)", format, sampleRate, isGapless)
+        os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
         // Configure audio session
         configureAudioSessionForFormat(format)
         activateAudioSession()
 
-        // Initialize push stream
-        streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+        // Check if we need to initialize push stream (first time or after cleanup)
+        let hasValidStream = streamDecoder.hasValidStream()
 
-        // Start playback
-        if streamDecoder.startPlayback() {
-            os_log(.info, log: logger, "✅ Push stream playback started successfully")
+        if !hasValidStream {
+            // First time: Create push stream
+            os_log(.info, log: logger, "📊 Creating new push stream (first track)")
+            streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+
+            // Start playback
+            if streamDecoder.startPlayback() {
+                os_log(.info, log: logger, "✅ Push stream playback started")
+            } else {
+                os_log(.error, log: logger, "❌ Failed to start push stream playback")
+                return
+            }
+        } else if !isGapless {
+            // Manual skip: Stop old decoder, flush buffer, keep push stream
+            // This ensures audio changes immediately (no waiting for buffered audio)
+            os_log(.info, log: logger, "📊 Manual skip - flushing old audio from buffer")
+            streamDecoder.stopDecoding()
+            streamDecoder.flushBuffer()  // CRITICAL: Remove old track audio from buffer
         } else {
-            os_log(.error, log: logger, "❌ Failed to start push stream playback")
+            // Gapless transition: DON'T flush buffer, let old audio finish playing
+            // The decoder already stopped naturally (triggered this call via delegate)
+            os_log(.info, log: logger, "🎵 Gapless transition - preserving buffer (old audio will finish)")
+            // NO stopDecoding() - decoder already stopped naturally
+            // NO flushBuffer() - we want old audio to keep playing!
         }
+
+        // Start new decoder for this track
+        // isNewTrack: true for gapless (mark boundary), false for manual skip (fresh start)
+        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless)
+
+        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d)", isGapless)
     }
 
     func stopPushStreamPlayback() {
@@ -129,11 +155,24 @@ class AudioManager: NSObject, ObservableObject {
     // Playback control
     func play() {
         activateAudioSession()
-        audioPlayer.play()
+
+        // Control push stream or audio player depending on active mode
+        if streamDecoder.hasValidStream() {
+            streamDecoder.resumePlayback()
+            os_log(.info, log: logger, "▶️ Resuming push stream playback")
+        } else {
+            audioPlayer.play()
+        }
     }
-    
+
     func pause() {
-        audioPlayer.pause()
+        // Control push stream or audio player depending on active mode
+        if streamDecoder.hasValidStream() {
+            streamDecoder.pausePlayback()
+            os_log(.info, log: logger, "⏸️ Pausing push stream playback")
+        } else {
+            audioPlayer.pause()
+        }
     }
     
     func stop() {
@@ -149,7 +188,14 @@ class AudioManager: NSObject, ObservableObject {
 
     /// INTERNAL FALLBACK ONLY: Get AudioPlayer time when server time unavailable
     /// This should only be used by NowPlayingManager as last resort fallback
+    /// UPDATED: For push streams, report decoded position (like squeezelite reports frames_played)
     internal func getAudioPlayerTimeForFallback() -> Double {
+        // For push streams, report our decoded position (bytes pushed / bytes per second)
+        // This matches squeezelite reporting frames_played / sample_rate
+        if streamDecoder.isPlaying() {
+            return streamDecoder.getCurrentPosition()
+        }
+        // For URL streams, use audio player position
         return audioPlayer.getCurrentTime()
     }
     
@@ -158,11 +204,19 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func getPosition() -> Float {
+        // Use decoder position for push streams, audio player position for URL streams
+        if streamDecoder.isPlaying() {
+            return Float(streamDecoder.getCurrentPosition())
+        }
         return audioPlayer.getPosition()
     }
     
     func getPlayerState() -> String {
         return audioPlayer.getPlayerState()
+    }
+
+    func hasPushStream() -> Bool {
+        return streamDecoder.hasValidStream()  // Check for valid stream (playing OR paused)
     }
     
     func checkIfTrackEnded() -> Bool {
@@ -440,8 +494,20 @@ extension AudioManager: AudioStreamDecoderDelegate {
 
     func audioStreamDecoderDidReachTrackBoundary(_ decoder: AudioStreamDecoder) {
         os_log(.info, log: logger, "🎯 Track boundary reached - gapless transition!")
-        // Update Now Playing metadata for new track
-        // TODO: Notify coordinator of track change when method is implemented
-        // slimClient?.handleTrackBoundary()
+        // Like squeezelite output.c:155 - output.track_started = true → send STMs
+        // This updates Material UI to show the new track that's NOW PLAYING
+        slimClient?.sendTrackStarted()
+    }
+
+    func audioStreamDecoderDidCompleteTrack(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "✅ Track decode complete (natural end) - sending STMd to server")
+        // Like squeezelite: DECODE_COMPLETE → wake_controller() → send STMd
+        slimClient?.sendTrackDecodeComplete()
+    }
+
+    func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int) {
+        os_log(.error, log: logger, "❌ Decoder error: %d - sending STMn to server", error)
+        // Like squeezelite: DECODE_ERROR → send STMn
+        slimClient?.sendTrackDecodeError()
     }
 }
