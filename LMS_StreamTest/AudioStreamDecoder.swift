@@ -36,6 +36,9 @@ class AudioStreamDecoder {
     /// BASS push stream handle (single instance for gapless)
     private var pushStream: HSTREAM = 0
 
+    /// BASS decoder stream handle (decodes HTTP URL without playing)
+    private var decoderStream: HSTREAM = 0
+
     /// Current audio format being decoded
     private var currentFormat: String?
 
@@ -51,6 +54,12 @@ class AudioStreamDecoder {
     /// Flag indicating if decoder is actively processing
     private var isDecoding: Bool = false
 
+    /// Flag to track if decoder was manually stopped (vs natural completion)
+    private var manualStop: Bool = false
+
+    /// Track total bytes decoded and pushed (for debugging)
+    private var totalBytesPushed: UInt64 = 0
+
     /// Track boundary position in buffer (for gapless transitions)
     private var trackBoundaryPosition: UInt64?
 
@@ -59,6 +68,11 @@ class AudioStreamDecoder {
 
     /// Current track start position (for accurate position tracking)
     private var trackStartPosition: UInt64 = 0
+
+    /// Previous track start position (for reporting position before boundary crossed)
+    /// When queueing gapless track, trackStartPosition gets updated to boundary
+    /// But we need to keep reporting old track's position until boundary is reached
+    private var previousTrackStartPosition: UInt64 = 0
 
     /// Maximum buffer size before throttling (in bytes)
     /// Default: ~4 seconds @ 44.1kHz stereo float = 44100 * 2 * 4 * 4 = 705,600 bytes
@@ -159,12 +173,298 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "▶️ Push stream resumed")
     }
 
+    // MARK: - Decoder Stream Management
+
+    /// Start decoding from HTTP URL (like squeezelite's decoder thread)
+    /// - Parameters:
+    ///   - url: HTTP URL to decode from
+    ///   - format: Audio format (flc, mp3, ops, etc.)
+    ///   - isNewTrack: Whether this is a new track (for gapless boundary marking)
+    func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false) {
+        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s", format, url)
+
+        currentFormat = format
+
+        // DON'T reset totalBytesPushed yet - we need it to mark the boundary first!
+
+        // Create decode-only stream from URL (like squeezelite's streambuf)
+        // BASS_STREAM_DECODE = no playback, just decode
+        // BASS_SAMPLE_FLOAT = 32-bit float PCM output
+        guard let urlCString = url.cString(using: .utf8) else {
+            os_log(.error, log: logger, "❌ Invalid URL string")
+            return
+        }
+
+        decoderStream = BASS_StreamCreateURL(
+            urlCString,
+            0,
+            DWORD(BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT),
+            nil,
+            nil
+        )
+
+        guard decoderStream != 0 else {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Decoder stream creation failed: %d", error)
+            return
+        }
+
+        // CRITICAL: Get actual sample rate from decoder stream
+        var info = BASS_CHANNELINFO()
+        BASS_ChannelGetInfo(decoderStream, &info)
+        let actualSampleRate = Int(info.freq)
+        let actualChannels = Int(info.chans)
+
+        os_log(.info, log: logger, "✅ Decoder created: %dHz, %dch (expected: %dHz, %dch)",
+               actualSampleRate, actualChannels, sampleRate, channels)
+
+        // If sample rate doesn't match, we need to recreate push stream
+        if actualSampleRate != sampleRate || actualChannels != channels {
+            os_log(.error, log: logger, "⚠️ Format mismatch! Recreating push stream to match decoder")
+
+            // Update our stored format
+            sampleRate = actualSampleRate
+            channels = actualChannels
+
+            // Recreate push stream with correct format
+            if pushStream != 0 {
+                BASS_StreamFree(pushStream)
+            }
+
+            initializePushStream(sampleRate: sampleRate, channels: channels)
+            startPlayback()
+        }
+
+        // Mark position tracking
+        if pushStream != 0 {
+            if isNewTrack {
+                // New track: Mark boundary for gapless transition
+                markTrackBoundary()
+
+                if let boundaryPos = trackBoundaryPosition {
+                    // CRITICAL: Save old track start before updating to boundary
+                    // Need this to continue reporting old track's position until boundary crossed
+                    previousTrackStartPosition = trackStartPosition
+                    trackStartPosition = boundaryPos
+                    os_log(.info, log: logger, "🎯 New track - position will reset at boundary: %llu (previous start: %llu)", trackStartPosition, previousTrackStartPosition)
+                }
+
+                // CRITICAL: Do NOT reset totalBytesPushed! It must be cumulative like squeezelite's writep!
+                // totalBytesPushed tracks the absolute write position in the push stream buffer
+                // BASS sync callbacks use absolute positions, so totalBytesPushed must remain cumulative
+                os_log(.info, log: logger, "📊 Continuing cumulative write tracking: totalBytesPushed=%llu", totalBytesPushed)
+            } else {
+                // First track: Mark current playback position as track start
+                let currentPlaybackPosition = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+                previousTrackStartPosition = 0  // No previous track
+                trackStartPosition = currentPlaybackPosition
+                os_log(.info, log: logger, "🎯 First track - marking start position: %llu", trackStartPosition)
+
+                // For first track, totalBytesPushed should start at current playback position
+                // This handles cases where push stream already has data
+                totalBytesPushed = currentPlaybackPosition
+                os_log(.info, log: logger, "📊 Initializing cumulative write tracking: totalBytesPushed=%llu", totalBytesPushed)
+            }
+        }
+
+        // Start decoder loop (like squeezelite's decode_thread)
+        isDecoding = true
+        manualStop = false  // This is a fresh start, not a manual stop
+        startDecoderLoop()
+    }
+
+    /// Stop current decoder stream
+    func stopDecoding() {
+        os_log(.info, log: logger, "⏹️ Stopping decoder (manual stop)")
+        manualStop = true  // Mark as manual stop
+        isDecoding = false
+
+        if decoderStream != 0 {
+            BASS_StreamFree(decoderStream)
+            decoderStream = 0
+        }
+    }
+
+    /// Flush push stream buffer (clear all buffered audio)
+    /// Used when starting a new track to remove old audio
+    /// Per BASS docs: "User streams... it is possible to reset a user stream
+    /// (including its buffer contents) by setting its position to byte 0."
+    func flushBuffer() {
+        guard pushStream != 0 else { return }
+
+        let buffered = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let currentPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        os_log(.info, log: logger, "🧹 Flushing buffer: %d bytes buffered, position at %llu BEFORE flush", buffered, currentPos)
+
+        // CRITICAL: Must stop stream before flushing buffer
+        BASS_ChannelStop(pushStream)
+        os_log(.info, log: logger, "⏸️ Stopped stream for buffer flush")
+
+        // Method 1: Set position to 0 to reset stream (per BASS docs)
+        // This resets both buffer contents AND position counter
+        BASS_ChannelSetPosition(pushStream, 0, DWORD(BASS_POS_BYTE))
+
+        // Method 2: Restart to clear the buffer
+        // BASS_ChannelPlay with restart=TRUE clears buffer contents
+        let result = BASS_ChannelPlay(pushStream, 1)  // 1 = restart (clears buffer)
+        if result != 0 {
+            // Verify position was reset
+            let newPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+            os_log(.info, log: logger, "📊 BASS position AFTER flush: %llu (should be 0)", newPos)
+
+            trackStartPosition = 0  // Reset track start for position calculation
+            previousTrackStartPosition = 0
+            totalBytesPushed = 0  // Reset write position
+            os_log(.info, log: logger, "✅ Buffer flushed and stream restarted")
+        } else {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to flush buffer: error %d", error)
+        }
+    }
+
+    /// Decoder loop - pulls PCM from decoder stream and pushes to push stream
+    /// This matches squeezelite's decode_thread() architecture
+    private func startDecoderLoop() {
+        decodeQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            os_log(.info, log: self.logger, "🔄 Decoder loop started")
+
+            // Buffer for decoded PCM (4KB chunks like squeezelite)
+            let bufferSize = 4096
+            var buffer = [Float](repeating: 0, count: bufferSize)
+
+            while self.isDecoding && self.decoderStream != 0 {
+                // Check if push stream has space (like squeezelite checks outputbuf space)
+                guard self.pushStream != 0 else {
+                    os_log(.error, log: self.logger, "⚠️ No push stream available")
+                    break
+                }
+
+                let buffered = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+
+                // Throttle if buffer is getting full (like squeezelite)
+                if buffered > self.maxBufferSize {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    continue
+                }
+
+                // Pull decoded PCM from decoder stream (like squeezelite's read_cb)
+                let bytesRead = BASS_ChannelGetData(
+                    self.decoderStream,
+                    &buffer,
+                    DWORD(bufferSize * 4)  // 4 bytes per float
+                )
+
+                // Check for error
+                if bytesRead == DWORD.max {
+                    let error = BASS_ErrorGetCode()
+
+                    if error == DWORD(BASS_ERROR_ENDED) {
+                        // BASS_ERROR_ENDED means decoder buffer is empty right now
+                        // Check if HTTP is done - if so, we're truly finished
+                        let connected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
+
+                        if connected == 0 {
+                            // HTTP done AND decoder buffer empty = track complete
+                            let totalSeconds = Double(self.totalBytesPushed) / Double(self.sampleRate * self.channels * 4)
+                            os_log(.info, log: self.logger, "✅ Decoder finished (ENDED + HTTP disconnected)")
+                            os_log(.info, log: self.logger, "📊 Total decoded: %llu bytes (%.2f seconds of audio)", self.totalBytesPushed, totalSeconds)
+
+                            if !self.manualStop {
+                                os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
+                                DispatchQueue.main.async {
+                                    self.delegate?.audioStreamDecoderDidCompleteTrack(self)
+                                }
+                            } else {
+                                os_log(.info, log: self.logger, "⏹️ Track decode stopped (manual skip)")
+                            }
+                            break
+                        }
+
+                        // HTTP still active - wait for more data to decode
+                        os_log(.debug, log: self.logger, "⏳ Decoder buffer empty (HTTP still active), waiting...")
+                        Thread.sleep(forTimeInterval: 0.01)
+                        continue
+                    }
+
+                    // Real error (not ENDED)
+                    os_log(.error, log: self.logger, "❌ Decoder stream error: %d", error)
+
+                    // On error, notify delegate
+                    if !self.manualStop {
+                        DispatchQueue.main.async {
+                            self.delegate?.audioStreamDecoderDidEncounterError(self, error: Int(error))
+                        }
+                    }
+                    break
+                }
+
+                if bytesRead == 0 {
+                    // CRITICAL: Like squeezelite opus.c:224-229
+                    // bytesRead == 0 means decoder has no frames left to decode
+                    // Check if HTTP stream is also disconnected (truly finished)
+                    let connected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
+
+                    if connected == 0 {
+                        // Like squeezelite: n == 0 && stream.state <= DISCONNECT → return DECODE_COMPLETE
+                        let totalSeconds = Double(self.totalBytesPushed) / Double(self.sampleRate * self.channels * 4)
+                        os_log(.info, log: self.logger, "✅ Decoder finished (no more frames + HTTP disconnected)")
+                        os_log(.info, log: self.logger, "📊 Total decoded: %llu bytes (%.2f seconds of audio)", self.totalBytesPushed, totalSeconds)
+
+                        if !self.manualStop {
+                            os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
+                            DispatchQueue.main.async {
+                                self.delegate?.audioStreamDecoderDidCompleteTrack(self)
+                            }
+                        } else {
+                            os_log(.info, log: self.logger, "⏹️ Track decode stopped (manual skip)")
+                        }
+                        break
+                    }
+
+                    // Still connected - no data available yet, wait a bit (like squeezelite's usleep)
+                    Thread.sleep(forTimeInterval: 0.001)
+                    continue
+                }
+
+                // Push decoded PCM to push stream (like squeezelite's write_cb to outputbuf)
+                let pcmData = Data(bytes: &buffer, count: Int(bytesRead))
+                let pushed = pcmData.withUnsafeBytes { ptr in
+                    BASS_StreamPutData(
+                        self.pushStream,
+                        UnsafeMutableRawPointer(mutating: ptr.baseAddress),
+                        bytesRead
+                    )
+                }
+
+                if pushed == DWORD.max {
+                    let error = BASS_ErrorGetCode()
+                    os_log(.error, log: self.logger, "❌ StreamPutData failed: %d", error)
+                    break
+                }
+
+                // Track total bytes for position calculation
+                self.totalBytesPushed += UInt64(bytesRead)
+            }
+
+            os_log(.info, log: self.logger, "🛑 Decoder loop stopped")
+
+            // Clean up decoder stream
+            if self.decoderStream != 0 {
+                BASS_StreamFree(self.decoderStream)
+                self.decoderStream = 0
+            }
+        }
+    }
+
     /// Stop and cleanup push stream
     func cleanup() {
         os_log(.info, log: logger, "🧹 Cleaning up push stream")
 
         // Stop decoding
         isDecoding = false
+        stopDecoding()
 
         // Remove all syncs
         for sync in trackBoundarySyncs {
@@ -220,27 +520,43 @@ class AudioStreamDecoder {
 
     /// Mark current buffer position as track boundary for gapless transition
     private func markTrackBoundary() {
-        // Get current playback position
-        let currentPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        // CRITICAL: Like squeezelite output.track_start = outputbuf->writep
+        // The boundary is at the WRITE position (where we've written to),
+        // NOT the playback position (where we're reading from)!
+        // totalBytesPushed tracks our write position (like squeezelite's writep)
+        trackBoundaryPosition = totalBytesPushed
 
-        // Get amount of buffered data
-        let bufferedBytes = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let boundarySeconds = Double(trackBoundaryPosition!) / Double(sampleRate * channels * 4)
+        os_log(.error, log: logger, "🎯🎯🎯 TRACK BOUNDARY MARKED at WRITE position: %llu bytes (%.2f seconds)", trackBoundaryPosition!, boundarySeconds)
 
-        // Boundary is at end of current buffer
-        trackBoundaryPosition = currentPos + UInt64(bufferedBytes)
+        // Get current playback position for comparison
+        let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        let playbackSeconds = Double(playbackPos) / Double(sampleRate * channels * 4)
+        os_log(.error, log: logger, "📊 Current playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
 
-        os_log(.info, log: logger, "🎯 Track boundary marked at position: %llu", trackBoundaryPosition!)
+        // Calculate how long until boundary is reached
+        let bytesUntilBoundary = Int64(trackBoundaryPosition!) - Int64(playbackPos)
+        let secondsUntilBoundary = Double(bytesUntilBoundary) / Double(sampleRate * channels * 4)
+        os_log(.error, log: logger, "📊 Playback will reach boundary in %.2f seconds (%lld bytes ahead)", secondsUntilBoundary, bytesUntilBoundary)
 
         // Set sync callback for this boundary
+        // CRITICAL: Use BASS_SYNC_POS without MIXTIME so callback fires when audio is HEARD, not when mixed!
+        // MIXTIME would fire ~0.5s early (when audio reaches mix buffer, ahead of playback)
         let sync = BASS_ChannelSetSync(
             pushStream,
-            DWORD(BASS_SYNC_POS | BASS_SYNC_MIXTIME),
+            DWORD(BASS_SYNC_POS),  // Fire at playback time, not mixtime
             trackBoundaryPosition!,
             bassTrackBoundaryCallback,
             Unmanaged.passUnretained(self).toOpaque()
         )
 
-        trackBoundarySyncs.append(sync)
+        if sync != 0 {
+            trackBoundarySyncs.append(sync)
+            os_log(.error, log: logger, "✅ BASS sync callback registered for boundary position: %llu", trackBoundaryPosition!)
+        } else {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to set boundary sync! BASS error: %d", error)
+        }
     }
 
     // MARK: - Buffer Monitoring
@@ -284,38 +600,119 @@ class AudioStreamDecoder {
 
     /// Handle track boundary reached event (called from global callback)
     func handleTrackBoundary() {
-        os_log(.info, log: logger, "🎯 Track boundary reached - updating metadata")
+        // Get current playback position to verify timing
+        let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        let playbackSeconds = Double(playbackPos) / Double(sampleRate * channels * 4)
 
-        // Reset position counter for new track
-        trackStartPosition = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        os_log(.error, log: logger, "🎯🎯🎯 TRACK BOUNDARY REACHED - playback entered new track audio")
+        os_log(.error, log: logger, "📊 Playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
+
+        if let boundaryPos = trackBoundaryPosition {
+            let boundarySeconds = Double(boundaryPos) / Double(sampleRate * channels * 4)
+            os_log(.error, log: logger, "📊 Expected boundary: %llu bytes (%.2f seconds)", boundaryPos, boundarySeconds)
+
+            // Log the difference (should be very close)
+            let diff = Int64(playbackPos) - Int64(boundaryPos)
+            os_log(.error, log: logger, "📊 Timing accuracy: %lld bytes difference", diff)
+        }
+
+        os_log(.error, log: logger, "📊 Write position (totalBytesPushed): %llu bytes", totalBytesPushed)
+        let writeReadGap = Int64(totalBytesPushed) - Int64(playbackPos)
+        os_log(.error, log: logger, "📊 Write-Read gap: %lld bytes (buffer ahead of playback)", writeReadGap)
+
+        // CRITICAL: Remove all OLD boundary syncs that have now fired
+        // Only keep syncs for future boundaries (prevents stale callbacks)
+        // Note: BASS_ChannelRemoveSync is safe to call even if sync already auto-removed
+        let syncCount = trackBoundarySyncs.count
+        for sync in trackBoundarySyncs {
+            BASS_ChannelRemoveSync(pushStream, sync)
+        }
+        trackBoundarySyncs.removeAll()
+        os_log(.info, log: logger, "🧹 Cleared %d old boundary sync(s)", syncCount)
+
+        // trackStartPosition is already set to boundary position in startDecodingFromURL()
+        // Don't update it here - it's already correct!
+        // The boundary position IS the track start position
 
         // Notify delegate of track transition
         delegate?.audioStreamDecoderDidReachTrackBoundary(self)
 
-        // Clear boundary marker
+        // Clear boundary marker - now getCurrentPosition() will calculate normally
         trackBoundaryPosition = nil
+
+        os_log(.error, log: logger, "✅ Boundary handling complete - STMs should be sent NOW")
     }
 
     // MARK: - Position Tracking
 
     /// Get current playback position within current track
+    /// Returns PLAYBACK position (not decode position) - what's actually been played
+    /// This matches squeezelite reporting frames_played (not frames_decoded)
+    /// Position is relative to trackStartPosition (like squeezelite's output.track_start)
     func getCurrentPosition() -> TimeInterval {
         guard pushStream != 0 else { return 0 }
 
-        let currentPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
-        let bytesIntoTrack = currentPos - trackStartPosition
+        // Get PLAYBACK position from BASS (not decode position!)
+        // BASS_POS_BYTE gives playback position (what's actually played)
+        // BASS_POS_DECODE would give decode position (ahead due to buffering)
+        let playbackBytes = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+
+        os_log(.info, log: logger, "📊 POS: BASS playback=%llu trackStart=%llu prevStart=%llu boundary=%{public}s",
+               playbackBytes, trackStartPosition, previousTrackStartPosition,
+               trackBoundaryPosition.map { String($0) } ?? "none")
+
+        // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
+        // When new track is queued, trackStartPosition is updated to the boundary position
+        // But we shouldn't report "new track at 0 seconds" until playback actually reaches that boundary!
+        // Instead, continue reporting position from the PREVIOUS track's start position
+        if let boundaryPos = trackBoundaryPosition, playbackBytes < boundaryPos {
+            // Still playing old track - calculate position from PREVIOUS track start
+            // previousTrackStartPosition is saved before trackStartPosition gets updated to boundary
+
+            // Protect against underflow
+            guard playbackBytes >= previousTrackStartPosition else {
+                os_log(.error, log: logger, "⚠️ Before boundary: playback (%llu) < previous start (%llu) - returning 0", playbackBytes, previousTrackStartPosition)
+                return 0
+            }
+
+            let trackBytes = playbackBytes - previousTrackStartPosition
+            let bytesPerSecond = sampleRate * channels * 4
+            let seconds = Double(trackBytes) / Double(bytesPerSecond)
+            os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f", playbackBytes, boundaryPos, seconds)
+            os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (before boundary mode)", seconds)
+            return max(0, seconds)
+        }
+
+        // After boundary: Calculate position within NEW track (like squeezelite: position - track_start)
+        // CRITICAL: Protect against underflow if playback position < trackStart
+        // This can happen after buffer flush or on edge cases
+        guard playbackBytes >= UInt64(trackStartPosition) else {
+            os_log(.error, log: logger, "⚠️ Playback position (%llu) < track start (%llu) - returning 0", playbackBytes, trackStartPosition)
+            return 0
+        }
+
+        let trackBytes = playbackBytes - UInt64(trackStartPosition)
 
         // Convert bytes to seconds
+        // Float samples = 4 bytes per sample
         let bytesPerSecond = sampleRate * channels * 4  // 4 bytes per float sample
-        let seconds = Double(bytesIntoTrack) / Double(bytesPerSecond)
+        let seconds = Double(trackBytes) / Double(bytesPerSecond)
 
-        return seconds
+        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (after boundary / normal mode, trackBytes=%llu)", seconds, trackBytes)
+        return max(0, seconds)  // Ensure non-negative
     }
 
     /// Check if stream is currently playing
     func isPlaying() -> Bool {
         guard pushStream != 0 else { return false }
         return BASS_ChannelIsActive(pushStream) == DWORD(BASS_ACTIVE_PLAYING)
+    }
+
+    /// Check if we have a valid push stream (playing OR paused)
+    func hasValidStream() -> Bool {
+        guard pushStream != 0 else { return false }
+        let state = BASS_ChannelIsActive(pushStream)
+        return state == DWORD(BASS_ACTIVE_PLAYING) || state == DWORD(BASS_ACTIVE_PAUSED)
     }
 
     deinit {
@@ -333,6 +730,13 @@ protocol AudioStreamDecoderDelegate: AnyObject {
 
     /// Called when playback reaches a track boundary
     func audioStreamDecoderDidReachTrackBoundary(_ decoder: AudioStreamDecoder)
+
+    /// Called when decoder completes a track naturally (like squeezelite's DECODE_COMPLETE → STMd)
+    /// This means the track finished decoding naturally (not manual skip)
+    func audioStreamDecoderDidCompleteTrack(_ decoder: AudioStreamDecoder)
+
+    /// Called when decoder encounters an error
+    func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int)
 }
 
 /// Buffer statistics

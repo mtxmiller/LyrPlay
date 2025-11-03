@@ -35,7 +35,10 @@ class SlimProtoCoordinator: ObservableObject {
 
     // MARK: - ICY Metadata Tracking
     private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
-    
+
+    // MARK: - Gapless Playback Tracking
+    private var expectingGaplessTransition: Bool = false  // Set to true after sending STMd, false when STRM received
+
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
 
@@ -927,14 +930,38 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         }
     }
 
-    func didStartDirectStream(format: String, startTime: Double, replayGain: Float) {
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) {
         os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
+        os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url)
 
         // Stop any existing playback and timers first
         stopPlaybackHeartbeat()
 
+        // Check if this is a gapless transition (track decode completed naturally)
+        let isGapless = expectingGaplessTransition
+        if isGapless {
+            os_log(.info, log: logger, "🎵 Gapless transition detected - queuing next track while old audio plays")
+        }
+
         // Start push stream playback with AudioStreamDecoder
-        audioManager.startPushStreamPlayback(format: format, sampleRate: 44100, channels: 2, replayGain: replayGain)
+        // isGapless: true means DON'T flush buffer, let old audio finish
+        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless)
+
+        // Reset gapless flag after use
+        expectingGaplessTransition = false
+
+        // Send STMc (stream connected) - matches URL stream behavior
+        os_log(.info, log: logger, "🔗 Push stream connected - sending STMc")
+        client.sendStatus("STMc")
+
+        // Send STMs for first track / manual skip (no gapless transition)
+        // For gapless: STMs is sent when track boundary is reached (keeps Material in sync)
+        if !isGapless {
+            os_log(.info, log: logger, "🎵 First track/manual skip - sending STMs immediately")
+            client.sendStatus("STMs")
+        } else {
+            os_log(.info, log: logger, "🎵 Gapless track - STMs will be sent at track boundary")
+        }
 
         // Start periodic server time fetching for lock screen updates
         startServerTimeFetching()
@@ -997,6 +1024,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         audioManager.stop()
 
+        // CRITICAL: Clear gapless flag - stop command means next track is manual skip, not gapless!
+        // If we don't clear this, old buffered audio keeps playing after skip
+        expectingGaplessTransition = false
+        os_log(.info, log: logger, "🧹 Cleared gapless flag - next track will flush buffer")
+
         // CRITICAL FIX: Update both SimpleTimeTracker AND NowPlayingManager to stop interpolating
         updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
 
@@ -1010,7 +1042,50 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         client.sendStatus("STMf")
     }
-    
+
+    // MARK: - Gapless Playback - Track Decode Complete
+
+    /// Send STMd message when decoder completes naturally (like squeezelite DECODE_COMPLETE)
+    /// This tells the server the track finished decoding and triggers next track queueing
+    func sendTrackDecodeComplete() {
+        let timestamp = Date()
+        os_log(.error, log: logger, "✅✅✅ TRACK DECODE COMPLETE - sending STMd to server")
+        os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
+        os_log(.error, log: logger, "📊 This means: All track data decoded, boundary marked, audio still playing from buffer")
+
+        // Like squeezelite: decode.state = DECODE_COMPLETE → wake_controller() → sendSTAT("STMd", 0)
+        client.sendStatus("STMd")
+
+        // Mark that we're expecting a gapless transition
+        // Next STRM command should be treated as gapless (don't flush buffer)
+        expectingGaplessTransition = true
+
+        // Server will respond with new STRM command for next track
+        // With autostart=2 or 3 (wait for CONT before starting decode)
+        os_log(.error, log: logger, "📊 Waiting for server to queue next track (gapless mode enabled)...")
+        os_log(.error, log: logger, "📊 When playback reaches boundary → STMs will be sent → Material will update")
+    }
+
+    /// Send STMn message when decoder encounters error (like squeezelite DECODE_ERROR)
+    func sendTrackDecodeError() {
+        os_log(.error, log: logger, "❌ Track decode error - sending STMn to server")
+        client.sendStatus("STMn")
+    }
+
+    /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
+    /// This keeps Material UI in sync with actual audio playback
+    func sendTrackStarted() {
+        let timestamp = Date()
+        os_log(.error, log: logger, "🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
+        os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
+
+        // Like squeezelite output.c:155 - output.track_started = true → send STMs
+        // This updates Material to show the track that's NOW PLAYING (not just queued)
+        client.sendStatus("STMs")
+
+        os_log(.error, log: logger, "✅ STMs sent - Material UI should be updating to new track")
+    }
+
     func getCurrentAudioTime() -> Double {
         // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
@@ -1020,8 +1095,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func hasActiveStream() -> Bool {
         // Check if we have an active BASS stream (not stale after reconnect)
+        // This includes both URL streams (audioPlayer) and push streams (streamDecoder)
         let playerState = audioManager.getPlayerState()
-        return playerState != "No Stream"
+        let hasPushStream = audioManager.hasPushStream()
+        return playerState != "No Stream" || hasPushStream
     }
 
     func didReceiveStatusRequest() {
