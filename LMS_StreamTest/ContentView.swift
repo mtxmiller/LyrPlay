@@ -253,16 +253,18 @@ struct ContentView: View {
         let baseURL = settings.webURL
         let settingsURL = "lmsstream://settings"
         let settingsName = "iOS App Settings"
-        
+
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
 
         // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
         // Material skin handles data freshness via its own API calls
 
-        // REMOVED: player parameter - let Material control default player selection
-        // Use & since baseURL already contains ?hide=notif
-        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+        // Add Material skin query parameters:
+        // - hide=mediaControls: Hides lock screen/notification settings (prevents Material web player from interfering with native iOS lock screen)
+        //   NOTE: Material code checks for 'mediaControls' not 'notif' (ui-settings.js:506)
+        // - appSettings: Custom iOS app settings integration
+        return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
     }
 
     
