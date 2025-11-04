@@ -78,6 +78,11 @@ class AudioStreamDecoder {
     /// Default: ~4 seconds @ 44.1kHz stereo float = 44100 * 2 * 4 * 4 = 705,600 bytes
     private let maxBufferSize: Int = 705_600
 
+    // MARK: - Silent Recovery Support
+    /// Flag to mute the next stream creation (for silent app foreground recovery)
+    /// When true, DSP gain is set to 0.001 immediately upon push stream playback start
+    var muteNextStream: Bool = false
+
     /// Registered sync handles (for cleanup)
     private var trackBoundarySyncs: [HSYNC] = []
 
@@ -150,7 +155,15 @@ class AudioStreamDecoder {
         let result = BASS_ChannelPlay(pushStream, 0)
 
         if result != 0 {
-            os_log(.info, log: logger, "▶️ Push stream playback started")
+            // SILENT RECOVERY: Mute using DSP gain (like ReplayGain) instead of volume
+            // BASS_ATTRIB_VOLDSP applies gain to sample data - should actually work!
+            // Use 0.001 instead of 0.0 to avoid any potential edge cases (-60dB = effectively silent)
+            if muteNextStream {
+                BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+                os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (sample-level muting, -60dB)")
+            }
+
+            os_log(.info, log: logger, "▶️ Push stream playback started (muted: %{public}s)", muteNextStream ? "YES" : "NO")
             return true
         } else {
             let error = BASS_ErrorGetCode()
@@ -171,6 +184,23 @@ class AudioStreamDecoder {
         guard pushStream != 0 else { return }
         BASS_ChannelPlay(pushStream, 0)
         os_log(.info, log: logger, "▶️ Push stream resumed")
+    }
+
+    /// Apply muting (DSP gain) to current push stream
+    /// Used when flushBuffer() bypasses startPlayback()
+    func applyMuting() {
+        guard pushStream != 0 else { return }
+
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+        os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (manual muting)")
+    }
+
+    /// Restore DSP gain to 1.0 after silent recovery
+    func restoreDSPGain() {
+        guard pushStream != 0 else { return }
+
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 1.0)
+        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
     }
 
     // MARK: - Decoder Stream Management

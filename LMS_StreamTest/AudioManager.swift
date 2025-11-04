@@ -132,6 +132,14 @@ class AudioManager: NSObject, ObservableObject {
             os_log(.info, log: logger, "📊 Manual skip - flushing old audio from buffer")
             streamDecoder.stopDecoding()
             streamDecoder.flushBuffer()  // CRITICAL: Remove old track audio from buffer
+
+            // CRITICAL: Apply muting after flush if silent recovery mode is enabled
+            // flushBuffer() calls BASS_ChannelPlay() directly, bypassing startPlayback()
+            // So we need to apply muting here manually
+            if streamDecoder.muteNextStream {
+                streamDecoder.applyMuting()
+                os_log(.info, log: logger, "🔇 Applied silent recovery muting after buffer flush")
+            }
         } else {
             // Gapless transition: DON'T flush buffer, let old audio finish playing
             // The decoder already stopped naturally (triggered this call via delegate)
@@ -212,6 +220,11 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func getPlayerState() -> String {
+        // Check push stream first (for gapless/direct streams)
+        if streamDecoder.isPlaying() {
+            return "Playing"
+        }
+        // Fall back to URL stream player state
         return audioPlayer.getPlayerState()
     }
 
@@ -244,12 +257,17 @@ class AudioManager: NSObject, ObservableObject {
     /// Enable silent mode for the next stream (for app foreground recovery)
     func enableSilentRecoveryMode() {
         audioPlayer.muteNextStream = true
+        streamDecoder.muteNextStream = true  // Also apply to push streams for gapless
+        os_log(.info, log: logger, "🔇 Silent recovery mode enabled for both URL and push streams")
     }
 
     /// Disable silent mode and restore normal DSP gain
     func disableSilentRecoveryMode() {
         audioPlayer.muteNextStream = false
+        streamDecoder.muteNextStream = false
         audioPlayer.restoreDSPGain()
+        streamDecoder.restoreDSPGain()
+        os_log(.info, log: logger, "🔊 Silent recovery mode disabled - DSP gain restored")
     }
 
     func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {

@@ -175,6 +175,9 @@ struct SettingsView: View {
                                 .padding(.leading, 28)
                         }
                     }
+                    .onChange(of: settings.enableAppOpenRecovery) { _ in
+                        settings.saveSettings()
+                    }
                     .padding(.vertical, 4)
                 }
 

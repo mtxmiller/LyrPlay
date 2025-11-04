@@ -1287,6 +1287,16 @@ extension SlimProtoCoordinator {
                 if duration > 45 {
                     // Long background (> 45s) - reconnect and recover position
                     os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - reconnecting and recovering", duration)
+
+                    // CRITICAL: Destroy stale push stream before recovery
+                    // iOS won't let BASS reactivate audio session when stopping/restarting existing stream from background
+                    // But it WILL let BASS create a fresh stream (like pre-gapless URL-based playback)
+                    // This matches fb87545 behavior where each playback created new BASS stream
+                    if audioManager.hasPushStream() {
+                        os_log(.info, log: logger, "🧹 Destroying stale push stream before recovery (iOS background audio session limitation)")
+                        audioManager.stopPushStreamPlayback()  // Calls streamDecoder.cleanup() → BASS_StreamFree
+                    }
+
                     connect()
 
                     // Wait for confirmed connection before recovery
@@ -1303,8 +1313,9 @@ extension SlimProtoCoordinator {
 
                         if self.connectionManager.connectionState.isConnected {
                             // Connection confirmed! Perform playlist recovery with play
+                            // This will create a FRESH push stream (hasValidStream() will be false)
                             timer.invalidate()
-                            os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Reconnected - performing position recovery")
+                            os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Reconnected - performing position recovery with fresh stream")
                             self.performPlaylistRecovery(shouldPlay: true)
 
                         } else if attempts >= maxAttempts {
