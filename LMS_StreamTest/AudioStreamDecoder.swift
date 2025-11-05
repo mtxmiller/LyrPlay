@@ -745,6 +745,12 @@ class AudioStreamDecoder {
         return state == DWORD(BASS_ACTIVE_PLAYING) || state == DWORD(BASS_ACTIVE_PAUSED)
     }
 
+    /// Check if stream handle exists (regardless of state)
+    /// Used by lock screen recovery to detect stale streams needing cleanup
+    func hasStreamHandle() -> Bool {
+        return pushStream != 0
+    }
+
     deinit {
         cleanup()
         os_log(.info, log: logger, "AudioStreamDecoder deinitialized")
