@@ -1216,30 +1216,11 @@ extension SlimProtoCoordinator {
 
                     connect()
 
-                    // Wait for confirmed connection before recovery
-                    var attempts = 0
-                    let maxAttempts = 10  // 5 seconds total (10 x 0.5s)
-
-                    Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
-                        guard let self = self else {
-                            timer.invalidate()
-                            return
-                        }
-
-                        attempts += 1
-
-                        if self.connectionManager.connectionState.isConnected {
-                            // Connection confirmed! Perform playlist recovery with play
-                            // This will create a FRESH push stream (hasValidStream() will be false)
-                            timer.invalidate()
-                            os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Reconnected - performing position recovery with fresh stream")
-                            self.performPlaylistRecovery(shouldPlay: true)
-
-                        } else if attempts >= maxAttempts {
-                            // Timeout - give up
-                            timer.invalidate()
-                            os_log(.error, log: self.logger, "🔒 Lock screen PLAY: Connection timeout after %d attempts", attempts)
-                        }
+                    // HYBRID FIX: Don't poll connection state (unreliable)
+                    // Just wait fixed time and ALWAYS call recovery (like e3ed788)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Performing position recovery after reconnect wait")
+                        self.performPlaylistRecovery(shouldPlay: true)
                     }
                 } else {
                     // Brief background (< 45s) - just send play command (fast!)

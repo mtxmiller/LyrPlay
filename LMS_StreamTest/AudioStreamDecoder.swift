@@ -63,6 +63,11 @@ class AudioStreamDecoder {
     /// Track boundary position in buffer (for gapless transitions)
     private var trackBoundaryPosition: UInt64?
 
+    /// Flag to mark boundary on next decoded chunk (like squeezelite's decode.new_stream)
+    /// Set when new STRM arrives, cleared when first chunk of new track is written
+    /// This ensures boundary is marked AFTER old decoder finishes pushing buffered audio
+    private var pendingTrackBoundary: Bool = false
+
     /// Metadata for next track (applied at boundary)
     private var nextTrackMetadata: TrackMetadata?
 
@@ -268,16 +273,17 @@ class AudioStreamDecoder {
         // Mark position tracking
         if pushStream != 0 {
             if isNewTrack {
-                // New track: Mark boundary for gapless transition
-                markTrackBoundary()
+                // New track: Set flag to mark boundary when FIRST DECODED CHUNK is written
+                // Like squeezelite: decode.new_stream = true when STRM arrives
+                // Boundary gets marked when first frame is actually written to buffer
+                // This ensures old decoder finishes pushing buffered audio before boundary
+                pendingTrackBoundary = true
+                os_log(.info, log: logger, "🎯 New track pending - boundary will be marked when first decoded chunk is written")
 
-                if let boundaryPos = trackBoundaryPosition {
-                    // CRITICAL: Save old track start before updating to boundary
-                    // Need this to continue reporting old track's position until boundary crossed
-                    previousTrackStartPosition = trackStartPosition
-                    trackStartPosition = boundaryPos
-                    os_log(.info, log: logger, "🎯 New track - position will reset at boundary: %llu (previous start: %llu)", trackStartPosition, previousTrackStartPosition)
-                }
+                // CRITICAL: Save old track start BEFORE new boundary is marked
+                // Need this to continue reporting old track's position until boundary crossed
+                previousTrackStartPosition = trackStartPosition
+                os_log(.info, log: logger, "📊 Saved previous track start: %llu", previousTrackStartPosition)
 
                 // CRITICAL: Do NOT reset totalBytesPushed! It must be cumulative like squeezelite's writep!
                 // totalBytesPushed tracks the absolute write position in the push stream buffer
@@ -456,6 +462,21 @@ class AudioStreamDecoder {
                     // Still connected - no data available yet, wait a bit (like squeezelite's usleep)
                     Thread.sleep(forTimeInterval: 0.001)
                     continue
+                }
+
+                // SQUEEZELITE-STYLE: Mark boundary when first chunk of new track is written
+                // Like squeezelite: flac.c:176 - if (decode.new_stream) { output.track_start = outputbuf->writep; }
+                // This ensures boundary is marked AFTER old decoder finishes pushing buffered audio
+                if self.pendingTrackBoundary {
+                    os_log(.info, log: self.logger, "🎯 First chunk of new track - marking boundary NOW at writep: %llu", self.totalBytesPushed)
+                    self.markTrackBoundary()
+                    self.pendingTrackBoundary = false
+
+                    // Update trackStartPosition to the boundary we just marked
+                    if let boundaryPos = self.trackBoundaryPosition {
+                        self.trackStartPosition = boundaryPos
+                        os_log(.info, log: self.logger, "🎯 Track start position updated to boundary: %llu (previous: %llu)", self.trackStartPosition, self.previousTrackStartPosition)
+                    }
                 }
 
                 // Push decoded PCM to push stream (like squeezelite's write_cb to outputbuf)
@@ -743,12 +764,6 @@ class AudioStreamDecoder {
         guard pushStream != 0 else { return false }
         let state = BASS_ChannelIsActive(pushStream)
         return state == DWORD(BASS_ACTIVE_PLAYING) || state == DWORD(BASS_ACTIVE_PAUSED)
-    }
-
-    /// Check if stream handle exists (regardless of state)
-    /// Used by lock screen recovery to detect stale streams needing cleanup
-    func hasStreamHandle() -> Bool {
-        return pushStream != 0
     }
 
     deinit {

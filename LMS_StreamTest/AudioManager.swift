@@ -229,10 +229,7 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func hasPushStream() -> Bool {
-        // Check if ANY stream handle exists (even if stopped/stalled)
-        // CRITICAL: After disconnection, stream may be stopped but handle still exists
-        // We need to cleanup these stale handles for lock screen recovery to work
-        return streamDecoder.hasStreamHandle()
+        return streamDecoder.hasValidStream()  // Check for valid stream (playing OR paused)
     }
     
     func checkIfTrackEnded() -> Bool {
