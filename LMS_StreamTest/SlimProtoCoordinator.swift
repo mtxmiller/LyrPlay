@@ -201,8 +201,17 @@ class SlimProtoCoordinator: ObservableObject {
         // Store metadata to prevent future duplicates
         lastSentICYMetadata = metadata
 
-        // Forward ICY metadata to LMS server (similar to squeezelite's sendMETA)
-        sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
+        // CRITICAL FIX: Only send ICY metadata if stream has duration
+        // Metadata-less HLS/playlist streams have no duration, causing LMS XMLBrowser.pm crash:
+        // "Can't call method 'duration' on an undefined value at XMLBrowser.pm line 1975"
+        // Check stream duration before sending to prevent server-side Perl crashes
+        let duration = audioManager.getDuration()
+        if duration > 0 {
+            os_log(.info, log: logger, "🎵 Stream has duration (%.2fs) - sending ICY metadata to LMS", duration)
+            sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
+        } else {
+            os_log(.info, log: logger, "🎵 Stream has no duration (infinite stream) - skipping ICY metadata send (prevents server crash)")
+        }
     }
 
     private func sendICYMetadataToLMS(title: String?, artist: String?) {
