@@ -6,15 +6,6 @@ import os.log
 
 // MARK: - Global BASS Callbacks
 
-/// Global callback for buffer stall events
-private func bassStallCallback(handle: HSYNC, channel: DWORD, data: DWORD, user: UnsafeMutableRawPointer?) {
-    if data == 0 {
-        os_log(.error, "⚠️ BUFFER STALLED - playback interrupted!")
-    } else {
-        os_log(.info, "✅ Buffer resumed after stall")
-    }
-}
-
 /// Global callback for track boundary sync
 private func bassTrackBoundaryCallback(handle: HSYNC, channel: DWORD, data: DWORD, user: UnsafeMutableRawPointer?) {
     guard let user = user else { return }
@@ -22,6 +13,23 @@ private func bassTrackBoundaryCallback(handle: HSYNC, channel: DWORD, data: DWOR
 
     DispatchQueue.main.async {
         decoder.handleTrackBoundary()
+    }
+}
+
+/// Global callback for buffer end/stall (when all audio has been played)
+/// For push streams, BASS_SYNC_STALL with data=0 indicates buffer empty
+private func bassBufferEndCallback(handle: HSYNC, channel: DWORD, data: DWORD, user: UnsafeMutableRawPointer?) {
+    guard let user = user else { return }
+    let decoder = Unmanaged<AudioStreamDecoder>.fromOpaque(user).takeUnretainedValue()
+
+    // data=0 means stalled (buffer empty), data=1 means resumed
+    if data == 0 {
+        os_log(.error, "⚠️ BUFFER STALLED - playback interrupted!")
+        DispatchQueue.main.async {
+            decoder.handleBufferEnd()
+        }
+    } else {
+        os_log(.info, "✅ Buffer resumed after stall")
     }
 }
 
@@ -78,6 +86,20 @@ class AudioStreamDecoder {
     /// When queueing gapless track, trackStartPosition gets updated to boundary
     /// But we need to keep reporting old track's position until boundary is reached
     private var previousTrackStartPosition: UInt64 = 0
+
+    /// Pending track info for deferred start (when format mismatch during gapless transition)
+    /// When next track has different sample rate/channels, we defer starting it until current track finishes
+    private var pendingTrack: PendingTrackInfo? = nil
+
+    /// Information about a track that's waiting to start (due to format mismatch)
+    /// Stores decoder handle to keep HTTP connection alive and preserve position 0:00
+    private struct PendingTrackInfo {
+        let url: String
+        let format: String
+        let decoderStream: HSTREAM  // Keep HTTP connection alive!
+        let sampleRate: Int
+        let channels: Int
+    }
 
     /// Maximum buffer size before throttling (in bytes)
     /// Default: ~4 seconds @ 44.1kHz stereo float = 44100 * 2 * 4 * 4 = 705,600 bytes
@@ -136,15 +158,18 @@ class AudioStreamDecoder {
 
     /// Set up BASS sync callbacks for monitoring
     private func setupSyncCallbacks() {
-        // Buffer stall monitoring
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        // Buffer stall monitoring - also detects buffer end for push streams
+        // For push streams, STALL with data=0 means buffer empty (track finished)
+        // This is how we detect when to start deferred tracks
         let stallSync = BASS_ChannelSetSync(
             pushStream,
             DWORD(BASS_SYNC_STALL),
             0,
-            bassStallCallback,
-            nil
+            bassBufferEndCallback,  // Use buffer end callback to handle deferred tracks
+            selfPtr
         )
-
         trackBoundarySyncs.append(stallSync)
 
         os_log(.info, log: logger, "✅ Sync callbacks registered")
@@ -255,6 +280,38 @@ class AudioStreamDecoder {
 
         // If sample rate doesn't match, we need to recreate push stream
         if actualSampleRate != sampleRate || actualChannels != channels {
+            os_log(.error, log: logger, "⚠️ Format mismatch! Decoder: %dHz/%dch, Stream: %dHz/%dch",
+                   actualSampleRate, actualChannels, sampleRate, channels)
+
+            // CRITICAL: If this is a gapless transition, defer the track start!
+            // We can't recreate the stream now because it would destroy buffered audio
+            // Instead, store the pending track and wait for buffer to empty
+            if isNewTrack {
+                os_log(.error, log: logger, "🎵 Gapless transition with format mismatch - DEFERRING track start")
+                os_log(.error, log: logger, "📊 Current track will play to completion, then new track will start")
+                os_log(.error, log: logger, "📊 Keeping decoder alive to preserve HTTP connection from position 0:00")
+
+                // Store pending track info WITH live decoder
+                // CRITICAL: Don't close decoder! Keep HTTP connection open so we get track from 0:00
+                pendingTrack = PendingTrackInfo(
+                    url: url,
+                    format: format,
+                    decoderStream: decoderStream,  // Keep alive!
+                    sampleRate: actualSampleRate,
+                    channels: actualChannels
+                )
+
+                // DON'T close decoder - we need to keep the HTTP connection alive
+                // If we close it, we lose the beginning of the track
+                // Set to 0 so stopDecoding() doesn't try to free it
+                decoderStream = 0
+
+                // Return early - don't start decoder loop yet
+                // Buffer end callback will start this track when current track finishes
+                return
+            }
+
+            // Not gapless - safe to recreate stream immediately
             os_log(.error, log: logger, "⚠️ Format mismatch! Recreating push stream to match decoder")
 
             // Update our stored format
@@ -314,6 +371,17 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "⏹️ Stopping decoder (manual stop)")
         manualStop = true  // Mark as manual stop
         isDecoding = false
+
+        // Clear any pending track (user manually stopped, so don't start deferred track)
+        if let pending = pendingTrack {
+            os_log(.info, log: logger, "🎵 Clearing pending track due to manual stop")
+            // Free the pending decoder stream (HTTP connection)
+            if pending.decoderStream != 0 {
+                BASS_StreamFree(pending.decoderStream)
+                os_log(.info, log: logger, "🧹 Freed pending decoder stream")
+            }
+            pendingTrack = nil
+        }
 
         if decoderStream != 0 {
             BASS_StreamFree(decoderStream)
@@ -694,6 +762,67 @@ class AudioStreamDecoder {
         os_log(.error, log: logger, "✅ Boundary handling complete - STMs should be sent NOW")
     }
 
+    /// Handle buffer end event (all audio has been played)
+    /// This is where we start deferred tracks when format mismatch occurred
+    func handleBufferEnd() {
+        os_log(.info, log: logger, "🎵 Buffer end reached - checking for pending track")
+
+        guard let pending = pendingTrack else {
+            os_log(.info, log: logger, "📊 No pending track - buffer naturally ended")
+            return
+        }
+
+        os_log(.info, log: logger, "🎵 Starting deferred track due to format mismatch")
+        os_log(.info, log: logger, "📊 Deferred track: %{public}s (format: %{public}s)",
+               pending.url, pending.format)
+
+        // Clear pending track first
+        pendingTrack = nil
+
+        // Flush buffer and recreate stream with new format
+        // Then start the deferred track
+        startDeferredTrack(pending)
+    }
+
+    /// Start a track that was deferred due to format mismatch
+    /// Uses existing decoder to preserve HTTP connection and get track from 0:00
+    private func startDeferredTrack(_ track: PendingTrackInfo) {
+        os_log(.info, log: logger, "🎵 Starting deferred track with preserved decoder (from position 0:00)")
+        os_log(.info, log: logger, "📊 Using existing decoder: %{public}s", track.url)
+
+        // Update our format to match the new track
+        sampleRate = track.sampleRate
+        channels = track.channels
+        currentFormat = track.format
+
+        // Recreate push stream with new format
+        // The buffer is now empty, so this is safe
+        if pushStream != 0 {
+            BASS_StreamFree(pushStream)
+        }
+
+        initializePushStream(sampleRate: sampleRate, channels: channels)
+        startPlayback()
+
+        // Use the EXISTING decoder (already connected, at position 0:00!)
+        // This preserves the HTTP connection so we get the track from the beginning
+        decoderStream = track.decoderStream
+
+        // Mark as first track (new stream, starting fresh)
+        trackStartPosition = 0
+        previousTrackStartPosition = 0
+        totalBytesPushed = 0
+
+        // Start decode loop with existing decoder
+        isDecoding = true
+        manualStop = false
+        startDecoderLoop()
+
+        // Notify delegate that deferred track started (for STMs)
+        os_log(.info, log: logger, "🎵 Notifying delegate of deferred track start")
+        delegate?.audioStreamDecoderDidStartDeferredTrack(self)
+    }
+
     // MARK: - Position Tracking
 
     /// Get current playback position within current track
@@ -788,6 +917,10 @@ protocol AudioStreamDecoderDelegate: AnyObject {
 
     /// Called when decoder encounters an error
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int)
+
+    /// Called when a deferred track (from format mismatch) starts playing
+    /// This allows coordinator to send STMs notification to server
+    func audioStreamDecoderDidStartDeferredTrack(_ decoder: AudioStreamDecoder)
 }
 
 /// Buffer statistics

@@ -528,4 +528,11 @@ extension AudioManager: AudioStreamDecoderDelegate {
         // Like squeezelite: DECODE_ERROR → send STMn
         slimClient?.sendTrackDecodeError()
     }
+
+    func audioStreamDecoderDidStartDeferredTrack(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "🎯 Deferred track started (format mismatch) - sending STMs!")
+        // When deferred track starts after format mismatch, notify server
+        // This updates Material UI to show the new track that's NOW PLAYING
+        slimClient?.sendTrackStarted()
+    }
 }
