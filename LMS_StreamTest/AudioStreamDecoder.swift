@@ -400,9 +400,9 @@ class AudioStreamDecoder {
         let currentPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
         os_log(.info, log: logger, "🧹 Flushing buffer: %d bytes buffered, position at %llu BEFORE flush", buffered, currentPos)
 
-        // CRITICAL: Must stop stream before flushing buffer
-        BASS_ChannelStop(pushStream)
-        os_log(.info, log: logger, "⏸️ Stopped stream for buffer flush")
+        // CRITICAL: DON'T stop stream - BASS auto-manages audio session/device changes
+        // Stopping interferes with BASS's automatic route change handling
+        // Just reset position and restart to clear buffer
 
         // Method 1: Set position to 0 to reset stream (per BASS docs)
         // This resets both buffer contents AND position counter
@@ -410,6 +410,7 @@ class AudioStreamDecoder {
 
         // Method 2: Restart to clear the buffer
         // BASS_ChannelPlay with restart=TRUE clears buffer contents
+        // Trust BASS to handle device switching automatically
         let result = BASS_ChannelPlay(pushStream, 1)  // 1 = restart (clears buffer)
         if result != 0 {
             // Verify position was reset
@@ -418,8 +419,9 @@ class AudioStreamDecoder {
 
             trackStartPosition = 0  // Reset track start for position calculation
             previousTrackStartPosition = 0
+            trackBoundaryPosition = nil  // Clear old gapless boundary from previous track
             totalBytesPushed = 0  // Reset write position
-            os_log(.info, log: logger, "✅ Buffer flushed and stream restarted")
+            os_log(.info, log: logger, "✅ Buffer flushed and restarted - BASS auto-handled device switching")
         } else {
             let error = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ Failed to flush buffer: error %d", error)
@@ -585,17 +587,14 @@ class AudioStreamDecoder {
         isDecoding = false
         stopDecoding()
 
-        // Remove all syncs
-        for sync in trackBoundarySyncs {
-            BASS_ChannelRemoveSync(pushStream, sync)
-        }
-        trackBoundarySyncs.removeAll()
-
-        // Free stream
+        // Free stream (automatically removes all syncs/DSP/FX per BASS documentation)
         if pushStream != 0 {
             BASS_StreamFree(pushStream)
             pushStream = 0
         }
+
+        // Clear our local sync array (syncs already removed by BASS_StreamFree)
+        trackBoundarySyncs.removeAll()
 
         os_log(.info, log: logger, "✅ Cleanup complete")
     }
@@ -831,6 +830,16 @@ class AudioStreamDecoder {
     /// Position is relative to trackStartPosition (like squeezelite's output.track_start)
     func getCurrentPosition() -> TimeInterval {
         guard pushStream != 0 else { return 0 }
+
+        // CRITICAL: Validate stream state before querying position
+        // During route changes (CarPlay, AirPods, etc), stream may be in PAUSED_DEVICE or invalid state
+        // Calling BASS_ChannelGetPosition() on corrupted streams returns garbage data
+        // This garbage crashes iOS media UI (MPNowPlayingInfoCenter)
+        let state = BASS_ChannelIsActive(pushStream)
+        guard state == DWORD(BASS_ACTIVE_PLAYING) || state == DWORD(BASS_ACTIVE_PAUSED) else {
+            os_log(.error, log: logger, "⚠️ Stream in invalid state (%d) - not querying position", state)
+            return 0  // Safe fallback - don't query corrupted stream
+        }
 
         // Get PLAYBACK position from BASS (not decode position!)
         // BASS_POS_BYTE gives playback position (what's actually played)

@@ -35,7 +35,11 @@ final class PlaybackSessionControllerTests: XCTestCase {
         super.tearDown()
     }
 
+    // REMOVED: ensureActive() no longer exists - BASS auto-manages audio session
+    // Manual session activation removed when migrating to BASS auto-management
     func testEnsureActiveSetsCategoryAndActivatesSession() {
+        // Test disabled - BASS handles session activation automatically
+        /*
         let exp = expectation(description: "activation")
         controller.ensureActive(context: .userInitiatedPlay)
 
@@ -48,6 +52,7 @@ final class PlaybackSessionControllerTests: XCTestCase {
         }
 
         waitForExpectations(timeout: 1.0)
+        */
     }
 
     func testInterruptionPausesAndResumesWhenIndicated() {
@@ -215,6 +220,10 @@ private final class FakePlaybackController: AudioPlaybackControlling {
     var isPlaying: Bool { isPlayingStub }
 
     func handleAudioRouteChange() {
+        // No-op for tests
+    }
+
+    func cleanupPushStreams() {
         // No-op for tests
     }
 }

@@ -47,10 +47,15 @@ protocol AudioPlaybackControlling: AnyObject {
     func pause()
     var isPlaying: Bool { get }
     func handleAudioRouteChange()  // NEW: Route change handling
+    func cleanupPushStreams()      // NEW: Cleanup for route changes when backgrounded
 }
 
 extension AudioManager: AudioPlaybackControlling {
     var isPlaying: Bool { getPlayerState() == "Playing" }
+
+    func cleanupPushStreams() {
+        stopPushStreamPlayback()
+    }
 }
 
 // MARK: - PlaybackSessionController
@@ -328,6 +333,7 @@ final class PlaybackSessionController {
             } else {
                 os_log(.info, log: logger, "🔀 Route change detected - BASS auto-switching to new device")
             }
+            // Trust BASS to handle route changes automatically - no manual cleanup
         }
 
         // PHONE CALL FIX: Check if we need to resume after interruption (phone call, etc.)
@@ -378,11 +384,12 @@ final class PlaybackSessionController {
     // MARK: - CarPlay Handling
     private func handleCarPlayConnected() {
         guard !shouldThrottleCarPlayEvent() else { return }
-        refreshRemoteCommandCenter()
         endBackgroundTask()
         os_log(.info, log: logger, "🚗 CarPlay connected - BASS auto-switching to CarPlay audio route")
 
         // BASS automatically handles CarPlay route switching - no manual session management needed
+        // DON'T refresh remote command center here - it activates audio session and triggers iOS auto-resume
+        // Remote commands are already configured at app launch and persist across route changes
         wasPlayingBeforeCarPlayDetach = false
     }
 

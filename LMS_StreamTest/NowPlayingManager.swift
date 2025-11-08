@@ -16,12 +16,16 @@ class NowPlayingManager: ObservableObject {
     private var currentAlbum: String = "Lyrion Music Server"
     private var currentArtwork: UIImage?
     private var metadataDuration: TimeInterval = 0.0
-    
+
     // MARK: - Time Sources
     private weak var audioManager: AudioManager?
     private var lastKnownServerTime: Double = 0.0
     private var lastKnownAudioTime: Double = 0.0
     private var isUsingServerTime: Bool = false
+
+    // MARK: - Deduplication State (prevent flooding MPNowPlayingInfoCenter)
+    private var lastUpdatedTime: Double = -1.0
+    private var lastUpdatedPlayingState: Bool = false
     
     private var lockScreenStoredPosition: Double = 0.0
     private var lockScreenStoredTimestamp: Date?
@@ -68,13 +72,24 @@ class NowPlayingManager: ObservableObject {
     private func updateNowPlayingTime() {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
 
-        // Log every update to see what's changing the lock screen
-        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
-               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        // CRITICAL: Only update MPNowPlayingInfoCenter when something ACTUALLY CHANGED
+        // Prevents flooding iOS media UI which can cause CarPlay/lock screen to crash
+        let timeDifference = abs(currentTime - lastUpdatedTime)
+        let stateChanged = isPlaying != lastUpdatedPlayingState
+        let timeChanged = timeDifference > 0.5  // Only update if >0.5s difference
 
+        if stateChanged || timeChanged {
+            // Log updates when something changed
+            os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
+                   currentTime, timeSource.description, isPlaying ? "YES" : "NO")
 
-        // Update now playing info with current time
-        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+            // Update now playing info with current time
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+
+            // Save last updated values
+            lastUpdatedTime = currentTime
+            lastUpdatedPlayingState = isPlaying
+        }
 
         // REMOVED: Server-time based track end detection - now using BASS_SYNC_END exclusively
         // The duplicate detection was causing spurious STMd signals during track transitions
@@ -290,10 +305,13 @@ class NowPlayingManager: ObservableObject {
         } else {
             os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s", title, artist)
         }
-        
+
         currentTrackTitle = title
         currentArtist = artist
         currentAlbum = album
+
+        // Reset deduplication state so next update goes through immediately
+        lastUpdatedTime = -1.0
         
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {

@@ -516,11 +516,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // CRITICAL: Save position for playlist recovery on any disconnect
         saveCurrentPositionForRecovery()
 
-        // CRITICAL FIX: Stop and free the BASS stream on disconnect
-        // This prevents trying to resume stale buffered data after reconnection
-        // Server will send fresh stream URL with correct position via HELO reconnect
-        os_log(.info, log: logger, "🛑 Stopping BASS stream on disconnect to prevent stale buffer resume")
-        audioManager.stop()
+        // Trust server-master architecture: Server controls playback via STRM commands
+        // Don't send local stop commands - let server decide when to stop/start via STRM
 
         connectionManager.didDisconnect(error: error)
 
@@ -1225,15 +1222,8 @@ extension SlimProtoCoordinator {
                     // Long background (> 45s) - reconnect and recover position
                     os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - reconnecting and recovering", duration)
 
-                    // CRITICAL: Destroy stale push stream before recovery
-                    // iOS won't let BASS reactivate audio session when stopping/restarting existing stream from background
-                    // But it WILL let BASS create a fresh stream (like pre-gapless URL-based playback)
-                    // This matches fb87545 behavior where each playback created new BASS stream
-                    if audioManager.hasPushStream() {
-                        os_log(.info, log: logger, "🧹 Destroying stale push stream before recovery (iOS background audio session limitation)")
-                        audioManager.stopPushStreamPlayback()  // Calls streamDecoder.cleanup() → BASS_StreamFree
-                    }
-
+                    // Trust BASS to auto-manage stream state during reconnection
+                    // BASS handles iOS audio session activation/deactivation automatically
                     connect()
 
                     // HYBRID FIX: Don't poll connection state (unreliable)

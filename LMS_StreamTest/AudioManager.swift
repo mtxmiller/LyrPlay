@@ -127,19 +127,19 @@ class AudioManager: NSObject, ObservableObject {
                 return
             }
         } else if !isGapless {
-            // Manual skip: Stop old decoder, flush buffer, keep push stream
-            // This ensures audio changes immediately (no waiting for buffered audio)
-            os_log(.info, log: logger, "📊 Manual skip - flushing old audio from buffer")
+            // Manual skip: Stop old decoder, flush buffer
+            // But first ensure BASS output device is resumed after any route change
+            os_log(.info, log: logger, "📊 Manual skip - stopping old decoder and flushing buffer")
             streamDecoder.stopDecoding()
-            streamDecoder.flushBuffer()  // CRITICAL: Remove old track audio from buffer
 
-            // CRITICAL: Apply muting after flush if silent recovery mode is enabled
-            // flushBuffer() calls BASS_ChannelPlay() directly, bypassing startPlayback()
-            // So we need to apply muting here manually
-            if streamDecoder.muteNextStream {
-                streamDecoder.applyMuting()
-                os_log(.info, log: logger, "🔇 Applied silent recovery muting after buffer flush")
-            }
+            // CRITICAL: After route change, BASS device may be paused (BASS_ACTIVE_PAUSED_DEVICE)
+            // Per BASS docs: "playback will be resumed by BASS_Start"
+            // Ensure output device is active before flushing buffer
+            BASS_Start()
+            os_log(.info, log: logger, "🔊 Ensured BASS output device active before buffer flush")
+
+            // Now safe to flush buffer - device is active and ready for new audio
+            streamDecoder.flushBuffer()
         } else {
             // Gapless transition: DON'T flush buffer, let old audio finish playing
             // The decoder already stopped naturally (triggered this call via delegate)
