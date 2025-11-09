@@ -113,6 +113,11 @@ class AudioStreamDecoder {
     /// Registered sync handles (for cleanup)
     private var trackBoundarySyncs: [HSYNC] = []
 
+    /// CRITICAL: Separate storage for STALL sync (buffer end detection)
+    /// This sync must persist across track boundaries to detect when buffer empties
+    /// for deferred track starts (format mismatch scenarios)
+    private var stallSync: HSYNC = 0
+
     // MARK: - Delegate
 
     weak var delegate: AudioStreamDecoderDelegate?
@@ -163,16 +168,16 @@ class AudioStreamDecoder {
         // Buffer stall monitoring - also detects buffer end for push streams
         // For push streams, STALL with data=0 means buffer empty (track finished)
         // This is how we detect when to start deferred tracks
-        let stallSync = BASS_ChannelSetSync(
+        // CRITICAL: Store separately from trackBoundarySyncs so it persists across track boundaries
+        stallSync = BASS_ChannelSetSync(
             pushStream,
             DWORD(BASS_SYNC_STALL),
             0,
             bassBufferEndCallback,  // Use buffer end callback to handle deferred tracks
             selfPtr
         )
-        trackBoundarySyncs.append(stallSync)
 
-        os_log(.info, log: logger, "✅ Sync callbacks registered")
+        os_log(.info, log: logger, "✅ Sync callbacks registered (STALL sync: %d)", stallSync)
     }
 
     /// Start BASS playback of push stream
@@ -593,8 +598,9 @@ class AudioStreamDecoder {
             pushStream = 0
         }
 
-        // Clear our local sync array (syncs already removed by BASS_StreamFree)
+        // Clear our local sync arrays (syncs already removed by BASS_StreamFree)
         trackBoundarySyncs.removeAll()
+        stallSync = 0  // Reset STALL sync handle (already freed by BASS_StreamFree)
 
         os_log(.info, log: logger, "✅ Cleanup complete")
     }
