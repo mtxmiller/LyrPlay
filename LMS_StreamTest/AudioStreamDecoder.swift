@@ -118,6 +118,9 @@ class AudioStreamDecoder {
     /// for deferred track starts (format mismatch scenarios)
     private var stallSync: HSYNC = 0
 
+    /// Throttle log counter to avoid spam (throttle can happen 10x/sec)
+    private var throttleLogCounter: Int = 0
+
     // MARK: - Delegate
 
     weak var delegate: AudioStreamDecoderDelegate?
@@ -154,6 +157,13 @@ class AudioStreamDecoder {
             os_log(.error, log: logger, "❌ Push stream creation failed: %d", error)
             return
         }
+
+        // CRITICAL: Set hard limit on queue buffer to prevent runaway memory usage
+        // This prevents decoding entire podcasts (60min = 1.2GB!) into RAM
+        // 150 MB = room for ~2 full songs in queue for gapless playback
+        let hardLimitBytes: Float = 150_000_000  // 150 MB
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_PUSH_LIMIT), hardLimitBytes)
+        os_log(.info, log: logger, "🔒 Set push stream queue limit: %.0f MB", hardLimitBytes / 1_048_576)
 
         // Set up buffer stall detection
         setupSyncCallbacks()
@@ -569,6 +579,40 @@ class AudioStreamDecoder {
                     os_log(.error, log: self.logger, "❌ StreamPutData failed: %d", error)
                     break
                 }
+
+                // DIAGNOSTIC: Check what "queued" actually means
+                // Per BASS docs: BASS_StreamPutData returns "amount of data currently queued"
+                // Per BASS docs: BASS_ChannelGetData(BASS_DATA_AVAILABLE) returns "playback buffer level"
+                let playbackBuffered = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+                let queuedAmount = Int(pushed)  // Return value from StreamPutData
+                let totalBuffered = queuedAmount + Int(playbackBuffered)
+
+                // Log every 100 chunks to avoid spam (4KB chunks = log every ~400KB)
+                if self.totalBytesPushed % 409600 == 0 {  // Every ~400KB
+                    os_log(.info, log: self.logger, "📊 BUFFER DIAGNOSTIC: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB total)",
+                           playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024,
+                           Double(totalBuffered) / 1_048_576)
+                }
+
+                // SOFT THROTTLE: Slow down decoder when queue gets large
+                // Hard limit (150 MB) is enforced by BASS_ATTRIB_PUSH_LIMIT
+                // Soft limit (100 MB) triggers throttling to reduce CPU usage
+                let softLimitBytes = 100_000_000  // 100 MB
+                if queuedAmount > softLimitBytes {
+                    // Queue is getting full - sleep to let playback consume buffer
+                    // This prevents 100% CPU on long podcasts while maintaining smooth playback
+                    // Log only every 50 throttles (~5 seconds) to avoid spam
+                    self.throttleLogCounter += 1
+                    if self.throttleLogCounter >= 50 {
+                        os_log(.info, log: self.logger, "⏸️ Queue large (%.1f MB) - throttling decoder (logged every ~5s)", Double(queuedAmount) / 1_048_576)
+                        self.throttleLogCounter = 0
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                    continue  // Skip to next loop iteration
+                }
+
+                // Reset throttle counter when not throttling
+                self.throttleLogCounter = 0
 
                 // Track total bytes for position calculation
                 self.totalBytesPushed += UInt64(bytesRead)
