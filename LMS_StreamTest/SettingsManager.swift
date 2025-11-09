@@ -387,18 +387,27 @@ class SettingsManager: ObservableObject {
     
     func resetConfiguration() {
         os_log(.info, log: logger, "Resetting all configuration")
-        
+
+        // Reset primary server
         serverHost = ""
         playerName = "iOS Player"
         isConfigured = false
-        
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
+
+        // CRITICAL FIX: Reset backup server settings
+        backupServerHost = ""
+        backupServerWebPort = 9000
+        backupServerSlimProtoPort = 3483
+        isBackupServerEnabled = false
+        currentActiveServer = .primary  // Reset to primary server
+
         // Reset CBass buffer settings to conservative defaults
         flacBufferSeconds = 15
         networkBufferKB = 512
-        
+
+        os_log(.info, log: logger, "✅ Reset complete: All server settings cleared, active server reset to primary")
         saveSettings()
     }
     

@@ -61,30 +61,36 @@ struct ContentView: View {
             hasShownError = false
             hasHandledError = false
             loadError = nil
-            
-            // FIXED: Only reconnect if server settings actually changed
+
+            // IMPROVED: Force update server settings and reconnect if ANY server setting changed
             let currentHost = settings.activeServerHost
             let currentWebPort = settings.activeServerWebPort
             let currentSlimPort = settings.activeServerSlimProtoPort
-            
-            // Check if any critical settings changed
+
+            // Check if any critical settings changed (including backup server changes)
             let hostChanged = currentHost != slimProtoCoordinator.lastKnownHost
             let portChanged = currentSlimPort != Int(slimProtoCoordinator.lastKnownPort)
-            
+
             if hostChanged || portChanged {
                 os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
-                       "🔄 Server settings changed - reconnecting (host: %{public}s, port: %d)",
+                       "🔄 Server settings changed - force updating and reconnecting (host: %{public}s, port: %d)",
                        currentHost, currentSlimPort)
-                
+
                 // Reset connection flag
                 hasConnected = false
-                
-                // Update coordinator with new settings
+
+                // CRITICAL FIX: Disconnect first to clear stale state
+                slimProtoCoordinator.disconnect()
+
+                // CRITICAL FIX: Force update coordinator AND client with new settings
                 slimProtoCoordinator.updateServerSettings(
                     host: currentHost,
                     port: UInt16(currentSlimPort)
                 )
-                
+
+                // Also clear reconnection counter to prevent failover interference
+                slimProtoCoordinator.resetConnectionManager()
+
                 // Reconnect after a short delay
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     self.connectToLMS()

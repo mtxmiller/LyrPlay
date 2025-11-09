@@ -165,6 +165,12 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
     }
 
+    func resetConnectionManager() {
+        // Reset reconnection counter to prevent failover interference when user manually changes servers
+        connectionManager.resetReconnectionAttempts()
+        os_log(.info, log: logger, "✅ Connection manager reset - reconnection counter cleared")
+    }
+
     func getBackgroundDuration() -> TimeInterval? {
         guard let bgTime = backgroundedTime else { return nil }
         return Date().timeIntervalSince(bgTime)
@@ -539,22 +545,45 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerShouldReconnect() {
         os_log(.info, log: logger, "🔄 Connection manager requesting reconnection")
-        
-        // Try backup server if primary fails and backup is available
+
+        // IMPROVED FAILOVER: Switch servers if current server keeps failing
+        let reconnectionAttempts = connectionManager.getReconnectionAttempts()
+
+        // Try backup server if primary fails (first 3 attempts on primary)
         if settings.currentActiveServer == .primary &&
+           reconnectionAttempts >= 3 &&
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
-            
-            os_log(.info, log: logger, "🔄 Primary server failed - trying backup server")
+
+            os_log(.info, log: logger, "🔄 Primary server failed after %d attempts - switching to backup", reconnectionAttempts)
             settings.switchToBackupServer()
-            
+
             // Update client with backup server settings
             client.updateServerSettings(
                 host: settings.activeServerHost,
                 port: UInt16(settings.activeServerSlimProtoPort)
             )
+
+            // CRITICAL: Reset reconnection counter when switching servers
+            connectionManager.resetReconnectionAttempts()
         }
-        
+        // Try primary server if backup fails (after 3 attempts on backup)
+        else if settings.currentActiveServer == .backup &&
+                reconnectionAttempts >= 3 {
+
+            os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary", reconnectionAttempts)
+            settings.switchToPrimaryServer()
+
+            // Update client with primary server settings
+            client.updateServerSettings(
+                host: settings.activeServerHost,
+                port: UInt16(settings.activeServerSlimProtoPort)
+            )
+
+            // CRITICAL: Reset reconnection counter when switching servers
+            connectionManager.resetReconnectionAttempts()
+        }
+
         client.connect()
     }
     

@@ -580,6 +580,16 @@ class SlimProtoConnectionManager {
         stopHealthMonitoring()
     }
 
+    // MARK: - Reconnection Attempt Management
+    func getReconnectionAttempts() -> Int {
+        return reconnectionAttempts
+    }
+
+    func resetReconnectionAttempts() {
+        os_log(.info, log: logger, "🔄 Resetting reconnection attempts (was %d)", reconnectionAttempts)
+        reconnectionAttempts = 0
+    }
+
     // MARK: - Public Status
     var connectionSummary: String {
         var summary = connectionState.displayName
