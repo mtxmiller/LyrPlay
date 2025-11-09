@@ -1424,8 +1424,11 @@ extension SlimProtoCoordinator {
             completion([:])
             return
         }
-        
-        let urlString = "\(settings.webURL)jsonrpc.js"
+
+        // CRITICAL FIX: Use direct LMS endpoint instead of Material's /material/jsonrpc.js
+        // Material endpoint can apply commands to wrong player based on Material UI session state
+        // Direct endpoint ensures player MAC in params[0] is always respected
+        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/jsonrpc.js"
         os_log(.info, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
         
         guard let url = URL(string: urlString) else {
