@@ -482,14 +482,33 @@ struct WebView: UIViewRepresentable {
             webViewReference = webView
         }
 
-        // Use cache for faster loading on subsequent opens
-        // Material skin handles data freshness via API calls, so caching the HTML/CSS/JS is safe
-        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
-        request.timeoutInterval = 30.0  // 30 seconds for remote/slow connections
+        // HYBRID CACHING APPROACH:
+        // - First load (no cache): Force network with fast timeout (fail fast if server down)
+        // - Subsequent loads (has cache): Use cache for instant load, verify server in background
+
+        let hasCache = URLCache.shared.cachedResponse(for: URLRequest(url: url)) != nil
+
+        var request: URLRequest
+        if hasCache {
+            // Have cache - load from cache for speed, verify server in background
+            request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
+            request.timeoutInterval = 30.0  // Can wait longer since cache will show
+
+            os_log(.info, log: logger, "✅ Cache available - loading from cache, verifying server in background")
+
+            // Verify server reachability in background
+            context.coordinator.verifyServerReachability(url: url)
+        } else {
+            // No cache - MUST load from network with FAST timeout
+            request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.timeoutInterval = 10.0  // Fail fast if server is down!
+
+            os_log(.info, log: logger, "⚠️ No cache - forcing network load with 10s timeout for fast failure")
+        }
 
         webView.load(request)
 
-        
+
         os_log(.info, log: logger, "WKWebView load request started with Material appSettings integration")
         return webView
     }
@@ -519,7 +538,37 @@ struct WebView: UIViewRepresentable {
             super.init()
             os_log(.info, log: logger, "Coordinator initialized with Material settings handler")
         }
-        
+
+        // MARK: - Server Reachability Verification
+        func verifyServerReachability(url: URL) {
+            // Quick HEAD request to server to verify it's up
+            // This runs in background while cache loads for instant UI
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5.0  // Quick timeout
+
+            os_log(.info, log: logger, "🔍 Verifying server reachability in background...")
+
+            URLSession.shared.dataTask(with: request) { _, response, error in
+                if let error = error {
+                    // Server unreachable - set error even though cache loaded
+                    os_log(.error, log: self.logger, "❌ Server unreachable: %{public}s", error.localizedDescription)
+                    DispatchQueue.main.async {
+                        self.parent.loadError = "Server unreachable: \(error.localizedDescription)"
+                    }
+                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
+                    // Server returned error status
+                    os_log(.error, log: self.logger, "❌ Server error: HTTP %d", httpResponse.statusCode)
+                    DispatchQueue.main.async {
+                        self.parent.loadError = "Server error: HTTP \(httpResponse.statusCode)"
+                    }
+                } else {
+                    // Success - cache is valid and server is up
+                    os_log(.info, log: self.logger, "✅ Server reachability verified - cache is fresh")
+                }
+            }.resume()
+        }
+
         // MARK: - Material Settings Integration Handler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             os_log(.info, log: logger, "📱 Received message from Material: %{public}s", message.name)
