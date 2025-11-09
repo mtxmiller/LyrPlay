@@ -184,7 +184,18 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func stop() {
+        // Stop traditional URL stream player
         audioPlayer.stop()
+
+        // CRITICAL: Stop push stream decoder AND pause playback
+        // When server sends stop 'q' command (manual skip or pause for radio streams):
+        // 1. stopDecoding() sets manualStop = true, preventing gapless transition callback
+        // 2. pausePlayback() immediately pauses BASS stream, stopping buffered audio
+        // Without pausePlayback(), ~10 seconds of buffered audio continues playing
+        streamDecoder.stopDecoding()
+        streamDecoder.pausePlayback()
+
+        os_log(.info, log: logger, "⏹️ Stopped decoder and paused stream playback")
     }
     
     // State queries
