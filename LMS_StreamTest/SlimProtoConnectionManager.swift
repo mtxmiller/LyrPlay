@@ -42,12 +42,14 @@ class SlimProtoConnectionManager {
     
     // MARK: - Reconnection Logic
     private var reconnectionTimer: Timer?
-    private var reconnectionAttempts: Int = 0
+    private var reconnectionAttempts: Int = 0  // Per-server counter (resets on server switch)
+    private var totalConsecutiveFailures: Int = 0  // TOTAL failures across all servers (never resets until success)
     private let maxReconnectionAttempts: Int = 8  // Increased for better persistence
+    private let maxTotalFailuresBeforeError: Int = 12  // After 12 total failures (both servers tried), show error
     private let baseReconnectionDelay: TimeInterval = 2.0
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
-    
+
     private var wasConnectedBeforeTimeout: Bool = false
     private var disconnectionDuration: TimeInterval = 0
     
@@ -428,19 +430,20 @@ class SlimProtoConnectionManager {
         connectionState = .connected
         lastSuccessfulConnection = Date()
         reconnectionAttempts = 0
+        totalConsecutiveFailures = 0  // CRITICAL: Reset total failures on successful connection
         stopReconnectionTimer()
-        
+
         // Start health monitoring
         let interval = isInBackground ? 30.0 : 15.0
         startHealthMonitoring(interval: interval)
-        
+
         // Record initial heartbeat
         recordHeartbeatResponse()
-        
+
         if wasReconnectionAfterTimeout {
             delegate?.connectionManagerDidReconnectAfterTimeout()
         }
-        
+
         wasConnectedBeforeTimeout = false
     }
     
@@ -509,22 +512,33 @@ class SlimProtoConnectionManager {
             os_log(.info, log: logger, "Skipping reconnection attempt")
             return
         }
-        
+
         guard isNetworkAvailable else {
             os_log(.error, log: logger, "🔄 Cannot reconnect - network unavailable")
             connectionState = .networkUnavailable
             return
         }
-        
+
         reconnectionAttempts += 1
-        os_log(.info, log: logger, "🔄 Reconnection attempt %d/%d", reconnectionAttempts, maxReconnectionAttempts)
-        
+        totalConsecutiveFailures += 1  // Track TOTAL failures across all servers
+
+        os_log(.info, log: logger, "🔄 Reconnection attempt %d/%d (total failures: %d/%d)",
+               reconnectionAttempts, maxReconnectionAttempts,
+               totalConsecutiveFailures, maxTotalFailuresBeforeError)
+
         connectionState = .reconnecting
         delegate?.connectionManagerShouldReconnect()
     }
-    
+
     private func shouldAttemptReconnection() -> Bool {
-        // Don't reconnect if we've exceeded max attempts
+        // CRITICAL: Stop if both servers have been tried and failed multiple times
+        if totalConsecutiveFailures >= maxTotalFailuresBeforeError {
+            os_log(.error, log: logger, "❌ Total failures (%d) exceeded limit - both servers unreachable", totalConsecutiveFailures)
+            connectionState = .failed
+            return false
+        }
+
+        // Don't reconnect if we've exceeded max attempts PER SERVER
         if reconnectionAttempts >= maxReconnectionAttempts {
             return false
         }
@@ -586,8 +600,18 @@ class SlimProtoConnectionManager {
     }
 
     func resetReconnectionAttempts() {
-        os_log(.info, log: logger, "🔄 Resetting reconnection attempts (was %d)", reconnectionAttempts)
+        // Called when AUTOMATIC failover switches servers (primary ↔ backup)
+        // Reset per-server counter but keep total consecutive failures tracking
+        os_log(.info, log: logger, "🔄 Resetting per-server reconnection attempts (was %d, total failures: %d)", reconnectionAttempts, totalConsecutiveFailures)
         reconnectionAttempts = 0
+    }
+
+    func resetAllReconnectionTracking() {
+        // Called when USER manually changes servers via settings
+        // Reset EVERYTHING for fresh start
+        os_log(.info, log: logger, "🔄 Resetting ALL reconnection tracking (attempts: %d, total failures: %d)", reconnectionAttempts, totalConsecutiveFailures)
+        reconnectionAttempts = 0
+        totalConsecutiveFailures = 0
     }
 
     // MARK: - Public Status

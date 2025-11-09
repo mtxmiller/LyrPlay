@@ -166,9 +166,9 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     func resetConnectionManager() {
-        // Reset reconnection counter to prevent failover interference when user manually changes servers
-        connectionManager.resetReconnectionAttempts()
-        os_log(.info, log: logger, "✅ Connection manager reset - reconnection counter cleared")
+        // Reset ALL reconnection tracking to prevent failover interference when user manually changes servers
+        connectionManager.resetAllReconnectionTracking()
+        os_log(.info, log: logger, "✅ Connection manager reset - all reconnection tracking cleared")
     }
 
     func getBackgroundDuration() -> TimeInterval? {
