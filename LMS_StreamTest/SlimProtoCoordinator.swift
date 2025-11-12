@@ -1042,6 +1042,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
 
+        // CRITICAL FIX: Reset SimpleTimeTracker to 0 when new track starts
+        // This ensures lock screen shows 0:00 for the new track, not stale time from previous track
+        simpleTimeTracker.updateFromServer(time: 0.0, duration: 0.0, playing: true)
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Reset SimpleTimeTracker to 0.0 for new track start")
+
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
         client.sendStatus("STMs")
@@ -1052,7 +1057,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Triggering immediate metadata update for lock screen (gapless transition)")
         fetchCurrentTrackMetadata()
 
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + metadata refresh triggered - lock screen should update immediately")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh triggered - lock screen should update immediately")
     }
 
     func getCurrentAudioTime() -> Double {
