@@ -1039,8 +1039,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// This keeps Material UI in sync with actual audio playback
     func sendTrackStarted() {
         let timestamp = Date()
-        os_log(.error, log: logger, "🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
-        os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
 
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
@@ -1049,10 +1049,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // CRITICAL FIX: Update lock screen metadata immediately for gapless transitions
         // In push stream architecture, metadata updates don't happen automatically like URL streams
         // So we need to manually trigger metadata refresh when track boundary is reached
-        os_log(.info, log: logger, "🔄 Triggering immediate metadata update for lock screen (gapless transition)")
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Triggering immediate metadata update for lock screen (gapless transition)")
         fetchCurrentTrackMetadata()
 
-        os_log(.error, log: logger, "✅ STMs sent + metadata refresh triggered - lock screen should update immediately")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + metadata refresh triggered - lock screen should update immediately")
     }
 
     func getCurrentAudioTime() -> Double {
@@ -1588,15 +1588,15 @@ extension SlimProtoCoordinator {
                let result = json["result"] as? [String: Any],
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
-                
+
                 // SIMPLIFIED: Use Material skin's straightforward metadata approach
                 let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LyrPlay"
                 let trackArtist = firstTrack["artist"] as? String ?? firstTrack["albumartist"] as? String ?? "Unknown Artist"
                 let trackAlbum = firstTrack["album"] as? String ?? firstTrack["remote_title"] as? String ?? "Lyrion Music Server"
-                
+
                 // CRITICAL FIX: Only update duration if server explicitly provides it (Material skin approach)
                 let serverDuration = firstTrack["duration"] as? Double
-                
+
                 // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
                 if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
@@ -1604,11 +1604,14 @@ extension SlimProtoCoordinator {
                 } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
                     artworkURL = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverid)/cover.jpg"
                 }
-                
+
                 // Log final metadata result
-                os_log(.info, log: logger, "🎵 Material-style: '%{public}s' by %{public}s%{public}s",
+                os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🎵 Material-style: '%{public}s' by %{public}s%{public}s",
                        trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
-                
+
+                let metadataTimestamp = Date()
+                os_log(.info, log: logger, "[BOUNDARY-DRIFT] 📊 METADATA UPDATE TIMESTAMP: %{public}s", metadataTimestamp.description)
+
                 DispatchQueue.main.async {
                     // Only update duration if server explicitly provides it (Material skin approach)
                     if let duration = serverDuration, duration > 0.0 {
@@ -1629,15 +1632,17 @@ extension SlimProtoCoordinator {
                             // duration parameter omitted - keeps existing duration
                         )
                     }
+
+                    os_log(.info, log: self.logger, "[BOUNDARY-DRIFT] ✅ METADATA APPLIED TO LOCK SCREEN - new track info should appear now")
                 }
-                
+
             } else {
-                os_log(.error, log: logger, "Failed to parse metadata response")
+                os_log(.error, log: logger, "[BOUNDARY-DRIFT] Failed to parse metadata response")
             }
         } catch {
-            os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] JSON parsing error: %{public}s", error.localizedDescription)
         }
-    }    
+    }
     // MARK: - Helper Method to Determine Source Type
     // Add to SlimProtoConnectionManagerDelegate extension
     func connectionManagerShouldStorePosition() {

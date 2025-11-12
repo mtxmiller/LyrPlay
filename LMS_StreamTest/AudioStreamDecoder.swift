@@ -696,24 +696,36 @@ class AudioStreamDecoder {
 
     /// Mark current buffer position as track boundary for gapless transition
     private func markTrackBoundary() {
-        // CRITICAL: Like squeezelite output.track_start = outputbuf->writep
-        // The boundary is at the WRITE position (where we've written to),
-        // NOT the playback position (where we're reading from)!
-        // totalBytesPushed tracks our write position (like squeezelite's writep)
-        trackBoundaryPosition = totalBytesPushed
+        // CRITICAL FIX: Don't use write position - it's stale by the time sync is registered!
+        // Instead, predict exactly when new track audio will start playing
+        // Formula: current_playback_position + total_buffered_bytes
+
+        let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        let playbackBuffered = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let queuedAmount = Int(BASS_StreamPutData(pushStream, nil, 0))  // Get current queue size without adding data
+        let totalBuffered = queuedAmount + Int(playbackBuffered)
+
+        // EXACT: Boundary = when new track's first sample will be heard
+        trackBoundaryPosition = UInt64(playbackPos + UInt64(totalBuffered))
 
         let boundarySeconds = Double(trackBoundaryPosition!) / Double(sampleRate * channels * 4)
-        os_log(.error, log: logger, "🎯🎯🎯 TRACK BOUNDARY MARKED at WRITE position: %llu bytes (%.2f seconds)", trackBoundaryPosition!, boundarySeconds)
-
-        // Get current playback position for comparison
-        let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
         let playbackSeconds = Double(playbackPos) / Double(sampleRate * channels * 4)
-        os_log(.error, log: logger, "📊 Current playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 TRACK BOUNDARY MARKED at PREDICTED position: %llu bytes (%.2f seconds)", trackBoundaryPosition!, boundarySeconds)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Current playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
 
         // Calculate how long until boundary is reached
         let bytesUntilBoundary = Int64(trackBoundaryPosition!) - Int64(playbackPos)
         let secondsUntilBoundary = Double(bytesUntilBoundary) / Double(sampleRate * channels * 4)
-        os_log(.error, log: logger, "📊 Playback will reach boundary in %.2f seconds (%lld bytes ahead)", secondsUntilBoundary, bytesUntilBoundary)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Playback will reach boundary in %.2f seconds (%lld bytes ahead)", secondsUntilBoundary, bytesUntilBoundary)
+
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 BUFFER AT BOUNDARY MARK: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB)",
+               playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024, Double(totalBuffered) / 1_048_576)
+
+        // This should now be accurate - boundary = current + buffer
+        let predictedPlaybackTime = Double(playbackPos + UInt64(totalBuffered)) / Double(sampleRate * channels * 4)
+        let driftPrediction = predictedPlaybackTime - boundarySeconds
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯 PREDICTION: New audio should play at %.2f seconds (drift: %.3f sec)",
+               predictedPlaybackTime, driftPrediction)
 
         // Set sync callback for this boundary
         // CRITICAL: Use BASS_SYNC_POS without MIXTIME so callback fires when audio is HEARD, not when mixed!
@@ -728,10 +740,10 @@ class AudioStreamDecoder {
 
         if sync != 0 {
             trackBoundarySyncs.append(sync)
-            os_log(.error, log: logger, "✅ BASS sync callback registered for boundary position: %llu", trackBoundaryPosition!)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ BASS sync callback registered for boundary position: %llu", trackBoundaryPosition!)
         } else {
             let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Failed to set boundary sync! BASS error: %d", error)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] ❌ Failed to set boundary sync! BASS error: %d", error)
         }
     }
 
@@ -780,21 +792,30 @@ class AudioStreamDecoder {
         let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
         let playbackSeconds = Double(playbackPos) / Double(sampleRate * channels * 4)
 
-        os_log(.error, log: logger, "🎯🎯🎯 TRACK BOUNDARY REACHED - playback entered new track audio")
-        os_log(.error, log: logger, "📊 Playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 TRACK BOUNDARY REACHED - playback entered new track audio")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
 
         if let boundaryPos = trackBoundaryPosition {
             let boundarySeconds = Double(boundaryPos) / Double(sampleRate * channels * 4)
-            os_log(.error, log: logger, "📊 Expected boundary: %llu bytes (%.2f seconds)", boundaryPos, boundarySeconds)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Expected boundary: %llu bytes (%.2f seconds)", boundaryPos, boundarySeconds)
 
             // Log the difference (should be very close)
             let diff = Int64(playbackPos) - Int64(boundaryPos)
-            os_log(.error, log: logger, "📊 Timing accuracy: %lld bytes difference", diff)
+            let diffSeconds = Double(diff) / Double(sampleRate * channels * 4)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timing accuracy: %lld bytes difference (%.3f seconds)", diff, diffSeconds)
         }
 
-        os_log(.error, log: logger, "📊 Write position (totalBytesPushed): %llu bytes", totalBytesPushed)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Write position (totalBytesPushed): %llu bytes", totalBytesPushed)
         let writeReadGap = Int64(totalBytesPushed) - Int64(playbackPos)
-        os_log(.error, log: logger, "📊 Write-Read gap: %lld bytes (buffer ahead of playback)", writeReadGap)
+        let writeReadGapSeconds = Double(writeReadGap) / Double(sampleRate * channels * 4)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Write-Read gap: %lld bytes (%.3f seconds ahead of playback)", writeReadGap, writeReadGapSeconds)
+
+        // CRITICAL BUFFER ANALYSIS: Check buffer when STMs is about to be sent
+        let playbackBuffered = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let queuedAmount = Int(BASS_StreamPutData(pushStream, nil, 0))  // Get current queue size without adding data
+        let totalBuffered = queuedAmount + Int(playbackBuffered)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 BUFFER AT STMs SEND: playback=%d KB, queue=%d KB, total=%d KB",
+               playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024)
 
         // CRITICAL: Remove all OLD boundary syncs that have now fired
         // Only keep syncs for future boundaries (prevents stale callbacks)
@@ -804,19 +825,21 @@ class AudioStreamDecoder {
             BASS_ChannelRemoveSync(pushStream, sync)
         }
         trackBoundarySyncs.removeAll()
-        os_log(.info, log: logger, "🧹 Cleared %d old boundary sync(s)", syncCount)
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🧹 Cleared %d old boundary sync(s)", syncCount)
 
         // trackStartPosition is already set to boundary position in startDecodingFromURL()
         // Don't update it here - it's already correct!
         // The boundary position IS the track start position
 
-        // Notify delegate of track transition
+        // Notify delegate of track transition - THIS SENDS STMs!
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📡 ABOUT TO SEND STMs - notifying delegate now...")
         delegate?.audioStreamDecoderDidReachTrackBoundary(self)
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs SENT - new track should start playing now")
 
         // Clear boundary marker - now getCurrentPosition() will calculate normally
         trackBoundaryPosition = nil
 
-        os_log(.error, log: logger, "✅ Boundary handling complete - STMs should be sent NOW")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ Boundary handling complete")
     }
 
     /// Handle buffer end event (all audio has been played)
