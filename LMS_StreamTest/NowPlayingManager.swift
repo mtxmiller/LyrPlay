@@ -72,24 +72,16 @@ class NowPlayingManager: ObservableObject {
     private func updateNowPlayingTime() {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
 
-        // CRITICAL: Only update MPNowPlayingInfoCenter when something ACTUALLY CHANGED
-        // Prevents flooding iOS media UI which can cause CarPlay/lock screen to crash
-        let timeDifference = abs(currentTime - lastUpdatedTime)
-        let stateChanged = isPlaying != lastUpdatedPlayingState
-        let timeChanged = timeDifference > 0.5  // Only update if >0.5s difference
+        // Update now playing info with current time (no throttling)
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
 
-        if stateChanged || timeChanged {
-            // Log updates when something changed
-            os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
-                   currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        // Save last updated values (for other logic)
+        lastUpdatedTime = currentTime
+        lastUpdatedPlayingState = isPlaying
 
-            // Update now playing info with current time
-            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
-
-            // Save last updated values
-            lastUpdatedTime = currentTime
-            lastUpdatedPlayingState = isPlaying
-        }
+        // Log all updates
+        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
+               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
 
         // REMOVED: Server-time based track end detection - now using BASS_SYNC_END exclusively
         // The duplicate detection was causing spurious STMd signals during track transitions

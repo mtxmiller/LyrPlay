@@ -104,6 +104,9 @@ bass24-ios-2/
 .claude/
 docs/bass_documentation
 
+# Squeezelite source code (development reference)
+squeezelite/
+
 # Development guides and logs
 LMS_Opus_Setup_Guide.md
 AUDIO_SESSION_CLEANUP_GUIDE.md
