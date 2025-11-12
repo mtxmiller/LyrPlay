@@ -103,7 +103,7 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
-    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false) {
+    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0) {
         os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d)", format, sampleRate, isGapless)
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
@@ -150,9 +150,9 @@ class AudioManager: NSObject, ObservableObject {
 
         // Start new decoder for this track
         // isNewTrack: true for gapless (mark boundary), false for manual skip (fresh start)
-        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless)
+        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless, startTime: startTime)
 
-        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d)", isGapless)
+        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d, startTime: %.2f)", isGapless, startTime)
     }
 
     func stopPushStreamPlayback() {

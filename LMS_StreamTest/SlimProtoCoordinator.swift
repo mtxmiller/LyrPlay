@@ -908,7 +908,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Start push stream playback with AudioStreamDecoder
         // isGapless: true means DON'T flush buffer, let old audio finish
-        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless)
+        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime)
 
         // Reset gapless flag after use
         expectingGaplessTransition = false
@@ -1046,7 +1046,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // This updates Material to show the track that's NOW PLAYING (not just queued)
         client.sendStatus("STMs")
 
-        os_log(.error, log: logger, "✅ STMs sent - Material UI should be updating to new track")
+        // CRITICAL FIX: Update lock screen metadata immediately for gapless transitions
+        // In push stream architecture, metadata updates don't happen automatically like URL streams
+        // So we need to manually trigger metadata refresh when track boundary is reached
+        os_log(.info, log: logger, "🔄 Triggering immediate metadata update for lock screen (gapless transition)")
+        fetchCurrentTrackMetadata()
+
+        os_log(.error, log: logger, "✅ STMs sent + metadata refresh triggered - lock screen should update immediately")
     }
 
     func getCurrentAudioTime() -> Double {

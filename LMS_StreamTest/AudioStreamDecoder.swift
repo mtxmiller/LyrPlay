@@ -76,6 +76,10 @@ class AudioStreamDecoder {
     /// This ensures boundary is marked AFTER old decoder finishes pushing buffered audio
     private var pendingTrackBoundary: Bool = false
 
+    /// Track start time offset (seconds into track where this stream starts)
+    /// Used for server-side seeks where stream starts at non-zero track position
+    private var trackStartTimeOffset: Double = 0.0
+
     /// Metadata for next track (applied at boundary)
     private var nextTrackMetadata: TrackMetadata?
 
@@ -255,8 +259,12 @@ class AudioStreamDecoder {
     ///   - url: HTTP URL to decode from
     ///   - format: Audio format (flc, mp3, ops, etc.)
     ///   - isNewTrack: Whether this is a new track (for gapless boundary marking)
-    func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false) {
-        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s", format, url)
+    ///   - startTime: Seconds into track where this stream starts (for server-side seeks)
+    func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0) {
+        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f)", format, url, startTime)
+
+        // Store track start time offset for server-side seeks
+        trackStartTimeOffset = startTime
 
         currentFormat = format
 
@@ -917,9 +925,10 @@ class AudioStreamDecoder {
             let trackBytes = playbackBytes - previousTrackStartPosition
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
-            os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f", playbackBytes, boundaryPos, seconds)
-            os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (before boundary mode)", seconds)
-            return max(0, seconds)
+        os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f", playbackBytes, boundaryPos, seconds)
+        let trackPosition = seconds + trackStartTimeOffset
+        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (before boundary mode, offset: %.2f)", trackPosition, trackStartTimeOffset)
+        return max(0, trackPosition)
         }
 
         // After boundary: Calculate position within NEW track (like squeezelite: position - track_start)
@@ -937,8 +946,9 @@ class AudioStreamDecoder {
         let bytesPerSecond = sampleRate * channels * 4  // 4 bytes per float sample
         let seconds = Double(trackBytes) / Double(bytesPerSecond)
 
-        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (after boundary / normal mode, trackBytes=%llu)", seconds, trackBytes)
-        return max(0, seconds)  // Ensure non-negative
+        let trackPosition = seconds + trackStartTimeOffset
+        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (after boundary / normal mode, offset: %.2f)", trackPosition, trackStartTimeOffset)
+        return max(0, trackPosition)  // Ensure non-negative
     }
 
     /// Check if stream is currently playing
