@@ -230,9 +230,29 @@ class AudioStreamDecoder {
 
     /// Resume push stream playback
     func resumePlayback() {
-        guard pushStream != 0 else { return }
-        BASS_ChannelPlay(pushStream, 0)
-        os_log(.info, log: logger, "▶️ Push stream resumed")
+        guard pushStream != 0 else {
+            os_log(.error, log: logger, "[APP-RECOVERY] ❌ Cannot resume - no push stream")
+            return
+        }
+
+        os_log(.error, log: logger, "[APP-RECOVERY] ▶️ RESUMING PUSH STREAM PLAYBACK")
+
+        // SILENT RECOVERY: Apply muting if requested (for app foreground recovery)
+        // resumePlayback() bypasses startPlayback(), so we need to check muteNextStream here too
+        if muteNextStream {
+            BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 APPLYING MUTING: DSP gain = 0.001 (resumed stream muting)")
+        } else {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔊 NO MUTING: muteNextStream = FALSE")
+        }
+
+        let result = BASS_ChannelPlay(pushStream, 0)
+        if result != 0 {
+            os_log(.error, log: logger, "[APP-RECOVERY] ✅ Push stream resumed successfully (muted: %{public}s)", muteNextStream ? "YES" : "NO")
+        } else {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "[APP-RECOVERY] ❌ Push stream resume failed: BASS error %d", error)
+        }
     }
 
     /// Apply muting (DSP gain) to current push stream
@@ -867,8 +887,9 @@ class AudioStreamDecoder {
     /// Start a track that was deferred due to format mismatch
     /// Uses existing decoder to preserve HTTP connection and get track from 0:00
     private func startDeferredTrack(_ track: PendingTrackInfo) {
-        os_log(.info, log: logger, "🎵 Starting deferred track with preserved decoder (from position 0:00)")
-        os_log(.info, log: logger, "📊 Using existing decoder: %{public}s", track.url)
+        os_log(.error, log: logger, "[APP-RECOVERY] 🎵 STARTING DEFERRED TRACK (format mismatch recovery)")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 Using existing decoder: %{public}s", track.url)
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 Mute state BEFORE stream recreation: muteNextStream=%{public}s", muteNextStream ? "TRUE" : "FALSE")
 
         // Update our format to match the new track
         sampleRate = track.sampleRate
@@ -878,10 +899,15 @@ class AudioStreamDecoder {
         // Recreate push stream with new format
         // The buffer is now empty, so this is safe
         if pushStream != 0 {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🧹 Freeing old push stream before recreation")
             BASS_StreamFree(pushStream)
+            pushStream = 0
         }
 
+        os_log(.error, log: logger, "[APP-RECOVERY] 🔄 Initializing new push stream: %dHz, %dch", sampleRate, channels)
         initializePushStream(sampleRate: sampleRate, channels: channels)
+
+        os_log(.error, log: logger, "[APP-RECOVERY] ▶️ Calling startPlayback() - should apply muting if muteNextStream=TRUE")
         startPlayback()
 
         // Use the EXISTING decoder (already connected, at position 0:00!)
@@ -899,7 +925,7 @@ class AudioStreamDecoder {
         startDecoderLoop()
 
         // Notify delegate that deferred track started (for STMs)
-        os_log(.info, log: logger, "🎵 Notifying delegate of deferred track start")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📡 Notifying delegate of deferred track start")
         delegate?.audioStreamDecoderDidStartDeferredTrack(self)
     }
 

@@ -189,6 +189,11 @@ struct ContentView: View {
                     return
                 }
 
+                os_log(.error, log: logger, "[APP-RECOVERY] 🎯 APP OPEN RECOVERY TRIGGERED - backgrounded for %.1f seconds", duration)
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Settings: enableAppOpenRecovery=%{public}s", settings.enableAppOpenRecovery ? "YES" : "NO")
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Audio format: %{public}s", settings.audioFormat.displayName)
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Current player state: %{public}s", audioManager.getPlayerState())
+
                 if duration > 45 {
                     // Long background (> 45s) - likely disconnected, perform recovery
                     os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)

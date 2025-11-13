@@ -399,7 +399,7 @@ class SlimProtoCoordinator: ObservableObject {
 
             // Set recovery in progress
             self.isRecoveryInProgress = true
-            os_log(.info, log: self.logger, "🔒 Playlist Recovery: Starting (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+            os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
 
             DispatchQueue.main.async { [weak self] in
                 self?.executePlaylistRecovery(shouldPlay: shouldPlay)
@@ -408,12 +408,14 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     private func executePlaylistRecovery(shouldPlay: Bool) {
+        os_log(.error, log: logger, "[APP-RECOVERY] 🎯 EXECUTING PLAYLIST RECOVERY (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+
         // CRITICAL: Playlist jump with timeOffset doesn't work with FLAC passthrough (push streams)
         // Direct streams can't seek mid-file, server would need to restart from beginning anyway
         // So for FLAC, just send simple play/pause command and accept starting from track beginning
         if settings.audioFormat == .flac {
-            os_log(.info, log: logger, "🎵 FLAC passthrough mode - playlist jump disabled (direct streams can't seek)")
-            os_log(.info, log: logger, "🎵 Sending simple %{public}s command - track will start from beginning", shouldPlay ? "play" : "pause")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 FLAC passthrough mode - playlist jump disabled (direct streams can't seek)")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 Sending simple %{public}s command - track will start from beginning", shouldPlay ? "play" : "pause")
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false
             return
@@ -421,7 +423,7 @@ class SlimProtoCoordinator: ObservableObject {
 
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-            os_log(.info, log: logger, "🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -431,19 +433,22 @@ class SlimProtoCoordinator: ObservableObject {
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
 
         guard savedPosition > 0 else {
-            os_log(.info, log: logger, "🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
         }
 
-        os_log(.info, log: logger, "🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
+        os_log(.error, log: logger, "[APP-RECOVERY] 🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
                savedIndex, savedPosition, shouldPlay ? "YES" : "NO")
 
         // SILENT RECOVERY: Set mute flag BEFORE playlist jump for app foreground recovery
         if !shouldPlay {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 ENABLING SILENT RECOVERY MODE BEFORE PLAYLIST JUMP")
             audioManager.enableSilentRecoveryMode()
-            os_log(.info, log: logger, "🔇 Silent recovery mode enabled - next stream will be muted")
+            os_log(.error, log: logger, "[APP-RECOVERY] ✅ Silent recovery mode enabled - next stream will be muted")
+        } else {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔊 Normal recovery mode - no muting needed")
         }
 
         // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
