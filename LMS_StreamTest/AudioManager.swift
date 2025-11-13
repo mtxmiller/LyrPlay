@@ -269,7 +269,20 @@ class AudioManager: NSObject, ObservableObject {
     func enableSilentRecoveryMode() {
         audioPlayer.muteNextStream = true
         streamDecoder.muteNextStream = true  // Also apply to push streams for gapless
-        os_log(.info, log: logger, "🔇 Silent recovery mode enabled for both URL and push streams")
+
+        // CRITICAL FIX: If there's an existing push stream, flush and mute it IMMEDIATELY
+        // This clears old buffered audio and ensures silence during recovery
+        if streamDecoder.hasValidStream() {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🧹 FLUSHING EXISTING PUSH STREAM BUFFER")
+            streamDecoder.flushBuffer()
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 MUTING FLUSHED STREAM")
+            streamDecoder.applyMuting()
+        }
+
+        os_log(.error, log: logger, "[APP-RECOVERY] 🔇 SILENT RECOVERY MODE ENABLED")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 audioPlayer.muteNextStream = %{public}s", audioPlayer.muteNextStream ? "TRUE" : "FALSE")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.muteNextStream = %{public}s", streamDecoder.muteNextStream ? "TRUE" : "FALSE")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.hasValidStream() = %{public}s", streamDecoder.hasValidStream() ? "TRUE" : "FALSE")
     }
 
     /// Disable silent mode and restore normal DSP gain
