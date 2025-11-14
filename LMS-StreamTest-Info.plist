@@ -46,5 +46,13 @@
 	<string>LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.</string>
 	<key>NSAllowsLocalNetworking</key>
 	<true/>
+	<key>UISupportedCarPlayContentTypes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>audio-playback</string>
+	</array>
 </dict>
 </plist>
