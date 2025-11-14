@@ -577,6 +577,7 @@
 					"$(PROJECT_DIR)/BASS_Headers",
 					"$(PROJECT_DIR)",
 				);
+				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				INFOPLIST_FILE = "LMS-StreamTest-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = LyrPlay;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
@@ -644,6 +645,7 @@
 					"$(PROJECT_DIR)/BASS_Headers",
 					"$(PROJECT_DIR)",
 				);
+				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				INFOPLIST_FILE = "LMS-StreamTest-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = LyrPlay;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
