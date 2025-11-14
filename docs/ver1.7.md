@@ -8,8 +8,9 @@
 - Fixed ContentView Settings pop-up on server connection issue
 - Fixed Backup server failover / persistent connection details - attempts each server 6X then will pop-up dialog
 
-### Need to FIX 
-- Server Authentication Capability
+### Need to FIX
+- FLAC Seeking / Headers
 
-### Mobile Transcode Updates
-- Need to REMOVE FLC->FLC
+### Features to Add
+- Player Sync w/ others
+- Server Authentication
