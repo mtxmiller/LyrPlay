@@ -6,6 +6,7 @@ import os.log
 class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "CarPlay")
     var interfaceController: CPInterfaceController?
+    private var browseTemplate: CPListTemplate?
 
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                    didConnect interfaceController: CPInterfaceController) {
@@ -17,17 +18,47 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         self.interfaceController = interfaceController
         os_log(.info, log: logger, "  ✅ Interface controller stored")
 
-        // Set up the Now Playing template
-        os_log(.info, log: logger, "  Getting CPNowPlayingTemplate.shared...")
-        let nowPlayingTemplate = CPNowPlayingTemplate.shared
-        os_log(.info, log: logger, "  ✅ CPNowPlayingTemplate.shared retrieved: %{public}s", String(describing: nowPlayingTemplate))
+        // Create Browse list with CPListTemplate
+        os_log(.info, log: logger, "  Creating Browse template...")
 
-        os_log(.info, log: logger, "  Setting root template...")
-        interfaceController.setRootTemplate(nowPlayingTemplate, animated: false) { success, error in
+        // Create Resume Playback list item
+        let resumeItem = CPListItem(
+            text: "Resume Playback",
+            detailText: "Start or resume from saved position",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        resumeItem.handler = { [weak self] item, completion in
+            guard let self = self else {
+                completion()
+                return
+            }
+
+            // Start playback
+            self.handleResumePlayback()
+
+            // Push Now Playing template onto navigation stack
+            self.pushNowPlayingTemplate()
+
+            completion()
+        }
+
+        // Create section with resume item
+        let browseSection = CPListSection(items: [resumeItem])
+
+        // Create Browse list template
+        let browseTemplate = CPListTemplate(title: "LyrPlay", sections: [browseSection])
+        self.browseTemplate = browseTemplate
+        os_log(.info, log: logger, "  ✅ Browse template created")
+
+        // Set Browse template as root (NOT in a tab bar - CPNowPlayingTemplate can't be in tab bar)
+        os_log(.info, log: logger, "  Setting Browse template as root...")
+        interfaceController.setRootTemplate(browseTemplate, animated: false) { success, error in
             if let error = error {
                 os_log(.error, log: self.logger, "❌ FAILED to set root template: %{public}s", error.localizedDescription)
             } else if success {
-                os_log(.info, log: self.logger, "  ✅ Root template set successfully")
+                os_log(.info, log: self.logger, "  ✅ Browse template set successfully as root")
             } else {
                 os_log(.error, log: self.logger, "❌ FAILED to set root template: success=false, no error")
             }
@@ -46,6 +77,71 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         os_log(.info, log: logger, "  ✅ Interface controller cleared")
         os_log(.info, log: logger, "🚗 CARPLAY DISCONNECTED")
     }
+
+    // MARK: - Browse Actions
+
+    private func handleResumePlayback() {
+        os_log(.info, log: logger, "🚗 Resume playback requested from CarPlay Browse")
+
+        // Ensure coordinator is initialized (may not be if only CarPlay scene is active)
+        if AudioManager.shared.slimClient == nil {
+            os_log(.info, log: logger, "⚠️ Coordinator not initialized - creating now...")
+            initializeCoordinator()
+        }
+
+        // Perform playlist recovery with playback enabled
+        // This will connect to server (if needed), jump to saved position, and start playing
+        AudioManager.shared.slimClient?.performPlaylistRecovery(shouldPlay: true)
+
+        os_log(.info, log: logger, "✅ Playlist recovery initiated - will connect and resume playback")
+    }
+
+    private func initializeCoordinator() {
+        let settings = SettingsManager.shared
+        let audioManager = AudioManager.shared
+
+        os_log(.info, log: logger, "🔧 Initializing SlimProto coordinator from CarPlay...")
+
+        // Create coordinator with audio manager
+        let coordinator = SlimProtoCoordinator(audioManager: audioManager)
+
+        // Connect coordinator to audio manager
+        audioManager.setSlimClient(coordinator)
+
+        // Configure with server settings
+        coordinator.updateServerSettings(
+            host: settings.activeServerHost,
+            port: UInt16(settings.activeServerSlimProtoPort)
+        )
+
+        // Connect to server
+        coordinator.connect()
+
+        os_log(.info, log: logger, "✅ Coordinator initialized and connected")
+    }
+
+    private func pushNowPlayingTemplate() {
+        guard let interfaceController = interfaceController else {
+            os_log(.error, log: logger, "❌ Cannot push Now Playing - no interface controller")
+            return
+        }
+
+        os_log(.info, log: logger, "📱 Pushing Now Playing template onto navigation stack...")
+
+        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+
+        interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
+            if let error = error {
+                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
+            } else if success {
+                os_log(.info, log: self.logger, "✅ Now Playing template pushed successfully")
+            } else {
+                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: success=false, no error")
+            }
+        }
+    }
+
+    // MARK: - Scene Lifecycle
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         os_log(.info, log: logger, "🚗 CARPLAY SCENE BECAME ACTIVE")
