@@ -392,18 +392,24 @@ struct ServerConfigView: View {
     
     private func validateAndSave() {
         validationErrors.removeAll()
-        
+
         let trimmedHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         if trimmedHost.isEmpty {
             validationErrors.append("Server address is required")
             return
         }
-        
-        settings.serverHost = trimmedHost
+
+        // Save to the correct server based on which is currently active
+        if settings.currentActiveServer == .primary {
+            settings.serverHost = trimmedHost
+        } else {
+            settings.backupServerHost = trimmedHost
+        }
+
         settings.saveSettings()
         hasChanges = false
-        
+
         presentationMode.wrappedValue.dismiss()
     }
 }
