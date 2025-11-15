@@ -36,8 +36,6 @@
 		<true/>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>
 			<key>38.77.56.86</key>
@@ -69,10 +67,6 @@
 	<key>UISupportedCarPlayContentTypes</key>
 	<array>
 		<string>audio</string>
-	</array>
-	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-		<string>audio-playback</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
