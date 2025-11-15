@@ -22,7 +22,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     
     // MARK: UISceneSession Lifecycle
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
-        os_log(.info, log: logger, "Configuring scene session")
-        return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+        os_log(.info, log: logger, "Configuring scene session for role: %{public}s", String(describing: connectingSceneSession.role))
+
+        // Route scenes based on their role
+        if connectingSceneSession.role == .carTemplateApplication {
+            os_log(.info, log: logger, "🚗 CarPlay scene connecting - using CarPlay configuration")
+            return UISceneConfiguration(name: "CarPlay", sessionRole: connectingSceneSession.role)
+        } else {
+            os_log(.info, log: logger, "📱 Main app scene connecting - using Default configuration")
+            return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+        }
     }
 }
