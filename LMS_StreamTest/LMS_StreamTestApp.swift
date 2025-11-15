@@ -6,13 +6,25 @@
 //
 
 import SwiftUI
+import os.log
 
 @main
 struct LMS_StreamTestApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    init() {
+        let logger = OSLog(subsystem: "com.lmsstream", category: "App")
+        os_log(.info, log: logger, "🚀 APP INITIALIZATION START")
+        os_log(.info, log: logger, "  @main App struct created")
+        os_log(.info, log: logger, "  @UIApplicationDelegateAdaptor configured")
+        os_log(.info, log: logger, "🚀 APP INITIALIZATION COMPLETE")
+    }
+
     var body: some Scene {
-        WindowGroup {
+        let logger = OSLog(subsystem: "com.lmsstream", category: "App")
+        os_log(.info, log: logger, "🏗️ APP BODY COMPUTED - Creating WindowGroup scene")
+
+        return WindowGroup {
             ContentView()
         }
     }

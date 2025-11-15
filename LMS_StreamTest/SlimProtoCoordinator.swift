@@ -1599,6 +1599,16 @@ extension SlimProtoCoordinator {
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
 
+                // Update CarPlay button states based on server's playlist position
+                if let totalTracks = result["playlist_tracks"] as? Int,
+                   let currentIndex = result["playlist_cur_index"] as? Int {
+                    os_log(.info, log: logger, "🎵 Playlist position: %d/%d", currentIndex + 1, totalTracks)
+                    audioManager.updatePlaylistPosition(
+                        currentIndex: currentIndex,
+                        totalTracks: totalTracks
+                    )
+                }
+
                 // SIMPLIFIED: Use Material skin's straightforward metadata approach
                 let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LyrPlay"
                 let trackArtist = firstTrack["artist"] as? String ?? firstTrack["albumartist"] as? String ?? "Unknown Artist"

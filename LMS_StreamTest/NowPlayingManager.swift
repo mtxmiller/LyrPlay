@@ -453,13 +453,29 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Remote Command State
     func enableRemoteCommands(_ enable: Bool) {
         let commandCenter = MPRemoteCommandCenter.shared()
-        
+
         commandCenter.playCommand.isEnabled = enable
         commandCenter.pauseCommand.isEnabled = enable
         commandCenter.nextTrackCommand.isEnabled = enable
         commandCenter.previousTrackCommand.isEnabled = enable
-        
+
         os_log(.info, log: logger, "🎛️ Remote commands %{public}s", enable ? "enabled" : "disabled")
+    }
+
+    // MARK: - Playlist Position State (for CarPlay button states)
+    func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
+        let commandCenter = MPRemoteCommandCenter.shared()
+
+        // Disable previous button if at first track
+        commandCenter.previousTrackCommand.isEnabled = (currentIndex > 0)
+
+        // Disable next button if at last track
+        commandCenter.nextTrackCommand.isEnabled = (currentIndex < totalTracks - 1)
+
+        os_log(.info, log: logger, "🎛️ Playlist position: %d/%d - Previous: %{public}s, Next: %{public}s",
+               currentIndex + 1, totalTracks,
+               commandCenter.previousTrackCommand.isEnabled ? "enabled" : "disabled",
+               commandCenter.nextTrackCommand.isEnabled ? "enabled" : "disabled")
     }
     
     // MARK: - Track End Detection

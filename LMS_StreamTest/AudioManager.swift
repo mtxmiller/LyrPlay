@@ -318,6 +318,11 @@ class AudioManager: NSObject, ObservableObject {
             duration: duration  // Pass through optional duration
         )
     }
+
+    // Update playlist position for CarPlay button states
+    func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
+        nowPlayingManager.updatePlaylistPosition(currentIndex: currentIndex, totalTracks: totalTracks)
+    }
     
     // MARK: - Private Audio Session Configuration
     private func configureAudioSessionForFormat(_ format: String) {
