@@ -54,36 +54,40 @@ class SettingsManager: ObservableObject {
         case oggVorbis = 1
         case opus = 2
         case flac = 3
-        
+        case aacPreferred = 4
+
         // Show all supported formats to users
         static var allCases: [AudioFormat] {
-            return [.compressed, .oggVorbis, .opus, .flac]
+            return [.compressed, .aacPreferred, .oggVorbis, .opus, .flac]
         }
-        
+
         var displayName: String {
             switch self {
-            case .compressed: return "Compressed (AAC/MP3)"
+            case .compressed: return "Compressed (MP3 preferred)"
+            case .aacPreferred: return "Compressed (AAC preferred)"
             case .oggVorbis: return "High Quality (OGG Vorbis)"
             case .opus: return "Premium Quality (Opus)"
             case .flac: return "Lossless (FLAC)"
             }
         }
-        
+
         var description: String {
             switch self {
-            case .compressed: return "Smallest bandwidth, universal compatibility • Works out of the box"
-            case .oggVorbis: return "Near-lossless quality, efficient streaming • Needs server transcoding (MobileTranscode Plugin)"
-            case .opus: return "Superior quality, modern codec, efficient bandwidth • Needs server transcoding (MobileTranscode Plugin) + opus-tools"
-            case .flac: return "Native lossless, highest quality • Needs server transcoding (MobileTranscode Plugin)"
+            case .compressed: return "Compressed formats: mp3, aac"
+            case .aacPreferred: return "Compressed formats: aac, mp3"
+            case .oggVorbis: return "High quality: ogg, mp3, aac"
+            case .opus: return "Premium quality: ops, ogg, mp3, aac"
+            case .flac: return "Lossless: wav, flc, ops, ogg, alc, aac, mp3"
             }
         }
-        
+
         var capabilities: String {
             switch self {
-            case .compressed: return "aac,m4a,mp3"
-            case .oggVorbis: return "ogg,aac,m4a,mp3"
-            case .opus: return "ops,ogg,aac,m4a,mp3"
-            case .flac: return "flc,ops,ogg,aac,m4a,mp3"
+            case .compressed: return "mp3,aac"
+            case .aacPreferred: return "aac,mp3"
+            case .oggVorbis: return "ogg,mp3,aac"
+            case .opus: return "ops,ogg,mp3,aac"
+            case .flac: return "wav,flc,ops,ogg,alc,aac,mp3"
             }
         }
     }
@@ -141,15 +145,6 @@ class SettingsManager: ObservableObject {
         // CBass supports FLAC and Opus natively over HTTP streaming
         let formats = audioFormat.capabilities
         return "\(baseCapabilities),\(formats)"
-    }
-    
-    // MARK: - URL Session Configuration with Custom User-Agent
-    func createCustomURLSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.httpAdditionalHeaders = [
-            "User-Agent": customUserAgent
-        ]
-        return URLSession(configuration: config)
     }
     
     // MARK: - Settings Persistence
@@ -396,18 +391,27 @@ class SettingsManager: ObservableObject {
     
     func resetConfiguration() {
         os_log(.info, log: logger, "Resetting all configuration")
-        
+
+        // Reset primary server
         serverHost = ""
         playerName = "iOS Player"
         isConfigured = false
-        
         serverWebPort = 9000
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
+
+        // CRITICAL FIX: Reset backup server settings
+        backupServerHost = ""
+        backupServerWebPort = 9000
+        backupServerSlimProtoPort = 3483
+        isBackupServerEnabled = false
+        currentActiveServer = .primary  // Reset to primary server
+
         // Reset CBass buffer settings to conservative defaults
         flacBufferSeconds = 15
         networkBufferKB = 512
-        
+
+        os_log(.info, log: logger, "✅ Reset complete: All server settings cleared, active server reset to primary")
         saveSettings()
     }
     
@@ -443,10 +447,6 @@ class SettingsManager: ObservableObject {
         "http://\(activeServerHost):\(activeServerWebPort)/material/"
     }
 
-    var initialWebURL: String {
-        "http://\(serverHost):\(serverWebPort)/material/"
-    }
-    
     var formattedMACAddress: String {
         playerMACAddress.uppercased()
     }

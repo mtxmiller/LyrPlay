@@ -16,7 +16,6 @@ struct ContentView: View {
     @State private var isAppInBackground = false
     @State private var hasLoadedInitially = false
     @State private var webView: WKWebView?
-    @State private var failureTimer: Timer?
     @State private var hasConnectionError = false
     @State private var hasHandledError = false
     @State private var hasShownError = false
@@ -62,30 +61,36 @@ struct ContentView: View {
             hasShownError = false
             hasHandledError = false
             loadError = nil
-            
-            // FIXED: Only reconnect if server settings actually changed
+
+            // IMPROVED: Force update server settings and reconnect if ANY server setting changed
             let currentHost = settings.activeServerHost
             let currentWebPort = settings.activeServerWebPort
             let currentSlimPort = settings.activeServerSlimProtoPort
-            
-            // Check if any critical settings changed
+
+            // Check if any critical settings changed (including backup server changes)
             let hostChanged = currentHost != slimProtoCoordinator.lastKnownHost
             let portChanged = currentSlimPort != Int(slimProtoCoordinator.lastKnownPort)
-            
+
             if hostChanged || portChanged {
                 os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
-                       "🔄 Server settings changed - reconnecting (host: %{public}s, port: %d)",
+                       "🔄 Server settings changed - force updating and reconnecting (host: %{public}s, port: %d)",
                        currentHost, currentSlimPort)
-                
+
                 // Reset connection flag
                 hasConnected = false
-                
-                // Update coordinator with new settings
+
+                // CRITICAL FIX: Disconnect first to clear stale state
+                slimProtoCoordinator.disconnect()
+
+                // CRITICAL FIX: Force update coordinator AND client with new settings
                 slimProtoCoordinator.updateServerSettings(
                     host: currentHost,
                     port: UInt16(currentSlimPort)
                 )
-                
+
+                // Also clear reconnection counter to prevent failover interference
+                slimProtoCoordinator.resetConnectionManager()
+
                 // Reconnect after a short delay
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     self.connectToLMS()
@@ -184,6 +189,11 @@ struct ContentView: View {
                     return
                 }
 
+                os_log(.error, log: logger, "[APP-RECOVERY] 🎯 APP OPEN RECOVERY TRIGGERED - backgrounded for %.1f seconds", duration)
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Settings: enableAppOpenRecovery=%{public}s", settings.enableAppOpenRecovery ? "YES" : "NO")
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Audio format: %{public}s", settings.audioFormat.displayName)
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Current player state: %{public}s", audioManager.getPlayerState())
+
                 if duration > 45 {
                     // Long background (> 45s) - likely disconnected, perform recovery
                     os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)
@@ -249,31 +259,23 @@ struct ContentView: View {
         }
     }
     
-    private func handleLoadFailure() {
-        // Auto-show settings after 10 seconds of failure
-        failureTimer?.invalidate()
-        failureTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
-            if self.loadError != nil {
-                self.showingSettings = true
-            }
-        }
-    }
-    
     // MARK: - Material Integration URL
     private var materialWebURL: String {
         let baseURL = settings.webURL
         let settingsURL = "lmsstream://settings"
         let settingsName = "iOS App Settings"
-        
+
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
 
         // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
         // Material skin handles data freshness via its own API calls
 
-        // REMOVED: player parameter - let Material control default player selection
-        // Use & since baseURL already contains ?hide=notif
-        return "\(baseURL)?appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+        // Add Material skin query parameters:
+        // - hide=mediaControls: Hides lock screen/notification settings (prevents Material web player from interfering with native iOS lock screen)
+        //   NOTE: Material code checks for 'mediaControls' not 'notif' (ui-settings.js:506)
+        // - appSettings: Custom iOS app settings integration
+        return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
     }
 
     
@@ -428,89 +430,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(loadError != nil) // Allow touches only when there's an error
     }
-    
-    // Enhanced debug overlay with server time synchronization info
 
-    
-    private var connectionStateColor: Color {
-        switch slimProtoCoordinator.connectionState {
-        case "Connected":
-            return .green
-        case "Connecting", "Reconnecting":
-            return .yellow
-        case "Failed":
-            return .red
-        case "No Network":
-            return .orange
-        default:
-            return .gray
-        }
-    }
-    
-    private var networkStatusColor: Color {
-        switch slimProtoCoordinator.networkStatus {
-        case "Wi-Fi", "Wired":
-            return .green
-        case "Cellular":
-            return .yellow
-        case "No Network":
-            return .red
-        default:
-            return .gray
-        }
-    }
-    
-    // Server time status color
-    private var serverTimeStatusColor: Color {
-        let status = slimProtoCoordinator.serverTimeStatus
-        if status.contains("Available") {
-            return .green
-        } else if status.contains("Unavailable") {
-            return .red
-        } else {
-            return .yellow
-        }
-    }
-    
-    private var serverTimeStatusIcon: String {
-        let status = slimProtoCoordinator.serverTimeStatus
-        if status.contains("Available") {
-            return "clock.fill"
-        } else if status.contains("Unavailable") {
-            return "clock.badge.xmark"
-        } else {
-            return "clock"
-        }
-    }
-
-    private var serverTimeStatusText: String {
-        let status = slimProtoCoordinator.serverTimeStatus
-        // Extract just the key info, not the full verbose status
-        if status.contains("Available") {
-            // Extract the "last sync: Xs ago" part if present
-            if let range = status.range(of: "last sync: ") {
-                let remaining = String(status[range.upperBound...])
-                if let endRange = remaining.range(of: ")") {
-                    let syncInfo = String(remaining[..<endRange.lowerBound])
-                    return "Server: \(syncInfo)"
-                }
-            }
-            return "Server: Active"
-        } else if status.contains("failures") {
-            // Extract failure count
-            if let range = status.range(of: "(") {
-                let remaining = String(status[range.upperBound...])
-                if let endRange = remaining.range(of: " failures") {
-                    let failureCount = String(remaining[..<endRange.lowerBound])
-                    return "Server: \(failureCount) fails"
-                }
-            }
-            return "Server: Failed"
-        } else {
-            return "Server: Unknown"
-        }
-    }
-    
     private func connectToLMS() {
         guard !hasConnected else { return }
         
@@ -573,14 +493,33 @@ struct WebView: UIViewRepresentable {
             webViewReference = webView
         }
 
-        // Use cache for faster loading on subsequent opens
-        // Material skin handles data freshness via API calls, so caching the HTML/CSS/JS is safe
-        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
-        request.timeoutInterval = 30.0  // 30 seconds for remote/slow connections
+        // HYBRID CACHING APPROACH:
+        // - First load (no cache): Force network with fast timeout (fail fast if server down)
+        // - Subsequent loads (has cache): Use cache for instant load, verify server in background
+
+        let hasCache = URLCache.shared.cachedResponse(for: URLRequest(url: url)) != nil
+
+        var request: URLRequest
+        if hasCache {
+            // Have cache - load from cache for speed, verify server in background
+            request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
+            request.timeoutInterval = 30.0  // Can wait longer since cache will show
+
+            os_log(.info, log: logger, "✅ Cache available - loading from cache, verifying server in background")
+
+            // Verify server reachability in background
+            context.coordinator.verifyServerReachability(url: url)
+        } else {
+            // No cache - MUST load from network with FAST timeout
+            request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.timeoutInterval = 10.0  // Fail fast if server is down!
+
+            os_log(.info, log: logger, "⚠️ No cache - forcing network load with 10s timeout for fast failure")
+        }
 
         webView.load(request)
 
-        
+
         os_log(.info, log: logger, "WKWebView load request started with Material appSettings integration")
         return webView
     }
@@ -610,7 +549,37 @@ struct WebView: UIViewRepresentable {
             super.init()
             os_log(.info, log: logger, "Coordinator initialized with Material settings handler")
         }
-        
+
+        // MARK: - Server Reachability Verification
+        func verifyServerReachability(url: URL) {
+            // Quick HEAD request to server to verify it's up
+            // This runs in background while cache loads for instant UI
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5.0  // Quick timeout
+
+            os_log(.info, log: logger, "🔍 Verifying server reachability in background...")
+
+            URLSession.shared.dataTask(with: request) { _, response, error in
+                if let error = error {
+                    // Server unreachable - set error even though cache loaded
+                    os_log(.error, log: self.logger, "❌ Server unreachable: %{public}s", error.localizedDescription)
+                    DispatchQueue.main.async {
+                        self.parent.loadError = "Server unreachable: \(error.localizedDescription)"
+                    }
+                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
+                    // Server returned error status
+                    os_log(.error, log: self.logger, "❌ Server error: HTTP %d", httpResponse.statusCode)
+                    DispatchQueue.main.async {
+                        self.parent.loadError = "Server error: HTTP \(httpResponse.statusCode)"
+                    }
+                } else {
+                    // Success - cache is valid and server is up
+                    os_log(.info, log: self.logger, "✅ Server reachability verified - cache is fresh")
+                }
+            }.resume()
+        }
+
         // MARK: - Material Settings Integration Handler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             os_log(.info, log: logger, "📱 Received message from Material: %{public}s", message.name)

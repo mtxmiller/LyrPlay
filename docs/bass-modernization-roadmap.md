@@ -404,16 +404,40 @@ import BassOpus
 
 ## Phase 3: Buffer-Level Gapless Playback
 
+**🔄 IN PROGRESS** - Manual skip working! Need to implement natural track end detection for true gapless.
+
+### Current Status (as of 2025-01-30)
+
+**✅ COMPLETED:**
+- Push stream architecture with decoder loop (URL → decoder → push stream)
+- Track boundary markers with BASS sync callbacks
+- Position tracking (per-track, resets at boundaries)
+- Pause/resume (works correctly with `hasValidStream()` check)
+- **Manual track skip** with buffer flush (`BASS_ChannelSetPosition(0)`)
+- **Sample rate matching** (detects actual format, recreates push stream if needed)
+- Material interface integration (STMc/STMs messages, position updates)
+
+**⚠️ CURRENT BEHAVIOR:**
+- **Manual skip:** ✅ Audio changes immediately (buffer flushed)
+- **Natural track end:** ❌ Not implemented (needs detection + queue mechanism)
+
+**📋 REMAINING FOR TRUE GAPLESS:**
+1. Detect natural track end vs manual skip
+2. On natural end: Don't flush buffer, let old audio finish
+3. Queue next track's decoder while current plays
+4. Boundary marker triggers metadata update (not audio change)
+5. Seamless audio transition (0ms gap)
+
 ### Goals
 - ✅ Implement push stream architecture
 - ✅ Add track boundary markers
-- ✅ Achieve true gapless playback (0ms gaps)
-- ✅ Match squeezelite quality
+- ⏳ Achieve true gapless playback (0ms gaps) - **In Progress**
+- ⏳ Match squeezelite quality - **In Progress**
 
 ### Prerequisites
-- [ ] Phase 1 & 2 stable
-- [ ] Read `/docs/bass-gapless-buffer-analysis.md`
-- [ ] Read `/docs/gapless-migration-plan.md`
+- [x] Phase 1 & 2 stable
+- [x] Read `/docs/bass-gapless-buffer-analysis.md`
+- [x] Read `/docs/gapless-migration-plan.md`
 
 ### Step 3.1: Design AudioStreamDecoder Class
 

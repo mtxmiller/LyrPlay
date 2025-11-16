@@ -15,16 +15,16 @@ protocol SlimProtoConnectionManagerDelegate: AnyObject {
     func connectionManagerDidReconnectAfterTimeout()
 }
 
-class SlimProtoConnectionManager: ObservableObject {
-    
+class SlimProtoConnectionManager {
+
     // MARK: - Dependencies
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SlimProtoConnectionManager")
-    
-    // MARK: - Published State
-    @Published var connectionState: ConnectionState = .disconnected
-    @Published var isInBackground: Bool = false
-    @Published var networkStatus: NetworkStatus = .unknown
-    @Published var backgroundTimeRemaining: TimeInterval = 0
+
+    // MARK: - State
+    var connectionState: ConnectionState = .disconnected
+    var isInBackground: Bool = false
+    var networkStatus: NetworkStatus = .unknown
+    var backgroundTimeRemaining: TimeInterval = 0
     
     // MARK: - Delegation
     weak var delegate: SlimProtoConnectionManagerDelegate?
@@ -42,12 +42,14 @@ class SlimProtoConnectionManager: ObservableObject {
     
     // MARK: - Reconnection Logic
     private var reconnectionTimer: Timer?
-    private var reconnectionAttempts: Int = 0
+    private var reconnectionAttempts: Int = 0  // Per-server counter (resets on server switch)
+    private var totalConsecutiveFailures: Int = 0  // TOTAL failures across all servers (never resets until success)
     private let maxReconnectionAttempts: Int = 8  // Increased for better persistence
+    private let maxTotalFailuresBeforeError: Int = 12  // After 12 total failures (both servers tried), show error
     private let baseReconnectionDelay: TimeInterval = 2.0
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
-    
+
     private var wasConnectedBeforeTimeout: Bool = false
     private var disconnectionDuration: TimeInterval = 0
     
@@ -428,19 +430,20 @@ class SlimProtoConnectionManager: ObservableObject {
         connectionState = .connected
         lastSuccessfulConnection = Date()
         reconnectionAttempts = 0
+        totalConsecutiveFailures = 0  // CRITICAL: Reset total failures on successful connection
         stopReconnectionTimer()
-        
+
         // Start health monitoring
         let interval = isInBackground ? 30.0 : 15.0
         startHealthMonitoring(interval: interval)
-        
+
         // Record initial heartbeat
         recordHeartbeatResponse()
-        
+
         if wasReconnectionAfterTimeout {
             delegate?.connectionManagerDidReconnectAfterTimeout()
         }
-        
+
         wasConnectedBeforeTimeout = false
     }
     
@@ -509,38 +512,33 @@ class SlimProtoConnectionManager: ObservableObject {
             os_log(.info, log: logger, "Skipping reconnection attempt")
             return
         }
-        
+
         guard isNetworkAvailable else {
             os_log(.error, log: logger, "🔄 Cannot reconnect - network unavailable")
             connectionState = .networkUnavailable
             return
         }
-        
+
         reconnectionAttempts += 1
-        os_log(.info, log: logger, "🔄 Reconnection attempt %d/%d", reconnectionAttempts, maxReconnectionAttempts)
-        
+        totalConsecutiveFailures += 1  // Track TOTAL failures across all servers
+
+        os_log(.info, log: logger, "🔄 Reconnection attempt %d/%d (total failures: %d/%d)",
+               reconnectionAttempts, maxReconnectionAttempts,
+               totalConsecutiveFailures, maxTotalFailuresBeforeError)
+
         connectionState = .reconnecting
         delegate?.connectionManagerShouldReconnect()
     }
-    
-    private func scheduleReconnectionIfNeeded() {
-        guard shouldAttemptReconnection() else {
-            os_log(.error, log: logger, "❌ Max reconnection attempts reached")
-            connectionState = .failed
-            return
-        }
-        
-        let delay = calculateReconnectionDelay()
-        os_log(.info, log: logger, "⏰ Scheduling reconnection in %.1f seconds (attempt %d)", delay, reconnectionAttempts + 1)
-        
-        stopReconnectionTimer()
-        reconnectionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.attemptReconnection()
-        }
-    }
-    
+
     private func shouldAttemptReconnection() -> Bool {
-        // Don't reconnect if we've exceeded max attempts
+        // CRITICAL: Stop if both servers have been tried and failed multiple times
+        if totalConsecutiveFailures >= maxTotalFailuresBeforeError {
+            os_log(.error, log: logger, "❌ Total failures (%d) exceeded limit - both servers unreachable", totalConsecutiveFailures)
+            connectionState = .failed
+            return false
+        }
+
+        // Don't reconnect if we've exceeded max attempts PER SERVER
         if reconnectionAttempts >= maxReconnectionAttempts {
             return false
         }
@@ -587,72 +585,35 @@ class SlimProtoConnectionManager: ObservableObject {
         reconnectionTimer?.invalidate()
         reconnectionTimer = nil
     }
-    
+
     // MARK: - Manual Control
-    func resetReconnectionAttempts() {
-        os_log(.info, log: logger, "🔄 Resetting reconnection attempts")
-        reconnectionAttempts = 0
-        stopReconnectionTimer()
-    }
-    
-    func forceReconnection() {
-        os_log(.info, log: logger, "🔄 Forcing reconnection")
-        lastDisconnectionReason = .userInitiated // Will be reset on next disconnect
-        resetReconnectionAttempts()
-        attemptReconnection()
-    }
-    
     func userInitiatedDisconnection() {
         os_log(.info, log: logger, "🔄 User initiated disconnection")
         lastDisconnectionReason = .userInitiated
         stopReconnectionTimer()
         stopHealthMonitoring()
     }
-    
-    // MARK: - Background Strategy (Enhanced)
-    var backgroundConnectionStrategy: BackgroundStrategy {
-        if !isInBackground {
-            return .normal
-        }
-        
-        // Check how long we've been in background
-        let backgroundDuration = backgroundStartTime?.timeIntervalSinceNow ?? 0
-        let absBackgroundDuration = abs(backgroundDuration)
-        
-        if backgroundTimeRemaining < 30 {
-            return .suspended
-        } else if absBackgroundDuration > 300 || isNetworkExpensive { // 5 minutes
-            return .minimal
-        } else {
-            return .reduced
-        }
+
+    // MARK: - Reconnection Attempt Management
+    func getReconnectionAttempts() -> Int {
+        return reconnectionAttempts
     }
-    
-    enum BackgroundStrategy {
-        case normal    // Full functionality
-        case reduced   // Slightly reduced activity
-        case minimal   // Reduced activity, longer intervals
-        case suspended // Minimal activity only
-        
-        var statusInterval: TimeInterval {
-            switch self {
-            case .normal: return 10.0
-            case .reduced: return 15.0
-            case .minimal: return 30.0
-            case .suspended: return 60.0
-            }
-        }
-        
-        var healthCheckInterval: TimeInterval {
-            switch self {
-            case .normal: return 15.0
-            case .reduced: return 20.0
-            case .minimal: return 30.0
-            case .suspended: return 60.0
-            }
-        }
+
+    func resetReconnectionAttempts() {
+        // Called when AUTOMATIC failover switches servers (primary ↔ backup)
+        // Reset per-server counter but keep total consecutive failures tracking
+        os_log(.info, log: logger, "🔄 Resetting per-server reconnection attempts (was %d, total failures: %d)", reconnectionAttempts, totalConsecutiveFailures)
+        reconnectionAttempts = 0
     }
-    
+
+    func resetAllReconnectionTracking() {
+        // Called when USER manually changes servers via settings
+        // Reset EVERYTHING for fresh start
+        os_log(.info, log: logger, "🔄 Resetting ALL reconnection tracking (attempts: %d, total failures: %d)", reconnectionAttempts, totalConsecutiveFailures)
+        reconnectionAttempts = 0
+        totalConsecutiveFailures = 0
+    }
+
     // MARK: - Public Status
     var connectionSummary: String {
         var summary = connectionState.displayName

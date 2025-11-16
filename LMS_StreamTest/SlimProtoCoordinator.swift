@@ -35,7 +35,10 @@ class SlimProtoCoordinator: ObservableObject {
 
     // MARK: - ICY Metadata Tracking
     private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
-    
+
+    // MARK: - Gapless Playback Tracking
+    private var expectingGaplessTransition: Bool = false  // Set to true after sending STMd, false when STRM received
+
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
 
@@ -162,27 +165,18 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "Server settings updated and tracked - Host: %{public}s, Port: %d", host, port)
     }
 
+    func resetConnectionManager() {
+        // Reset ALL reconnection tracking to prevent failover interference when user manually changes servers
+        connectionManager.resetAllReconnectionTracking()
+        os_log(.info, log: logger, "✅ Connection manager reset - all reconnection tracking cleared")
+    }
+
     func getBackgroundDuration() -> TimeInterval? {
         guard let bgTime = backgroundedTime else { return nil }
         return Date().timeIntervalSince(bgTime)
     }
 
     /// Request server-side seek for transcoding pipeline fixes
-    func requestSeekToTime(_ timeOffset: Double) {
-        os_log(.info, log: logger, "🔧 Requesting server seek to %{public}.2f seconds for transcoding fix", timeOffset)
-
-        // Use proper JSON-RPC structure like existing recovery methods
-        let seekCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [settings.playerMACAddress, ["time", timeOffset]]
-        ]
-
-        sendJSONRPCCommandDirect(seekCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔧 Server seek command completed")
-        }
-    }
-    
     // MARK: - Server Time Sync Management (Using SimpleTimeTracker)
     private func startServerTimeSync() {
         os_log(.debug, log: logger, "🔄 Using simplified SlimProto time tracking")
@@ -213,8 +207,17 @@ class SlimProtoCoordinator: ObservableObject {
         // Store metadata to prevent future duplicates
         lastSentICYMetadata = metadata
 
-        // Forward ICY metadata to LMS server (similar to squeezelite's sendMETA)
-        sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
+        // CRITICAL FIX: Only send ICY metadata if stream has duration
+        // Metadata-less HLS/playlist streams have no duration, causing LMS XMLBrowser.pm crash:
+        // "Can't call method 'duration' on an undefined value at XMLBrowser.pm line 1975"
+        // Check stream duration before sending to prevent server-side Perl crashes
+        let duration = audioManager.getDuration()
+        if duration > 0 {
+            os_log(.info, log: logger, "🎵 Stream has duration (%.2fs) - sending ICY metadata to LMS", duration)
+            sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
+        } else {
+            os_log(.info, log: logger, "🎵 Stream has no duration (infinite stream) - skipping ICY metadata send (prevents server crash)")
+        }
     }
 
     private func sendICYMetadataToLMS(title: String?, artist: String?) {
@@ -396,7 +399,7 @@ class SlimProtoCoordinator: ObservableObject {
 
             // Set recovery in progress
             self.isRecoveryInProgress = true
-            os_log(.info, log: self.logger, "🔒 Playlist Recovery: Starting (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+            os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
 
             DispatchQueue.main.async { [weak self] in
                 self?.executePlaylistRecovery(shouldPlay: shouldPlay)
@@ -405,9 +408,32 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     private func executePlaylistRecovery(shouldPlay: Bool) {
+        os_log(.error, log: logger, "[APP-RECOVERY] 🎯 EXECUTING PLAYLIST RECOVERY (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+
+        // CRITICAL FIX: Add timeout to prevent permanent recovery lock if JSONRPC callback fails
+        // This prevents CarPlay "Resume Playback" from hanging on subsequent attempts
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+            guard let self = self else { return }
+            if self.isRecoveryInProgress {
+                os_log(.error, log: self.logger, "⚠️ RECOVERY TIMEOUT - Clearing lock after 10s (callback likely failed)")
+                self.isRecoveryInProgress = false
+            }
+        }
+
+        // CRITICAL: Playlist jump with timeOffset doesn't work with FLAC passthrough (push streams)
+        // Direct streams can't seek mid-file, server would need to restart from beginning anyway
+        // So for FLAC, just send simple play/pause command and accept starting from track beginning
+        if settings.audioFormat == .flac {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 FLAC passthrough mode - playlist jump disabled (direct streams can't seek)")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 Sending simple %{public}s command - track will start from beginning", shouldPlay ? "play" : "pause")
+            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
+            isRecoveryInProgress = false
+            return
+        }
+
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-            os_log(.info, log: logger, "🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -417,19 +443,22 @@ class SlimProtoCoordinator: ObservableObject {
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
 
         guard savedPosition > 0 else {
-            os_log(.info, log: logger, "🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
         }
 
-        os_log(.info, log: logger, "🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
+        os_log(.error, log: logger, "[APP-RECOVERY] 🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
                savedIndex, savedPosition, shouldPlay ? "YES" : "NO")
 
         // SILENT RECOVERY: Set mute flag BEFORE playlist jump for app foreground recovery
         if !shouldPlay {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 ENABLING SILENT RECOVERY MODE BEFORE PLAYLIST JUMP")
             audioManager.enableSilentRecoveryMode()
-            os_log(.info, log: logger, "🔇 Silent recovery mode enabled - next stream will be muted")
+            os_log(.error, log: logger, "[APP-RECOVERY] ✅ Silent recovery mode enabled - next stream will be muted")
+        } else {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔊 Normal recovery mode - no muting needed")
         }
 
         // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
@@ -477,89 +506,6 @@ class SlimProtoCoordinator: ObservableObject {
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
         }
     }
-    
-    /// App open recovery - same playlist jump method but pauses after recovery
-    func performAppOpenRecovery() {
-        // 🚫 DISABLED: App open recovery temporarily disabled for testing
-        os_log(.info, log: logger, "📱 App Open Recovery: DISABLED for testing")
-
-        recoveryQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            // Check if recovery is already in progress
-            guard !self.isRecoveryInProgress else {
-                os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - recovery already in progress")
-                return
-            }
-
-            // Check if we were disconnected while in background - this indicates recovery is needed
-            guard self.wasDisconnectedWhileInBackground else {
-                os_log(.info, log: self.logger, "📱 App Open Recovery: Skipping - was not disconnected while in background")
-                return
-            }
-
-            // Check if we have recovery data (no time limit - like other music players)
-            guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-                os_log(.info, log: self.logger, "📱 No recovery data for app open - skipping recovery")
-                 return
-            }
-
-            // Set recovery in progress and clear background disconnection flag
-            self.isRecoveryInProgress = true
-            self.wasDisconnectedWhileInBackground = false
-            os_log(.info, log: self.logger, "📱 App Open Recovery: Starting (blocking other recovery methods)")
-
-            DispatchQueue.main.async { [weak self] in
-                self?.executeAppOpenRecovery()
-            }
-        }
-    }
-    
-    private func executeAppOpenRecovery() {
-        
-        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
-        
-        guard savedPosition > 0 else {
-            os_log(.info, log: logger, "📱 No saved position for app open - skipping recovery")
-            isRecoveryInProgress = false // Clear recovery flag
-            return
-        }
-        
-        os_log(.info, log: logger, "📱 Performing app open recovery: jump to track %d at %.2f seconds (will pause)", savedIndex, savedPosition)
-        
-        // Use Home Assistant approach: playlist jump with timeOffset AND pause
-        let playlistJumpCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [settings.playerMACAddress, [
-                "playlist", "jump", savedIndex, 1, 1, [
-                    "timeOffset": savedPosition
-                ]
-            ]]
-        ]
-        
-        sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "📱 App open recovery completed - positioned silently with noplay=1")
-            
-            // No pause needed since noplay=1 keeps it paused automatically
-            // Refresh WebView to show updated position/state
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                SettingsManager.shared.shouldReloadWebView = true
-                os_log(.info, log: self?.logger ?? OSLog.default, "🔄 WebView refresh triggered after app open recovery")
-            }
-            
-            // Clear recovery flag after completion
-            self?.isRecoveryInProgress = false
-            os_log(.info, log: self?.logger ?? OSLog.default, "📱 Recovery state cleared - other recovery methods can now proceed")
-            
-            // Clear recovery data after successful use
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
-        }
-    }
-    
 }
 
 // MARK: - SlimProtoClientDelegate
@@ -591,11 +537,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // CRITICAL: Save position for playlist recovery on any disconnect
         saveCurrentPositionForRecovery()
 
-        // CRITICAL FIX: Stop and free the BASS stream on disconnect
-        // This prevents trying to resume stale buffered data after reconnection
-        // Server will send fresh stream URL with correct position via HELO reconnect
-        os_log(.info, log: logger, "🛑 Stopping BASS stream on disconnect to prevent stale buffer resume")
-        audioManager.stop()
+        // Trust server-master architecture: Server controls playback via STRM commands
+        // Don't send local stop commands - let server decide when to stop/start via STRM
 
         connectionManager.didDisconnect(error: error)
 
@@ -617,22 +560,45 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerShouldReconnect() {
         os_log(.info, log: logger, "🔄 Connection manager requesting reconnection")
-        
-        // Try backup server if primary fails and backup is available
+
+        // IMPROVED FAILOVER: Switch servers if current server keeps failing
+        let reconnectionAttempts = connectionManager.getReconnectionAttempts()
+
+        // Try backup server if primary fails (first 3 attempts on primary)
         if settings.currentActiveServer == .primary &&
+           reconnectionAttempts >= 3 &&
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
-            
-            os_log(.info, log: logger, "🔄 Primary server failed - trying backup server")
+
+            os_log(.info, log: logger, "🔄 Primary server failed after %d attempts - switching to backup", reconnectionAttempts)
             settings.switchToBackupServer()
-            
+
             // Update client with backup server settings
             client.updateServerSettings(
                 host: settings.activeServerHost,
                 port: UInt16(settings.activeServerSlimProtoPort)
             )
+
+            // CRITICAL: Reset reconnection counter when switching servers
+            connectionManager.resetReconnectionAttempts()
         }
-        
+        // Try primary server if backup fails (after 3 attempts on backup)
+        else if settings.currentActiveServer == .backup &&
+                reconnectionAttempts >= 3 {
+
+            os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary", reconnectionAttempts)
+            settings.switchToPrimaryServer()
+
+            // Update client with primary server settings
+            client.updateServerSettings(
+                host: settings.activeServerHost,
+                port: UInt16(settings.activeServerSlimProtoPort)
+            )
+
+            // CRITICAL: Reset reconnection counter when switching servers
+            connectionManager.resetReconnectionAttempts()
+        }
+
         client.connect()
     }
     
@@ -941,7 +907,59 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.fetchServerTime()
         }
     }
-    
+
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) {
+        os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
+        os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url)
+
+        // Stop any existing playback and timers first
+        stopPlaybackHeartbeat()
+
+        // Check if this is a gapless transition (track decode completed naturally)
+        let isGapless = expectingGaplessTransition
+        if isGapless {
+            os_log(.info, log: logger, "🎵 Gapless transition detected - queuing next track while old audio plays")
+        }
+
+        // Start push stream playback with AudioStreamDecoder
+        // isGapless: true means DON'T flush buffer, let old audio finish
+        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime)
+
+        // Reset gapless flag after use
+        expectingGaplessTransition = false
+
+        // Send STMc (stream connected) - matches URL stream behavior
+        os_log(.info, log: logger, "🔗 Push stream connected - sending STMc")
+        client.sendStatus("STMc")
+
+        // Send STMs for first track / manual skip (no gapless transition)
+        // For gapless: STMs is sent when track boundary is reached (keeps Material in sync)
+        if !isGapless {
+            os_log(.info, log: logger, "🎵 First track/manual skip - sending STMs immediately")
+            client.sendStatus("STMs")
+        } else {
+            os_log(.info, log: logger, "🎵 Gapless track - STMs will be sent at track boundary")
+        }
+
+        // Start periodic server time fetching for lock screen updates
+        startServerTimeFetching()
+
+        // Start the 1-second heartbeat timer (like squeezelite)
+        startPlaybackHeartbeat()
+
+        // Get initial metadata for new stream
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.fetchCurrentTrackMetadata()
+        }
+
+        // Fetch server time after connection stabilizes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.fetchServerTime()
+        }
+
+        os_log(.info, log: logger, "✅ Direct stream (push mode) playback started")
+    }
+
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         
@@ -984,6 +1002,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         audioManager.stop()
 
+        // CRITICAL: Clear gapless flag - stop command means next track is manual skip, not gapless!
+        // If we don't clear this, old buffered audio keeps playing after skip
+        expectingGaplessTransition = false
+        os_log(.info, log: logger, "🧹 Cleared gapless flag - next track will flush buffer")
+
         // CRITICAL FIX: Update both SimpleTimeTracker AND NowPlayingManager to stop interpolating
         updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
 
@@ -997,7 +1020,61 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         client.sendStatus("STMf")
     }
-    
+
+    // MARK: - Gapless Playback - Track Decode Complete
+
+    /// Send STMd message when decoder completes naturally (like squeezelite DECODE_COMPLETE)
+    /// This tells the server the track finished decoding and triggers next track queueing
+    func sendTrackDecodeComplete() {
+        let timestamp = Date()
+        os_log(.error, log: logger, "✅✅✅ TRACK DECODE COMPLETE - sending STMd to server")
+        os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
+        os_log(.error, log: logger, "📊 This means: All track data decoded, boundary marked, audio still playing from buffer")
+
+        // Like squeezelite: decode.state = DECODE_COMPLETE → wake_controller() → sendSTAT("STMd", 0)
+        client.sendStatus("STMd")
+
+        // Mark that we're expecting a gapless transition
+        // Next STRM command should be treated as gapless (don't flush buffer)
+        expectingGaplessTransition = true
+
+        // Server will respond with new STRM command for next track
+        // With autostart=2 or 3 (wait for CONT before starting decode)
+        os_log(.error, log: logger, "📊 Waiting for server to queue next track (gapless mode enabled)...")
+        os_log(.error, log: logger, "📊 When playback reaches boundary → STMs will be sent → Material will update")
+    }
+
+    /// Send STMn message when decoder encounters error (like squeezelite DECODE_ERROR)
+    func sendTrackDecodeError() {
+        os_log(.error, log: logger, "❌ Track decode error - sending STMn to server")
+        client.sendStatus("STMn")
+    }
+
+    /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
+    /// This keeps Material UI in sync with actual audio playback
+    func sendTrackStarted() {
+        let timestamp = Date()
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
+
+        // CRITICAL FIX: Reset SimpleTimeTracker to 0 when new track starts
+        // This ensures lock screen shows 0:00 for the new track, not stale time from previous track
+        simpleTimeTracker.updateFromServer(time: 0.0, duration: 0.0, playing: true)
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Reset SimpleTimeTracker to 0.0 for new track start")
+
+        // Like squeezelite output.c:155 - output.track_started = true → send STMs
+        // This updates Material to show the track that's NOW PLAYING (not just queued)
+        client.sendStatus("STMs")
+
+        // CRITICAL FIX: Update lock screen metadata immediately for gapless transitions
+        // In push stream architecture, metadata updates don't happen automatically like URL streams
+        // So we need to manually trigger metadata refresh when track boundary is reached
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Triggering immediate metadata update for lock screen (gapless transition)")
+        fetchCurrentTrackMetadata()
+
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh triggered - lock screen should update immediately")
+    }
+
     func getCurrentAudioTime() -> Double {
         // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
@@ -1007,8 +1084,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func hasActiveStream() -> Bool {
         // Check if we have an active BASS stream (not stale after reconnect)
+        // This includes both URL streams (audioPlayer) and push streams (streamDecoder)
         let playerState = audioManager.getPlayerState()
-        return playerState != "No Stream"
+        let hasPushStream = audioManager.hasPushStream()
+        return playerState != "No Stream" || hasPushStream
     }
 
     func didReceiveStatusRequest() {
@@ -1133,11 +1212,6 @@ extension SlimProtoCoordinator {
         return time
     }
     
-    /// Get SimpleTimeTracker for debugging (Material-style system)
-    func getSimpleTimeTracker() -> SimpleTimeTracker {
-        return simpleTimeTracker
-    }
-    
     /// Handle track end detection from server time (replaces unreliable BASS_SYNC_END)
     func handleTrackEndFromServerTime() {
         os_log(.info, log: logger, "🎵 Track end detected via server time - forwarding to command handler")
@@ -1151,10 +1225,6 @@ extension SlimProtoCoordinator {
     }
     
     /// Public method to refresh Material UI (can be called externally)
-    func refreshMaterialInterface() {
-        // Removed refreshMaterialUI() method - server auto-resume handles position recovery
-    }
-    
     /// Start periodic server time fetching
     func startServerTimeFetching() {
         stopServerTimeFetching() // Stop any existing timer
@@ -1206,31 +1276,16 @@ extension SlimProtoCoordinator {
                 if duration > 45 {
                     // Long background (> 45s) - reconnect and recover position
                     os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - reconnecting and recovering", duration)
+
+                    // Trust BASS to auto-manage stream state during reconnection
+                    // BASS handles iOS audio session activation/deactivation automatically
                     connect()
 
-                    // Wait for confirmed connection before recovery
-                    var attempts = 0
-                    let maxAttempts = 10  // 5 seconds total (10 x 0.5s)
-
-                    Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
-                        guard let self = self else {
-                            timer.invalidate()
-                            return
-                        }
-
-                        attempts += 1
-
-                        if self.connectionManager.connectionState.isConnected {
-                            // Connection confirmed! Perform playlist recovery with play
-                            timer.invalidate()
-                            os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Reconnected - performing position recovery")
-                            self.performPlaylistRecovery(shouldPlay: true)
-
-                        } else if attempts >= maxAttempts {
-                            // Timeout - give up
-                            timer.invalidate()
-                            os_log(.error, log: self.logger, "🔒 Lock screen PLAY: Connection timeout after %d attempts", attempts)
-                        }
+                    // HYBRID FIX: Don't poll connection state (unreliable)
+                    // Just wait fixed time and ALWAYS call recovery (like e3ed788)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Performing position recovery after reconnect wait")
+                        self.performPlaylistRecovery(shouldPlay: true)
                     }
                 } else {
                     // Brief background (< 45s) - just send play command (fast!)
@@ -1266,20 +1321,7 @@ extension SlimProtoCoordinator {
             commandHandler.isPausedByLockScreen = true
         }
     }
-    
-    private func sendPowerCommand(_ state: String) {
-        let playerID = settings.playerMACAddress
-        let powerCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["power", state]]
-        ]
-        
-        sendJSONRPCCommandDirect(powerCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔌 Power command sent: power %{public}s", state)
-        }
-    }
-    
+
     private func sendJSONRPCCommand(_ command: String, retryCount: Int = 0) {
         // CRITICAL FIX: For pause commands, get current server position FIRST
         if command.lowercased() == "pause" {
@@ -1408,8 +1450,11 @@ extension SlimProtoCoordinator {
             completion([:])
             return
         }
-        
-        let urlString = "\(settings.webURL)jsonrpc.js"
+
+        // CRITICAL FIX: Use direct LMS endpoint instead of Material's /material/jsonrpc.js
+        // Material endpoint can apply commands to wrong player based on Material UI session state
+        // Direct endpoint ensures player MAC in params[0] is always respected
+        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/jsonrpc.js"
         os_log(.info, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
         
         guard let url = URL(string: urlString) else {
@@ -1563,15 +1608,25 @@ extension SlimProtoCoordinator {
                let result = json["result"] as? [String: Any],
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
-                
+
+                // Update CarPlay button states based on server's playlist position
+                if let totalTracks = result["playlist_tracks"] as? Int,
+                   let currentIndex = result["playlist_cur_index"] as? Int {
+                    os_log(.info, log: logger, "🎵 Playlist position: %d/%d", currentIndex + 1, totalTracks)
+                    audioManager.updatePlaylistPosition(
+                        currentIndex: currentIndex,
+                        totalTracks: totalTracks
+                    )
+                }
+
                 // SIMPLIFIED: Use Material skin's straightforward metadata approach
                 let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LyrPlay"
                 let trackArtist = firstTrack["artist"] as? String ?? firstTrack["albumartist"] as? String ?? "Unknown Artist"
                 let trackAlbum = firstTrack["album"] as? String ?? firstTrack["remote_title"] as? String ?? "Lyrion Music Server"
-                
+
                 // CRITICAL FIX: Only update duration if server explicitly provides it (Material skin approach)
                 let serverDuration = firstTrack["duration"] as? Double
-                
+
                 // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
                 if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
@@ -1579,11 +1634,14 @@ extension SlimProtoCoordinator {
                 } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
                     artworkURL = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverid)/cover.jpg"
                 }
-                
+
                 // Log final metadata result
-                os_log(.info, log: logger, "🎵 Material-style: '%{public}s' by %{public}s%{public}s",
+                os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🎵 Material-style: '%{public}s' by %{public}s%{public}s",
                        trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
-                
+
+                let metadataTimestamp = Date()
+                os_log(.info, log: logger, "[BOUNDARY-DRIFT] 📊 METADATA UPDATE TIMESTAMP: %{public}s", metadataTimestamp.description)
+
                 DispatchQueue.main.async {
                     // Only update duration if server explicitly provides it (Material skin approach)
                     if let duration = serverDuration, duration > 0.0 {
@@ -1604,63 +1662,18 @@ extension SlimProtoCoordinator {
                             // duration parameter omitted - keeps existing duration
                         )
                     }
+
+                    os_log(.info, log: self.logger, "[BOUNDARY-DRIFT] ✅ METADATA APPLIED TO LOCK SCREEN - new track info should appear now")
                 }
-                
+
             } else {
-                os_log(.error, log: logger, "Failed to parse metadata response")
+                os_log(.error, log: logger, "[BOUNDARY-DRIFT] Failed to parse metadata response")
             }
         } catch {
-            os_log(.error, log: logger, "JSON parsing error: %{public}s", error.localizedDescription)
+            os_log(.error, log: logger, "[BOUNDARY-DRIFT] JSON parsing error: %{public}s", error.localizedDescription)
         }
-    }    
-    // MARK: - Helper Method to Determine Source Type
-    private func determineSourceType(from trackData: [String: Any]) -> String {
-        // Check various indicators to determine the source type
-        
-        // Check for Radio Paradise specific fields
-        if let url = trackData["url"] as? String {
-            if url.contains("radioparadise.com") {
-                return "Radio Paradise"
-            }
-            if url.contains("tunein.com") || url.contains("radiotime.com") {
-                return "TuneIn Radio"
-            }
-            if url.contains("somafm.com") {
-                return "SomaFM"
-            }
-            if url.contains("spotify.com") {
-                return "Spotify"
-            }
-            if url.contains("tidal.com") {
-                return "Tidal"
-            }
-            if url.contains("qobuz.com") {
-                return "Qobuz"
-            }
-            // Generic radio stream detection
-            if url.contains(".pls") || url.contains(".m3u") || url.contains("stream") {
-                return "Internet Radio"
-            }
-        }
-        
-        // Check for remote_title which often indicates streaming
-        if trackData["remote_title"] != nil {
-            return "Internet Radio"
-        }
-        
-        // Check for plugin-specific fields
-        if trackData["icon"] != nil || trackData["image"] != nil {
-            return "Plugin Stream"
-        }
-        
-        // Check if it has a file path (local music)
-        if let trackID = trackData["id"] as? Int, trackID > 0 {
-            return "Local Music"
-        }
-        
-        return "Unknown Source"
     }
-    
+    // MARK: - Helper Method to Determine Source Type
     // Add to SlimProtoConnectionManagerDelegate extension
     func connectionManagerShouldStorePosition() {
         os_log(.info, log: logger, "🔒 Connection lost - storing current position for recovery")
@@ -1681,64 +1694,6 @@ extension SlimProtoCoordinator {
 
 
 
-    // Add this new method for seeking via JSON-RPC
-    private func sendSeekCommand(to position: Double, completion: @escaping (Bool) -> Void) {
-        let playerID = settings.playerMACAddress
-        let clampedPosition = max(0, position)
-        
-        // FIXED: Use correct JSON-RPC format for time seeking
-        let jsonRPC = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["time", clampedPosition]]  // ✅ Pass number directly, not as string
-        ] as [String : Any]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            os_log(.error, log: logger, "Failed to create seek JSON-RPC command")
-            completion(false)
-            return
-        }
-        
-        let webPort = settings.activeServerWebPort
-        let host = settings.activeServerHost
-        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
-            os_log(.error, log: logger, "Invalid server URL for seek command")
-            completion(false)
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = jsonData
-        request.timeoutInterval = 8.0
-        
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    os_log(.error, log: self.logger, "Seek command failed: %{public}s", error.localizedDescription)
-                    completion(false)
-                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                    os_log(.info, log: self.logger, "✅ Seek command sent successfully to %.2f", clampedPosition)
-                    
-                    // Fetch fresh server time after seek to update lock screen
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.fetchServerTime()
-                    }
-                    
-                    completion(true)
-                } else {
-                    os_log(.error, log: self.logger, "Seek command failed with HTTP error")
-                    completion(false)
-                }
-            }
-        }
-        
-        task.resume()
-        os_log(.info, log: logger, "🌐 Sending seek command to %.2f seconds", clampedPosition)
-    }
-    
     // MARK: - Volume Control
     func setPlayerVolume(_ volume: Float) {
         // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
@@ -1747,17 +1702,5 @@ extension SlimProtoCoordinator {
 
     func getPlayerVolume() -> Float {
         return audioManager.getVolume()
-    }
-}
-
-// MARK: - Background Strategy Extension
-extension SlimProtoConnectionManager.BackgroundStrategy {
-    var description: String {
-        switch self {
-        case .normal: return "normal"
-        case .reduced: return "reduced"
-        case .minimal: return "minimal"
-        case .suspended: return "suspended"
-        }
     }
 }

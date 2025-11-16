@@ -1,50 +1,13 @@
 // File: InterruptionManager.swift
-// Temporary placeholder while the new session orchestration is specified.
+// Minimal stub - PlaybackSessionController handles all interruption logic
 import Foundation
-import AVFoundation
 import os.log
 
-protocol InterruptionManagerDelegate: AnyObject {
-    func interruptionDidBegin(type: InterruptionManager.InterruptionType, shouldPause: Bool)
-    func interruptionDidEnd(type: InterruptionManager.InterruptionType, shouldResume: Bool)
-    func routeDidChange(type: InterruptionManager.RouteChangeType, shouldPause: Bool)
-    func audioSessionWasReset()
-}
-
-/// Minimal shell that keeps the app compiling while we replace the legacy
-/// interruption stack with a single session controller.
+/// Minimal stub that provides route change description for logging
+/// All actual interruption handling is done by PlaybackSessionController
 final class InterruptionManager: ObservableObject {
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "InterruptionManager")
-
-    enum InterruptionType {
-        case phoneCall
-        case facetimeCall
-        case siri
-        case alarm
-        case otherAudio
-        case unknown
-
-        var shouldAutoResume: Bool {
-            switch self {
-            case .phoneCall, .facetimeCall, .alarm, .siri:
-                return true
-            case .otherAudio, .unknown:
-                return false
-            }
-        }
-
-        var description: String {
-            switch self {
-            case .phoneCall: return "Phone Call"
-            case .facetimeCall: return "FaceTime Call"
-            case .siri: return "Siri"
-            case .alarm: return "Alarm"
-            case .otherAudio: return "Other Audio App"
-            case .unknown: return "Unknown"
-            }
-        }
-    }
 
     enum RouteChangeType {
         case headphonesDisconnected
@@ -57,24 +20,6 @@ final class InterruptionManager: ObservableObject {
         case airPlayDisconnected
         case speakerChange
         case unknown
-
-        var shouldPause: Bool {
-            switch self {
-            case .headphonesDisconnected, .carPlayDisconnected, .bluetoothDisconnected, .airPlayDisconnected:
-                return true
-            default:
-                return false
-            }
-        }
-
-        var shouldAutoResume: Bool {
-            switch self {
-            case .carPlayConnected:
-                return true
-            default:
-                return false
-            }
-        }
 
         var description: String {
             switch self {
@@ -92,24 +37,10 @@ final class InterruptionManager: ObservableObject {
         }
     }
 
-    weak var delegate: InterruptionManagerDelegate?
-
-    @Published var currentInterruption: InterruptionType?
-    @Published var isInterrupted: Bool = false
     @Published var lastRouteChange: RouteChangeType?
 
-    private var wasPlayingBeforeInterruption: Bool = false
-
     init() {
-        os_log(.info, log: logger, "InterruptionManager placeholder initialized")
-    }
-
-    func setWasPlayingBeforeInterruption(_ wasPlaying: Bool) {
-        wasPlayingBeforeInterruption = wasPlaying
-    }
-
-    func getWasPlayingBeforeInterruption() -> Bool {
-        wasPlayingBeforeInterruption
+        os_log(.info, log: logger, "InterruptionManager stub initialized")
     }
 
     func getCurrentAudioRoute() -> String {
@@ -117,6 +48,6 @@ final class InterruptionManager: ObservableObject {
     }
 
     func getInterruptionStatus() -> String {
-        isInterrupted ? "Interrupted" : "Normal"
+        "Normal"
     }
 }

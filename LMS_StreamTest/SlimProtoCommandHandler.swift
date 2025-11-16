@@ -5,6 +5,7 @@ import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float)
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) // NEW: For gapless push streams
     func didPauseStream()
     func didResumeStream()
     func didStopStream()
@@ -73,24 +74,6 @@ class SlimProtoCommandHandler: ObservableObject {
         default:
             slimProtoClient?.sendStatus("STMt")  // ← Keep as-is
         }
-    }
-    
-    func getCurrentStreamTime() -> Double {
-        guard !isStreamPaused, let startTime = streamStartTime else {
-            return streamPosition // Return frozen position when paused
-        }
-        
-        // Calculate elapsed time since last update
-        let elapsed = Date().timeIntervalSince(lastStreamUpdate)
-        return streamPosition + elapsed
-    }
-    
-    private func updateStreamPosition(_ position: Double) {
-        streamPosition = position
-        lastStreamUpdate = Date()
-        streamStartTime = isStreamPaused ? nil : Date()
-        
-        os_log(.info, log: logger, "📍 Stream position updated: %.2f", position)
     }
     
     // MARK: - SETD Command Processing
@@ -176,6 +159,10 @@ class SlimProtoCommandHandler: ObservableObject {
             let autostart = payload[1]
             let format = payload[2]
 
+            // DEBUG: Log autostart byte to understand server streaming mode choice
+            os_log(.debug, log: logger, "🔍 STRM autostart byte: %d (0x%02X) - '0'=%d '3'=%d",
+                   autostart, autostart, Character("0").asciiValue!, Character("3").asciiValue!)
+
             // Extract replay_gain from bytes 14-17 (u32_t in 16.16 fixed point format)
             // Pack format: 'aaaaaaaCCCaCCCNnN' where the first N (4 bytes) is replay_gain at offset 14
             let replayGainBytes = payload.subdata(in: 14..<18)
@@ -230,28 +217,35 @@ class SlimProtoCommandHandler: ObservableObject {
                 formatName = "FLAC"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering FLAC - native playback with StreamingKit!")
+                    os_log(.info, log: logger, "✅ Server offering FLAC")
                 }
                 
             case 112: // 'p' = PCM
                 formatName = "PCM"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
+                    os_log(.info, log: logger, "✅ Server offering PCM")
                 }
-                
+
+            case 119: // 'w' = WAV
+                formatName = "WAV"
+                shouldAccept = true
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering WAV - native BASS support!")
+                }
+
             case 111: // 'o' = OGG
                 formatName = "OGG"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering OGG - CBass native support!")
+                    os_log(.info, log: logger, "✅ Server offering OGG - Bass native support!")
                 }
                 
             case 117: // 'u' = Opus
                 formatName = "Opus"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering Opus - CBass native support!")
+                    os_log(.info, log: logger, "✅ Server offering Opus - Bass native support!")
                 }
                 
             default:
@@ -275,10 +269,14 @@ class SlimProtoCommandHandler: ObservableObject {
                     
                     if let url = extractURLFromHTTPRequest(httpRequest) {
                         os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
-                        
+
+                        // Check if this is a direct stream (autostart < '2') or HTTP stream (autostart >= '2')
+                        // Per squeezelite: 0='direct wait', 1='direct play', 2/3='HTTP'
+                        let isDirectStream = (autostart < Character("2").asciiValue!)
+
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
-                            handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat)
+                            handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat, autostart: autostart)
                         case UInt8(ascii: "p"): // pause
                             handlePauseCommand()
                         case UInt8(ascii: "u"): // unpause
@@ -330,8 +328,11 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Individual Command Handlers (existing code...)
-    private func handleStartCommand(url: String, format: String, startTime: Double, replayGain: Float) {
-        os_log(.info, log: logger, "▶️ Starting %{public}s stream from %.2f with replayGain %.4f", format, startTime, replayGain)
+    private func handleStartCommand(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
+        // Autostart values (per squeezelite): 0/1=direct stream, 2/3=HTTP stream
+        let streamMode = (autostart < Character("2").asciiValue!) ? "DIRECT" : "HTTP"
+        os_log(.info, log: logger, "▶️ Starting %{public}s stream (%{public}s mode, autostart=%d) from %.2f with replayGain %.4f",
+               format, streamMode, autostart, startTime, replayGain)
 
         // CRITICAL DEBUG: Log if server is sending unexpected start times
         if startTime > 0.1 && startTime < lastKnownPosition - 5.0 {
@@ -351,7 +352,19 @@ class SlimProtoCommandHandler: ObservableObject {
         isStreamActive = true
         waitingForNextTrack = false  // Server responded with new track - playlist NOT ended
 
-        delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+        // Route to appropriate playback mode based on autostart
+        // Per squeezelite: 0/1=direct stream (gapless), 2/3=HTTP stream (traditional)
+        let isDirectStream = (autostart < Character("2").asciiValue!)
+
+        if isDirectStream {
+            // Direct stream - use push stream for gapless (autostart 0 or 1)
+            os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")
+            delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+        } else {
+            // HTTP URL stream - use traditional pull stream (autostart 2 or 3)
+            os_log(.info, log: logger, "🌐 Routing to HTTP stream (traditional URL stream)")
+            delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+        }
     }
 
     // ADD THESE NEW METHODS:
@@ -401,23 +414,7 @@ class SlimProtoCommandHandler: ObservableObject {
         }
         return lastKnownPosition
     }
-    
-    func syncWithServerPosition(_ serverPosition: Double, isPlaying: Bool) {
-        // Just update our tracking variables
-        lastKnownPosition = serverPosition
-        isStreamPaused = !isPlaying
-        
-        // Update server reference time
-        if isPlaying {
-            serverStartTime = Date()
-            serverStartPosition = serverPosition
-        } else {
-            serverStartTime = nil
-        }
-        
-        os_log(.info, log: logger, "🔄 Synced to server position: %.2f", serverPosition)
-    }
-    
+
     func handleUnpauseCommand() {
         os_log(.info, log: logger, "▶️ Server unpause command")
 
@@ -502,50 +499,7 @@ class SlimProtoCommandHandler: ObservableObject {
     }
     
     // MARK: - Utility Methods
-    
-    func getServerProvidedTime() -> Double {
-        // Always prefer server position when paused
-        if isPausedByLockScreen {
-            return lastKnownPosition
-        }
-        
-        // For playing state, only calculate if we have a recent server reference
-        guard let startTime = serverStartTime else {
-            return lastKnownPosition
-        }
-        
-        // Only trust local calculation for short periods (< 30 seconds)
-        let elapsed = Date().timeIntervalSince(startTime)
-        if elapsed < 30.0 {
-            return serverStartPosition + elapsed
-        } else {
-            // Older than 30 seconds - don't trust local calculation
-            return lastKnownPosition
-        }
-    }
-    
 
-    func updateServerTimeFromSlimProto(_ position: Double, isPlaying: Bool) {
-        // CRITICAL FIX: Only update position if it's a meaningful value (> 0.1 seconds)
-        // SlimProto pause commands often send position 0.00 which is wrong
-        
-        if position > 0.1 || isPlaying {
-            // Valid position or we're playing - update everything
-            lastKnownPosition = position
-            isStreamPaused = !isPlaying
-            
-            // Note: SimpleTimeTracker in coordinator handles time updates
-            
-            os_log(.info, log: logger, "🔄 Updated both SlimProto and ServerTime with position: %.2f", position)
-        } else {
-            // Invalid/zero position during pause - only update playing state
-            isStreamPaused = !isPlaying
-            
-            // Note: SimpleTimeTracker in coordinator handles playback state
-            
-            os_log(.info, log: logger, "🔄 Updated playing state only (position %.2f ignored), preserved server time", position)
-        }
-    }
     private func extractURLFromHTTPRequest(_ httpRequest: String) -> String? {
         let lines = httpRequest.components(separatedBy: "\n")
         guard let firstLine = lines.first else { return nil }
@@ -594,12 +548,7 @@ class SlimProtoCommandHandler: ObservableObject {
 
         os_log(.info, log: logger, "✅ STMd sent - waiting for server response (next track or playlist end)")
     }
-    
-    func updatePlaybackPosition(_ position: Double) {
-        lastKnownPosition = position
-        // REMOVED: All the complex state management
-    }
-    
+
     func startSkipProtection() {
         os_log(.info, log: logger, "🛡️ Starting skip protection - blocking track end detection")
         isManualSkipInProgress = true

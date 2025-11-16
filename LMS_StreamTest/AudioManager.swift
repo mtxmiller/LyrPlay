@@ -12,6 +12,7 @@ class AudioManager: NSObject, ObservableObject {
     private let audioPlayer: AudioPlayer
     private let audioSessionManager: AudioSessionManager
     private let nowPlayingManager: NowPlayingManager
+    private let streamDecoder: AudioStreamDecoder  // NEW: For gapless playback
     
     // MARK: - Time Update Throttling (ADD THIS LINE)
     private var lastTimeUpdateReport: Date = Date()
@@ -41,9 +42,10 @@ class AudioManager: NSObject, ObservableObject {
         self.audioPlayer = AudioPlayer()
         self.audioSessionManager = AudioSessionManager()
         self.nowPlayingManager = NowPlayingManager()
-        
+        self.streamDecoder = AudioStreamDecoder()  // NEW: Initialize decoder
+
         super.init()
-        
+
         setupDelegation()
 
         // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
@@ -61,14 +63,14 @@ class AudioManager: NSObject, ObservableObject {
         // Connect AudioPlayer to AudioManager
         audioPlayer.delegate = self
         audioPlayer.audioManager = self  // Set back-reference for media control refresh
-        
+
         // Connect AudioSessionManager to AudioManager - ENHANCED
         audioSessionManager.delegate = self
-        
-        // Connect NowPlayingManager to AudioManager
-        nowPlayingManager.delegate = self
-        
-        os_log(.info, log: logger, "✅ Component delegation configured with interruption handling")
+
+        // Connect AudioStreamDecoder to AudioManager - NEW
+        streamDecoder.delegate = self
+
+        os_log(.info, log: logger, "✅ Component delegation configured with interruption handling and gapless decoder")
     }
     
     func setCommandHandler(_ handler: SlimProtoCommandHandler) {
@@ -82,11 +84,6 @@ class AudioManager: NSObject, ObservableObject {
     // MARK: - Public Interface (Exact same as original AudioManager)
     
     // Stream playback methods
-    func playStream(urlString: String) {
-        activateAudioSession()
-        audioPlayer.playStream(urlString: urlString)
-    }
-
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
@@ -94,11 +91,6 @@ class AudioManager: NSObject, ObservableObject {
         // Start playback
         activateAudioSession()
         audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
-    }
-
-    func playStreamAtPosition(urlString: String, startTime: Double) {
-        activateAudioSession()
-        audioPlayer.playStreamAtPosition(urlString: urlString, startTime: startTime)
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
@@ -110,18 +102,100 @@ class AudioManager: NSObject, ObservableObject {
         audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
     }
 
+    // NEW: Push stream playback for gapless (matches squeezelite architecture)
+    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d)", format, sampleRate, isGapless)
+        os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
+
+        // Configure audio session
+        configureAudioSessionForFormat(format)
+        activateAudioSession()
+
+        // Check if we need to initialize push stream (first time or after cleanup)
+        let hasValidStream = streamDecoder.hasValidStream()
+
+        if !hasValidStream {
+            // First time: Create push stream
+            os_log(.info, log: logger, "📊 Creating new push stream (first track)")
+            streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+
+            // Start playback
+            if streamDecoder.startPlayback() {
+                os_log(.info, log: logger, "✅ Push stream playback started")
+            } else {
+                os_log(.error, log: logger, "❌ Failed to start push stream playback")
+                return
+            }
+        } else if !isGapless {
+            // Manual skip: Stop old decoder, flush buffer
+            // But first ensure BASS output device is resumed after any route change
+            os_log(.info, log: logger, "📊 Manual skip - stopping old decoder and flushing buffer")
+            streamDecoder.stopDecoding()
+
+            // CRITICAL: After route change, BASS device may be paused (BASS_ACTIVE_PAUSED_DEVICE)
+            // Per BASS docs: "playback will be resumed by BASS_Start"
+            // Ensure output device is active before flushing buffer
+            BASS_Start()
+            os_log(.info, log: logger, "🔊 Ensured BASS output device active before buffer flush")
+
+            // Now safe to flush buffer - device is active and ready for new audio
+            streamDecoder.flushBuffer()
+        } else {
+            // Gapless transition: DON'T flush buffer, let old audio finish playing
+            // The decoder already stopped naturally (triggered this call via delegate)
+            os_log(.info, log: logger, "🎵 Gapless transition - preserving buffer (old audio will finish)")
+            // NO stopDecoding() - decoder already stopped naturally
+            // NO flushBuffer() - we want old audio to keep playing!
+        }
+
+        // Start new decoder for this track
+        // isNewTrack: true for gapless (mark boundary), false for manual skip (fresh start)
+        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless, startTime: startTime)
+
+        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d, startTime: %.2f)", isGapless, startTime)
+    }
+
+    func stopPushStreamPlayback() {
+        os_log(.info, log: logger, "🛑 Stopping push stream playback")
+        streamDecoder.cleanup()
+    }
+
     // Playback control
     func play() {
         activateAudioSession()
-        audioPlayer.play()
+
+        // Control push stream or audio player depending on active mode
+        if streamDecoder.hasValidStream() {
+            streamDecoder.resumePlayback()
+            os_log(.info, log: logger, "▶️ Resuming push stream playback")
+        } else {
+            audioPlayer.play()
+        }
     }
-    
+
     func pause() {
-        audioPlayer.pause()
+        // Control push stream or audio player depending on active mode
+        if streamDecoder.hasValidStream() {
+            streamDecoder.pausePlayback()
+            os_log(.info, log: logger, "⏸️ Pausing push stream playback")
+        } else {
+            audioPlayer.pause()
+        }
     }
     
     func stop() {
+        // Stop traditional URL stream player
         audioPlayer.stop()
+
+        // CRITICAL: Stop push stream decoder AND pause playback
+        // When server sends stop 'q' command (manual skip or pause for radio streams):
+        // 1. stopDecoding() sets manualStop = true, preventing gapless transition callback
+        // 2. pausePlayback() immediately pauses BASS stream, stopping buffered audio
+        // Without pausePlayback(), ~10 seconds of buffered audio continues playing
+        streamDecoder.stopDecoding()
+        streamDecoder.pausePlayback()
+
+        os_log(.info, log: logger, "⏹️ Stopped decoder and paused stream playback")
     }
     
     // State queries
@@ -133,7 +207,14 @@ class AudioManager: NSObject, ObservableObject {
 
     /// INTERNAL FALLBACK ONLY: Get AudioPlayer time when server time unavailable
     /// This should only be used by NowPlayingManager as last resort fallback
+    /// UPDATED: For push streams, report decoded position (like squeezelite reports frames_played)
     internal func getAudioPlayerTimeForFallback() -> Double {
+        // For push streams, report our decoded position (bytes pushed / bytes per second)
+        // This matches squeezelite reporting frames_played / sample_rate
+        if streamDecoder.isPlaying() {
+            return streamDecoder.getCurrentPosition()
+        }
+        // For URL streams, use audio player position
         return audioPlayer.getCurrentTime()
     }
     
@@ -142,11 +223,24 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func getPosition() -> Float {
+        // Use decoder position for push streams, audio player position for URL streams
+        if streamDecoder.isPlaying() {
+            return Float(streamDecoder.getCurrentPosition())
+        }
         return audioPlayer.getPosition()
     }
     
     func getPlayerState() -> String {
+        // Check push stream first (for gapless/direct streams)
+        if streamDecoder.isPlaying() {
+            return "Playing"
+        }
+        // Fall back to URL stream player state
         return audioPlayer.getPlayerState()
+    }
+
+    func hasPushStream() -> Bool {
+        return streamDecoder.hasValidStream()  // Check for valid stream (playing OR paused)
     }
     
     func checkIfTrackEnded() -> Bool {
@@ -174,12 +268,30 @@ class AudioManager: NSObject, ObservableObject {
     /// Enable silent mode for the next stream (for app foreground recovery)
     func enableSilentRecoveryMode() {
         audioPlayer.muteNextStream = true
+        streamDecoder.muteNextStream = true  // Also apply to push streams for gapless
+
+        // CRITICAL FIX: If there's an existing push stream, flush and mute it IMMEDIATELY
+        // This clears old buffered audio and ensures silence during recovery
+        if streamDecoder.hasValidStream() {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🧹 FLUSHING EXISTING PUSH STREAM BUFFER")
+            streamDecoder.flushBuffer()
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 MUTING FLUSHED STREAM")
+            streamDecoder.applyMuting()
+        }
+
+        os_log(.error, log: logger, "[APP-RECOVERY] 🔇 SILENT RECOVERY MODE ENABLED")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 audioPlayer.muteNextStream = %{public}s", audioPlayer.muteNextStream ? "TRUE" : "FALSE")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.muteNextStream = %{public}s", streamDecoder.muteNextStream ? "TRUE" : "FALSE")
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.hasValidStream() = %{public}s", streamDecoder.hasValidStream() ? "TRUE" : "FALSE")
     }
 
     /// Disable silent mode and restore normal DSP gain
     func disableSilentRecoveryMode() {
         audioPlayer.muteNextStream = false
+        streamDecoder.muteNextStream = false
         audioPlayer.restoreDSPGain()
+        streamDecoder.restoreDSPGain()
+        os_log(.info, log: logger, "🔊 Silent recovery mode disabled - DSP gain restored")
     }
 
     func activateAudioSession(context: PlaybackSessionController.ActivationContext = .userInitiatedPlay) {
@@ -205,6 +317,11 @@ class AudioManager: NSObject, ObservableObject {
             artworkURL: artworkURL,
             duration: duration  // Pass through optional duration
         )
+    }
+
+    // Update playlist position for CarPlay button states
+    func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
+        nowPlayingManager.updatePlaylistPosition(currentIndex: currentIndex, totalTracks: totalTracks)
     }
     
     // MARK: - Private Audio Session Configuration
@@ -235,12 +352,10 @@ class AudioManager: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ SlimClient reference set for AudioManager and NowPlayingManager")
     }
 
-    // MARK: - Route Change Handling (Simplified - BASS manages automatically)
-    /// BASS automatically handles iOS audio route changes (CarPlay, AirPods, etc.)
-    /// Just delegate to AudioPlayer for logging
+    // MARK: - Route Change Handling (Required by AudioPlaybackControlling protocol)
+    /// BASS automatically handles iOS audio route changes - no action needed
     func handleAudioRouteChange() {
-        os_log(.info, log: logger, "🔀 AudioManager handling route change - BASS manages automatically")
-        audioPlayer.handleAudioRouteChange()
+        os_log(.info, log: logger, "🔀 Route change - BASS manages automatically")
     }
 
     // MARK: - Cleanup
@@ -331,64 +446,12 @@ extension AudioManager: AudioPlayerDelegate {
     }
 }
 
-// MARK: - Interruption State Management (ADD THIS SECTION)
+// MARK: - Interruption State Management
 extension AudioManager {
-    
-    // MARK: - Interruption Handling Integration
-    /// Called when audio session is interrupted (phone calls, etc.)
-    func handleAudioInterruption(shouldPause: Bool) {
-        guard shouldPause else { return }
-        
-        let currentState = getPlayerState()
-        wasPlayingBeforeInterruption = (currentState == "Playing")
-        // REMOVED: interruptionPosition = getCurrentTime() - don't track position
-        
-        os_log(.info, log: logger, "🚫 Audio interrupted - was playing: %{public}s",
-               wasPlayingBeforeInterruption ? "YES" : "NO")
 
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
-        // NOTE: PlaybackSessionController (line 286) already sends server pause command for interruptions
-        // This AudioManager method may be redundant - keeping for safety but no action needed
-
-        os_log(.info, log: logger, "ℹ️ Interruption handled by PlaybackSessionController (server command)")
-    }
-    
-    /// Called when audio interruption ends
-    func handleInterruptionEnded(shouldResume: Bool) {
-        os_log(.info, log: logger, "✅ Interruption ended - should resume: %{public}s",
-               shouldResume ? "YES" : "NO")
-
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles this via server
-        // NOTE: PlaybackSessionController (line 305) already sends server play command for interruption resume
-        // This AudioManager method may be redundant - keeping for safety but no action needed
-
-        os_log(.info, log: logger, "ℹ️ Interruption resume handled by PlaybackSessionController (server command)")
-
-        wasPlayingBeforeInterruption = false
-    }
-    
-    /// Called when audio route changes (headphones, CarPlay, etc.)
-    func handleRouteChange(shouldPause: Bool, routeType: String = "Unknown") {
-        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
-               routeType, shouldPause ? "YES" : "NO")
-        
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
-        // NOTE: PlaybackSessionController (line 348) already sends server pause for AirPods disconnect
-        // This AudioManager method may be redundant - keeping for logging only
-
-        os_log(.info, log: logger, "ℹ️ Route change handled by PlaybackSessionController (server command)")
-        // Legacy CarPlay handling removed; new session controller will manage reconnect logic
-    }
-    
-    // MARK: - Server Communication for Interruptions
-    // MARK: - Utility Methods
     // MARK: - Public Interruption Status
     func getInterruptionStatus() -> String {
         return audioSessionManager.getInterruptionStatus()
-    }
-    
-    func isCurrentlyInterrupted() -> Bool {
-        return audioSessionManager.getInterruptionStatus() != "Normal"
     }
 }
 
@@ -416,53 +479,22 @@ extension AudioManager: AudioSessionManagerDelegate {
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: currentTime)
     }
     
-    // NEW: Handle interruptions
+    // AudioSessionManagerDelegate methods - PlaybackSessionController handles actual interruption logic
     func audioSessionWasInterrupted(shouldPause: Bool) {
-        handleAudioInterruption(shouldPause: shouldPause)
+        guard shouldPause else { return }
+        let currentState = getPlayerState()
+        wasPlayingBeforeInterruption = (currentState == "Playing")
+        os_log(.info, log: logger, "🚫 Audio interrupted (PlaybackSessionController handles server commands)")
     }
-    
-    // NEW: Handle interruption end
+
     func audioSessionInterruptionEnded(shouldResume: Bool) {
-        handleInterruptionEnded(shouldResume: shouldResume)
+        os_log(.info, log: logger, "✅ Interruption ended (PlaybackSessionController handles server commands)")
+        wasPlayingBeforeInterruption = false
     }
-    
-    // NEW: Handle route changes with smart CarPlay logic
+
     func audioSessionRouteChanged(shouldPause: Bool) {
-        // Get the actual route change type from InterruptionManager
         let routeChangeDescription = audioSessionManager.interruptionManager?.lastRouteChange?.description ?? "Unknown"
-        
-        os_log(.info, log: logger, "🔀 Route change: %{public}s (shouldPause: %{public}s)",
-               routeChangeDescription, shouldPause ? "YES" : "NO")
-
-        // REMOVED: Direct player manipulation - PlaybackSessionController handles route changes via server
-        // NOTE: This delegate method may be redundant with PlaybackSessionController's route handling
-        // PlaybackSessionController observes AVAudioSession.routeChangeNotification and sends server commands
-
-        os_log(.info, log: logger, "ℹ️ Route change logged - PlaybackSessionController handles server commands")
-    }
-}
-
-// MARK: - NowPlayingManagerDelegate
-extension AudioManager: NowPlayingManagerDelegate {
-    
-    func nowPlayingDidReceivePlayCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "🎵 Lock screen play command (unused)")
-    }
-    
-    func nowPlayingDidReceivePauseCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏸️ Lock screen pause command (unused)")
-    }
-    
-    func nowPlayingDidReceiveNextTrackCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏭️ Lock screen next track command (unused)")
-    }
-    
-    func nowPlayingDidReceivePreviousTrackCommand() {
-        // NOTE: Not used - lock screen commands go directly to server
-        os_log(.debug, log: logger, "⏮️ Lock screen previous track command (unused)")
+        os_log(.info, log: logger, "🔀 Route change: %{public}s (PlaybackSessionController handles server commands)", routeChangeDescription)
     }
 }
 
@@ -493,19 +525,43 @@ extension AudioManager {
 }
 // MARK: - Server Time Integration
 extension AudioManager {
-    /// Server time integration handled by SimpleTimeTracker in coordinator
-    /// This method is no longer needed
-    func setupServerTimeIntegration() {
-        os_log(.info, log: logger, "✅ Server time integration handled by SimpleTimeTracker")
-    }
-    
     /// Gets time source information for debugging
     func getTimeSourceInfo() -> String {
         return nowPlayingManager.getTimeSourceInfo()
     }
-    
-    /// Gets server time synchronization status for debugging
-    func getServerTimeStatus() -> String {
-        return nowPlayingManager.getTimeSourceInfo()
+}
+
+// MARK: - AudioStreamDecoder Delegate (NEW - Gapless Playback)
+extension AudioManager: AudioStreamDecoderDelegate {
+    func audioStreamDecoderNeedsMoreData(_ decoder: AudioStreamDecoder) {
+        os_log(.debug, log: logger, "📊 Stream decoder needs more data - buffer low")
+        // TODO: Request more data from SlimProto socket
+        // This will be implemented when we hook up the socket reading
+    }
+
+    func audioStreamDecoderDidReachTrackBoundary(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "🎯 Track boundary reached - gapless transition!")
+        // Like squeezelite output.c:155 - output.track_started = true → send STMs
+        // This updates Material UI to show the new track that's NOW PLAYING
+        slimClient?.sendTrackStarted()
+    }
+
+    func audioStreamDecoderDidCompleteTrack(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "✅ Track decode complete (natural end) - sending STMd to server")
+        // Like squeezelite: DECODE_COMPLETE → wake_controller() → send STMd
+        slimClient?.sendTrackDecodeComplete()
+    }
+
+    func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int) {
+        os_log(.error, log: logger, "❌ Decoder error: %d - sending STMn to server", error)
+        // Like squeezelite: DECODE_ERROR → send STMn
+        slimClient?.sendTrackDecodeError()
+    }
+
+    func audioStreamDecoderDidStartDeferredTrack(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "🎯 Deferred track started (format mismatch) - sending STMs!")
+        // When deferred track starts after format mismatch, notify server
+        // This updates Material UI to show the new track that's NOW PLAYING
+        slimClient?.sendTrackStarted()
     }
 }

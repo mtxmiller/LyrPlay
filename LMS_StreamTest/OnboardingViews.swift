@@ -687,49 +687,6 @@ struct ServerSetupView: View {
     // MARK: - Server Validation Helper
     
     // MARK: - Simple Server Validation
-    private func validateLMSServerQuick(host: String, port: Int, completion: @escaping (DiscoveredServer?) -> Void) {
-        guard let url = URL(string: "http://\(host):\(port)/jsonrpc.js") else {
-            completion(nil)
-            return
-        }
-        
-        let jsonRPC: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["version", "?"]]
-        ]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
-            completion(nil)
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("LyrPlay Discovery", forHTTPHeaderField: "User-Agent")
-        request.httpBody = jsonData
-        request.timeoutInterval = 2.0
-        
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            var serverName: String? = nil
-            
-            if let data = data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let result = json["result"] as? [String: Any] {
-                
-                if let version = result["_version"] as? String {
-                    serverName = "LMS \(version)"
-                } else {
-                    serverName = "Lyrion Music Server"
-                }
-            }
-            
-            let name = serverName ?? "LMS Server"
-            completion(DiscoveredServer(name: name, host: host, port: port))
-        }.resume()
-    }
-    
     private let commonAddresses = [
         "lms.local", "squeezebox.local",
         "192.168.1.100", "192.168.1.101"

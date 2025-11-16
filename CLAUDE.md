@@ -8,12 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Current Status: **LIVE ON APP STORE** 🌟
 - ✅ **Version 1.5 Live on App Store** - StreamingKit-based stable release with major stability improvements
-- 🚧 **Version 1.6 Build ~20 in TestFlight** - Major audio engine upgrade migrating from StreamingKit to CBass
-- ✅ **CBass Audio Framework Migration** - Active development for superior FLAC, Opus, and multi-format support
+- ✅ **Version 1.6 in TestFlight** - CBass migration complete with gapless playback using push streams
+- ✅ **CBass Audio Framework Migration COMPLETE** - Superior FLAC, Opus, and multi-format support with BASS auto-managed audio sessions
+- ✅ **Gapless Playback** - True gapless transitions using BASS push stream architecture
+- ✅ **CarPlay Support** - Phase 1 complete with Now Playing template and lock screen recovery integration
 - ✅ **macOS Compatibility** - iPad app runs on macOS via "Designed for iPad" setting
 - ✅ **Enhanced Audio Format Support** - FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS library integration
 - ✅ **Improved Interruption Handling** - Fixed phone call interruptions with proper server pause/resume commands
-- ✅ **Broader Device Support** - iOS 15.0+ deployment target for compatibility with older devices
+- ✅ **Mobile Transcode Capability** - Optional server-side transcoding for mobile data optimization
+- ✅ **Broader Device Support** - iOS 15.6+ deployment target for compatibility with older devices
 - ✅ **Professional GitHub repository** - https://github.com/mtxmiller/LyrPlay
 - ✅ **Active user support** - https://github.com/mtxmiller/LyrPlay/issues
 - ✅ **GitHub Sponsorship** - Community funding support established
@@ -64,13 +67,92 @@ The app follows a coordinator pattern with `SlimProtoCoordinator` as the main or
 - **SettingsManager**: Configuration and server management singleton
 
 ### Audio Architecture
-The audio system is built on the CBass framework with centralized session management:
+The audio system is built on the CBass framework with BASS-managed audio sessions:
 
 - **AudioPlayer**: CBass-based player with native BASS audio library integration supporting FLAC, AAC, MP4A, MP3, Opus, OGG
 - **CBass Framework**: High-performance audio library with cross-platform support (iOS and macOS)
-- **PlaybackSessionController**: Centralized iOS audio session management, interruption handling, and remote command center
+- **BASS Audio Session Management**: BASS automatically manages iOS AVAudioSession lifecycle (activation, deactivation, route changes)
+- **Push Stream Architecture**: Gapless playback using BASS push streams with write/read position tracking and sync callbacks
+- **PlaybackSessionController**: Centralized interruption handling, remote command center, and CarPlay integration
 - **NowPlayingManager**: Lock screen and Control Center integration with MPNowPlayingInfoCenter
 - **InterruptionManager**: Legacy stub - functionality moved to PlaybackSessionController
+
+**Important**: Manual AVAudioSession management has been removed. BASS handles all session lifecycle automatically via `BASS_CONFIG_IOS_SESSION`, preventing conflicts and ensuring proper audio routing across all scenarios (CarPlay, AirPods, phone calls, etc.).
+
+### CarPlay Architecture
+LyrPlay implements CarPlay support using iOS scene delegation architecture:
+
+#### **Scene Delegate Architecture**
+- **AppDelegate**: Routes scene connections based on session role (main app vs. CarPlay)
+- **SceneDelegate**: Manages main app window using UIHostingController with SwiftUI ContentView
+- **CarPlaySceneDelegate**: Manages CarPlay interface using CPTemplateApplicationSceneDelegate
+- **SwiftUI Integration**: Uses `@UIApplicationDelegateAdaptor` to bridge SwiftUI App lifecycle with UIKit scene delegates
+
+#### **Scene Configuration** (Info.plist)
+```xml
+<key>UIApplicationSceneManifest</key>
+<dict>
+    <key>UISceneConfigurations</key>
+    <dict>
+        <!-- Main app scene -->
+        <key>UIWindowSceneSessionRoleApplication</key>
+        <array>
+            <dict>
+                <key>UISceneConfigurationName</key>
+                <string>Default Configuration</string>
+                <key>UISceneDelegateClassName</key>
+                <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+            </dict>
+        </array>
+        <!-- CarPlay scene -->
+        <key>CPTemplateApplicationSceneSessionRoleApplication</key>
+        <array>
+            <dict>
+                <key>UISceneConfigurationName</key>
+                <string>CarPlay</string>
+                <key>UISceneClassName</key>
+                <string>CPTemplateApplicationScene</string>
+                <key>UISceneDelegateClassName</key>
+                <string>$(PRODUCT_MODULE_NAME).CarPlaySceneDelegate</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+```
+
+#### **CarPlay User Interface**
+**Phase 1 - Now Playing (COMPLETED)**:
+- **CPNowPlayingTemplate**: Displays current track info, artwork, playback controls
+- **MPNowPlayingInfoCenter**: Syncs metadata from NowPlayingManager to CarPlay display
+- **Remote Commands**: Play/pause/next/previous via PlaybackSessionController
+- **Lock Screen Recovery**: CarPlay play button triggers same recovery as lock screen (45s threshold)
+
+**Phase 2 - Browse Interface (PLANNED)**:
+- CPListTemplate for library/playlist browsing
+- LMS JSON-RPC integration for metadata
+- Search functionality
+- Tab bar navigation
+
+#### **CarPlay Entitlements**
+```xml
+<key>com.apple.developer.carplay-audio</key>
+<true/>
+```
+
+#### **Remote Command Integration**
+CarPlay play/pause commands flow through the same recovery mechanism as lock screen:
+```
+CarPlay Button Press
+  ↓
+PlaybackSessionController.handleRemoteCommand()
+  ↓
+SlimProtoCoordinator.sendLockScreenCommand()
+  ↓
+If backgrounded > 45s: connect() → performPlaylistRecovery()
+If backgrounded < 45s: sendJSONRPCCommand()
+```
+
+This unified approach ensures CarPlay, lock screen, and Control Center all benefit from the same robust position recovery system.
 
 ### Position Recovery Architecture
 The app uses a unified **playlist jump recovery system** that is critical for maintaining playback continuity across various scenarios:
@@ -97,31 +179,33 @@ Unlike simple seek commands that only change position within the current track, 
 #### **Position Saving Triggers**
 Position is automatically saved to UserDefaults during:
 - **Pause Commands**: Every pause creates a recovery save point
-- **Route Changes**: All audio route changes (CarPlay, AirPods, speakers) save position via `reinitializeBASS()`
+- **Route Changes**: Position saved when audio routes change (BASS auto-manages device switching)
 - **Network Disconnection**: Connection loss saves position for recovery
 - **App Backgrounding**: Position saved when app enters background
 - **CarPlay Events**: Specific handling for CarPlay connect/disconnect scenarios
+
+**Note**: BASS automatically handles all audio route changes (CarPlay, AirPods, speakers, phone calls) without requiring manual session reinitialization.
 
 #### **Unified Recovery Flow**
 All recovery scenarios use the same robust mechanism:
 
 1. **Route Changes** (CarPlay, AirPods, etc.):
    ```swift
-   // In reinitializeBASS()
-   coordinator.saveCurrentPositionForRecovery()  // Fresh position
-   coordinator.performPlaylistRecovery()         // Playlist jump
+   // BASS auto-manages audio route switching
+   // Position saved automatically by PlaybackSessionController
+   // No manual recovery needed - BASS continues playback seamlessly
    ```
 
-2. **Lock Screen Recovery**:
+2. **Lock Screen/CarPlay Recovery** (after backgrounding > 45s):
    ```swift
-   // User presses play on lock screen when disconnected
+   // User presses play on lock screen or CarPlay when disconnected
    sendLockScreenCommand("play") → performPlaylistRecovery()
    ```
 
-3. **CarPlay Disconnect/Reconnect**:
+3. **Quick Resume** (backgrounded < 45s):
    ```swift
-   // Disconnect: Save → Jump → Pause
-   // Reconnect: Save → Jump → Play
+   // Connection still alive - just send play command
+   sendLockScreenCommand("play") → sendJSONRPCCommand("play")
    ```
 
 #### **Recovery Data Storage**
@@ -196,8 +280,8 @@ if ($reconnect) {
 This elegant solution eliminates the need for client-side position recovery in most scenarios, providing the smooth experience users expect from native audio apps.
 
 ### Key Dependencies
-- **CocoaAsyncSocket**: Network socket communication for SlimProto
-- **CBass**: Swift Package Manager integration of BASS audio library (Bass, BassFLAC, BassOpus)
+- **CocoaAsyncSocket**: Network socket communication for SlimProto (via CocoaPods)
+- **CBass/BASS**: BASS audio library (Bass, BassFLAC, BassOpus) integrated via bridging header
 - **WebKit**: Embedded Material LMS interface
 - **Build Automation**: Automated CBundleVersion fixes for App Store compliance
 
@@ -234,12 +318,16 @@ The app embeds the Material LMS web interface with sophisticated integration:
 ## Development Considerations
 
 ### Audio Session Management
-The app handles complex audio session scenarios through PlaybackSessionController:
-- Background audio playback with proper iOS background modes
-- Interruption recovery with server pause/resume commands (phone calls, other apps)
-- Lock screen integration with Now Playing info and remote command center
-- Audio format support: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codec integration
-- CarPlay integration with automatic audio route handling
+BASS framework automatically manages iOS AVAudioSession lifecycle via `BASS_CONFIG_IOS_SESSION`. PlaybackSessionController handles high-level coordination:
+- **BASS Auto-Management**: Session activation, deactivation, and route changes handled automatically
+- **Background audio playback**: Proper iOS background modes with lock screen integration
+- **Interruption recovery**: Server pause/resume commands for phone calls and other apps
+- **Lock screen integration**: Now Playing info and remote command center via MPNowPlayingInfoCenter
+- **Audio format support**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codec integration
+- **CarPlay integration**: Automatic audio route handling with unified remote command processing
+- **Gapless playback**: BASS push streams with position tracking and boundary sync callbacks
+
+**Important**: Manual AVAudioSession management has been removed to prevent conflicts with BASS. The framework handles all iOS audio session scenarios automatically.
 
 ### Network Architecture
 - Primary/backup server support with automatic failover
@@ -297,12 +385,12 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Local Storage**: Only app preferences (UserDefaults)
 
 ### Build Configuration
-- **iOS Deployment Target**: 15.0 (broad compatibility for older devices)
+- **iOS Deployment Target**: 15.6 (broad compatibility for older devices)
 - **macOS Support**: iPad app compatibility ("Designed for iPad" on Mac)
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Current Version**: 1.6 Build ~20 (CBass Migration in TestFlight)
+- **Current Version**: 1.6 in TestFlight (CBass migration complete with gapless playback)
 - **Live Version**: 1.5 (StreamingKit-based, App Store)
 
 ## Testing Structure
@@ -342,10 +430,10 @@ Comprehensive error handling with user-friendly recovery:
 ## Build Configuration
 
 ### Minimum Requirements
-- iOS 18.2 deployment target (latest iOS features)
-- Xcode 15.0+ for SwiftUI and Swift Package Manager support
-- CocoaPods for CocoaAsyncSocket dependency
-- Swift Package Manager for CBass framework integration
+- **iOS 15.6+** deployment target (broad device compatibility)
+- **Xcode 16.0+** for SwiftUI support and modern project format
+- **CocoaPods** for CocoaAsyncSocket dependency
+- **BASS audio library** integrated via Swift bridging header (libbass.a, libbassmix.a, libbassflac.a, libbassopus.a)
 
 ### Key Build Settings
 - Background modes: Audio, fetch, processing
@@ -357,39 +445,51 @@ Comprehensive error handling with user-friendly recovery:
 **LyrPlay is now a stable, production-ready App Store application** with active development continuing on advanced features:
 
 ### Completed Core Platform ✅
-- **Stable App Store presence** - Version 1.5 live, Version 1.6 CBass migration ready for submission
-- **CBass Audio Framework** - Complete migration from StreamingKit to high-performance BASS library
-- **Universal network compatibility** - Server discovery works on all network configurations  
-- **Enhanced audio streaming** - CBass integration with superior FLAC, Opus, and multi-format support
+- **Stable App Store presence** - Version 1.5 live on App Store
+- **CBass Audio Framework COMPLETE** - Full migration from StreamingKit to high-performance BASS library
+- **Gapless Playback** - True gapless transitions using BASS push stream architecture
+- **BASS Auto-Managed Sessions** - Eliminated manual AVAudioSession management, BASS handles all scenarios automatically
+- **CarPlay Phase 1 COMPLETE** - Now Playing template with unified lock screen recovery
+- **Universal network compatibility** - Server discovery works on all network configurations
+- **Enhanced audio streaming** - Superior FLAC, Opus, and multi-format support with native BASS codecs
 - **Professional UI Experience** - LyrPlay loading screen with animated branding and Material integration
 - **Background audio** - Full iOS background modes with lock screen integration
-- **iOS 18.2 Ready** - Updated for latest iOS features and modern deployment target
+- **iOS 15.6+ Support** - Broad device compatibility from iOS 15.6 through latest iOS
 
 ### Active Development Areas 🔧
-- **CarPlay Implementation** - Phase 2 & 3 complete (~65% done), browse interface and core playback functional
-- **Advanced UI Features** - Album/playlist navigation and playback container functionality
-- **Performance Optimizations** - Continued refinement of audio session management and metadata handling
+- **FLAC Seeking Fix** - Investigating FLAC seeking issues with BASS push stream architecture (current blocker)
+- **CarPlay Phase 2** - Browse interface with library/playlist navigation (planned)
+- **Performance Optimizations** - Continued refinement of metadata handling and network efficiency
+- **Mobile Transcode Optimization** - Server-side transcoding for mobile data conservation
 
 ### Technical Excellence
 The codebase follows modern iOS development practices with comprehensive error handling, proper async/await patterns, and extensive logging for production debugging. All major user-reported issues from GitHub have been resolved.
 
 ## Known Limitations
 
+### FLAC Seeking with Push Streams ⚠️
+- **Issue**: FLAC seeking currently non-functional with BASS push stream architecture
+- **Impact**: Users cannot seek/scrub within FLAC tracks (play/pause/skip still work)
+- **Workaround**: Server-side transcode to MP3/AAC enables seeking (with quality tradeoff)
+- **Status**: Under active investigation
+- **Affects**: Only FLAC format; MP3, AAC, Opus, OGG seeking works normally
+
 ### CBass Migration Benefits ✅
 - **Problem**: StreamingKit limitations with FLAC seeking and multi-format support
-- **Solution**: Complete migration to CBass framework (BASS audio library)
-- **Benefits**: 
-  - Superior FLAC support with native seeking
+- **Solution**: Complete migration to BASS audio library via bridging header
+- **Benefits**:
+  - Gapless playback with push stream architecture
   - Enhanced Opus codec support
-  - Better multi-format audio handling
+  - Better multi-format audio handling (except FLAC seeking)
+  - BASS auto-managed audio sessions
   - Improved performance and reliability
   - App Store validation compliance
-- **Status**: **COMPLETED** - CBass v1.6 migration fully implemented and tested
-- **Legacy FLAC Server Configuration**: Still available for server-side optimization if needed
+- **Status**: **COMPLETED** - CBass migration fully implemented and tested
 
 ### Platform Compatibility
-- **macOS/visionOS**: Not supported due to CBass framework targeting iOS optimization
-- **CarPlay**: Implementation in progress (~65% complete) with core functionality working
+- **macOS**: Supported via "Designed for iPad" compatibility mode
+- **visionOS**: Not currently supported
+- **CarPlay**: Phase 1 complete (Now Playing template), Phase 2 browse interface planned
 - **Background Limitations**: Standard iOS background audio restrictions apply
 
 ## Reference Source Code
@@ -411,13 +511,16 @@ These repositories provide definitive reference for:
 
 ## Recent Updates and Improvements
 
-### Version 1.6 - CBass Migration Release (January 2025) ✅
-- **Complete Audio Engine Upgrade**: Migration from StreamingKit to CBass framework
-- **Enhanced FLAC Support**: Native BASS library integration with superior codec handling
+### Version 1.6 - CBass Migration & CarPlay Release (November 2025) ✅
+- **Complete Audio Engine Upgrade**: Migration from StreamingKit to BASS library via bridging header
+- **Gapless Playback**: True gapless transitions using BASS push stream architecture
+- **BASS Auto-Managed Sessions**: Removed manual AVAudioSession management, BASS handles all scenarios automatically
+- **CarPlay Phase 1**: Now Playing template with scene delegate architecture and unified lock screen recovery
+- **Enhanced FLAC Support**: Native BASS library integration with superior codec handling for all bit depths
 - **Professional Loading Screen**: LyrPlay branded loading experience with animations
-- **iOS 18.2 Compatibility**: Updated deployment target for latest iOS features
+- **iOS 15.6+ Compatibility**: Broad device support from iOS 15.6 onwards
+- **Mobile Transcode Support**: Optional server-side transcoding for data optimization
 - **App Store Ready**: All framework validation issues resolved with automated build fixes
-- **Build Automation**: Automated CBundleVersion fixes for seamless App Store submission
 - **Repository Cleanup**: Organized codebase with GitHub sponsorship support
 
 ### Version 1.5 - Major Stability Release (January 2025) ✅
@@ -447,16 +550,18 @@ These repositories provide definitive reference for:
 
 ### Major Fixes Completed
 
-#### CBass Audio Framework Migration - IN PROGRESS ✅
+#### CBass Audio Framework Migration - COMPLETED ✅
 - **Previous Issue**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
 - **Root Cause**: StreamingKit limitations with FLAC seeking and multi-format support
-- **Current Solution**: Active migration to CBass framework (BASS audio library) - Version 1.6 Build ~20
+- **Solution**: Complete migration to BASS audio library integrated via Swift bridging header
 - **Benefits Achieved**:
-  - Native FLAC seeking with CBass framework
-  - Enhanced support for FLAC, AAC, MP4A, MP3, Opus, OGG formats
-  - Superior multi-format audio handling with BASS codec integration
-  - Cross-platform support (iOS and macOS)
-  - Fixed phone call interruption handling with server pause/resume commands
+  - **Gapless Playback**: True gapless transitions using BASS push stream architecture
+  - **Enhanced Format Support**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
+  - **BASS Auto-Management**: Automatic AVAudioSession handling eliminates manual management conflicts
+  - **Superior Audio Quality**: Direct codec integration with optimal performance
+  - **Phone Call Recovery**: Proper interruption handling with server pause/resume commands
+  - **Cross-Platform**: iOS and macOS support via "Designed for iPad" compatibility
+- **Known Limitation**: FLAC seeking currently non-functional with push stream architecture (under investigation)
 
 #### Legacy FLAC Server Configuration (Still Available)
 For users who want additional server-side optimization, the previous server configuration method is still documented:
@@ -552,20 +657,30 @@ When submitting, use these prepared values:
 
 ---
 
-**Last Updated**: September 22, 2025 - Version 1.6 CBass Migration In Progress ✅
-- **Production app** with active user base on App Store (Version 1.5 StreamingKit-based)
-- **Version 1.6 Build ~20** with CBass migration in TestFlight testing
-- **Active audio engine upgrade** from StreamingKit to CBass framework
-- **Enhanced platform support** with macOS compatibility via "Designed for iPad" setting
-- **Improved interruption handling** with server pause/resume commands
-- **Repository optimized** with GitHub sponsorship and clean organization
+**Last Updated**: November 14, 2025 - Version 1.6 CBass Migration Complete + CarPlay Phase 1 ✅
 
-#### Current Status:
-- **Live Audio Engine**: StreamingKit (Version 1.5 on App Store)
-- **Development Audio Engine**: CBass framework (BASS library) with native multi-format support
-- **Current Development Version**: 1.6 Build ~20 (TestFlight)
-- **Next App Store Release**: 1.6 with CBass migration
-- **Platform Support**: iOS 15.0+ and macOS via "Designed for iPad" compatibility
-- **Audio Formats**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS integration
-- **iOS Deployment Target**: 15.0 for broad device compatibility
-- remember playlist jump, where we are using why it is critical on route changes, backgrounding etc
+### Production Status
+- **App Store Version**: 1.5 (StreamingKit-based, stable)
+- **TestFlight Version**: 1.6 (CBass/BASS library with gapless playback)
+- **Active User Base**: Production app with GitHub community support
+
+### Current Capabilities (v1.6)
+- **Audio Engine**: BASS library integrated via Swift bridging header
+- **Gapless Playback**: ✅ Working with push stream architecture
+- **FLAC Seeking**: ❌ Currently non-functional (under investigation)
+- **Other Format Seeking**: ✅ MP3, AAC, Opus, OGG seeking works normally
+- **Audio Session Management**: BASS auto-managed (manual management removed)
+- **CarPlay**: Phase 1 complete (Now Playing template with lock screen recovery)
+- **Platform Support**: iOS 15.6+ and macOS via "Designed for iPad" compatibility
+- **Audio Formats**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
+
+### Active Development Priorities
+1. **FLAC Seeking Fix** - Critical blocker for v1.6 App Store submission
+2. **CarPlay Phase 2** - Browse interface for library/playlist navigation
+3. **Mobile Transcode Optimization** - Server-side transcoding for data conservation
+
+### Architecture Notes
+- **Playlist Jump Recovery**: Critical for position recovery across backgrounding, lock screen, CarPlay scenarios
+- **45-Second Threshold**: Lock screen/CarPlay recovery triggers after 45s backgrounding
+- **HELO Reconnect Bit**: Seamless reconnection for brief disconnections (<300s)
+- **Scene Delegate Architecture**: SwiftUI + UIKit bridge for CarPlay support

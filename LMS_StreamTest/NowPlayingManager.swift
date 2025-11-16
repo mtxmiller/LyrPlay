@@ -5,13 +5,6 @@ import MediaPlayer
 import UIKit
 import os.log
 
-protocol NowPlayingManagerDelegate: AnyObject {
-    func nowPlayingDidReceivePlayCommand()
-    func nowPlayingDidReceivePauseCommand()
-    func nowPlayingDidReceiveNextTrackCommand()
-    func nowPlayingDidReceivePreviousTrackCommand()
-}
-
 class NowPlayingManager: ObservableObject {
     
     // MARK: - Configuration
@@ -23,21 +16,22 @@ class NowPlayingManager: ObservableObject {
     private var currentAlbum: String = "Lyrion Music Server"
     private var currentArtwork: UIImage?
     private var metadataDuration: TimeInterval = 0.0
-    
+
     // MARK: - Time Sources
     private weak var audioManager: AudioManager?
     private var lastKnownServerTime: Double = 0.0
     private var lastKnownAudioTime: Double = 0.0
     private var isUsingServerTime: Bool = false
+
+    // MARK: - Deduplication State (prevent flooding MPNowPlayingInfoCenter)
+    private var lastUpdatedTime: Double = -1.0
+    private var lastUpdatedPlayingState: Bool = false
     
     private var lockScreenStoredPosition: Double = 0.0
     private var lockScreenStoredTimestamp: Date?
     private var lockScreenWasPlaying: Bool = false
     private var connectionLostTime: Date?
-    
-    // MARK: - Delegation
-    weak var delegate: NowPlayingManagerDelegate?
-    
+
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
     
@@ -78,13 +72,16 @@ class NowPlayingManager: ObservableObject {
     private func updateNowPlayingTime() {
         let (currentTime, isPlaying, timeSource) = getCurrentPlaybackInfo()
 
-        // Log every update to see what's changing the lock screen
+        // Update now playing info with current time (no throttling)
+        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+
+        // Save last updated values (for other logic)
+        lastUpdatedTime = currentTime
+        lastUpdatedPlayingState = isPlaying
+
+        // Log all updates
         os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
                currentTime, timeSource.description, isPlaying ? "YES" : "NO")
-
-
-        // Update now playing info with current time
-        updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
 
         // REMOVED: Server-time based track end detection - now using BASS_SYNC_END exclusively
         // The duplicate detection was causing spurious STMd signals during track transitions
@@ -300,10 +297,13 @@ class NowPlayingManager: ObservableObject {
         } else {
             os_log(.info, log: logger, "🎵 Updating track metadata: %{public}s - %{public}s", title, artist)
         }
-        
+
         currentTrackTitle = title
         currentArtist = artist
         currentAlbum = album
+
+        // Reset deduplication state so next update goes through immediately
+        lastUpdatedTime = -1.0
         
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
@@ -426,19 +426,7 @@ class NowPlayingManager: ObservableObject {
     func getCurrentArtist() -> String {
         return currentArtist
     }
-    
-    func getCurrentAlbum() -> String {
-        return currentAlbum
-    }
-    
-    func getMetadataDuration() -> TimeInterval {
-        return metadataDuration
-    }
-    
-    func hasArtwork() -> Bool {
-        return currentArtwork != nil
-    }
-    
+
     // MARK: - Lock Screen Integration
     func setSlimClient(_ slimClient: SlimProtoCoordinator) {
         self.slimClient = slimClient
@@ -465,13 +453,29 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Remote Command State
     func enableRemoteCommands(_ enable: Bool) {
         let commandCenter = MPRemoteCommandCenter.shared()
-        
+
         commandCenter.playCommand.isEnabled = enable
         commandCenter.pauseCommand.isEnabled = enable
         commandCenter.nextTrackCommand.isEnabled = enable
         commandCenter.previousTrackCommand.isEnabled = enable
-        
+
         os_log(.info, log: logger, "🎛️ Remote commands %{public}s", enable ? "enabled" : "disabled")
+    }
+
+    // MARK: - Playlist Position State (for CarPlay button states)
+    func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
+        let commandCenter = MPRemoteCommandCenter.shared()
+
+        // Disable previous button if at first track
+        commandCenter.previousTrackCommand.isEnabled = (currentIndex > 0)
+
+        // Disable next button if at last track
+        commandCenter.nextTrackCommand.isEnabled = (currentIndex < totalTracks - 1)
+
+        os_log(.info, log: logger, "🎛️ Playlist position: %d/%d - Previous: %{public}s, Next: %{public}s",
+               currentIndex + 1, totalTracks,
+               commandCenter.previousTrackCommand.isEnabled ? "enabled" : "disabled",
+               commandCenter.nextTrackCommand.isEnabled ? "enabled" : "disabled")
     }
     
     // MARK: - Track End Detection

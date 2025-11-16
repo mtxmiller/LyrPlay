@@ -16,4 +16,9 @@
 // so we don't need to include their headers here
 #import "bass.h"
 
+// Helper for STREAMPROC_PUSH constant (Swift-friendly wrapper)
+static inline STREAMPROC* getLyrPlayStreamProcPush(void) {
+    return STREAMPROC_PUSH;
+}
+
 #endif /* LMS_StreamTest_Bridging_Header_h */

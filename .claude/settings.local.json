@@ -11,7 +11,8 @@
       "WebSearch",
       "mcp__sosumi__searchAppleDocumentation",
       "mcp__sosumi__fetchAppleDocumentation",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Read(//Users/ericmiller/Downloads/lms-material/MaterialSkin/HTML/material/html/js/**)"
     ],
     "deny": [],
     "additionalDirectories": [
