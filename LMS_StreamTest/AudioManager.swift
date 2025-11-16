@@ -5,11 +5,11 @@ import AVFoundation
 import os.log
 
 class AudioManager: NSObject, ObservableObject {
-    
+
     static let shared = AudioManager()  // ← ADD THIS LINE
-    
+
     // MARK: - Components
-    private let audioPlayer: AudioPlayer
+    let audioPlayer: AudioPlayer  // Made public for SettingsView access
     private let audioSessionManager: AudioSessionManager
     private let nowPlayingManager: NowPlayingManager
     private let streamDecoder: AudioStreamDecoder  // NEW: For gapless playback
@@ -69,6 +69,7 @@ class AudioManager: NSObject, ObservableObject {
 
         // Connect AudioStreamDecoder to AudioManager - NEW
         streamDecoder.delegate = self
+        streamDecoder.audioPlayer = audioPlayer  // Set reference for stream info updates
 
         os_log(.info, log: logger, "✅ Component delegation configured with interruption handling and gapless decoder")
     }

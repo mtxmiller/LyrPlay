@@ -55,16 +55,18 @@ class SettingsManager: ObservableObject {
         case opus = 2
         case flac = 3
         case aacPreferred = 4
+        case wavSeekable = 5  // FLAC→WAV transcode for seeking support
 
         // Show all supported formats to users
         static var allCases: [AudioFormat] {
-            return [.compressed, .aacPreferred, .oggVorbis, .opus, .flac]
+            return [.compressed, .aacPreferred, .oggVorbis, .opus, .flac, .wavSeekable]
         }
 
         var displayName: String {
             switch self {
             case .compressed: return "Compressed (MP3 preferred)"
             case .aacPreferred: return "Compressed (AAC preferred)"
+            case .wavSeekable: return "Lossless with Seeking (WAV)"
             case .oggVorbis: return "High Quality (OGG Vorbis)"
             case .opus: return "Premium Quality (Opus)"
             case .flac: return "Lossless (FLAC)"
@@ -75,9 +77,10 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Compressed formats: mp3, aac"
             case .aacPreferred: return "Compressed formats: aac, mp3"
+            case .wavSeekable: return "FLAC→WAV transcode with seeking: wav, mp3"
             case .oggVorbis: return "High quality: ogg, mp3, aac"
             case .opus: return "Premium quality: ops, ogg, mp3, aac"
-            case .flac: return "Lossless: wav, flc, ops, ogg, alc, aac, mp3"
+            case .flac: return "Lossless: flc, ops, ogg, alc, aac, mp3"
             }
         }
 
@@ -85,9 +88,10 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "mp3,aac"
             case .aacPreferred: return "aac,mp3"
+            case .wavSeekable: return "wav,mp3"
             case .oggVorbis: return "ogg,mp3,aac"
             case .opus: return "ops,ogg,mp3,aac"
-            case .flac: return "wav,flc,ops,ogg,alc,aac,mp3"
+            case .flac: return "flc,ops,ogg,alc,aac,mp3"
             }
         }
     }

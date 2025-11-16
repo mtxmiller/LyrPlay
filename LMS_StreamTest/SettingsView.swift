@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 // MARK: - Main Settings View
 struct SettingsView: View {
     @StateObject private var settings = SettingsManager.shared
+    @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @EnvironmentObject private var coordinator: SlimProtoCoordinator
     @Environment(\.presentationMode) var presentationMode
     @State private var showingConnectionTest = false
@@ -131,7 +132,7 @@ struct SettingsView: View {
                                 Image(systemName: "music.note")
                                     .foregroundColor(.blue)
                                     .frame(width: 20)
-                                
+
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Audio Format")
                                         .font(.body)
@@ -147,7 +148,7 @@ struct SettingsView: View {
                                         .scaleEffect(0.8)
                                 }
                             }
-                            
+
                             Text(settings.audioFormat.description)
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
@@ -156,6 +157,47 @@ struct SettingsView: View {
                     }
                     .disabled(isReconnecting)
                     .padding(.vertical, 2)
+                }
+
+                // Current Playback Info Section
+                if let streamInfo = audioPlayer.currentStreamInfo {
+                    Section(header: Text("Current Playback")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "waveform")
+                                    .foregroundColor(.green)
+                                    .frame(width: 20)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Stream Information")
+                                        .font(.body)
+                                        .fontWeight(.medium)
+                                    Text(streamInfo.displayString)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            // Detailed breakdown
+                            HStack(spacing: 16) {
+                                DetailItem(label: "Format", value: streamInfo.format)
+                                DetailItem(label: "Sample Rate", value: "\(streamInfo.sampleRate/1000)kHz")
+                            }
+
+                            HStack(spacing: 16) {
+                                DetailItem(label: "Bit Depth", value: "\(streamInfo.bitDepth)-bit")
+                                DetailItem(label: "Channels", value: streamInfo.channels == 1 ? "Mono" : streamInfo.channels == 2 ? "Stereo" : "\(streamInfo.channels)ch")
+                            }
+
+                            if streamInfo.bitrate > 0 {
+                                HStack(spacing: 16) {
+                                    DetailItem(label: "Bitrate", value: "\(Int(streamInfo.bitrate)) kbps")
+                                    Spacer()
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
 
                 // Playback Settings Section
@@ -1262,5 +1304,23 @@ struct FormatRequirementSimple: View {
 
             Spacer()
         }
+    }
+}
+
+// MARK: - Detail Item (for stream info display)
+struct DetailItem: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

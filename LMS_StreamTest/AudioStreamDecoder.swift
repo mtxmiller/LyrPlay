@@ -131,6 +131,7 @@ class AudioStreamDecoder {
     // MARK: - Delegate
 
     weak var delegate: AudioStreamDecoderDelegate?
+    weak var audioPlayer: AudioPlayer?  // Reference to update stream info
 
     // MARK: - Initialization
 
@@ -323,6 +324,9 @@ class AudioStreamDecoder {
 
         os_log(.info, log: logger, "✅ Decoder created: %dHz, %dch (expected: %dHz, %dch)",
                actualSampleRate, actualChannels, sampleRate, channels)
+
+        // Update stream info for SettingsView display (using decoder stream info)
+        updateStreamInfoFromDecoder(decoderStream)
 
         // If sample rate doesn't match, we need to recreate push stream
         if actualSampleRate != sampleRate || actualChannels != channels {
@@ -664,9 +668,101 @@ class AudioStreamDecoder {
         }
     }
 
+    // MARK: - Stream Info Update
+
+    /// Update stream info from decoder stream (shows actual format: FLAC, MP3, etc.)
+    private func updateStreamInfoFromDecoder(_ stream: HSTREAM) {
+        guard stream != 0 else {
+            audioPlayer?.currentStreamInfo = nil
+            return
+        }
+
+        // Get channel info from BASS decoder stream
+        var info = BASS_CHANNELINFO()
+        guard BASS_ChannelGetInfo(stream, &info) != 0 else {
+            os_log(.error, log: logger, "❌ Failed to get decoder stream info: %d", BASS_ErrorGetCode())
+            return
+        }
+
+        // Get bitrate attribute from decoder stream
+        var bitrate: Float = 0.0
+        BASS_ChannelGetAttribute(stream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
+
+        // Map ctype to human-readable format name
+        let formatName = formatNameFromCType(info.ctype)
+
+        // Extract bit depth from origres (LOWORD contains bits)
+        let bitDepth = Int(info.origres & 0xFFFF)
+
+        let streamInfo = AudioPlayer.StreamInfo(
+            format: formatName,
+            sampleRate: Int(info.freq),
+            channels: Int(info.chans),
+            bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
+            bitrate: bitrate
+        )
+
+        audioPlayer?.currentStreamInfo = streamInfo
+        os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
+    }
+
+    private func formatNameFromCType(_ ctype: DWORD) -> String {
+        // BASS codec type constants
+        let BASS_CTYPE_STREAM_MP3: DWORD = 0x10005
+        let BASS_CTYPE_STREAM_VORBIS: DWORD = 0x10002  // OGG Vorbis
+        let BASS_CTYPE_STREAM_OPUS: DWORD = 0x11200    // From bassopus.h
+        let BASS_CTYPE_STREAM_FLAC: DWORD = 0x10900    // From bassflac.h
+        let BASS_CTYPE_STREAM_FLAC_OGG: DWORD = 0x10901  // FLAC in OGG container
+        let BASS_CTYPE_STREAM_WAV: DWORD = 0x40000     // WAV format flag
+        let BASS_CTYPE_STREAM_WAV_PCM: DWORD = 0x10001
+        let BASS_CTYPE_STREAM_WAV_FLOAT: DWORD = 0x10003
+        let BASS_CTYPE_STREAM_AIFF: DWORD = 0x10004
+        let BASS_CTYPE_STREAM_CA: DWORD = 0x10007      // CoreAudio (AAC on iOS)
+
+        // Check for WAV format flag first (0x40000 bit set)
+        if (ctype & BASS_CTYPE_STREAM_WAV) != 0 {
+            // Extract codec from LOWORD
+            let codec = ctype & 0xFFFF
+            switch codec {
+            case 0x0001:  // WAVE_FORMAT_PCM
+                return "WAV PCM"
+            case 0x0003:  // WAVE_FORMAT_IEEE_FLOAT
+                return "WAV Float"
+            default:
+                return "WAV (codec \(String(format: "0x%X", codec)))"
+            }
+        }
+
+        switch ctype {
+        case BASS_CTYPE_STREAM_MP3:
+            return "MP3"
+        case BASS_CTYPE_STREAM_VORBIS:
+            return "OGG Vorbis"
+        case BASS_CTYPE_STREAM_OPUS:
+            return "Opus"
+        case BASS_CTYPE_STREAM_FLAC:
+            return "FLAC"
+        case BASS_CTYPE_STREAM_FLAC_OGG:
+            return "FLAC (OGG)"
+        case BASS_CTYPE_STREAM_WAV_PCM:
+            return "WAV PCM"
+        case BASS_CTYPE_STREAM_WAV_FLOAT:
+            return "WAV Float"
+        case BASS_CTYPE_STREAM_AIFF:
+            return "AIFF"
+        case BASS_CTYPE_STREAM_CA:
+            return "AAC"
+        default:
+            return "Unknown (\(String(format: "0x%X", ctype)))"
+        }
+    }
+
     /// Stop and cleanup push stream
     func cleanup() {
         os_log(.info, log: logger, "🧹 Cleaning up push stream")
+
+        // Clear stream info when cleaning up
+        audioPlayer?.currentStreamInfo = nil
 
         // Stop decoding
         isDecoding = false

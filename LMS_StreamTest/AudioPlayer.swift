@@ -18,10 +18,28 @@ protocol AudioPlayerDelegate: AnyObject {
 }
 
 class AudioPlayer: NSObject, ObservableObject {
-    
+
+    // MARK: - Stream Info
+    struct StreamInfo {
+        let format: String
+        let sampleRate: Int
+        let channels: Int
+        let bitDepth: Int
+        let bitrate: Float
+
+        var displayString: String {
+            let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
+            let bitrateStr = bitrate > 0 ? " @ \(Int(bitrate)) kbps" : ""
+            return "\(format) • \(sampleRate/1000)kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
+        }
+    }
+
+    // MARK: - Published Properties
+    @Published var currentStreamInfo: StreamInfo?
+
     // MARK: - Core Components (MINIMAL CBASS)
     private var currentStream: HSTREAM = 0
-    
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
     private let settings = SettingsManager.shared
@@ -190,6 +208,9 @@ class AudioPlayer: NSObject, ObservableObject {
         let playResult = BASS_ChannelPlay(currentStream, 0)
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
+
+            // Update stream info for UI display
+            updateStreamInfo()
 
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
@@ -391,6 +412,95 @@ class AudioPlayer: NSObject, ObservableObject {
             BASS_ChannelStop(currentStream)
             BASS_StreamFree(currentStream)
             currentStream = 0
+        }
+        // Clear stream info when stream is cleaned up
+        currentStreamInfo = nil
+    }
+
+    // MARK: - Stream Info Retrieval
+    private func updateStreamInfo() {
+        guard currentStream != 0 else {
+            currentStreamInfo = nil
+            return
+        }
+
+        // Get channel info from BASS
+        var info = BASS_CHANNELINFO()
+        guard BASS_ChannelGetInfo(currentStream, &info) != 0 else {
+            os_log(.error, log: logger, "❌ Failed to get channel info: %d", BASS_ErrorGetCode())
+            return
+        }
+
+        // Get bitrate attribute
+        var bitrate: Float = 0.0
+        BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
+
+        // Map ctype to human-readable format name
+        let formatName = formatNameFromCType(info.ctype)
+
+        // Extract bit depth from origres (LOWORD contains bits)
+        let bitDepth = Int(info.origres & 0xFFFF)
+
+        let streamInfo = StreamInfo(
+            format: formatName,
+            sampleRate: Int(info.freq),
+            channels: Int(info.chans),
+            bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
+            bitrate: bitrate
+        )
+
+        currentStreamInfo = streamInfo
+        os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
+    }
+
+    private func formatNameFromCType(_ ctype: DWORD) -> String {
+        // BASS codec type constants
+        let BASS_CTYPE_STREAM_MP3: DWORD = 0x10005
+        let BASS_CTYPE_STREAM_VORBIS: DWORD = 0x10002  // OGG Vorbis
+        let BASS_CTYPE_STREAM_OPUS: DWORD = 0x11200    // From bassopus.h
+        let BASS_CTYPE_STREAM_FLAC: DWORD = 0x10900    // From bassflac.h
+        let BASS_CTYPE_STREAM_FLAC_OGG: DWORD = 0x10901  // FLAC in OGG container
+        let BASS_CTYPE_STREAM_WAV: DWORD = 0x40000     // WAV format flag
+        let BASS_CTYPE_STREAM_WAV_PCM: DWORD = 0x10001
+        let BASS_CTYPE_STREAM_WAV_FLOAT: DWORD = 0x10003
+        let BASS_CTYPE_STREAM_AIFF: DWORD = 0x10004
+        let BASS_CTYPE_STREAM_CA: DWORD = 0x10007      // CoreAudio (AAC on iOS)
+
+        // Check for WAV format flag first (0x40000 bit set)
+        if (ctype & BASS_CTYPE_STREAM_WAV) != 0 {
+            // Extract codec from LOWORD
+            let codec = ctype & 0xFFFF
+            switch codec {
+            case 0x0001:  // WAVE_FORMAT_PCM
+                return "WAV PCM"
+            case 0x0003:  // WAVE_FORMAT_IEEE_FLOAT
+                return "WAV Float"
+            default:
+                return "WAV (codec \(String(format: "0x%X", codec)))"
+            }
+        }
+
+        switch ctype {
+        case BASS_CTYPE_STREAM_MP3:
+            return "MP3"
+        case BASS_CTYPE_STREAM_VORBIS:
+            return "OGG Vorbis"
+        case BASS_CTYPE_STREAM_OPUS:
+            return "Opus"
+        case BASS_CTYPE_STREAM_FLAC:
+            return "FLAC"
+        case BASS_CTYPE_STREAM_FLAC_OGG:
+            return "FLAC (OGG)"
+        case BASS_CTYPE_STREAM_WAV_PCM:
+            return "WAV PCM"
+        case BASS_CTYPE_STREAM_WAV_FLOAT:
+            return "WAV Float"
+        case BASS_CTYPE_STREAM_AIFF:
+            return "AIFF"
+        case BASS_CTYPE_STREAM_CA:
+            return "AAC"
+        default:
+            return "Unknown (\(String(format: "0x%X", ctype)))"
         }
     }
     
