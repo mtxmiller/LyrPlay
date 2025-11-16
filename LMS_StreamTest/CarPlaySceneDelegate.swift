@@ -87,13 +87,27 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         if AudioManager.shared.slimClient == nil {
             os_log(.info, log: logger, "⚠️ Coordinator not initialized - creating now...")
             initializeCoordinator()
+
+            // CRITICAL FIX: Wait for connection before attempting recovery
+            // coordinator.connect() is async - give it time to establish connection
+            os_log(.info, log: logger, "⏳ Waiting 2s for coordinator to connect before recovery...")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.attemptRecovery()
+            }
+        } else {
+            // Coordinator already exists - attempt recovery immediately
+            attemptRecovery()
+        }
+    }
+
+    private func attemptRecovery() {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ Cannot resume - no coordinator available after init")
+            return
         }
 
-        // Perform playlist recovery with playback enabled
-        // This will connect to server (if needed), jump to saved position, and start playing
-        AudioManager.shared.slimClient?.performPlaylistRecovery(shouldPlay: true)
-
-        os_log(.info, log: logger, "✅ Playlist recovery initiated - will connect and resume playback")
+        os_log(.info, log: logger, "✅ Attempting playlist recovery with playback enabled...")
+        coordinator.performPlaylistRecovery(shouldPlay: true)
     }
 
     private func initializeCoordinator() {

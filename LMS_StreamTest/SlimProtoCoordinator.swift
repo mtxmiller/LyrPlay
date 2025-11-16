@@ -410,6 +410,16 @@ class SlimProtoCoordinator: ObservableObject {
     private func executePlaylistRecovery(shouldPlay: Bool) {
         os_log(.error, log: logger, "[APP-RECOVERY] 🎯 EXECUTING PLAYLIST RECOVERY (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
 
+        // CRITICAL FIX: Add timeout to prevent permanent recovery lock if JSONRPC callback fails
+        // This prevents CarPlay "Resume Playback" from hanging on subsequent attempts
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+            guard let self = self else { return }
+            if self.isRecoveryInProgress {
+                os_log(.error, log: self.logger, "⚠️ RECOVERY TIMEOUT - Clearing lock after 10s (callback likely failed)")
+                self.isRecoveryInProgress = false
+            }
+        }
+
         // CRITICAL: Playlist jump with timeOffset doesn't work with FLAC passthrough (push streams)
         // Direct streams can't seek mid-file, server would need to restart from beginning anyway
         // So for FLAC, just send simple play/pause command and accept starting from track beginning

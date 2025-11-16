@@ -83,6 +83,9 @@ class AudioStreamDecoder {
     /// Metadata for next track (applied at boundary)
     private var nextTrackMetadata: TrackMetadata?
 
+    /// Last time we logged "buffer empty" message (for rate limiting)
+    private var lastBufferEmptyLogTime: Date = .distantPast
+
     /// Current track start position (for accurate position tracking)
     private var trackStartPosition: UInt64 = 0
 
@@ -532,7 +535,12 @@ class AudioStreamDecoder {
                         }
 
                         // HTTP still active - wait for more data to decode
-                        os_log(.debug, log: self.logger, "⏳ Decoder buffer empty (HTTP still active), waiting...")
+                        // Rate limit logging to once per second to avoid log spam
+                        let now = Date()
+                        if now.timeIntervalSince(self.lastBufferEmptyLogTime) >= 1.0 {
+                            os_log(.debug, log: self.logger, "⏳ Decoder buffer empty (HTTP still active), waiting...")
+                            self.lastBufferEmptyLogTime = now
+                        }
                         Thread.sleep(forTimeInterval: 0.01)
                         continue
                     }

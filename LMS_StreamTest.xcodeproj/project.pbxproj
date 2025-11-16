@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
 		6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */; };
-		6BD675C62EC8044700904C17 /* CarKey.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BD675C52EC8044700904C17 /* CarKey.framework */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
 		78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */; };
@@ -76,7 +75,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6BD675C62EC8044700904C17 /* CarKey.framework in Frameworks */,
 				6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */,
 				6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */,
 				78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */,
