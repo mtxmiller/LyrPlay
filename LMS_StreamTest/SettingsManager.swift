@@ -71,19 +71,19 @@ class SettingsManager: ObservableObject {
         
         var description: String {
             switch self {
-            case .compressed: return "Smallest bandwidth, universal compatibility • Works out of the box"
-            case .oggVorbis: return "Near-lossless quality, efficient streaming • Needs server transcoding (MobileTranscode Plugin)"
-            case .opus: return "Superior quality, modern codec, efficient bandwidth • Needs server transcoding (MobileTranscode Plugin) + opus-tools"
-            case .flac: return "Native lossless, highest quality • Needs server transcoding (MobileTranscode Plugin)"
+            case .compressed: return "Compressed formats: mp3, aac"
+            case .oggVorbis: return "High quality: ogg, mp3, aac"
+            case .opus: return "Premium quality: ops, ogg, mp3, aac"
+            case .flac: return "Lossless: wav, flc, ops, ogg, alc, aac, mp3"
             }
         }
         
         var capabilities: String {
             switch self {
-            case .compressed: return "aac,mp4,mp4x,mp3"
-            case .oggVorbis: return "ogg,aac,mp4,mp4x,mp3"
-            case .opus: return "ops,ogg,aac,mp4,mp4x,alc,mp3"
-            case .flac: return "flc,ops,ogg,aac,mp4,mp4x,alc,mp3"
+            case .compressed: return "mp3,aac"
+            case .oggVorbis: return "ogg,mp3,aac"
+            case .opus: return "ops,ogg,mp3,aac"
+            case .flac: return "wav,flc,ops,ogg,alc,aac,mp3"
             }
         }
     }

@@ -217,28 +217,35 @@ class SlimProtoCommandHandler: ObservableObject {
                 formatName = "FLAC"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering FLAC - native playback with StreamingKit!")
+                    os_log(.info, log: logger, "✅ Server offering FLAC")
                 }
                 
             case 112: // 'p' = PCM
                 formatName = "PCM"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering PCM - StreamingKit can handle this")
+                    os_log(.info, log: logger, "✅ Server offering PCM")
                 }
-                
+
+            case 119: // 'w' = WAV
+                formatName = "WAV"
+                shouldAccept = true
+                if streamCommand != UInt8(ascii: "t") {
+                    os_log(.info, log: logger, "✅ Server offering WAV - native BASS support!")
+                }
+
             case 111: // 'o' = OGG
                 formatName = "OGG"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering OGG - CBass native support!")
+                    os_log(.info, log: logger, "✅ Server offering OGG - Bass native support!")
                 }
                 
             case 117: // 'u' = Opus
                 formatName = "Opus"
                 shouldAccept = true
                 if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering Opus - CBass native support!")
+                    os_log(.info, log: logger, "✅ Server offering Opus - Bass native support!")
                 }
                 
             default:
