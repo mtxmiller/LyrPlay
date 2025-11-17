@@ -77,7 +77,7 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Compressed formats: mp3, aac"
             case .aacPreferred: return "Compressed formats: aac, mp3"
-            case .wavSeekable: return "FLAC→WAV transcode with seeking: wav, mp3"
+            case .wavSeekable: return "FLAC→WAV transcode with seeking: wav, flc,mp3"
             case .oggVorbis: return "High quality: ogg, mp3, aac"
             case .opus: return "Premium quality: ops, ogg, mp3, aac"
             case .flac: return "Lossless: flc, ops, ogg, alc, aac, mp3"
@@ -88,7 +88,7 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "mp3,aac"
             case .aacPreferred: return "aac,mp3"
-            case .wavSeekable: return "wav,mp3"
+            case .wavSeekable: return "wav,flc,mp3"
             case .oggVorbis: return "ogg,mp3,aac"
             case .opus: return "ops,ogg,mp3,aac"
             case .flac: return "flc,ops,ogg,alc,aac,mp3"
