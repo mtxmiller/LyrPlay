@@ -20,9 +20,9 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 
 ## Audio Format Support
 
-- **FLAC, AAC, M4A, Opus, OGG Vorbis** - All formats supported with native BASS codecs
+- **FLAC, AAC, M4A, Opus, OGG Vorbis, WAV** - All formats supported with native BASS codecs
 - **Gapless Playback** - Supported across all formats using push stream architecture
-- **Seeking Limitation** - FLAC seeking currently non-functional (under investigation). Use Mobile Transcode to Opus/MP3 for seek support
+- **Seeking Limitation** - FLAC seeking currently non-functional (under investigation). Use Mobile Transcode to Opus/MP3/WAV for seek support
 
 ## Requirements
 
@@ -37,7 +37,7 @@ For remote access outside your home network, you'll need a secure VPN solution: 
 
 **Important**: Direct internet exposure of LMS servers is not recommended due to security risks. 
 
-## Enabling Mobile Transcode (Recommended for FLAC)
+## Enabling Mobile Transcode (Required for Opus / WAV)
 
 LyrPlay can play MP3/AAC and FLAC without additional plugins, but **FLAC seeking is currently non-functional** with gapless playback. For full functionality, use the [Mobile Transcode](https://github.com/mtxmiller/MobileTranscode) plugin to convert FLAC to Opus.
 
@@ -45,12 +45,12 @@ LyrPlay can play MP3/AAC and FLAC without additional plugins, but **FLAC seeking
 
 **Mobile Transcode Plugin URL:** https://raw.githubusercontent.com/mtxmiller/MobileTranscode/main/repo.xml
 
-If you want to **manually** configure your custom-convert.conf please see reference here: https://github.com/mtxmiller/LyrPlay/blob/main/custom-convert.conf
+**NOT REQ'd** with plugin but if you want to **manually** configure your custom-convert.conf please see reference here: https://github.com/mtxmiller/MobileTranscode/blob/main/custom-convert.conf
 
 **Benefits:**
 - **Opus 256kbps** - Bandwidth efficient modern codec with working seek/scrub support
 - **Lower Data Usage** - Smaller file sizes for mobile streaming
-- **Full Seeking** - Scrub/seek works perfectly with transcoded formats (workaround for FLAC seeking limitation)
+- **Full Seeking** - Server side seek works with FLC->WAV transcoding
 
 **NOTE — Install Opus Tools** (required for Opus transcoding):
 
@@ -78,23 +78,13 @@ Built with:
 - **WebKit** for Material web interface integration
 - **BASS integration** via Swift bridging header (libbass, libbassmix, libbassflac, libbassopus)
 
-### Building
-
-```bash
-# Install dependencies
-pod install
-
-# Build from command line
-xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest -configuration Debug build
-```
-
 ## Support
 
 Report issues or request features through [GitHub Issues](https://github.com/mtxmiller/LyrPlay/issues).
 
 **App Store Support URL:** https://github.com/mtxmiller/LyrPlay/issues
 
-## 💖 Support LyrPlay Development
+## Support LyrPlay Development
 
 LyrPlay is free and open source. If it's been useful to you, consider supporting continued development:
 

@@ -87,13 +87,37 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS handles iOS audio session automatically (default behavior)
         // No BASS_CONFIG_IOS_SESSION configuration needed - BASS manages everything
 
-        // Minimal BASS initialization - keep it simple
-        let result = BASS_Init(-1, 44100, 0, nil, nil)
-        
+        // Initialize BASS at maximum quality (192kHz) with BASS_DEVICE_FREQ flag
+        // The hardware will negotiate down to its actual capability
+        // This ensures external DACs get their full sample rate capability
+        let targetRate: DWORD = 192000  // Request 192kHz - hardware will use its max capability
+        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
+
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
             return
+        }
+
+        // Query what sample rate we actually got from the hardware
+        var info = BASS_INFO()
+        if BASS_GetInfo(&info) != 0 {
+            let actualRate = info.freq
+            os_log(.info, log: logger, "🎵 BASS Audio Output: Requested %dHz → Hardware provided %dHz",
+                   Int(targetRate), actualRate)
+
+            // Log device type based on actual rate for debugging
+            if actualRate >= 192000 {
+                os_log(.info, log: logger, "✅ High-end external DAC detected (192kHz+)")
+            } else if actualRate >= 96000 {
+                os_log(.info, log: logger, "✅ External DAC detected (96kHz)")
+            } else if actualRate == 48000 {
+                os_log(.info, log: logger, "📱 Standard iOS output (48kHz - built-in/AirPods)")
+            } else if actualRate == 44100 {
+                os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
+            }
+        } else {
+            os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
         }
 
         // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
