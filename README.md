@@ -31,7 +31,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Material Skin plugin** (install from LMS Settings → Plugins)
 - Network connection to your LMS server
 
-### Remote Access
+## Remote Access
 
 For remote access outside your home network, you'll need a secure VPN solution: Wireguard, Tailscale Etc. 
 
