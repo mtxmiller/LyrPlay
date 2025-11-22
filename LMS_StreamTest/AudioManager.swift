@@ -151,9 +151,10 @@ class AudioManager: NSObject, ObservableObject {
 
         // Start new decoder for this track
         // isNewTrack: true for gapless (mark boundary), false for manual skip (fresh start)
-        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless, startTime: startTime)
+        // replayGain: Linear gain multiplier from server (applied via BASS_ATTRIB_VOLDSP)
+        streamDecoder.startDecodingFromURL(url, format: format, isNewTrack: isGapless, startTime: startTime, replayGain: replayGain)
 
-        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d, startTime: %.2f)", isGapless, startTime)
+        os_log(.info, log: logger, "✅ Push stream decoder started (gapless: %d, startTime: %.2f, replayGain: %.4f)", isGapless, startTime, replayGain)
     }
 
     func stopPushStreamPlayback() {
@@ -259,9 +260,14 @@ class AudioManager: NSObject, ObservableObject {
     // MARK: - Volume Control
     func setVolume(_ volume: Float) {
         audioPlayer.setVolume(volume)
+        streamDecoder.setVolume(volume)  // Also apply to push streams
     }
 
     func getVolume() -> Float {
+        // Return push stream volume if active, otherwise URL stream
+        if streamDecoder.hasValidStream() {
+            return streamDecoder.getVolume()
+        }
         return audioPlayer.getVolume()
     }
 
