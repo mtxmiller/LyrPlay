@@ -948,8 +948,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         startPlaybackHeartbeat()
 
         // Get initial metadata for new stream
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.fetchCurrentTrackMetadata()
+        // CRITICAL: For gapless transitions, defer metadata until track boundary!
+        // sendTrackStarted() will call fetchCurrentTrackMetadata() at the right time.
+        // Otherwise we show next track's info while old track still plays!
+        if !isGapless {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.fetchCurrentTrackMetadata()
+            }
+        } else {
+            os_log(.info, log: logger, "🎵 Gapless - deferring metadata fetch until track boundary (sendTrackStarted)")
         }
 
         // Fetch server time after connection stabilizes
@@ -1031,12 +1038,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
         os_log(.error, log: logger, "📊 This means: All track data decoded, boundary marked, audio still playing from buffer")
 
+        // CRITICAL: Mark gapless flag BEFORE sending STMd to prevent race condition!
+        // If server responds very quickly (local network), the new STRM could arrive
+        // before the next line executes, causing isGapless to be false when it should be true
+        expectingGaplessTransition = true
+
         // Like squeezelite: decode.state = DECODE_COMPLETE → wake_controller() → sendSTAT("STMd", 0)
         client.sendStatus("STMd")
-
-        // Mark that we're expecting a gapless transition
-        // Next STRM command should be treated as gapless (don't flush buffer)
-        expectingGaplessTransition = true
 
         // Server will respond with new STRM command for next track
         // With autostart=2 or 3 (wait for CONT before starting decode)

@@ -221,6 +221,39 @@ struct SettingsView: View {
                         settings.saveSettings()
                     }
                     .padding(.vertical, 4)
+
+                    // Max Sample Rate Picker
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: "waveform")
+                                .foregroundColor(.purple)
+                                .frame(width: 20)
+                            Text("Max Sample Rate")
+                                .font(.body)
+                            Spacer()
+                            Picker("", selection: $settings.maxSampleRate) {
+                                Text("44.1 kHz").tag(44100)
+                                Text("48 kHz").tag(48000)
+                                Text("96 kHz").tag(96000)
+                                Text("192 kHz (No Limit)").tag(192000)
+                            }
+                            .pickerStyle(.menu)
+                        }
+                        Text("Server will downsample high-res audio above this rate. Lower values save mobile data.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 28)
+                    }
+                    .padding(.vertical, 4)
+                    .onChange(of: settings.maxSampleRate) { _ in
+                        settings.saveSettings()
+                        // Restart connection to apply new capabilities
+                        if coordinator.isConnected {
+                            Task {
+                                await coordinator.restartConnection()
+                            }
+                        }
+                    }
                 }
 
                 // Advanced Section
@@ -524,8 +557,9 @@ struct PlayerConfigView: View {
 // MARK: - Advanced Configuration View
 struct AdvancedConfigView: View {
     @StateObject private var settings = SettingsManager.shared
+    @EnvironmentObject private var coordinator: SlimProtoCoordinator
     @Environment(\.presentationMode) var presentationMode
-    
+
     @State private var webPort: String = "9000"
     @State private var slimProtoPort: String = "3483"
     @State private var connectionTimeout: Double = 10.0
@@ -583,7 +617,7 @@ struct AdvancedConfigView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             if !validationErrors.isEmpty {
                 Section(header: Text("Validation Errors")) {
                     ForEach(validationErrors, id: \.self) { error in
@@ -1119,12 +1153,13 @@ struct AudioFormatConfigView: View {
     @EnvironmentObject private var coordinator: SlimProtoCoordinator
     @Environment(\.presentationMode) var presentationMode
     @State private var isReconnecting = false
-    
+    @State private var editedFormatCodes: String = ""
+
     var body: some View {
         Form {
-            Section(header: Text("Audio Format Selection"), 
+            Section(header: Text("Audio Format Selection"),
                    footer: Text("Changes require reconnection to take effect. Higher quality formats may use more bandwidth.")) {
-                
+
                 ForEach(SettingsManager.AudioFormat.allCases, id: \.self) { format in
                     Button(action: {
                         selectFormat(format)
@@ -1135,20 +1170,20 @@ struct AudioFormatConfigView: View {
                                     Text(format.displayName)
                                         .font(.body)
                                         .foregroundColor(.primary)
-                                    
+
                                     if settings.audioFormat == format {
                                         Spacer()
                                         Image(systemName: "checkmark")
                                             .foregroundColor(.blue)
                                     }
                                 }
-                                
+
                                 Text(format.description)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.leading)
                             }
-                            
+
                             if settings.audioFormat != format {
                                 Spacer()
                             }
@@ -1156,6 +1191,50 @@ struct AudioFormatConfigView: View {
                     }
                     .disabled(isReconnecting)
                     .buttonStyle(PlainButtonStyle())
+                }
+            }
+
+            // Custom Format Codes Editor (only shown when Custom is selected)
+            if settings.audioFormat == .custom {
+                Section(header: Text("Custom Format Codes"),
+                       footer: Text("Common codes: flc (FLAC), wav, pcm, mp3, aac, ogg, ops (Opus), alc (ALAC)")) {
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        TextField("flc,wav,mp3,aac", text: $editedFormatCodes)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .font(.system(.body, design: .monospaced))
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Active codes:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(settings.activeFormatCodes)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.blue)
+                            }
+
+                            Spacer()
+
+                            Button(action: applyCustomFormatCodes) {
+                                HStack {
+                                    if isReconnecting {
+                                        ProgressView()
+                                            .scaleEffect(0.7)
+                                    }
+                                    Text("Apply")
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(editedFormatCodes != settings.customFormatCodes ? Color.blue : Color.gray)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                            }
+                            .disabled(isReconnecting || editedFormatCodes == settings.customFormatCodes)
+                        }
+                    }
                 }
             }
 
@@ -1229,23 +1308,60 @@ struct AudioFormatConfigView: View {
         }
         .navigationTitle("Audio Format")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            // Initialize editor with current custom format codes
+            editedFormatCodes = settings.customFormatCodes
+        }
     }
-    
+
     private func selectFormat(_ format: SettingsManager.AudioFormat) {
         guard settings.audioFormat != format else { return }
-        
+
+        // Capture previous format BEFORE changing
+        let previousFormat = settings.audioFormat
+
         settings.audioFormat = format
+
+        // If switching to custom, copy previous format's codes as starting point
+        if format == .custom && settings.customFormatCodes.isEmpty {
+            let defaultCodes = previousFormat.capabilities.isEmpty ? "mp3,aac" : previousFormat.capabilities
+            settings.customFormatCodes = defaultCodes
+            editedFormatCodes = defaultCodes
+        }
+
         settings.saveSettings()
-        
+
         // Restart connection if currently connected
-        if coordinator.connectionState == "Connected" {
+        if coordinator.isConnected {
             Task {
                 await MainActor.run {
                     isReconnecting = true
                 }
-                
+
                 await coordinator.restartConnection()
-                
+
+                await MainActor.run {
+                    isReconnecting = false
+                }
+            }
+        }
+    }
+
+    private func applyCustomFormatCodes() {
+        guard !editedFormatCodes.isEmpty else { return }
+
+        settings.customFormatCodes = editedFormatCodes
+        settings.saveSettings()
+
+        // Restart connection if connected
+        if coordinator.isConnected {
+            Task {
+                await MainActor.run {
+                    isReconnecting = true
+                }
+
+                await coordinator.restartConnection()
+
                 await MainActor.run {
                     isReconnecting = false
                 }

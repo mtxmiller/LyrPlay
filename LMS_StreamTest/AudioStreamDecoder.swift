@@ -68,6 +68,9 @@ class AudioStreamDecoder {
     /// Track total bytes decoded and pushed (for debugging)
     private var totalBytesPushed: UInt64 = 0
 
+    /// Track bytes at last buffer diagnostic log (for throttling)
+    private var lastBufferDiagnosticBytes: UInt64 = 0
+
     /// Track boundary position in buffer (for gapless transitions)
     private var trackBoundaryPosition: UInt64?
 
@@ -566,6 +569,7 @@ class AudioStreamDecoder {
             previousTrackStartPosition = 0
             trackBoundaryPosition = nil  // Clear old gapless boundary from previous track
             totalBytesPushed = 0  // Reset write position
+            lastBufferDiagnosticBytes = 0  // Reset buffer diagnostic counter
             os_log(.info, log: logger, "✅ Buffer flushed and restarted - BASS auto-handled device switching")
         } else {
             let error = BASS_ErrorGetCode()
@@ -722,11 +726,13 @@ class AudioStreamDecoder {
                 let queuedAmount = Int(pushed)  // Return value from StreamPutData
                 let totalBuffered = queuedAmount + Int(playbackBuffered)
 
-                // Log every 100 chunks to avoid spam (4KB chunks = log every ~400KB)
-                if self.totalBytesPushed % 409600 == 0 {  // Every ~400KB
+                // Log buffer stats every ~2MB pushed (works with any chunk size)
+                let bytesSinceLastLog = self.totalBytesPushed - self.lastBufferDiagnosticBytes
+                if bytesSinceLastLog >= 2_000_000 {  // Every ~2MB
                     os_log(.info, log: self.logger, "📊 BUFFER DIAGNOSTIC: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB total)",
                            playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024,
                            Double(totalBuffered) / 1_048_576)
+                    self.lastBufferDiagnosticBytes = self.totalBytesPushed
                 }
 
                 // SOFT THROTTLE: Slow down decoder when queue gets large
@@ -1117,6 +1123,7 @@ class AudioStreamDecoder {
         trackStartPosition = 0
         previousTrackStartPosition = 0
         totalBytesPushed = 0
+        lastBufferDiagnosticBytes = 0
 
         // Start decode loop with existing decoder
         isDecoding = true
