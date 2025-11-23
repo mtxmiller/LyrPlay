@@ -102,30 +102,19 @@ lms-remotecache-plugin/
 slimserver/
 bass24-ios-2/
 .claude/
-docs/bass_documentation
 
 # Squeezelite source code (development reference)
 squeezelite/
 
-# Development guides and logs
+# Development docs, guides, and logs (internal notes)
+docs/
 LMS_Opus_Setup_Guide.md
 AUDIO_SESSION_CLEANUP_GUIDE.md
 AUDIO_SESSION_CLEANUP_GUIDE2.md
 LOG_*.md
 CARPLAY_LOG.md
-docs/boundary-tracking-assessment.md
-docs/double-stmd-fix.md
-docs/gapless-implementation-comparison.md
-docs/playlist-end-detection-fix.md
-.gitignore
-docs/server_log_ref.md
-docs/server_log47.md
-docs/server-authentication-plan-v2.md
-docs/server-authentication-plan-v3.md
-docs/server-time-tracking-analysis.md
-docs/STMd_timing_fix_summary.md
-docs/stmd-problem-deep-analysis.md
-docs/track3-time-sync-issue.md
-docs/MONETIZATION_PLAN.md
+~FLAC.pm.backup
+
+# Editor/IDE settings
 .grok/settings.json
 LMS_StreamTest.code-workspace
