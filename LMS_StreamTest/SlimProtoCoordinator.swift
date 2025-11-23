@@ -420,16 +420,8 @@ class SlimProtoCoordinator: ObservableObject {
             }
         }
 
-        // CRITICAL: Playlist jump with timeOffset doesn't work with FLAC passthrough (push streams)
-        // Direct streams can't seek mid-file, server would need to restart from beginning anyway
-        // So for FLAC, just send simple play/pause command and accept starting from track beginning
-        if settings.audioFormat == .flac {
-            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 FLAC passthrough mode - playlist jump disabled (direct streams can't seek)")
-            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 Sending simple %{public}s command - track will start from beginning", shouldPlay ? "play" : "pause")
-            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
-            isRecoveryInProgress = false
-            return
-        }
+        // NOTE: FLAC restriction removed - FLAC now uses legacy URL streaming (not push streams)
+        // which supports seeking via server-side transcoding. Playlist jump recovery works for all formats.
 
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
