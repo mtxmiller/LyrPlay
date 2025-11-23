@@ -148,9 +148,8 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
 
         // Network buffer configuration - optimized for both LAN and mobile streaming
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
-        os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
-
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
+        //os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
         os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }

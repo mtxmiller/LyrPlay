@@ -222,6 +222,27 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
 
+                    // Legacy URL Streaming Toggle
+                    Toggle(isOn: $settings.useLegacyURLStreaming) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                    .foregroundColor(.orange)
+                                    .frame(width: 20)
+                                Text("Legacy URL Streaming")
+                                    .font(.body)
+                            }
+                            Text("Use traditional streaming instead of gapless push stream. Enable if FLAC playback stops early.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .onChange(of: settings.useLegacyURLStreaming) { _ in
+                        settings.saveSettings()
+                    }
+                    .padding(.vertical, 4)
+
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {

@@ -29,6 +29,7 @@ class SettingsManager: ObservableObject {
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
+    @Published var useLegacyURLStreaming: Bool = false  // Force legacy URL streaming instead of push stream (for FLAC debugging)
 
 
     // MARK: - Read-only Properties
@@ -125,6 +126,7 @@ class SettingsManager: ObservableObject {
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
+        static let useLegacyURLStreaming = "UseLegacyURLStreaming"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -199,6 +201,7 @@ class SettingsManager: ObservableObject {
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
+        useLegacyURLStreaming = UserDefaults.standard.bool(forKey: Keys.useLegacyURLStreaming)
 
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
@@ -228,6 +231,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
+        UserDefaults.standard.set(useLegacyURLStreaming, forKey: Keys.useLegacyURLStreaming)
 
         UserDefaults.standard.synchronize()
         
