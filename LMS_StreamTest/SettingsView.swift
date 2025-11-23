@@ -222,11 +222,6 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
 
-                    // Legacy URL Streaming Toggle - HIDDEN
-                    // FLAC now auto-routes to legacy streaming due to BASSFLAC decode issue
-                    // Keeping setting in SettingsManager for potential future use/debugging
-                    // Toggle(isOn: $settings.useLegacyURLStreaming) { ... }
-
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
