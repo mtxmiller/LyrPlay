@@ -179,8 +179,8 @@ class AudioStreamDecoder {
 
         // CRITICAL: Set hard limit on queue buffer to prevent runaway memory usage
         // This prevents decoding entire podcasts (60min = 1.2GB!) into RAM
-        // 150 MB = room for ~2 full songs in queue for gapless playback
-        let hardLimitBytes: Float = 150_000_000  // 150 MB
+        // 600 MB = room for large FLAC files (500MB+) and gapless playback queue
+        let hardLimitBytes: Float = 600_000_000  // 600 MB
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_PUSH_LIMIT), hardLimitBytes)
         os_log(.info, log: logger, "🔒 Set push stream queue limit: %.0f MB", hardLimitBytes / 1_048_576)
 

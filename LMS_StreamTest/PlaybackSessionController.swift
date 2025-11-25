@@ -147,9 +147,15 @@ final class PlaybackSessionController {
         // CRITICAL: iOS requires an ACTIVE audio session to show lock screen controls
         // Activate session ONCE during setup, then BASS manages everything after
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
-            os_log(.info, log: logger, "🔒 Audio session activated for lock screen controls setup")
+            let session = AVAudioSession.sharedInstance()
+
+            // Request maximum sample rate for external DACs (96kHz, 192kHz, etc.)
+            // Hardware will negotiate to its highest supported rate
+            try session.setPreferredSampleRate(192000)
+
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true, options: [])
+            os_log(.info, log: logger, "🔒 Audio session activated (preferred rate: 192kHz) for lock screen controls setup")
         } catch {
             os_log(.error, log: logger, "❌ Failed to activate session for lock screen: %{public}s", error.localizedDescription)
         }
