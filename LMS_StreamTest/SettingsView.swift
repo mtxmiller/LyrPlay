@@ -347,6 +347,10 @@ struct SettingsView: View {
                 }
             }
         }
+        .onAppear {
+            // Refresh output device info when settings view appears
+            audioPlayer.updateOutputDeviceInfo()
+        }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet()
         }

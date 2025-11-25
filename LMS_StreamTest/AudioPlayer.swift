@@ -94,7 +94,27 @@ class AudioPlayer: NSObject, ObservableObject {
     override init() {
         super.init()
         setupCBass()
+        setupRouteChangeObserver()
         os_log(.info, log: logger, "AudioPlayer initialized with CBass")
+    }
+
+    private func setupRouteChangeObserver() {
+        // Observe audio route changes to update output device info
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        // Update output device info when route changes (AirPods, CarPlay, USB DAC, etc.)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.updateOutputDeviceInfo()
+            os_log(.info, log: self.logger, "🔀 Route changed - output device info updated")
+        }
     }
     
     // MARK: - Core Setup (MINIMAL CBASS)
@@ -247,10 +267,8 @@ class AudioPlayer: NSObject, ObservableObject {
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
-            // Update stream info for UI display
+            // Update stream info for UI display (also updates output device info)
             updateStreamInfo()
-            // Update output device info for UI display
-            updateOutputDeviceInfo()
 
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
@@ -492,6 +510,9 @@ class AudioPlayer: NSObject, ObservableObject {
 
         currentStreamInfo = streamInfo
         os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
+
+        // Also update output device info when stream changes (sample rate may change)
+        updateOutputDeviceInfo()
     }
 
     private func formatNameFromCType(_ ctype: DWORD) -> String {
@@ -546,7 +567,7 @@ class AudioPlayer: NSObject, ObservableObject {
     }
 
     // MARK: - Output Device Info Retrieval
-    private func updateOutputDeviceInfo() {
+    public func updateOutputDeviceInfo() {
         // Get current BASS device output information (sample rate, latency, etc.)
         var info = BASS_INFO()
         guard BASS_GetInfo(&info) != 0 else {
@@ -824,6 +845,7 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Cleanup
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         cleanup()
 
         BASS_Free()
