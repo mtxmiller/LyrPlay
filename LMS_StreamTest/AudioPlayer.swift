@@ -2,6 +2,7 @@
 // Updated to use BASS with plugin loading for FLAC/Opus support
 // BASS API exposed via bridging header (LMS_StreamTest-Bridging-Header.h)
 import Foundation
+import AVFoundation
 import MediaPlayer
 import os.log
 
@@ -34,8 +35,22 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Output Device Info
+    struct OutputDeviceInfo {
+        let deviceName: String
+        let deviceType: String
+        let outputSampleRate: Int
+        let outputChannels: Int
+        let latency: Int  // milliseconds
+
+        var displayString: String {
+            return "\(deviceName) • \(outputSampleRate/1000)kHz • \(latency)ms latency"
+        }
+    }
+
     // MARK: - Published Properties
     @Published var currentStreamInfo: StreamInfo?
+    @Published var currentOutputInfo: OutputDeviceInfo?
 
     // MARK: - Core Components (MINIMAL CBASS)
     private var currentStream: HSTREAM = 0
@@ -234,6 +249,8 @@ class AudioPlayer: NSObject, ObservableObject {
 
             // Update stream info for UI display
             updateStreamInfo()
+            // Update output device info for UI display
+            updateOutputDeviceInfo()
 
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
@@ -438,6 +455,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         // Clear stream info when stream is cleaned up
         currentStreamInfo = nil
+        // Note: Keep output device info - it's still valid even without an active stream
     }
 
     // MARK: - Stream Info Retrieval
@@ -524,6 +542,78 @@ class AudioPlayer: NSObject, ObservableObject {
             return "AAC"
         default:
             return "Unknown (\(String(format: "0x%X", ctype)))"
+        }
+    }
+
+    // MARK: - Output Device Info Retrieval
+    private func updateOutputDeviceInfo() {
+        // Get current BASS device output information (sample rate, latency, etc.)
+        var info = BASS_INFO()
+        guard BASS_GetInfo(&info) != 0 else {
+            os_log(.error, log: logger, "❌ Failed to get BASS output info: %d", BASS_ErrorGetCode())
+            currentOutputInfo = nil
+            return
+        }
+
+        // On iOS, BASS uses the default device (-1) and routing is managed by iOS
+        // Query AVAudioSession for the actual device name and type
+        let audioSession = AVAudioSession.sharedInstance()
+        let currentRoute = audioSession.currentRoute
+
+        // Get the first output (primary audio route)
+        guard let output = currentRoute.outputs.first else {
+            os_log(.error, log: logger, "❌ No audio output route available")
+            currentOutputInfo = nil
+            return
+        }
+
+        // Extract device name and type from iOS audio route
+        let deviceName = output.portName  // e.g., "AirPods Pro", "Speaker", "USB Audio Device"
+        let deviceType = deviceTypeFromPortType(output.portType)
+
+        // Create output device info with BASS specs + iOS device info
+        let outputInfo = OutputDeviceInfo(
+            deviceName: deviceName,
+            deviceType: deviceType,
+            outputSampleRate: Int(info.freq),
+            outputChannels: Int(info.speakers),
+            latency: Int(info.latency)
+        )
+
+        currentOutputInfo = outputInfo
+        os_log(.info, log: logger, "🔊 Output device: %{public}s (port: %{public}s)",
+               outputInfo.displayString, output.portType.rawValue)
+    }
+
+    private func deviceTypeFromPortType(_ portType: AVAudioSession.Port) -> String {
+        // Map iOS AVAudioSession port types to human-readable device types
+        switch portType {
+        case .builtInSpeaker:
+            return "Built-in Speaker"
+        case .builtInReceiver:
+            return "Built-in Receiver"
+        case .headphones:
+            return "Headphones"
+        case .bluetoothA2DP:
+            return "Bluetooth Audio"
+        case .bluetoothLE:
+            return "Bluetooth LE"
+        case .bluetoothHFP:
+            return "Bluetooth Hands-Free"
+        case .carAudio:
+            return "CarPlay"
+        case .airPlay:
+            return "AirPlay"
+        case .HDMI:
+            return "HDMI"
+        case .usbAudio:
+            return "USB Audio"
+        case .lineOut:
+            return "Line Out"
+        case .headsetMic:
+            return "Headset"
+        default:
+            return "Audio Output"
         }
     }
     

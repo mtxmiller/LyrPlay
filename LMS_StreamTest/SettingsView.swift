@@ -159,9 +159,9 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                 }
 
-                // Current Playback Info Section
+                // Current Playback Info Section (INPUT)
                 if let streamInfo = audioPlayer.currentStreamInfo {
-                    Section(header: Text("Current Playback")) {
+                    Section(header: Text("Stream Information (INPUT)")) {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Image(systemName: "waveform")
@@ -169,7 +169,7 @@ struct SettingsView: View {
                                     .frame(width: 20)
 
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Stream Information")
+                                    Text("File/Stream Format")
                                         .font(.body)
                                         .fontWeight(.medium)
                                     Text(streamInfo.displayString)
@@ -194,6 +194,40 @@ struct SettingsView: View {
                                     DetailItem(label: "Bitrate", value: "\(Int(streamInfo.bitrate)) kbps")
                                     Spacer()
                                 }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                // Output Device Info Section (OUTPUT)
+                if let outputInfo = audioPlayer.currentOutputInfo {
+                    Section(header: Text("Output Device (HARDWARE)")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "speaker.wave.3")
+                                    .foregroundColor(.blue)
+                                    .frame(width: 20)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(outputInfo.deviceName)
+                                        .font(.body)
+                                        .fontWeight(.medium)
+                                    Text(outputInfo.deviceType)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            // Detailed breakdown
+                            HStack(spacing: 16) {
+                                DetailItem(label: "Output Rate", value: "\(outputInfo.outputSampleRate/1000)kHz")
+                                DetailItem(label: "Channels", value: "\(outputInfo.outputChannels)ch")
+                            }
+
+                            HStack(spacing: 16) {
+                                DetailItem(label: "Latency", value: "\(outputInfo.latency)ms")
+                                Spacer()
                             }
                         }
                         .padding(.vertical, 4)
