@@ -149,13 +149,14 @@ final class PlaybackSessionController {
         do {
             let session = AVAudioSession.sharedInstance()
 
-            // Request maximum sample rate for external DACs (96kHz, 192kHz, etc.)
-            // Hardware will negotiate to its highest supported rate
-            try session.setPreferredSampleRate(192000)
+            // Let iOS automatically switch sample rates for external DACs
+            // setPreferredSampleRate() is broken on iOS 26 and prevents auto-switching
+            // iOS natively supports bit-perfect output with automatic rate matching
+            // try session.setPreferredSampleRate(192000)  // REMOVED - broken API
 
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true, options: [])
-            os_log(.info, log: logger, "🔒 Audio session activated (preferred rate: 192kHz) for lock screen controls setup")
+            os_log(.info, log: logger, "🔒 Audio session activated (iOS auto sample rate) for lock screen controls setup")
         } catch {
             os_log(.error, log: logger, "❌ Failed to activate session for lock screen: %{public}s", error.localizedDescription)
         }

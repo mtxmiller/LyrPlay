@@ -122,11 +122,12 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS handles iOS audio session automatically (default behavior)
         // No BASS_CONFIG_IOS_SESSION configuration needed - BASS manages everything
 
-        // Initialize BASS at maximum quality (192kHz) with BASS_DEVICE_FREQ flag
-        // The hardware will negotiate down to its actual capability
-        // This ensures external DACs get their full sample rate capability
-        let targetRate: DWORD = 192000  // Request 192kHz - hardware will use its max capability
-        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
+        // Initialize BASS without BASS_DEVICE_FREQ flag - let iOS auto-detect sample rate
+        // Per BASS docs: "sample format has no effect on iOS - device's native format is automatically used"
+        // iOS will automatically switch to match the stream's sample rate for external DACs
+        // This enables bit-perfect playback at 96kHz, 192kHz, etc.
+        let targetRate: DWORD = 192000  // Ignored on iOS - device uses native format automatically
+        let result = BASS_Init(-1, targetRate, 0, nil, nil)  // No BASS_DEVICE_FREQ - let iOS handle it
 
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
