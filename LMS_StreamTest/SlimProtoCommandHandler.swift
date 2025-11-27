@@ -356,17 +356,8 @@ class SlimProtoCommandHandler: ObservableObject {
         // Per squeezelite: 0/1=direct stream (gapless), 2/3=HTTP stream (traditional)
         let isDirectStream = (autostart < Character("2").asciiValue!)
 
-        // FLAC AUTO-ROUTING: BASSFLAC + BASS_STREAM_DECODE fails with transcoded streams
-        // Route FLAC to legacy URL streaming which works perfectly
-        // Trade-off: FLAC loses gapless playback, but plays reliably
-        let formatUpper = format.uppercased()
-        let isFLAC = (formatUpper == "FLC" || formatUpper == "FLAC")
-
-        if isFLAC {
-            // Legacy URL streaming - FLAC works reliably in this mode
-            os_log(.info, log: logger, "🎵 FLAC: Auto-routing to legacy URL streaming (BASSFLAC decode issue)")
-            delegate?.didStartStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
-        } else if isDirectStream {
+        // Route streams based on autostart mode - all formats use same logic
+        if isDirectStream {
             // Direct stream - use push stream for gapless (autostart 0 or 1)
             os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")
             delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain)

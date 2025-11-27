@@ -1231,9 +1231,9 @@ extension SlimProtoCoordinator {
         
         // Fetch immediately
         fetchServerTime()
-        
-        // Start periodic timer (every 8 seconds)
-        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+
+        // Start periodic timer (every 3 seconds for responsive lock screen)
+        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.fetchServerTime()
         }
         

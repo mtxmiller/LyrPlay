@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Current Status: **LIVE ON APP STORE** 🌟
 - ✅ **Version 1.5 Live on App Store** - StreamingKit-based stable release with major stability improvements
-- ✅ **Version 1.6 in TestFlight** - CBass migration complete with gapless playback using push streams
+- ✅ **Version 1.7 in TestFlight** - CarPlay Browse + External DAC support + WAV format + Enhanced gapless playback
 - ✅ **CBass Audio Framework Migration COMPLETE** - Superior FLAC, Opus, and multi-format support with BASS auto-managed audio sessions
 - ✅ **Gapless Playback** - True gapless transitions using BASS push stream architecture
 - ✅ **CarPlay Support** - Phase 1 complete with Now Playing template and lock screen recovery integration
@@ -217,68 +217,6 @@ UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
 
 This unified approach eliminates timing conflicts and provides consistent behavior across all playback interruption scenarios.
 
-### Seamless Reconnection via HELO Reconnect Bit
-
-**NEW in v1.6.3+**: LyrPlay now implements the **HELO reconnect bit mechanism** used by squeezelite for truly seamless reconnection when app resumes from background.
-
-#### **The Challenge**
-When iOS backgrounds LyrPlay and TCP connection drops after ~3 minutes, the LMS server "forgets" the player after 300 seconds. Upon app reopening, position was lost requiring playlist jump recovery with audio blips.
-
-#### **The Solution: Reconnect Bit (0x4000)**
-Following squeezelite's proven approach, LyrPlay now sets a reconnect bit in the HELO message's `wlan_channellist` field:
-
-```swift
-// In SlimProtoClient.sendHelo():
-let wlanChannels: UInt16 = isReconnection ? 0x4000 : 0x0000
-```
-
-**How it works:**
-1. **First connection**: Send HELO with `0x0000` (new player)
-2. **All subsequent connections**: Send HELO with `0x4000` (reconnect bit set)
-3. **Server recognizes**: "Same player reconnecting" → calls `playerReconnect()`
-4. **Server executes**: `ContinuePlay` event with preserved position
-5. **Result**: Seamless resume with NO audio blip, NO playlist jump needed!
-
-#### **Implementation Details**
-```swift
-// SlimProtoClient.swift
-private var isReconnection = false  // Set to true after first HELO
-
-// After first successful HELO:
-if !isReconnection {
-    isReconnection = true  // All future connections are reconnections
-}
-
-// IMPORTANT: Never reset isReconnection in disconnect()
-// Maintains state across backgrounding/foregrounding cycles
-```
-
-#### **Server-Side Processing** (from LMS source code)
-```perl
-# Slim/Networking/Slimproto.pm line 973
-$reconnect = $wlan_channellist & 0x4000;
-
-# Slim/Player/Squeezebox.pm line 70-96
-if ($reconnect) {
-    $client->resumeOnPower(1);      # Resume playback state
-    $controller->playerReconnect($bytes_received);  # ContinuePlay event
-}
-```
-
-#### **Benefits vs Playlist Jump**
-- ✅ **No audio blip** - Server continues existing stream seamlessly
-- ✅ **No seek artifacts** - No new stream creation or seeking required
-- ✅ **Paused state preserved** - If paused before, stays paused after reconnect
-- ✅ **Server-native** - Uses LMS's built-in reconnection mechanism
-- ✅ **Proven approach** - Exactly how squeezelite handles backgrounding
-
-#### **When Used**
-- App resumes from background (< 300s timeout)
-- Network reconnection after brief disconnection
-- Any scenario where player reconnects to same server
-
-This elegant solution eliminates the need for client-side position recovery in most scenarios, providing the smooth experience users expect from native audio apps.
-
 ### Key Dependencies
 - **CocoaAsyncSocket**: Network socket communication for SlimProto (via CocoaPods)
 - **CBass/BASS**: BASS audio library (Bass, BassFLAC, BassOpus) integrated via bridging header
@@ -390,7 +328,7 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Current Version**: 1.6 in TestFlight (CBass migration complete with gapless playback)
+- **Current Version**: 1.7 in TestFlight (External DAC + WAV + Enhanced gapless)
 - **Live Version**: 1.5 (StreamingKit-based, App Store)
 
 ## Testing Structure
@@ -447,9 +385,13 @@ Comprehensive error handling with user-friendly recovery:
 ### Completed Core Platform ✅
 - **Stable App Store presence** - Version 1.5 live on App Store
 - **CBass Audio Framework COMPLETE** - Full migration from StreamingKit to high-performance BASS library
-- **Gapless Playback** - True gapless transitions using BASS push stream architecture
+- **Gapless Playback** - True gapless transitions using BASS push stream architecture with enhanced sync reliability
 - **BASS Auto-Managed Sessions** - Eliminated manual AVAudioSession management, BASS handles all scenarios automatically
 - **CarPlay Phase 1 COMPLETE** - Now Playing template with unified lock screen recovery
+- **External DAC Support** - Output device metrics display with sample rate monitoring for hardware audio interfaces
+- **WAV Format Support** - Lossless WAV playback with seeking capability (Qobuz compatibility)
+- **FLAC Auto-Routing** - Automatic legacy URL streaming for FLAC (BASSFLAC decode workaround)
+- **Real-Time Stream Info** - Live display of current stream format, bitrate, and buffer status
 - **Universal network compatibility** - Server discovery works on all network configurations
 - **Enhanced audio streaming** - Superior FLAC, Opus, and multi-format support with native BASS codecs
 - **Professional UI Experience** - LyrPlay loading screen with animated branding and Material integration
@@ -457,10 +399,10 @@ Comprehensive error handling with user-friendly recovery:
 - **iOS 15.6+ Support** - Broad device compatibility from iOS 15.6 through latest iOS
 
 ### Active Development Areas 🔧
-- **FLAC Seeking Fix** - Investigating FLAC seeking issues with BASS push stream architecture (current blocker)
-- **CarPlay Phase 2** - Browse interface with library/playlist navigation (planned)
-- **Performance Optimizations** - Continued refinement of metadata handling and network efficiency
-- **Mobile Transcode Optimization** - Server-side transcoding for mobile data conservation
+- **CarPlay Phase 2** - Browse interface with library/playlist navigation (in progress)
+- **FLAC Seeking Enhancement** - Continued refinement of FLAC playback with WAV fallback option
+- **Performance Optimizations** - Buffer management and gapless transition refinements
+- **External DAC Optimization** - Enhanced hardware audio interface support and monitoring
 
 ### Technical Excellence
 The codebase follows modern iOS development practices with comprehensive error handling, proper async/await patterns, and extensive logging for production debugging. All major user-reported issues from GitHub have been resolved.
@@ -511,6 +453,20 @@ These repositories provide definitive reference for:
 
 ## Recent Updates and Improvements
 
+### Version 1.7 - External DAC & Format Enhancement Release (December 2025) ✅
+- **External DAC Support**: Output device metrics display with real-time sample rate monitoring for hardware audio interfaces
+- **WAV Format Support**: Lossless WAV playback with full seeking capability (Qobuz compatibility)
+- **FLAC Auto-Routing**: Automatic legacy URL streaming mode for FLAC files (BASSFLAC decode workaround)
+- **AAC Format Priority**: User-configurable AAC preferred format option for codec priority control
+- **Real-Time Stream Info**: Live display showing current stream format, bitrate, sample rate, and buffer status
+- **Enhanced Gapless Playback**: Fixed sync issues, boundary drift, and format mismatch transitions
+- **Volume Control & ReplayGain**: Fixed volume control and ReplayGain support for push streams
+- **Buffer Level Control**: User-configurable buffer limiting to optimize memory usage for podcasts and long streams
+- **Critical Bug Fixes**: Resolved CarPlay crashes, infinite logging, lock screen recovery reliability, backup server failover
+- **VPN Support**: Fixed Tailscale and VPN connectivity issues
+- **Podcast Optimization**: Resolved memory/CPU issues with long-duration content
+- **Removed Reconnect Bit**: Simplified reconnection strategy, playlist jump recovery now handles all scenarios
+
 ### Version 1.6 - CBass Migration & CarPlay Release (November 2025) ✅
 - **Complete Audio Engine Upgrade**: Migration from StreamingKit to BASS library via bridging header
 - **Gapless Playback**: True gapless transitions using BASS push stream architecture
@@ -547,6 +503,20 @@ These repositories provide definitive reference for:
 - **Connection state management**: Enhanced reconnection strategies with proper state handling
 - **Server time synchronization**: Refined timing mechanisms for gapless playback
 - **Legacy app open recovery**: Removed and replaced with custom position banking system to prevent conflicts
+
+### Previous Approaches (Historical Reference)
+
+#### HELO Reconnect Bit (v1.6.3 - Deprecated)
+LyrPlay previously implemented the HELO reconnect bit mechanism (0x4000) used by squeezelite for seamless reconnection. This approach set a reconnect flag in the HELO message's `wlan_channellist` field to signal the LMS server that the player was reconnecting rather than connecting fresh.
+
+**Why It Was Removed:**
+While elegant in theory, the reconnect bit approach proved unreliable in production:
+- Inconsistent behavior across different LMS server versions
+- Limited effectiveness with iOS backgrounding constraints
+- Playlist jump recovery provided more reliable position restoration
+- Added complexity without measurable benefit over simpler approaches
+
+**Current Approach:** LyrPlay now relies on playlist jump recovery with position banking for all reconnection scenarios, providing consistent and reliable playback restoration across all conditions.
 
 ### Major Fixes Completed
 
@@ -657,30 +627,32 @@ When submitting, use these prepared values:
 
 ---
 
-**Last Updated**: November 14, 2025 - Version 1.6 CBass Migration Complete + CarPlay Phase 1 ✅
+**Last Updated**: December 2025 - Version 1.7 External DAC & Format Enhancement Release ✅
 
 ### Production Status
 - **App Store Version**: 1.5 (StreamingKit-based, stable)
-- **TestFlight Version**: 1.6 (CBass/BASS library with gapless playback)
+- **TestFlight Version**: 1.7 (CBass/BASS library with external DAC support and WAV format)
 - **Active User Base**: Production app with GitHub community support
 
-### Current Capabilities (v1.6)
+### Current Capabilities (v1.7)
 - **Audio Engine**: BASS library integrated via Swift bridging header
-- **Gapless Playback**: ✅ Working with push stream architecture
-- **FLAC Seeking**: ❌ Currently non-functional (under investigation)
-- **Other Format Seeking**: ✅ MP3, AAC, Opus, OGG seeking works normally
+- **Gapless Playback**: ✅ Enhanced with improved sync reliability and format mismatch handling
+- **FLAC Support**: ✅ Auto-routing to legacy URL streaming mode (workaround for seeking)
+- **WAV Format**: ✅ Lossless WAV playback with full seeking capability
+- **Format Seeking**: ✅ MP3, AAC, Opus, OGG, WAV seeking works normally
+- **External DAC**: ✅ Real-time sample rate monitoring and output device metrics
 - **Audio Session Management**: BASS auto-managed (manual management removed)
-- **CarPlay**: Phase 1 complete (Now Playing template with lock screen recovery)
+- **CarPlay**: Phase 1 complete (Now Playing template), Phase 2 in development
 - **Platform Support**: iOS 15.6+ and macOS via "Designed for iPad" compatibility
-- **Audio Formats**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
+- **Audio Formats**: FLAC, WAV, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
 
 ### Active Development Priorities
-1. **FLAC Seeking Fix** - Critical blocker for v1.6 App Store submission
-2. **CarPlay Phase 2** - Browse interface for library/playlist navigation
-3. **Mobile Transcode Optimization** - Server-side transcoding for data conservation
+1. **CarPlay Phase 2** - Browse interface for library/playlist navigation (in progress)
+2. **FLAC Seeking Enhancement** - Continued refinement with WAV fallback option
+3. **External DAC Optimization** - Enhanced hardware audio interface support
 
 ### Architecture Notes
 - **Playlist Jump Recovery**: Critical for position recovery across backgrounding, lock screen, CarPlay scenarios
 - **45-Second Threshold**: Lock screen/CarPlay recovery triggers after 45s backgrounding
-- **HELO Reconnect Bit**: Seamless reconnection for brief disconnections (<300s)
 - **Scene Delegate Architecture**: SwiftUI + UIKit bridge for CarPlay support
+- **Reconnect Bit Removed**: Simplified to playlist jump recovery for all reconnection scenarios
