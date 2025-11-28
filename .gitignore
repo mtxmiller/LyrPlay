@@ -118,3 +118,4 @@ CARPLAY_LOG.md
 # Editor/IDE settings
 .grok/settings.json
 LMS_StreamTest.code-workspace
+.claude/
