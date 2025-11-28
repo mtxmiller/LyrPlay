@@ -256,6 +256,28 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
 
+                    Toggle(isOn: $settings.iOSPlayerFocus) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "iphone")
+                                    .foregroundColor(.blue)
+                                    .frame(width: 20)
+                                Text("iOS Player Focus")
+                                    .font(.body)
+                            }
+                            Text("Show only LyrPlay player in Material web interface, hide other Squeezebox players")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .onChange(of: settings.iOSPlayerFocus) { _ in
+                        settings.saveSettings()
+                        // Trigger WebView reload when setting changes
+                        settings.shouldReloadWebView = true
+                    }
+                    .padding(.vertical, 4)
+
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {

@@ -3,6 +3,7 @@
 import SwiftUI
 import WebKit
 import os.log
+import UIKit
 
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
@@ -258,7 +259,12 @@ struct ContentView: View {
             }
         }
     }
-    
+
+    // MARK: - Helper Functions
+    private func getLyrPlayPlayerName() -> String {
+        return settings.effectivePlayerName
+    }
+
     // MARK: - Material Integration URL
     private var materialWebURL: String {
         let baseURL = settings.webURL
@@ -268,6 +274,9 @@ struct ContentView: View {
         let encodedSettingsURL = settingsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsURL
         let encodedSettingsName = settingsName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? settingsName
 
+        // Add player parameter to show only LyrPlay when iOS Player Focus is enabled
+        let playerName = settings.iOSPlayerFocus ? getLyrPlayPlayerName() : ""
+
         // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
         // Material skin handles data freshness via its own API calls
 
@@ -275,7 +284,12 @@ struct ContentView: View {
         // - hide=mediaControls: Hides lock screen/notification settings (prevents Material web player from interfering with native iOS lock screen)
         //   NOTE: Material code checks for 'mediaControls' not 'notif' (ui-settings.js:506)
         // - appSettings: Custom iOS app settings integration
-        return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+        // - player: Show only specified player when iOS Player Focus is enabled
+        if settings.iOSPlayerFocus {
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+        } else {
+            return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+        }
     }
 
     

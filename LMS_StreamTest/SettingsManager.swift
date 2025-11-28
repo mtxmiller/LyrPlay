@@ -18,6 +18,7 @@ class SettingsManager: ObservableObject {
     @Published var flacBufferSeconds: Int = 15  // FLAC playback buffer duration (was 20s hardcoded)
     @Published var networkBufferKB: Int = 512   // Network buffer size in KB (was 512KB hardcoded)
     @Published var isConfigured: Bool = false
+    @Published var iOSPlayerFocus: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
     @Published var shouldReloadWebView: Bool = false
     @Published var backupServerHost: String = ""
@@ -124,6 +125,7 @@ class SettingsManager: ObservableObject {
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
+        static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -198,6 +200,7 @@ class SettingsManager: ObservableObject {
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
+        iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
 
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
@@ -227,6 +230,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
+        UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
 
         UserDefaults.standard.synchronize()
         
