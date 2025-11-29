@@ -302,12 +302,16 @@ class AudioStreamDecoder {
         currentVolume = clampedVolume
 
         guard pushStream != 0 else {
+            #if DEBUG
             os_log(.debug, log: logger, "🔊 Volume stored (no stream): %.2f", clampedVolume)
+            #endif
             return
         }
 
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
+        #if DEBUG
         os_log(.debug, log: logger, "🔊 Volume set: %.2f", clampedVolume)
+        #endif
     }
 
     /// Get current volume level
@@ -726,6 +730,7 @@ class AudioStreamDecoder {
                 let queuedAmount = Int(pushed)  // Return value from StreamPutData
                 let totalBuffered = queuedAmount + Int(playbackBuffered)
 
+                #if DEBUG
                 // Log buffer stats every ~2MB pushed (works with any chunk size)
                 let bytesSinceLastLog = self.totalBytesPushed - self.lastBufferDiagnosticBytes
                 if bytesSinceLastLog >= 2_000_000 {  // Every ~2MB
@@ -734,6 +739,7 @@ class AudioStreamDecoder {
                            Double(totalBuffered) / 1_048_576)
                     self.lastBufferDiagnosticBytes = self.totalBytesPushed
                 }
+                #endif
 
                 // SOFT THROTTLE: Slow down decoder when queue gets large
                 // Hard limit (150 MB) is enforced by BASS_ATTRIB_PUSH_LIMIT
@@ -1159,9 +1165,11 @@ class AudioStreamDecoder {
         // BASS_POS_DECODE would give decode position (ahead due to buffering)
         let playbackBytes = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
 
+        #if DEBUG
         os_log(.info, log: logger, "📊 POS: BASS playback=%llu trackStart=%llu prevStart=%llu boundary=%{public}s",
                playbackBytes, trackStartPosition, previousTrackStartPosition,
                trackBoundaryPosition.map { String($0) } ?? "none")
+        #endif
 
         // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
         // When new track is queued, trackStartPosition is updated to the boundary position
@@ -1180,10 +1188,11 @@ class AudioStreamDecoder {
             let trackBytes = playbackBytes - previousTrackStartPosition
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
-        os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f", playbackBytes, boundaryPos, seconds)
-        let trackPosition = seconds + trackStartTimeOffset
-        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (before boundary mode, offset: %.2f)", trackPosition, trackStartTimeOffset)
-        return max(0, trackPosition)
+            let trackPosition = seconds + trackStartTimeOffset
+            #if DEBUG
+            os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f (offset: %.2f)", playbackBytes, boundaryPos, trackPosition, trackStartTimeOffset)
+            #endif
+            return max(0, trackPosition)
         }
 
         // After boundary: Calculate position within NEW track (like squeezelite: position - track_start)
@@ -1202,7 +1211,6 @@ class AudioStreamDecoder {
         let seconds = Double(trackBytes) / Double(bytesPerSecond)
 
         let trackPosition = seconds + trackStartTimeOffset
-        os_log(.info, log: logger, "📊 RETURNING POSITION: %.2f seconds (after boundary / normal mode, offset: %.2f)", trackPosition, trackStartTimeOffset)
         return max(0, trackPosition)  // Ensure non-negative
     }
 
