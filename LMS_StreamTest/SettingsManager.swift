@@ -18,6 +18,7 @@ class SettingsManager: ObservableObject {
     @Published var flacBufferSeconds: Int = 15  // FLAC playback buffer duration (was 20s hardcoded)
     @Published var networkBufferKB: Int = 512   // Network buffer size in KB (was 512KB hardcoded)
     @Published var isConfigured: Bool = false
+    @Published var iOSPlayerFocus: Bool = false
     @Published var showFallbackSettingsButton: Bool = true
     @Published var shouldReloadWebView: Bool = false
     @Published var backupServerHost: String = ""
@@ -27,7 +28,8 @@ class SettingsManager: ObservableObject {
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = .compressed
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
-
+    @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
+    @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
@@ -56,10 +58,11 @@ class SettingsManager: ObservableObject {
         case flac = 3
         case aacPreferred = 4
         case wavSeekable = 5  // FLAC→WAV transcode for seeking support
+        case custom = 6       // User-defined format codes
 
         // Show all supported formats to users
         static var allCases: [AudioFormat] {
-            return [.compressed, .aacPreferred, .oggVorbis, .opus, .flac, .wavSeekable]
+            return [.compressed, .aacPreferred, .oggVorbis, .opus, .flac, .wavSeekable, .custom]
         }
 
         var displayName: String {
@@ -70,6 +73,7 @@ class SettingsManager: ObservableObject {
             case .oggVorbis: return "High Quality (OGG Vorbis)"
             case .opus: return "Premium Quality (Opus)"
             case .flac: return "Lossless (FLAC)"
+            case .custom: return "Custom Format Codes"
             }
         }
 
@@ -77,10 +81,11 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Compressed formats: mp3, aac"
             case .aacPreferred: return "Compressed formats: aac, mp3"
-            case .wavSeekable: return "FLAC→WAV transcode with seeking: wav, flc,mp3"
-            case .oggVorbis: return "High quality: ogg, mp3, aac"
-            case .opus: return "Premium quality: ops, ogg, mp3, aac"
+            case .wavSeekable: return "FLAC→WAV transcode with seeking: wav, flc, ops, ogg, mp3"
+            case .oggVorbis: return "High quality: ogg, flac, mp3, aac"
+            case .opus: return "Premium quality: ops, ogg, flac, mp3, aac"
             case .flac: return "Lossless: flc, ops, ogg, alc, aac, mp3"
+            case .custom: return "User-defined format codes"
             }
         }
 
@@ -88,10 +93,11 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "mp3,aac"
             case .aacPreferred: return "aac,mp3"
-            case .wavSeekable: return "wav,flc,mp3"
-            case .oggVorbis: return "ogg,mp3,aac"
-            case .opus: return "ops,ogg,mp3,aac"
+            case .wavSeekable: return "wav,flc,ops,ogg,mp3"
+            case .oggVorbis: return "ogg,flc,mp3,aac"
+            case .opus: return "ops,ogg,flc,mp3,aac"
             case .flac: return "flc,ops,ogg,alc,aac,mp3"
+            case .custom: return ""  // Will use customFormatCodes instead
             }
         }
     }
@@ -117,6 +123,9 @@ class SettingsManager: ObservableObject {
         static let currentActiveServer = "CurrentActiveServer"
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
+        static let maxSampleRate = "MaxSampleRate"
+        static let customFormatCodes = "CustomFormatCodes"
+        static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -144,11 +153,23 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - Dynamic Capabilities String
+
+    /// The base capabilities (everything except format codes)
+    private var baseCapabilities: String {
+        return "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=\(maxSampleRate)"
+    }
+
+    /// The format codes portion of capabilities (e.g., "flc,wav,mp3")
+    var activeFormatCodes: String {
+        if audioFormat == .custom && !customFormatCodes.isEmpty {
+            return customFormatCodes
+        }
+        return audioFormat.capabilities.isEmpty ? "mp3,aac" : audioFormat.capabilities
+    }
+
+    /// The full capabilities string sent to the server
     var capabilitiesString: String {
-        let baseCapabilities = "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=192000"
-        // CBass supports FLAC and Opus natively over HTTP streaming
-        let formats = audioFormat.capabilities
-        return "\(baseCapabilities),\(formats)"
+        return "\(baseCapabilities),\(activeFormatCodes)"
     }
     
     // MARK: - Settings Persistence
@@ -177,6 +198,9 @@ class SettingsManager: ObservableObject {
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
         audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .compressed
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
+        maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
+        customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
+        iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
 
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
@@ -204,6 +228,9 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
+        UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
+        UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
+        UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
 
         UserDefaults.standard.synchronize()
         

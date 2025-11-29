@@ -356,6 +356,7 @@ class SlimProtoCommandHandler: ObservableObject {
         // Per squeezelite: 0/1=direct stream (gapless), 2/3=HTTP stream (traditional)
         let isDirectStream = (autostart < Character("2").asciiValue!)
 
+        // Route streams based on autostart mode - all formats use same logic
         if isDirectStream {
             // Direct stream - use push stream for gapless (autostart 0 or 1)
             os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")

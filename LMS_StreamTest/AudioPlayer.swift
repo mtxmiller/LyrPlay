@@ -2,6 +2,7 @@
 // Updated to use BASS with plugin loading for FLAC/Opus support
 // BASS API exposed via bridging header (LMS_StreamTest-Bridging-Header.h)
 import Foundation
+import AVFoundation
 import MediaPlayer
 import os.log
 
@@ -34,8 +35,22 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Output Device Info
+    struct OutputDeviceInfo {
+        let deviceName: String
+        let deviceType: String
+        let outputSampleRate: Int
+        let outputChannels: Int
+        let latency: Int  // milliseconds
+
+        var displayString: String {
+            return "\(deviceName) • \(outputSampleRate/1000)kHz • \(latency)ms latency"
+        }
+    }
+
     // MARK: - Published Properties
     @Published var currentStreamInfo: StreamInfo?
+    @Published var currentOutputInfo: OutputDeviceInfo?
 
     // MARK: - Core Components (MINIMAL CBASS)
     private var currentStream: HSTREAM = 0
@@ -79,7 +94,27 @@ class AudioPlayer: NSObject, ObservableObject {
     override init() {
         super.init()
         setupCBass()
+        setupRouteChangeObserver()
         os_log(.info, log: logger, "AudioPlayer initialized with CBass")
+    }
+
+    private func setupRouteChangeObserver() {
+        // Observe audio route changes to update output device info
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        // Update output device info when route changes (AirPods, CarPlay, USB DAC, etc.)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.updateOutputDeviceInfo()
+            os_log(.info, log: self.logger, "🔀 Route changed - output device info updated")
+        }
     }
     
     // MARK: - Core Setup (MINIMAL CBASS)
@@ -87,11 +122,12 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS handles iOS audio session automatically (default behavior)
         // No BASS_CONFIG_IOS_SESSION configuration needed - BASS manages everything
 
-        // Initialize BASS at maximum quality (192kHz) with BASS_DEVICE_FREQ flag
-        // The hardware will negotiate down to its actual capability
-        // This ensures external DACs get their full sample rate capability
-        let targetRate: DWORD = 192000  // Request 192kHz - hardware will use its max capability
-        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
+        // Initialize BASS without BASS_DEVICE_FREQ flag - let iOS auto-detect sample rate
+        // Per BASS docs: "sample format has no effect on iOS - device's native format is automatically used"
+        // iOS will automatically switch to match the stream's sample rate for external DACs
+        // This enables bit-perfect playback at 96kHz, 192kHz, etc.
+        let targetRate: DWORD = 192000  // Ignored on iOS - device uses native format automatically
+        let result = BASS_Init(-1, targetRate, 0, nil, nil)  // No BASS_DEVICE_FREQ - let iOS handle it
 
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
@@ -148,9 +184,8 @@ class AudioPlayer: NSObject, ObservableObject {
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
 
         // Network buffer configuration - optimized for both LAN and mobile streaming
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
-        os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
-
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
+        //os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
         os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
     }
@@ -233,7 +268,7 @@ class AudioPlayer: NSObject, ObservableObject {
         if playResult != 0 {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
-            // Update stream info for UI display
+            // Update stream info for UI display (also updates output device info)
             updateStreamInfo()
 
             commandHandler?.handleStreamConnected()
@@ -439,6 +474,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         // Clear stream info when stream is cleaned up
         currentStreamInfo = nil
+        // Note: Keep output device info - it's still valid even without an active stream
     }
 
     // MARK: - Stream Info Retrieval
@@ -475,6 +511,9 @@ class AudioPlayer: NSObject, ObservableObject {
 
         currentStreamInfo = streamInfo
         os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
+
+        // Also update output device info when stream changes (sample rate may change)
+        updateOutputDeviceInfo()
     }
 
     private func formatNameFromCType(_ ctype: DWORD) -> String {
@@ -525,6 +564,78 @@ class AudioPlayer: NSObject, ObservableObject {
             return "AAC"
         default:
             return "Unknown (\(String(format: "0x%X", ctype)))"
+        }
+    }
+
+    // MARK: - Output Device Info Retrieval
+    public func updateOutputDeviceInfo() {
+        // Get current BASS device output information (sample rate, latency, etc.)
+        var info = BASS_INFO()
+        guard BASS_GetInfo(&info) != 0 else {
+            os_log(.error, log: logger, "❌ Failed to get BASS output info: %d", BASS_ErrorGetCode())
+            currentOutputInfo = nil
+            return
+        }
+
+        // On iOS, BASS uses the default device (-1) and routing is managed by iOS
+        // Query AVAudioSession for the actual device name and type
+        let audioSession = AVAudioSession.sharedInstance()
+        let currentRoute = audioSession.currentRoute
+
+        // Get the first output (primary audio route)
+        guard let output = currentRoute.outputs.first else {
+            os_log(.error, log: logger, "❌ No audio output route available")
+            currentOutputInfo = nil
+            return
+        }
+
+        // Extract device name and type from iOS audio route
+        let deviceName = output.portName  // e.g., "AirPods Pro", "Speaker", "USB Audio Device"
+        let deviceType = deviceTypeFromPortType(output.portType)
+
+        // Create output device info with BASS specs + iOS device info
+        let outputInfo = OutputDeviceInfo(
+            deviceName: deviceName,
+            deviceType: deviceType,
+            outputSampleRate: Int(info.freq),
+            outputChannels: Int(info.speakers),
+            latency: Int(info.latency)
+        )
+
+        currentOutputInfo = outputInfo
+        os_log(.info, log: logger, "🔊 Output device: %{public}s (port: %{public}s)",
+               outputInfo.displayString, output.portType.rawValue)
+    }
+
+    private func deviceTypeFromPortType(_ portType: AVAudioSession.Port) -> String {
+        // Map iOS AVAudioSession port types to human-readable device types
+        switch portType {
+        case .builtInSpeaker:
+            return "Built-in Speaker"
+        case .builtInReceiver:
+            return "Built-in Receiver"
+        case .headphones:
+            return "Headphones"
+        case .bluetoothA2DP:
+            return "Bluetooth Audio"
+        case .bluetoothLE:
+            return "Bluetooth LE"
+        case .bluetoothHFP:
+            return "Bluetooth Hands-Free"
+        case .carAudio:
+            return "CarPlay"
+        case .airPlay:
+            return "AirPlay"
+        case .HDMI:
+            return "HDMI"
+        case .usbAudio:
+            return "USB Audio"
+        case .lineOut:
+            return "Line Out"
+        case .headsetMic:
+            return "Headset"
+        default:
+            return "Audio Output"
         }
     }
     
@@ -735,6 +846,7 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Cleanup
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         cleanup()
 
         BASS_Free()

@@ -68,6 +68,9 @@ class AudioStreamDecoder {
     /// Track total bytes decoded and pushed (for debugging)
     private var totalBytesPushed: UInt64 = 0
 
+    /// Track bytes at last buffer diagnostic log (for throttling)
+    private var lastBufferDiagnosticBytes: UInt64 = 0
+
     /// Track boundary position in buffer (for gapless transitions)
     private var trackBoundaryPosition: UInt64?
 
@@ -116,6 +119,14 @@ class AudioStreamDecoder {
     /// Flag to mute the next stream creation (for silent app foreground recovery)
     /// When true, DSP gain is set to 0.001 immediately upon push stream playback start
     var muteNextStream: Bool = false
+
+    // MARK: - Volume and ReplayGain Support
+    /// Current volume level (0.0 to 1.0) - applied via BASS_ATTRIB_VOL
+    private var currentVolume: Float = 1.0
+
+    /// Current replay gain (linear multiplier) - applied via BASS_ATTRIB_VOLDSP
+    /// Server sends as 16.16 fixed point, converted to float (e.g., 0.501 for -6dB)
+    private var currentReplayGain: Float = 1.0
 
     /// Registered sync handles (for cleanup)
     private var trackBoundarySyncs: [HSYNC] = []
@@ -168,13 +179,19 @@ class AudioStreamDecoder {
 
         // CRITICAL: Set hard limit on queue buffer to prevent runaway memory usage
         // This prevents decoding entire podcasts (60min = 1.2GB!) into RAM
-        // 150 MB = room for ~2 full songs in queue for gapless playback
-        let hardLimitBytes: Float = 150_000_000  // 150 MB
+        // 600 MB = room for large FLAC files (500MB+) and gapless playback queue
+        let hardLimitBytes: Float = 600_000_000  // 600 MB
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_PUSH_LIMIT), hardLimitBytes)
         os_log(.info, log: logger, "🔒 Set push stream queue limit: %.0f MB", hardLimitBytes / 1_048_576)
 
         // Set up buffer stall detection
         setupSyncCallbacks()
+
+        // Apply stored volume setting (server may have sent audg before stream existed)
+        if currentVolume != 1.0 {
+            BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), currentVolume)
+            os_log(.info, log: logger, "🔊 Applied stored volume to new stream: %.2f", currentVolume)
+        }
 
         os_log(.info, log: logger, "✅ Push stream created: handle=%d", pushStream)
     }
@@ -276,6 +293,78 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
     }
 
+    // MARK: - Volume Control (Server UI Volume)
+
+    /// Set volume level from server audg command
+    /// This controls the playback volume (BASS_ATTRIB_VOL)
+    func setVolume(_ volume: Float) {
+        let clampedVolume = max(0.0, min(1.0, volume))
+        currentVolume = clampedVolume
+
+        guard pushStream != 0 else {
+            os_log(.debug, log: logger, "🔊 Volume stored (no stream): %.2f", clampedVolume)
+            return
+        }
+
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
+        os_log(.debug, log: logger, "🔊 Volume set: %.2f", clampedVolume)
+    }
+
+    /// Get current volume level
+    func getVolume() -> Float {
+        guard pushStream != 0 else { return currentVolume }
+
+        var volume: Float = 1.0
+        BASS_ChannelGetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), &volume)
+        return volume
+    }
+
+    // MARK: - ReplayGain Support
+
+    /// Apply replay gain from server STRM command
+    /// Uses BASS_ATTRIB_VOLDSP for sample-level gain (like squeezelite)
+    /// - Parameter gain: Linear gain multiplier (e.g., 0.501 for -6dB, 1.412 for +3dB)
+    func setReplayGain(_ gain: Float) {
+        // Clamp to prevent distortion (max 2x = +6dB boost)
+        let clampedGain = min(max(gain, 0.0), 2.0)
+        currentReplayGain = clampedGain
+
+        guard pushStream != 0 else {
+            os_log(.info, log: logger, "🎚️ ReplayGain stored (no stream): %.4f", clampedGain)
+            return
+        }
+
+        // Don't apply if we're in silent recovery mode (muteNextStream)
+        if muteNextStream {
+            os_log(.info, log: logger, "🎚️ ReplayGain stored (muted for recovery): %.4f", clampedGain)
+            return
+        }
+
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), clampedGain)
+        os_log(.info, log: logger, "🎚️ ReplayGain applied: %.4f", clampedGain)
+    }
+
+    /// Get current replay gain value
+    func getReplayGain() -> Float {
+        return currentReplayGain
+    }
+
+    /// Apply stored volume and replay gain to current stream
+    /// Called after stream creation or when restoring from muted state
+    private func applyStoredGainSettings() {
+        guard pushStream != 0 else { return }
+
+        // Apply volume
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), currentVolume)
+
+        // Apply replay gain (only if not in silent recovery mode)
+        if !muteNextStream && currentReplayGain != 1.0 {
+            BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), currentReplayGain)
+        }
+
+        os_log(.info, log: logger, "🔊 Applied stored settings: volume=%.2f, replayGain=%.4f", currentVolume, currentReplayGain)
+    }
+
     // MARK: - Decoder Stream Management
 
     /// Start decoding from HTTP URL (like squeezelite's decoder thread)
@@ -284,8 +373,17 @@ class AudioStreamDecoder {
     ///   - format: Audio format (flc, mp3, ops, etc.)
     ///   - isNewTrack: Whether this is a new track (for gapless boundary marking)
     ///   - startTime: Seconds into track where this stream starts (for server-side seeks)
-    func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0) {
-        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f)", format, url, startTime)
+    ///   - replayGain: Linear gain multiplier from server (1.0 = no change)
+    func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0, replayGain: Float = 1.0) {
+        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
+
+        // Apply replay gain for this track (stored and applied when not in silent recovery mode)
+        if replayGain > 0.0 && replayGain != 1.0 {
+            setReplayGain(replayGain)
+        } else {
+            // Reset to default (no gain adjustment)
+            currentReplayGain = 1.0
+        }
 
         // Store track start time offset for server-side seeks
         trackStartTimeOffset = startTime
@@ -471,6 +569,7 @@ class AudioStreamDecoder {
             previousTrackStartPosition = 0
             trackBoundaryPosition = nil  // Clear old gapless boundary from previous track
             totalBytesPushed = 0  // Reset write position
+            lastBufferDiagnosticBytes = 0  // Reset buffer diagnostic counter
             os_log(.info, log: logger, "✅ Buffer flushed and restarted - BASS auto-handled device switching")
         } else {
             let error = BASS_ErrorGetCode()
@@ -627,11 +726,13 @@ class AudioStreamDecoder {
                 let queuedAmount = Int(pushed)  // Return value from StreamPutData
                 let totalBuffered = queuedAmount + Int(playbackBuffered)
 
-                // Log every 100 chunks to avoid spam (4KB chunks = log every ~400KB)
-                if self.totalBytesPushed % 409600 == 0 {  // Every ~400KB
+                // Log buffer stats every ~2MB pushed (works with any chunk size)
+                let bytesSinceLastLog = self.totalBytesPushed - self.lastBufferDiagnosticBytes
+                if bytesSinceLastLog >= 2_000_000 {  // Every ~2MB
                     os_log(.info, log: self.logger, "📊 BUFFER DIAGNOSTIC: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB total)",
                            playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024,
                            Double(totalBuffered) / 1_048_576)
+                    self.lastBufferDiagnosticBytes = self.totalBytesPushed
                 }
 
                 // SOFT THROTTLE: Slow down decoder when queue gets large
@@ -1022,6 +1123,7 @@ class AudioStreamDecoder {
         trackStartPosition = 0
         previousTrackStartPosition = 0
         totalBytesPushed = 0
+        lastBufferDiagnosticBytes = 0
 
         // Start decode loop with existing decoder
         isDecoding = true

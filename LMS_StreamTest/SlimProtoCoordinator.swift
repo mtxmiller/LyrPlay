@@ -420,16 +420,8 @@ class SlimProtoCoordinator: ObservableObject {
             }
         }
 
-        // CRITICAL: Playlist jump with timeOffset doesn't work with FLAC passthrough (push streams)
-        // Direct streams can't seek mid-file, server would need to restart from beginning anyway
-        // So for FLAC, just send simple play/pause command and accept starting from track beginning
-        if settings.audioFormat == .flac {
-            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 FLAC passthrough mode - playlist jump disabled (direct streams can't seek)")
-            os_log(.error, log: logger, "[APP-RECOVERY] 🎵 Sending simple %{public}s command - track will start from beginning", shouldPlay ? "play" : "pause")
-            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
-            isRecoveryInProgress = false
-            return
-        }
+        // NOTE: FLAC restriction removed - FLAC now uses legacy URL streaming (not push streams)
+        // which supports seeking via server-side transcoding. Playlist jump recovery works for all formats.
 
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
@@ -948,8 +940,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         startPlaybackHeartbeat()
 
         // Get initial metadata for new stream
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.fetchCurrentTrackMetadata()
+        // CRITICAL: For gapless transitions, defer metadata until track boundary!
+        // sendTrackStarted() will call fetchCurrentTrackMetadata() at the right time.
+        // Otherwise we show next track's info while old track still plays!
+        if !isGapless {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.fetchCurrentTrackMetadata()
+            }
+        } else {
+            os_log(.info, log: logger, "🎵 Gapless - deferring metadata fetch until track boundary (sendTrackStarted)")
         }
 
         // Fetch server time after connection stabilizes
@@ -1031,12 +1030,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
         os_log(.error, log: logger, "📊 This means: All track data decoded, boundary marked, audio still playing from buffer")
 
+        // CRITICAL: Mark gapless flag BEFORE sending STMd to prevent race condition!
+        // If server responds very quickly (local network), the new STRM could arrive
+        // before the next line executes, causing isGapless to be false when it should be true
+        expectingGaplessTransition = true
+
         // Like squeezelite: decode.state = DECODE_COMPLETE → wake_controller() → sendSTAT("STMd", 0)
         client.sendStatus("STMd")
-
-        // Mark that we're expecting a gapless transition
-        // Next STRM command should be treated as gapless (don't flush buffer)
-        expectingGaplessTransition = true
 
         // Server will respond with new STRM command for next track
         // With autostart=2 or 3 (wait for CONT before starting decode)
@@ -1231,9 +1231,9 @@ extension SlimProtoCoordinator {
         
         // Fetch immediately
         fetchServerTime()
-        
-        // Start periodic timer (every 8 seconds)
-        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+
+        // Start periodic timer (every 3 seconds for responsive lock screen)
+        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.fetchServerTime()
         }
         

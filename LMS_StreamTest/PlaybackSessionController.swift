@@ -147,9 +147,16 @@ final class PlaybackSessionController {
         // CRITICAL: iOS requires an ACTIVE audio session to show lock screen controls
         // Activate session ONCE during setup, then BASS manages everything after
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
-            os_log(.info, log: logger, "🔒 Audio session activated for lock screen controls setup")
+            let session = AVAudioSession.sharedInstance()
+
+            // Let iOS automatically switch sample rates for external DACs
+            // setPreferredSampleRate() is broken on iOS 26 and prevents auto-switching
+            // iOS natively supports bit-perfect output with automatic rate matching
+            // try session.setPreferredSampleRate(192000)  // REMOVED - broken API
+
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true, options: [])
+            os_log(.info, log: logger, "🔒 Audio session activated (iOS auto sample rate) for lock screen controls setup")
         } catch {
             os_log(.error, log: logger, "❌ Failed to activate session for lock screen: %{public}s", error.localizedDescription)
         }
