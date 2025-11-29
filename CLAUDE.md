@@ -409,12 +409,23 @@ The codebase follows modern iOS development practices with comprehensive error h
 
 ## Known Limitations
 
+### BASSFLAC Threading Fix (November 2025) ✅
+- **Problem**: BASSFLAC was treating `max_framesize=0` in FLAC STREAMINFO headers (common in LMS transcoded streams) as a literal limit instead of "unknown", causing streams to abort after 5-6 seconds
+- **Solution**: Updated to BASSFLAC 2.4.17.1 (Nov 27, 2025) with dedicated threading for asynchronous frame decoding
+- **Fix Details**: Ian @ un4seen moved FLAC decoding to a dedicated thread, allowing the decoder to block while waiting for data without freezing the calling thread
+- **Benefits**:
+  - Resolves early stream termination with transcoded FLAC
+  - Improved multithreading performance
+  - Better handling of push stream data buffering
+- **Status**: **IMPLEMENTED** - New bassflac.xcframework integrated (307K vs 290K previous)
+- **Forum Thread**: https://www.un4seen.com/forum/?topic=20817.0
+
 ### FLAC Seeking with Push Streams ⚠️
-- **Issue**: FLAC seeking currently non-functional with BASS push stream architecture
+- **Issue**: FLAC seeking currently non-functional with BASS push stream architecture (may be resolved with threading fix above - requires testing)
 - **Impact**: Users cannot seek/scrub within FLAC tracks (play/pause/skip still work)
 - **Workaround**: Server-side transcode to MP3/AAC enables seeking (with quality tradeoff)
-- **Status**: Under active investigation
-- **Affects**: Only FLAC format; MP3, AAC, Opus, OGG seeking works normally
+- **Testing Required**: New BASSFLAC threading fix may resolve seeking issues
+- **Affects**: Only FLAC format; MP3, AAC, Opus, OGG, WAV seeking works normally
 
 ### CBass Migration Benefits ✅
 - **Problem**: StreamingKit limitations with FLAC seeking and multi-format support
@@ -454,6 +465,7 @@ These repositories provide definitive reference for:
 ## Recent Updates and Improvements
 
 ### Version 1.7 - External DAC & Format Enhancement Release (December 2025) ✅
+- **BASSFLAC Threading Fix**: Updated to BASSFLAC 2.4.17.1 with asynchronous frame decoding to fix `max_framesize=0` early termination issues in transcoded FLAC streams
 - **External DAC Support**: Output device metrics display with real-time sample rate monitoring for hardware audio interfaces
 - **WAV Format Support**: Lossless WAV playback with full seeking capability (Qobuz compatibility)
 - **FLAC Auto-Routing**: Automatic legacy URL streaming mode for FLAC files (BASSFLAC decode workaround)
