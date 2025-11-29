@@ -32,13 +32,17 @@ class AudioSessionManager: ObservableObject {
     init() {
         setupBackgroundObservers()
         setupInterruptionManager()
+        #if DEBUG
         os_log(.info, log: logger, "Enhanced AudioSessionManager initialized")
+        #endif
     }
     
     // MARK: - Interruption Manager Setup
     private func setupInterruptionManager() {
         interruptionManager = InterruptionManager()
+        #if DEBUG
         os_log(.info, log: logger, "✅ Interruption manager stub initialized")
+        #endif
     }
 
     // MARK: - Background Observers
@@ -56,8 +60,10 @@ class AudioSessionManager: ObservableObject {
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
-        
+
+        #if DEBUG
         os_log(.info, log: logger, "✅ Background observers configured")
+        #endif
     }
     
     @objc private func appDidEnterBackground() {
@@ -136,7 +142,9 @@ class AudioSessionManager: ObservableObject {
     deinit {
         NotificationCenter.default.removeObserver(self)
         stopBackgroundTask()
+        #if DEBUG
         os_log(.info, log: logger, "Enhanced AudioSessionManager deinitialized")
+        #endif
     }
 }
 

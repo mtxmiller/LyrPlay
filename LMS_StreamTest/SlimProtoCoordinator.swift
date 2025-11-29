@@ -56,7 +56,9 @@ class SlimProtoCoordinator: ObservableObject {
         setupAudioPlayerIntegration()
         setupBackgroundObservers()
 
+        #if DEBUG
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
+        #endif
     }
     
     // MARK: - Setup
@@ -109,7 +111,9 @@ class SlimProtoCoordinator: ObservableObject {
             object: nil
         )
 
+        #if DEBUG
         os_log(.info, log: logger, "✅ Background observers configured for duration-based recovery")
+        #endif
     }
 
     @objc private func handleAppDidEnterBackground() {

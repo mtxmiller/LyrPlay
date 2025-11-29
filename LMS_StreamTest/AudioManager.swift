@@ -55,7 +55,9 @@ class AudioManager: NSObject, ObservableObject {
             self?.slimClient
         }
 
+        #if DEBUG
         os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
+        #endif
     }
     
     // MARK: - Component Integration
@@ -71,7 +73,9 @@ class AudioManager: NSObject, ObservableObject {
         streamDecoder.delegate = self
         streamDecoder.audioPlayer = audioPlayer  // Set reference for stream info updates
 
+        #if DEBUG
         os_log(.info, log: logger, "✅ Component delegation configured with interruption handling and gapless decoder")
+        #endif
     }
     
     func setCommandHandler(_ handler: SlimProtoCommandHandler) {
@@ -367,7 +371,9 @@ class AudioManager: NSObject, ObservableObject {
 
     // MARK: - Cleanup
     deinit {
+        #if DEBUG
         os_log(.info, log: logger, "Refactored AudioManager deinitialized")
+        #endif
     }
 }
 

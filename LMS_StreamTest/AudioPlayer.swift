@@ -95,7 +95,9 @@ class AudioPlayer: NSObject, ObservableObject {
         super.init()
         setupCBass()
         setupRouteChangeObserver()
+        #if DEBUG
         os_log(.info, log: logger, "AudioPlayer initialized with CBass")
+        #endif
     }
 
     private func setupRouteChangeObserver() {
@@ -186,8 +188,10 @@ class AudioPlayer: NSObject, ObservableObject {
         // Network buffer configuration - optimized for both LAN and mobile streaming
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
         //os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
+        #if DEBUG
         os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
+        #endif
     }
 
     // MARK: - Stream Playback (MINIMAL CBASS)
@@ -799,7 +803,9 @@ class AudioPlayer: NSObject, ObservableObject {
             //BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(50))    // Fast updates for stability
             //BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT), DWORD(120000))  // 2min timeout
             
+            #if DEBUG
             os_log(.info, log: logger, "🎵 FLAC configured with user settings: %ds buffer, %ds network", settings.flacBufferSeconds, settings.networkBufferKB)
+            #endif
             
         case "AAC", "MP3", "OGG":
             // Compressed formats that work well - smaller buffer for responsiveness
@@ -818,7 +824,9 @@ class AudioPlayer: NSObject, ObservableObject {
             //BASS_SetConfig(DWORD(BASS_CONFIG_UPDATEPERIOD), DWORD(200))    // Moderate update rate
             
             
+            #if DEBUG
             os_log(.info, log: logger, "🎵 Opus configured with reliable buffering: 5s playback, 120s network")
+            #endif
             
         default:
             // Use defaults from setupCBass() - 2s buffer, 64KB network

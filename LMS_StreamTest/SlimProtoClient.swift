@@ -69,7 +69,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         super.init()
         loadSettings()
         setupSocket()
+        #if DEBUG
         os_log(.info, log: logger, "SlimProtoClient initialized - Host: %{public}s:%d", host, port)
+        #endif
     }
     
     // MARK: - Settings Integration
@@ -88,7 +90,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     // MARK: - Socket Setup
     private func setupSocket() {
         socket = GCDAsyncSocket(delegate: self, delegateQueue: DispatchQueue(label: "com.lmsstream.socket"))
+        #if DEBUG
         os_log(.info, log: logger, "Socket initialized")
+        #endif
     }
     
     // MARK: - Connection Management

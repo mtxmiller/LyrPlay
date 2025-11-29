@@ -148,7 +148,9 @@ class AudioStreamDecoder {
 
     init() {
         decodeQueue = DispatchQueue(label: "com.lyrplay.decoder", qos: .userInitiated)
+        #if DEBUG
         os_log(.info, log: logger, "✅ AudioStreamDecoder initialized")
+        #endif
     }
 
     // MARK: - Push Stream Management
@@ -1229,7 +1231,9 @@ class AudioStreamDecoder {
 
     deinit {
         cleanup()
+        #if DEBUG
         os_log(.info, log: logger, "AudioStreamDecoder deinitialized")
+        #endif
     }
 }
 
