@@ -159,75 +159,31 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                 }
 
-                // Current Playback Info Section (INPUT)
-                if let streamInfo = audioPlayer.currentStreamInfo {
-                    Section(header: Text("Stream Information (INPUT)")) {
-                        VStack(alignment: .leading, spacing: 8) {
+                // Audio Stream & Output Info (Combined)
+                if let streamInfo = audioPlayer.currentStreamInfo,
+                   let outputInfo = audioPlayer.currentOutputInfo {
+                    Section(header: Text("Audio Stream & Output")) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Stream info line
                             HStack {
                                 Image(systemName: "waveform")
                                     .foregroundColor(.green)
                                     .frame(width: 20)
 
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("File/Stream Format")
-                                        .font(.body)
-                                        .fontWeight(.medium)
-                                    Text(streamInfo.displayString)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
+                                Text("\(streamInfo.format) • \(streamInfo.sampleRate/1000)kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrate > 0 ? " • \(Int(streamInfo.bitrate)) kbps" : "")")
+                                    .font(.subheadline)
+                                    .foregroundColor(.primary)
                             }
 
-                            // Detailed breakdown
-                            HStack(spacing: 16) {
-                                DetailItem(label: "Format", value: streamInfo.format)
-                                DetailItem(label: "Sample Rate", value: "\(streamInfo.sampleRate/1000)kHz")
-                            }
-
-                            HStack(spacing: 16) {
-                                DetailItem(label: "Bit Depth", value: "\(streamInfo.bitDepth)-bit")
-                                DetailItem(label: "Channels", value: streamInfo.channels == 1 ? "Mono" : streamInfo.channels == 2 ? "Stereo" : "\(streamInfo.channels)ch")
-                            }
-
-                            if streamInfo.bitrate > 0 {
-                                HStack(spacing: 16) {
-                                    DetailItem(label: "Bitrate", value: "\(Int(streamInfo.bitrate)) kbps")
-                                    Spacer()
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-
-                // Output Device Info Section (OUTPUT)
-                if let outputInfo = audioPlayer.currentOutputInfo {
-                    Section(header: Text("Output Device (HARDWARE)")) {
-                        VStack(alignment: .leading, spacing: 8) {
+                            // Output device line
                             HStack {
                                 Image(systemName: "speaker.wave.3")
                                     .foregroundColor(.blue)
                                     .frame(width: 20)
 
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(outputInfo.deviceName)
-                                        .font(.body)
-                                        .fontWeight(.medium)
-                                    Text(outputInfo.deviceType)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            // Detailed breakdown
-                            HStack(spacing: 16) {
-                                DetailItem(label: "Output Rate", value: "\(outputInfo.outputSampleRate/1000)kHz")
-                                DetailItem(label: "Channels", value: "\(outputInfo.outputChannels)ch")
-                            }
-
-                            HStack(spacing: 16) {
-                                DetailItem(label: "Latency", value: "\(outputInfo.latency)ms")
-                                Spacer()
+                                Text("\(outputInfo.deviceName) → \(outputInfo.outputSampleRate/1000)kHz")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
                             }
                         }
                         .padding(.vertical, 4)

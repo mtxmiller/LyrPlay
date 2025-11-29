@@ -114,6 +114,7 @@ AUDIO_SESSION_CLEANUP_GUIDE2.md
 LOG_*.md
 CARPLAY_LOG.md
 ~FLAC.pm.backup
+Frameworks/bassflac.xcframework.backup_20251128/
 
 # Editor/IDE settings
 .grok/settings.json
