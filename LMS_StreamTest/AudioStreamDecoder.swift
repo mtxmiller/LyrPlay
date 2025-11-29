@@ -89,6 +89,9 @@ class AudioStreamDecoder {
     /// Last time we logged "buffer empty" message (for rate limiting)
     private var lastBufferEmptyLogTime: Date = .distantPast
 
+    /// Last time we logged "before boundary" position (for rate limiting to prevent duplicate logs)
+    private var lastBeforeBoundaryLogTime: Date = .distantPast
+
     /// Current track start position (for accurate position tracking)
     private var trackStartPosition: UInt64 = 0
 
@@ -732,16 +735,17 @@ class AudioStreamDecoder {
                 let queuedAmount = Int(pushed)  // Return value from StreamPutData
                 let totalBuffered = queuedAmount + Int(playbackBuffered)
 
-                #if DEBUG
-                // Log buffer stats every ~2MB pushed (works with any chunk size)
-                let bytesSinceLastLog = self.totalBytesPushed - self.lastBufferDiagnosticBytes
-                if bytesSinceLastLog >= 2_000_000 {  // Every ~2MB
-                    os_log(.info, log: self.logger, "📊 BUFFER DIAGNOSTIC: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB total)",
-                           playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024,
-                           Double(totalBuffered) / 1_048_576)
-                    self.lastBufferDiagnosticBytes = self.totalBytesPushed
-                }
-                #endif
+                // Too spammy - uncomment only for debugging buffer levels
+                // #if DEBUG
+                // // Log buffer stats every ~2MB pushed (works with any chunk size)
+                // let bytesSinceLastLog = self.totalBytesPushed - self.lastBufferDiagnosticBytes
+                // if bytesSinceLastLog >= 2_000_000 {  // Every ~2MB
+                //     os_log(.info, log: self.logger, "📊 BUFFER DIAGNOSTIC: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB total)",
+                //            playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024,
+                //            Double(totalBuffered) / 1_048_576)
+                //     self.lastBufferDiagnosticBytes = self.totalBytesPushed
+                // }
+                // #endif
 
                 // SOFT THROTTLE: Slow down decoder when queue gets large
                 // Hard limit (150 MB) is enforced by BASS_ATTRIB_PUSH_LIMIT
@@ -1167,11 +1171,12 @@ class AudioStreamDecoder {
         // BASS_POS_DECODE would give decode position (ahead due to buffering)
         let playbackBytes = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
 
-        #if DEBUG
-        os_log(.info, log: logger, "📊 POS: BASS playback=%llu trackStart=%llu prevStart=%llu boundary=%{public}s",
-               playbackBytes, trackStartPosition, previousTrackStartPosition,
-               trackBoundaryPosition.map { String($0) } ?? "none")
-        #endif
+        // Too spammy - uncomment only for debugging position calculations
+        // #if DEBUG
+        // os_log(.info, log: logger, "📊 POS: BASS playback=%llu trackStart=%llu prevStart=%llu boundary=%{public}s",
+        //        playbackBytes, trackStartPosition, previousTrackStartPosition,
+        //        trackBoundaryPosition.map { String($0) } ?? "none")
+        // #endif
 
         // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
         // When new track is queued, trackStartPosition is updated to the boundary position
@@ -1191,9 +1196,15 @@ class AudioStreamDecoder {
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
             let trackPosition = seconds + trackStartTimeOffset
-            #if DEBUG
-            os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f (offset: %.2f)", playbackBytes, boundaryPos, trackPosition, trackStartTimeOffset)
-            #endif
+
+            // Log "before boundary" position, but throttle to every 4 seconds to prevent duplicate spam
+            let now = Date()
+            if now.timeIntervalSince(lastBeforeBoundaryLogTime) >= 4.0 {
+                os_log(.info, log: logger, "⏳ Before boundary (at %llu, boundary at %llu) - reporting old track position: %.2f (offset: %.2f)",
+                       playbackBytes, boundaryPos, trackPosition, trackStartTimeOffset)
+                lastBeforeBoundaryLogTime = now
+            }
+
             return max(0, trackPosition)
         }
 

@@ -159,9 +159,9 @@ class SlimProtoCommandHandler: ObservableObject {
             let autostart = payload[1]
             let format = payload[2]
 
-            // DEBUG: Log autostart byte to understand server streaming mode choice
-            os_log(.debug, log: logger, "🔍 STRM autostart byte: %d (0x%02X) - '0'=%d '3'=%d",
-                   autostart, autostart, Character("0").asciiValue!, Character("3").asciiValue!)
+            // Too spammy - uncomment only for debugging STRM commands
+            // os_log(.debug, log: logger, "🔍 STRM autostart byte: %d (0x%02X) - '0'=%d '3'=%d",
+            //        autostart, autostart, Character("0").asciiValue!, Character("3").asciiValue!)
 
             // Extract replay_gain from bytes 14-17 (u32_t in 16.16 fixed point format)
             // Pack format: 'aaaaaaaCCCaCCCNnN' where the first N (4 bytes) is replay_gain at offset 14
@@ -492,10 +492,12 @@ class SlimProtoCommandHandler: ObservableObject {
 
         if isPausedByLockScreen {
             slimProtoClient?.sendStatus("STMp", serverTimestamp: serverTimestamp)
-            os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
+            // Too spammy - uncomment only for debugging status responses
+            // os_log(.info, log: logger, "📍 Responding to status request with PAUSE status")
         } else {
             slimProtoClient?.sendStatus("STMt", serverTimestamp: serverTimestamp)
-            os_log(.info, log: logger, "📍 Responding to status request with TIMER status")
+            // Too spammy - uncomment only for debugging status responses
+            // os_log(.info, log: logger, "📍 Responding to status request with TIMER status")
         }
     }
     

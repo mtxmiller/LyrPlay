@@ -41,8 +41,9 @@ class SlimProtoCoordinator: ObservableObject {
 
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
+    private var lastServerTimeFetchLog: Date?
 
-    
+
     // MARK: - Initialization
     init(audioManager: AudioManager) {
         self.audioManager = audioManager
@@ -1131,16 +1132,20 @@ extension SlimProtoCoordinator {
             isPlaying: isPlaying
         )
         
-        os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]", 
-               position, isPlaying ? "YES" : "NO")
+        // Too spammy - uncomment only for debugging server time sync
+        // os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]",
+        //        position, isPlaying ? "YES" : "NO")
     }
     
     /// Fetch actual server time via JSON-RPC (not audio player time)
     func fetchServerTime() {
         guard !settings.activeServerHost.isEmpty else {
+            os_log(.debug, log: logger, "⏱️ fetchServerTime: No active server host")
             return
         }
-        
+
+        // Too spammy - removed, throttled log added to parseServerTimeResponse instead
+
         let playerID = settings.playerMACAddress
         let jsonRPC = [
             "id": 1,
@@ -1178,12 +1183,21 @@ extension SlimProtoCoordinator {
     /// Parse JSON-RPC response to extract real server time
     private func parseServerTimeResponse(data: Data?, error: Error?) {
         guard let data = data, error == nil else {
+            if let error = error {
+                os_log(.error, log: logger, "⏱️ Server time fetch FAILED: %{public}s", error.localizedDescription)
+            } else {
+                os_log(.error, log: logger, "⏱️ Server time fetch FAILED: No data received")
+            }
             return
         }
-        
+
+        // Too spammy - uncomment only for debugging server time responses
+        // os_log(.debug, log: logger, "⏱️ Server time response received, parsing...")
+
         do {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let result = json["result"] as? [String: Any] else {
+                os_log(.error, log: logger, "⏱️ Server time parse FAILED: Invalid JSON structure")
                 return
             }
             
@@ -1195,9 +1209,20 @@ extension SlimProtoCoordinator {
             
             // Update our time tracking with REAL server time
             updateServerTime(position: serverTime, duration: duration, isPlaying: isPlaying)
-            
-            os_log(.info, log: logger, "📡 Real server time fetched: %.2f (playing: %{public}s)", 
-                   serverTime, isPlaying ? "YES" : "NO")
+
+            // Log server time fetch, but throttle to every 10 seconds to reduce spam (like lock screen)
+            let shouldLog: Bool
+            if let lastLog = lastServerTimeFetchLog {
+                shouldLog = Date().timeIntervalSince(lastLog) >= 10.0
+            } else {
+                shouldLog = true
+            }
+
+            if shouldLog {
+                os_log(.info, log: logger, "⏱️ Server time: %.2f (playing: %{public}s)",
+                       serverTime, isPlaying ? "YES" : "NO")
+                lastServerTimeFetchLog = Date()
+            }
             
         } catch {
             os_log(.error, log: logger, "❌ Failed to parse server time response: %{public}s", error.localizedDescription)
@@ -1231,24 +1256,37 @@ extension SlimProtoCoordinator {
     /// Public method to refresh Material UI (can be called externally)
     /// Start periodic server time fetching
     func startServerTimeFetching() {
-        stopServerTimeFetching() // Stop any existing timer
-        
-        // Fetch immediately
-        fetchServerTime()
+        // CRITICAL: Timer must be created on main thread to ensure it has a RunLoop
+        // Background DispatchQueues don't have RunLoops, so timers won't fire repeatedly
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
 
-        // Start periodic timer (every 3 seconds for responsive lock screen)
-        serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.fetchServerTime()
+            // Stop any existing timer directly (not via async method to avoid race condition)
+            self.serverTimeTimer?.invalidate()
+            self.serverTimeTimer = nil
+
+            // Fetch immediately
+            self.fetchServerTime()
+
+            // Start periodic timer (every 3 seconds for responsive lock screen)
+            // MUST be on main thread RunLoop to fire repeatedly
+            self.serverTimeTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                self?.fetchServerTime()
+            }
+
+            os_log(.debug, log: self.logger, "🔄 Started periodic server time fetching (on main thread)")
         }
-        
-        os_log(.debug, log: logger, "🔄 Started periodic server time fetching")
     }
     
     /// Stop periodic server time fetching
     func stopServerTimeFetching() {
-        serverTimeTimer?.invalidate()
-        serverTimeTimer = nil
-        os_log(.debug, log: logger, "⏹️ Stopped periodic server time fetching")
+        // Also ensure stop happens on main thread where timer was created
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.serverTimeTimer?.invalidate()
+            self.serverTimeTimer = nil
+            os_log(.debug, log: self.logger, "⏹️ Stopped periodic server time fetching")
+        }
     }
 }
 

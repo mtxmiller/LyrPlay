@@ -222,8 +222,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             
             // Parse 2-byte length in network order
             let messageLength = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-            os_log(.debug, log: logger, "Server message length: %d bytes", messageLength)
-            
+
+            // Too spammy - uncomment only for debugging message parsing
+            // os_log(.debug, log: logger, "Server message length: %d bytes", messageLength)
+
             if messageLength > 0 && messageLength < 10000 {
                 socket.readData(toLength: UInt(messageLength), withTimeout: 30, tag: 1)
             } else {
@@ -250,9 +252,10 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             
             // Create command structure
             let command = SlimProtoCommand(type: commandString, payload: payloadData)
-            
-            os_log(.debug, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
-            
+
+            // Too spammy - uncomment only for debugging server commands
+            // os_log(.debug, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
+
             // Notify delegate
             delegate?.slimProtoDidReceiveCommand(command)
             
@@ -331,8 +334,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             return
         }
 
-        os_log(.debug, log: logger, "📤 Sending STAT: %{public}s", code)
-        
+        // Too spammy - uncomment only for debugging STAT sends
+        // os_log(.debug, log: logger, "Sending STAT: %{public}s", code)
+
         var statusData = Data()
         
         // Event code (4 bytes, space-padded)
@@ -470,11 +474,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         fullMessage.append(command)
         fullMessage.append(lengthData)
         fullMessage.append(statusData)
-        
+
+        // Too spammy - uncomment only for debugging STAT packets
+        // os_log(.debug, log: logger, "STAT packet: %{public}s", fullMessage.map { String(format: "%02X", $0) }.joined(separator: " "))
+
         socket.write(fullMessage, withTimeout: 30, tag: 2)
-        
-        os_log(.debug, log: logger, "STAT packet: %{public}s, position: %.2f, size: %d bytes",
-               code, clampedPosition, fullMessage.count)
     }
 
     // MARK: - Public Interface

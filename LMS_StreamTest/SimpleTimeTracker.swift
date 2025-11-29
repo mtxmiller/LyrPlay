@@ -36,8 +36,9 @@ class SimpleTimeTracker {
             trackDuration = duration
         }
 
-        os_log(.debug, log: logger, "📍 Server time updated: %.2f (duration: %.2f, playing: %{public}s)",
-               time, duration, playing ? "YES" : "NO")
+        // Too spammy - uncomment only for debugging server time updates
+        // os_log(.debug, log: logger, "📍 Server time updated: %.2f (duration: %.2f, playing: %{public}s)",
+        //        time, duration, playing ? "YES" : "NO")
     }
     
     // MARK: - Current Time Calculation (Material-style)
@@ -52,10 +53,10 @@ class SimpleTimeTracker {
         if isPlaying {
             let elapsed = Date().timeIntervalSince(updated)
             let interpolatedTime = originalServerTime + elapsed
-            
-            os_log(.debug, log: logger, "🔍 Interpolated time: %.2f + %.2f = %.2f", 
-                   originalServerTime, elapsed, interpolatedTime)
-            
+
+            // Too spammy - uncomment only for debugging time interpolation
+            // os_log(.debug, log: logger, "🔍 Interpolated time: %.2f (server: %.2f + elapsed: %.2f)", interpolatedTime, originalServerTime, elapsed)
+
             return (interpolatedTime, true)
         } else {
             os_log(.debug, log: logger, "🔍 Not playing, returning stored time: %.2f", serverTime)

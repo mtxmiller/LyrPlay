@@ -26,7 +26,10 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Deduplication State (prevent flooding MPNowPlayingInfoCenter)
     private var lastUpdatedTime: Double = -1.0
     private var lastUpdatedPlayingState: Bool = false
-    
+
+    // Log throttling (only log lock screen updates every 10 seconds)
+    private var lastLockScreenLogTime: Date?
+
     private var lockScreenStoredPosition: Double = 0.0
     private var lockScreenStoredTimestamp: Date?
     private var lockScreenWasPlaying: Bool = false
@@ -79,9 +82,19 @@ class NowPlayingManager: ObservableObject {
         lastUpdatedTime = currentTime
         lastUpdatedPlayingState = isPlaying
 
-        // Log all updates
-        os_log(.debug, log: logger, "🔒 LOCK SCREEN UPDATE: %.2f (%{public}s, playing: %{public}s)",
-               currentTime, timeSource.description, isPlaying ? "YES" : "NO")
+        // Log lock screen time updates, but throttle to every 10 seconds to reduce spam
+        let shouldLog: Bool
+        if let lastLog = lastLockScreenLogTime {
+            shouldLog = Date().timeIntervalSince(lastLog) >= 10.0
+        } else {
+            shouldLog = true
+        }
+
+        if shouldLog {
+            os_log(.info, log: logger, "🔒 LOCK SCREEN: time=%.2f playing=%{public}s source=%{public}s",
+                   currentTime, isPlaying ? "YES" : "NO", "\(timeSource)")
+            lastLockScreenLogTime = Date()
+        }
 
         // REMOVED: Server-time based track end detection - now using BASS_SYNC_END exclusively
         // The duplicate detection was causing spurious STMd signals during track transitions
@@ -128,11 +141,10 @@ class NowPlayingManager: ObservableObject {
         // SIMPLIFIED: Use SlimProto time from coordinator if available
         if let slimClient = slimClient {
             let (slimProtoTime, isPlaying) = slimClient.getCurrentInterpolatedTime()
-            
+
             if slimProtoTime > 0.0 {
-                os_log(.debug, log: logger, "🔒 Using SlimProto time: %.2f (playing: %{public}s)",
-                       slimProtoTime, isPlaying ? "YES" : "NO")
-                
+                // Too spammy - uncomment only for debugging time sources
+                // os_log(.debug, log: logger, "🔒 Using SlimProto time: %.2f (playing: %{public}s)", slimProtoTime, isPlaying ? "YES" : "NO")
                 lastKnownServerTime = slimProtoTime
                 return (time: slimProtoTime, isPlaying: isPlaying, source: .serverTime)
             }
@@ -396,8 +408,9 @@ class NowPlayingManager: ObservableObject {
         // This replaces the complex ServerTimeSynchronizer integration
 
         // CRITICAL FIX: Reset lastKnownServerTime to 0 when playback stops (matches squeezelite behavior)
-        os_log(.info, log: logger, "🔍 updateFromSlimProto called: time=%.2f, duration=%.2f, playing=%{public}s, lastKnown=%.2f",
-               currentTime, duration, isPlaying ? "YES" : "NO", lastKnownServerTime)
+        // Too spammy - uncomment only for debugging SlimProto updates
+        // os_log(.info, log: logger, "🔍 updateFromSlimProto called: time=%.2f, duration=%.2f, playing=%{public}s, lastKnown=%.2f",
+        //        currentTime, duration, isPlaying ? "YES" : "NO", lastKnownServerTime)
 
         if currentTime == 0.0 && !isPlaying {
             lastKnownServerTime = 0.0
@@ -414,8 +427,9 @@ class NowPlayingManager: ObservableObject {
         // Update now playing info immediately with SlimProto data
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
 
-        os_log(.debug, log: logger, "📍 Updated from SlimProto: %.2f (playing: %{public}s)",
-               currentTime, isPlaying ? "YES" : "NO")
+        // Too spammy - uncomment only for debugging SlimProto updates
+        // os_log(.debug, log: logger, "📍 Updated from SlimProto: %.2f (playing: %{public}s)",
+        //        currentTime, isPlaying ? "YES" : "NO")
     }
     
     // MARK: - Metadata Access
