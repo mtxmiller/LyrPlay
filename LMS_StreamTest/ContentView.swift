@@ -23,19 +23,25 @@ struct ContentView: View {
     
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
-        
+
         // ✅ FIXED: Use the same singleton instance for EVERYTHING
         let audioMgr = AudioManager.shared
         self._audioManager = StateObject(wrappedValue: audioMgr)
-        
-        // ✅ Create SlimProtoCoordinator ONCE with the SAME AudioManager
-        let coordinator = SlimProtoCoordinator(audioManager: audioMgr)
+
+        // ✅ CRITICAL: Reuse existing coordinator if one exists (from CarPlay or previous scene)
+        // This prevents stopping/restarting playback when opening the app
+        let coordinator: SlimProtoCoordinator
+        if let existingCoordinator = audioMgr.slimClient {
+            os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "♻️ Reusing existing SlimProtoCoordinator (from CarPlay or previous scene)")
+            coordinator = existingCoordinator
+        } else {
+            os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "🆕 Creating new SlimProtoCoordinator")
+            coordinator = SlimProtoCoordinator(audioManager: audioMgr)
+            audioMgr.slimClient = coordinator
+        }
         self._slimProtoCoordinator = StateObject(wrappedValue: coordinator)
-        
-        // ✅ Connect them using the SAME instances
-        audioMgr.slimClient = coordinator
-        
-        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ FIXED: Single AudioManager and SlimProtoCoordinator instances created")
+
+        os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "✅ FIXED: Single AudioManager and SlimProtoCoordinator instances shared")
     }
     
     var body: some View {
@@ -447,18 +453,24 @@ struct ContentView: View {
 
     private func connectToLMS() {
         guard !hasConnected else { return }
-        
+
         os_log(.info, log: logger, "Connecting to LMS server with Material Integration: %{public}s", settings.activeServerHost)
-        
+
         audioManager.setSlimClient(slimProtoCoordinator)
-        
+
         // Update coordinator with current settings
         slimProtoCoordinator.updateServerSettings(
             host: settings.activeServerHost,
             port: UInt16(settings.activeServerSlimProtoPort)
         )
-        
-        slimProtoCoordinator.connect()
+
+        // Only connect if not already connected (e.g., when reusing coordinator from CarPlay)
+        if !slimProtoCoordinator.isConnected {
+            os_log(.info, log: logger, "📡 Initiating new connection to LMS")
+            slimProtoCoordinator.connect()
+        } else {
+            os_log(.info, log: logger, "✅ Already connected - skipping reconnection")
+        }
         hasConnected = true
     }
     
