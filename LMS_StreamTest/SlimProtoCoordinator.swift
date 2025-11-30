@@ -1485,8 +1485,8 @@ extension SlimProtoCoordinator {
     
     // Direct JSON-RPC command sender for preference testing and CarPlay services
     public func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
-        os_log(.info, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
-        
+        os_log(.debug, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
+
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
             os_log(.error, log: logger, "❌ Failed to create JSON-RPC command")
             completion([:])
@@ -1497,7 +1497,7 @@ extension SlimProtoCoordinator {
         // Material endpoint can apply commands to wrong player based on Material UI session state
         // Direct endpoint ensures player MAC in params[0] is always respected
         let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/jsonrpc.js"
-        os_log(.info, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
+        os_log(.debug, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
         
         guard let url = URL(string: urlString) else {
             os_log(.error, log: logger, "❌ Invalid JSON-RPC URL: %{public}s", urlString)
@@ -1520,18 +1520,18 @@ extension SlimProtoCoordinator {
             }
             
             if let httpResponse = response as? HTTPURLResponse {
-                os_log(.info, log: self.logger, "🌐 JSON-RPC response status: %d", httpResponse.statusCode)
+                os_log(.debug, log: self.logger, "🌐 JSON-RPC response status: %d", httpResponse.statusCode)
             }
-            
+
             guard let data = data else {
                 os_log(.error, log: self.logger, "❌ No data received from JSON-RPC request")
                 completion([:])
                 return
             }
-            
+
             do {
                 if let jsonResult = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    os_log(.info, log: self.logger, "✅ JSON-RPC response: %{public}s", String(describing: jsonResult))
+                    os_log(.debug, log: self.logger, "✅ JSON-RPC response: %{public}s", String(describing: jsonResult))
                     completion(jsonResult)
                 } else {
                     os_log(.error, log: self.logger, "❌ Invalid JSON-RPC response format")

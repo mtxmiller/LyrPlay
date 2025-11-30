@@ -13,91 +13,36 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                    didConnect interfaceController: CPInterfaceController) {
         os_log(.info, log: logger, "🚗 CARPLAY WILL CONNECT")
-        os_log(.info, log: logger, "  Template Scene: %{public}s", String(describing: templateApplicationScene))
-        os_log(.info, log: logger, "  Interface Controller: %{public}s", String(describing: interfaceController))
-        os_log(.info, log: logger, "  Session: %{public}s", String(describing: templateApplicationScene.session))
 
         self.interfaceController = interfaceController
-        os_log(.info, log: logger, "  ✅ Interface controller stored")
 
         // Initialize coordinator if needed
         if AudioManager.shared.slimClient == nil {
             initializeCoordinator()
         }
 
-        // Create Browse list with CPListTemplate
-        os_log(.info, log: logger, "  Creating Browse template...")
+        // Build home page sections asynchronously
+        buildHomeTemplate { [weak self] template in
+            guard let self = self else { return }
 
-        // Create Resume Playback list item
-        let resumeItem = CPListItem(
-            text: "Resume Playback",
-            detailText: "Start or resume from saved position",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        resumeItem.handler = { [weak self] item, completion in
-            guard let self = self else {
-                completion()
-                return
+            self.browseTemplate = template
+
+            // Configure Now Playing template with Up Next button
+            let nowPlayingTemplate = CPNowPlayingTemplate.shared
+            nowPlayingTemplate.isUpNextButtonEnabled = true
+            nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
+
+            // Set Browse template as root (NOT in a tab bar - CPNowPlayingTemplate can't be in tab bar)
+            interfaceController.setRootTemplate(template, animated: false) { success, error in
+                if let error = error {
+                    os_log(.error, log: self.logger, "❌ FAILED to set root template: %{public}s", error.localizedDescription)
+                } else if !success {
+                    os_log(.error, log: self.logger, "❌ FAILED to set root template: success=false, no error")
+                }
             }
 
-            // Start playback
-            self.handleResumePlayback()
-
-            // Push Now Playing template onto navigation stack
-            self.pushNowPlayingTemplate()
-
-            completion()
+            os_log(.info, log: self.logger, "🚗 CARPLAY CONNECTED SUCCESSFULLY")
         }
-
-        // Create Playlists list item
-        let playlistsItem = CPListItem(
-            text: "Playlists",
-            detailText: "Browse and play your music playlists",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        playlistsItem.handler = { [weak self] item, completion in
-            guard let self = self else {
-                completion()
-                return
-            }
-
-            // Show playlists
-            self.showPlaylists()
-
-            completion()
-        }
-
-        // Create section with all items (Up Next removed - it's now on Now Playing template)
-        let browseSection = CPListSection(items: [resumeItem, playlistsItem])
-
-        // Create Browse list template
-        let browseTemplate = CPListTemplate(title: "LyrPlay", sections: [browseSection])
-        self.browseTemplate = browseTemplate
-        os_log(.info, log: logger, "  ✅ Browse template created with playlists")
-
-        // Configure Now Playing template with Up Next button
-        let nowPlayingTemplate = CPNowPlayingTemplate.shared
-        nowPlayingTemplate.isUpNextButtonEnabled = true
-        nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
-        os_log(.info, log: logger, "  ✅ Configured Now Playing template with Up Next button")
-
-        // Set Browse template as root (NOT in a tab bar - CPNowPlayingTemplate can't be in tab bar)
-        os_log(.info, log: logger, "  Setting Browse template as root...")
-        interfaceController.setRootTemplate(browseTemplate, animated: false) { success, error in
-            if let error = error {
-                os_log(.error, log: self.logger, "❌ FAILED to set root template: %{public}s", error.localizedDescription)
-            } else if success {
-                os_log(.info, log: self.logger, "  ✅ Browse template set successfully as root")
-            } else {
-                os_log(.error, log: self.logger, "❌ FAILED to set root template: success=false, no error")
-            }
-        }
-
-        os_log(.info, log: logger, "🚗 CARPLAY CONNECTED SUCCESSFULLY")
     }
 
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
@@ -863,4 +808,394 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         os_log(.info, log: logger, "🎵 Up Next button tapped on Now Playing screen")
         showUpNextQueue()
     }
+
+    // MARK: - Material-Style Home Page
+
+    private func buildHomeTemplate(completion: @escaping (CPListTemplate) -> Void) {
+        var items: [CPListTemplateItem] = []
+
+        // Item 1: Resume Playback
+        let resumeItem = CPListItem(
+            text: "▶︎ Resume Playback",
+            detailText: "Start or resume from saved position",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        resumeItem.handler = { [weak self] item, completion in
+            self?.handleResumePlayback()
+            self?.pushNowPlayingTemplate()
+            completion()
+        }
+        items.append(resumeItem)
+
+        // Fetch sections sequentially to preserve order
+        fetchNewMusicWithArtwork { [weak self] newMusicAlbums in
+            guard let self = self else { return }
+
+            // Add New Music row
+            if let newMusicRow = self.buildAlbumImageRow(newMusicAlbums, title: "New Music") {
+                items.append(newMusicRow)
+            }
+
+            // Then fetch Random Releases
+            self.fetchRandomReleasesWithArtwork { randomAlbums in
+                // Add Random Releases row
+                if let randomRow = self.buildAlbumImageRow(randomAlbums, title: "Random Releases") {
+                    items.append(randomRow)
+                }
+
+                // Finally add playlists
+                self.fetchPlaylists { playlists in
+                    // Add playlist items
+                    let playlistItems = playlists.prefix(10).map { playlist -> CPListItem in
+                        let item = CPListItem(
+                            text: playlist.name,
+                            detailText: playlist.trackCountDisplay,
+                            image: nil,
+                            accessoryImage: nil,
+                            accessoryType: .disclosureIndicator
+                        )
+                        item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                            self?.handlePlaylistSelection(playlist: playlist)
+                            completion()
+                        }
+                        return item
+                    }
+
+                    // Create two sections
+                    var sections: [CPListSection] = []
+
+                    // Section 1: Resume + Album rows (no header)
+                    sections.append(CPListSection(items: items))
+
+                    // Section 2: Playlists with header
+                    if !playlistItems.isEmpty {
+                        let playlistsSection = CPListSection(items: playlistItems, header: "Playlists", sectionIndexTitle: nil)
+                        sections.append(playlistsSection)
+                    }
+
+                    let template = CPListTemplate(title: "LyrPlay", sections: sections)
+                    completion(template)
+                }
+            }
+        }
+    }
+
+    private func buildAlbumImageRow(_ albums: [Album], title: String) -> CPListImageRowItem? {
+        guard !albums.isEmpty else { return nil }
+
+        // Create grid images (up to 8 items for CPListImageRowItem)
+        // Render each image into a new bitmap context to ensure unique UIImage instances
+        let gridImages = albums.prefix(8).map { album -> UIImage in
+            if let artwork = album.artwork {
+                // Render into a new graphics context to create a fresh UIImage
+                let renderer = UIGraphicsImageRenderer(size: artwork.size)
+                return renderer.image { context in
+                    artwork.draw(at: .zero)
+                }
+            }
+            return createPlaceholderImage()
+        }
+
+        let imageRowItem = CPListImageRowItem(text: title, images: gridImages)
+
+        // Set up tap handler for each image
+        imageRowItem.listImageRowHandler = { [weak self] (item: CPListImageRowItem, index: Int, completion: @escaping () -> Void) in
+            guard index < albums.count else {
+                completion()
+                return
+            }
+            self?.playAlbum(albums[index])
+            completion()
+        }
+
+        // Handler for tapping the title text - show full list
+        imageRowItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            if title == "New Music" {
+                self?.showFullNewMusicList()
+            } else if title == "Random Releases" {
+                self?.showFullRandomReleasesList()
+            }
+            completion()
+        }
+
+        return imageRowItem
+    }
+
+    private func buildPlaylistImageRow(_ playlists: [Playlist]) -> CPListImageRowItem? {
+        guard !playlists.isEmpty else { return nil }
+
+        // Create grid images (up to 8 items)
+        let gridImages = playlists.prefix(8).map { playlist -> UIImage in
+            return createPlaylistPlaceholderImage()
+        }
+
+        let imageRowItem = CPListImageRowItem(text: "Playlists", images: gridImages)
+
+        // Set up tap handler for each image
+        imageRowItem.listImageRowHandler = { [weak self] (item: CPListImageRowItem, index: Int, completion: @escaping () -> Void) in
+            guard index < playlists.count else {
+                completion()
+                return
+            }
+            self?.handlePlaylistSelection(playlist: playlists[index])
+            completion()
+        }
+
+        // Handler for tapping the title text - show full playlists
+        imageRowItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showPlaylists()
+            completion()
+        }
+
+        return imageRowItem
+    }
+
+    private func createPlaceholderImage() -> UIImage {
+        let size = CGSize(width: 200, height: 200)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            // Gray background
+            UIColor.systemGray4.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Music note icon
+            let iconSize: CGFloat = 100
+            let iconRect = CGRect(x: (size.width - iconSize) / 2,
+                                 y: (size.height - iconSize) / 2,
+                                 width: iconSize,
+                                 height: iconSize)
+            if let icon = UIImage(systemName: "music.note")?.withTintColor(.systemGray, renderingMode: .alwaysOriginal) {
+                icon.draw(in: iconRect)
+            }
+        }
+    }
+
+    private func createPlaylistPlaceholderImage() -> UIImage {
+        let size = CGSize(width: 200, height: 200)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            // Teal background
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Music list icon
+            let iconSize: CGFloat = 100
+            let iconRect = CGRect(x: (size.width - iconSize) / 2,
+                                 y: (size.height - iconSize) / 2,
+                                 width: iconSize,
+                                 height: iconSize)
+            if let icon = UIImage(systemName: "music.note.list")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+                icon.draw(in: iconRect)
+            }
+        }
+    }
+
+    private func showFullNewMusicList() {
+        // TODO: Implement full New Music list view
+        os_log(.info, log: logger, "📋 Show full New Music list")
+    }
+
+    private func showFullRandomReleasesList() {
+        // TODO: Implement full Random Releases list view
+        os_log(.info, log: logger, "📋 Show full Random Releases list")
+    }
+
+    private func fetchNewMusicWithArtwork(completion: @escaping ([Album]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion([])
+            return
+        }
+
+        // Material skin: ["albums"] with ["sort:new", "tags:aajlqswyKSS24"]
+        // Request 8 albums (max for CPListImageRowItem)
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["albums", 0, 8, "sort:new", "tags:ajlqy"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else {
+                completion([])
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let albumsLoop = result["albums_loop"] as? [[String: Any]] else {
+                    completion([])
+                    return
+                }
+
+                let albums = albumsLoop.compactMap { albumData -> Album? in
+                    guard let id = albumData["id"] as? String ?? (albumData["id"] as? Int).map(String.init),
+                          let name = albumData["album"] as? String else {
+                        return nil
+                    }
+
+                    let artist = albumData["artist"] as? String ?? "Unknown Artist"
+                    let artworkTrackId = albumData["artwork_track_id"] as? String
+
+                    return Album(id: id, name: name, artist: artist, artworkTrackId: artworkTrackId, artwork: nil)
+                }
+
+                // Load artwork for all albums
+                self.loadArtworkForAlbums(albums, completion: completion)
+            }
+        }
+    }
+
+    private func fetchRandomReleasesWithArtwork(completion: @escaping ([Album]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion([])
+            return
+        }
+
+        // Material skin: ["albums"] with ["sort:random", "tags:aajlqswyKSS24"]
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["albums", 0, 8, "sort:random", "tags:ajlqy"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else {
+                completion([])
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let albumsLoop = result["albums_loop"] as? [[String: Any]] else {
+                    completion([])
+                    return
+                }
+
+                let albums = albumsLoop.compactMap { albumData -> Album? in
+                    guard let id = albumData["id"] as? String ?? (albumData["id"] as? Int).map(String.init),
+                          let name = albumData["album"] as? String else {
+                        return nil
+                    }
+
+                    let artist = albumData["artist"] as? String ?? "Unknown Artist"
+                    let artworkTrackId = albumData["artwork_track_id"] as? String
+
+                    return Album(id: id, name: name, artist: artist, artworkTrackId: artworkTrackId, artwork: nil)
+                }
+
+                // Load artwork for all albums
+                self.loadArtworkForAlbums(albums, completion: completion)
+            }
+        }
+    }
+
+    private func loadArtworkForAlbums(_ albums: [Album], completion: @escaping ([Album]) -> Void) {
+        guard !albums.isEmpty else {
+            completion([])
+            return
+        }
+
+        let group = DispatchGroup()
+        let settings = SettingsManager.shared
+
+        // Create a thread-safe dictionary to store results
+        var results: [Int: Album] = [:]
+        let lock = NSLock()
+
+        for (index, album) in albums.enumerated() {
+            group.enter()
+
+            // Use artwork_track_id for artwork URL (NOT album id!)
+            // LMS uses artwork_track_id to map to the correct cover art
+            guard let artworkId = album.artworkTrackId else {
+                os_log(.debug, log: self.logger, "⚠️ No artwork_track_id for album %{public}s (ID: %{public}s)", album.name, album.id)
+                lock.lock()
+                results[index] = album
+                lock.unlock()
+                group.leave()
+                continue
+            }
+
+            let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover.jpg"
+
+            guard let url = URL(string: urlString) else {
+                os_log(.error, log: self.logger, "❌ Invalid artwork URL for album ID: %{public}s", album.id)
+                lock.lock()
+                results[index] = album
+                lock.unlock()
+                group.leave()
+                continue
+            }
+
+            // Capture album and index in closure
+            let albumCopy = album
+            let indexCopy = index
+
+            URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+                defer { group.leave() }
+
+                if let error = error {
+                    os_log(.error, log: self?.logger ?? OSLog.default,
+                           "❌ Artwork load failed for %{public}s: %{public}s", albumCopy.name, error.localizedDescription)
+                    lock.lock()
+                    results[indexCopy] = albumCopy
+                    lock.unlock()
+                    return
+                }
+
+                if let data = data, let image = UIImage(data: data) {
+                    let updatedAlbum = Album(id: albumCopy.id, name: albumCopy.name, artist: albumCopy.artist, artworkTrackId: albumCopy.artworkTrackId, artwork: image)
+                    lock.lock()
+                    results[indexCopy] = updatedAlbum
+                    lock.unlock()
+                } else {
+                    os_log(.error, log: self?.logger ?? OSLog.default,
+                           "❌ Failed to create image for %{public}s", albumCopy.name)
+                    lock.lock()
+                    results[indexCopy] = albumCopy
+                    lock.unlock()
+                }
+            }.resume()
+        }
+
+        group.notify(queue: .main) {
+            // Reconstruct array in original order, preserving exact album positions
+            // Use map instead of compactMap to ensure indexes stay aligned
+            let sortedAlbums = albums.enumerated().map { index, originalAlbum in
+                results[index] ?? originalAlbum
+            }
+            completion(sortedAlbums)
+        }
+    }
+
+    private func playAlbum(_ album: Album) {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+
+        let playerID = SettingsManager.shared.playerMACAddress
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                if !response.isEmpty {
+                    self?.pushNowPlayingTemplate()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Supporting Models
+
+struct Album {
+    let id: String
+    let name: String
+    let artist: String
+    let artworkTrackId: String?  // LMS artwork_track_id field for cover art URLs
+    let artwork: UIImage?
 }
