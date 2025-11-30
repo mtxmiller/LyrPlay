@@ -1,0 +1,11 @@
+# SQLite cache and journal files
+beads.db
+beads.db-*
+
+# Daemon communication and locks
+bd.sock
+bd.pipe
+.exclusive-lock
+daemon.lock
+daemon.pid
+daemon.log
