@@ -1483,8 +1483,8 @@ extension SlimProtoCoordinator {
     
     
     
-    // Direct JSON-RPC command sender for preference testing
-    private func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+    // Direct JSON-RPC command sender for preference testing and CarPlay services
+    public func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         os_log(.info, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
