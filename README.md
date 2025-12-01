@@ -17,12 +17,13 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Interruption Handling** - Smart pause/resume for phone calls and other app interruptions
 - **Server Discovery** - Automatic LMS server detection with failover support
 - **iOS Optimized** - Native SwiftUI app with BASS-managed audio sessions
+- **Custom CarPlay Interface** - Native CarPlay interface with similar layout to Material Skin
 
 ## Audio Format Support
 
 - **FLAC, AAC, M4A, Opus, OGG Vorbis, WAV** - All formats supported with native BASS codecs
 - **Gapless Playback** - Supported across all formats using push stream architecture
-- **Seeking Limitation** - FLAC seeking currently non-functional (under investigation). Use Mobile Transcode to Opus/MP3/WAV for seek support
+- **Maximum Bitrate Selection for Transcoding** - Adjustable in App Settings
 
 ## Requirements
 
@@ -33,13 +34,18 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 
 ## Remote Access
 
-For remote access outside your home network, you'll need a secure VPN solution: Wireguard, Tailscale Etc. 
+For remote access outside your home network, you'll need a secure VPN solution like Tailscale Etc. 
+
+1. Install Tailscale on your iOS device and your server.
+2. Enable MagicDNS - ensure server and iOS device have MagicDNS enabled.
+3. Enter the MagicDNS name of your server into LyrPlay during app setup.
+4. Listen to LyrPlay on cellular!
 
 **Important**: Direct internet exposure of LMS servers is not recommended due to security risks. 
 
 ## Enabling Mobile Transcode (Required for Opus / WAV)
 
-LyrPlay can play MP3/AAC and FLAC without additional plugins, but **FLAC seeking is currently non-functional** with gapless playback. For full functionality, use the [Mobile Transcode](https://github.com/mtxmiller/MobileTranscode) plugin to convert FLAC to Opus.
+LyrPlay can play MP3/AAC/WAV and FLAC without additional plugins, but the MobileTranscode Plugin makes app more capable. For full functionality, use the [Mobile Transcode](https://github.com/mtxmiller/MobileTranscode) plugin to convert FLAC to Opus.
 
 **To install it go to Server Settings -> Manage Plugins -> 3rd Party -> Mobile Transcode**
 
@@ -50,13 +56,25 @@ LyrPlay can play MP3/AAC and FLAC without additional plugins, but **FLAC seeking
 **Benefits:**
 - **Opus 256kbps** - Bandwidth efficient modern codec with working seek/scrub support
 - **Lower Data Usage** - Smaller file sizes for mobile streaming
-- **Full Seeking** - Server side seek works with FLC->WAV transcoding
+- **Full Seeking** - For manual seek and auto position reccovery on App-open
 
-**NOTE — Install Opus Tools** (required for Opus transcoding):
+### NOTE — Install Opus Tools (required for Opus transcoding):
 
 ```bash
 # Install opus-tools in your LMS container
 docker exec -it lms bash -c "apt-get update && apt-get install -y opus-tools"
+```
+
+### Enabling Opus on Docker Container startup
+
+- Create a script in your /"container folder"/config named **custom-init.sh** with below code
+- This will ensure Opus-tools are always enabled on your Lyrion Container
+
+```
+#!/bin/bash
+# Install opus-tools for Opus transcoding support
+apt-get update -qq
+apt-get install --no-install-recommends -qy opus-tools
 ```
 
 ## Usage
