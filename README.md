@@ -107,11 +107,11 @@ Report issues or request features through [GitHub Issues](https://github.com/mtx
 LyrPlay is free and open source. If it's been useful to you, consider supporting continued development:
 
 - ⭐ **Star this repository** (helps with visibility)
-- ☕ **[Buy me a coffee](https://ko-fi.com/mtxmiller)** (one-time support)
+- 💖 **[Sponsor me on GitHub](https://github.com/sponsors/mtxmiller)** (monthly or one-time support)
 - 🐛 **Report issues** and suggest features
 - 🤝 **Contribute code** if you're a developer
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mtxmiller)
+[![Sponsor](https://img.shields.io/github/sponsors/mtxmiller?style=for-the-badge&logo=github&label=Sponsor)](https://github.com/sponsors/mtxmiller)
 
 Your support helps maintain LyrPlay and add community-requested features!
 
