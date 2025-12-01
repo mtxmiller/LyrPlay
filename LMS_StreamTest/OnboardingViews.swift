@@ -932,7 +932,7 @@ struct TestDetailRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(detail.name)
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(.black)
                 Text(detail.message)
                     .font(.caption)
                     .foregroundColor(.gray)

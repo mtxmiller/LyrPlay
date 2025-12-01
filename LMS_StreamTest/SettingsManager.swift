@@ -69,7 +69,7 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Compressed (MP3 preferred)"
             case .aacPreferred: return "Compressed (AAC preferred)"
-            case .wavSeekable: return "Lossless with Seeking (WAV)"
+            case .wavSeekable: return "Lossless (WAV)"
             case .oggVorbis: return "High Quality (OGG Vorbis)"
             case .opus: return "Premium Quality (Opus)"
             case .flac: return "Lossless (FLAC)"
