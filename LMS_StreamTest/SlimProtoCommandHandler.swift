@@ -277,10 +277,19 @@ class SlimProtoCommandHandler: ObservableObject {
                         switch streamCommand {
                         case UInt8(ascii: "s"): // start
                             handleStartCommand(url: url, format: formatName, startTime: 0.0, replayGain: replayGainFloat, autostart: autostart)
-                        case UInt8(ascii: "p"): // pause
-                            handlePauseCommand()
-                        case UInt8(ascii: "u"): // unpause
-                            handleUnpauseCommand()
+                        case UInt8(ascii: "p"): // pause (PHASE 4: check for timed pause)
+                            // For strm 'p', replay_gain field may contain interval for timed pause (play silence)
+                            let interval = replayGainFixed  // Interval in milliseconds
+                            handlePauseCommand(interval: interval)
+                        case UInt8(ascii: "u"): // unpause (PHASE 2: with timing for sync)
+                            // For strm 'u' commands, replay_gain field contains jiffies timestamp (not actual gain)
+                            // Extract jiffies from bytes 14-17 (same as replay_gain field)
+                            let jiffiesTimestamp = replayGainFixed  // Already extracted above
+                            handleUnpauseCommand(jiffies: jiffiesTimestamp)
+                        case UInt8(ascii: "a"): // skip ahead (PHASE 4: sync drift correction)
+                            // For strm 'a', replay_gain field contains interval to skip ahead (consume buffer)
+                            let interval = replayGainFixed  // Interval in milliseconds
+                            handleSkipAheadCommand(interval: interval)
                         case UInt8(ascii: "q"): // stop
                             handleStopCommand()
                         case UInt8(ascii: "t"): // status request
@@ -307,10 +316,16 @@ class SlimProtoCommandHandler: ObservableObject {
                 case UInt8(ascii: "s"): // start - but no URL!
                     os_log(.error, log: logger, "🚨 Server sent START command but no HTTP data!")
                     slimProtoClient?.sendStatus("STMn")
-                case UInt8(ascii: "p"): // pause
-                    handlePauseCommand()
-                case UInt8(ascii: "u"): // unpause
-                    handleUnpauseCommand()
+                case UInt8(ascii: "p"): // pause (PHASE 4: check for timed pause)
+                    let interval = replayGainFixed
+                    handlePauseCommand(interval: interval)
+                case UInt8(ascii: "u"): // unpause (PHASE 2: with timing for sync)
+                    // For strm 'u' commands, replay_gain field contains jiffies timestamp
+                    let jiffiesTimestamp = replayGainFixed  // Already extracted above
+                    handleUnpauseCommand(jiffies: jiffiesTimestamp)
+                case UInt8(ascii: "a"): // skip ahead (PHASE 4: sync drift correction)
+                    let interval = replayGainFixed
+                    handleSkipAheadCommand(interval: interval)
                 case UInt8(ascii: "q"): // stop
                     handleStopCommand()
                 case UInt8(ascii: "t"): // status request
@@ -391,20 +406,55 @@ class SlimProtoCommandHandler: ObservableObject {
     //     slimProtoClient?.sendRESP(headers)
     // }
     
-    private func handlePauseCommand() {
-        os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
-        
-        // Don't track position - server knows where we are
-        isStreamPaused = true
-        // DON'T automatically set isPausedByLockScreen - only SlimProtoCoordinator should set this
-        // for actual lock screen pauses
-        
-        // CRITICAL FIX: Only update playing state, NOT position when pausing
-        // The pause command doesn't include accurate position data
-        // Note: SimpleTimeTracker in coordinator handles time tracking
-        
-        delegate?.didPauseStream()
-        // REMOVED: client status sending - let coordinator handle it
+    // PHASE 4: Enhanced pause command with timed pause support for sync drift correction
+    private func handlePauseCommand(interval: UInt32 = 0) {
+        if interval == 0 {
+            // Regular pause (no interval)
+            os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
+
+            // Don't track position - server knows where we are
+            isStreamPaused = true
+            // DON'T automatically set isPausedByLockScreen - only SlimProtoCoordinator should set this
+            // for actual lock screen pauses
+
+            // CRITICAL FIX: Only update playing state, NOT position when pausing
+            // The pause command doesn't include accurate position data
+            // Note: SimpleTimeTracker in coordinator handles time tracking
+
+            delegate?.didPauseStream()
+            // REMOVED: client status sending - let coordinator handle it
+        } else {
+            // Timed pause - play silence for interval milliseconds (sync drift correction)
+            let intervalSeconds = TimeInterval(interval) / 1000.0
+            os_log(.info, log: logger, "⏸️🔇 PHASE 4: Timed pause - play silence for %.3f seconds (drift correction)", intervalSeconds)
+
+            // Forward to coordinator which routes to AudioManager → AudioPlayer
+            if let coordinator = delegate as? SlimProtoCoordinator {
+                coordinator.playSilence(duration: intervalSeconds)
+                os_log(.info, log: logger, "✅ PHASE 4: Timed pause initiated")
+            } else {
+                os_log(.error, log: logger, "❌ Cannot access coordinator for timed pause - falling back to regular pause")
+                isStreamPaused = true
+                delegate?.didPauseStream()
+            }
+        }
+    }
+
+    // PHASE 4: Skip ahead command for sync drift correction
+    private func handleSkipAheadCommand(interval: UInt32) {
+        let intervalSeconds = TimeInterval(interval) / 1000.0
+        os_log(.info, log: logger, "⏩ PHASE 4: Skip ahead - consume buffer for %.3f seconds (drift correction)", intervalSeconds)
+
+        // Forward to coordinator which routes to AudioManager → AudioPlayer
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            coordinator.skipAhead(duration: intervalSeconds)
+            os_log(.info, log: logger, "✅ PHASE 4: Skip ahead initiated")
+        } else {
+            os_log(.error, log: logger, "❌ Cannot access coordinator for skip ahead")
+        }
+
+        // Send acknowledgment
+        slimProtoClient?.sendStatus("STMt")
     }
     
     func getCurrentAudioTime() -> Double {
@@ -416,8 +466,9 @@ class SlimProtoCommandHandler: ObservableObject {
         return lastKnownPosition
     }
 
-    func handleUnpauseCommand() {
-        os_log(.info, log: logger, "▶️ Server unpause command")
+    // PHASE 2: Enhanced unpause command with synchronized start timing
+    func handleUnpauseCommand(jiffies: UInt32 = 0) {
+        os_log(.info, log: logger, "▶️ Server unpause command (jiffies: %u)", jiffies)
 
         // CRITICAL FIX: Check if we have an active stream before unpausing
         // If no stream (e.g., after disconnect/reconnect), use playlist jump to recover position
@@ -437,12 +488,40 @@ class SlimProtoCommandHandler: ObservableObject {
             }
         }
 
-        // Normal unpause flow - we have an active stream
-        isStreamPaused = false
-        isPausedByLockScreen = false
+        // PHASE 2+3: Handle synchronized unpause with jiffies timestamp
+        if jiffies == 0 {
+            // Immediate unpause - no synchronization needed
+            os_log(.info, log: logger, "▶️ Immediate unpause (jiffies=0) - starting playback now")
+            isStreamPaused = false
+            isPausedByLockScreen = false
+            delegate?.didResumeStream()
+        } else {
+            // Synchronized unpause - start at specific jiffies time
+            // Convert jiffies (milliseconds) to TimeInterval (seconds)
+            let startAtJiffies = TimeInterval(jiffies) / 1000.0
 
-        delegate?.didResumeStream()
-        // REMOVED: client status sending - let coordinator handle it
+            os_log(.info, log: logger, "🎯 Synchronized unpause - start at jiffies %.3f seconds", startAtJiffies)
+
+            // PHASE 3: Call AudioPlayer.startAt() for synchronized multi-room playback
+            if let coordinator = delegate as? SlimProtoCoordinator {
+                // Forward to coordinator which routes to AudioManager → AudioPlayer
+                coordinator.startAtJiffies(startAtJiffies)
+
+                isStreamPaused = false
+                isPausedByLockScreen = false
+
+                os_log(.info, log: logger, "✅ PHASE 3: Synchronized start initiated via coordinator")
+            } else {
+                // Fallback if coordinator not available
+                os_log(.error, log: logger, "❌ Cannot access coordinator for synchronized start - falling back to immediate resume")
+                isStreamPaused = false
+                isPausedByLockScreen = false
+                delegate?.didResumeStream()
+            }
+        }
+
+        // Send STMr (resume acknowledgment) to server
+        slimProtoClient?.sendStatus("STMr")
     }
     
     private func handleStopCommand() {

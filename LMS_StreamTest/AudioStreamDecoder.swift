@@ -142,6 +142,174 @@ class AudioStreamDecoder {
     /// Throttle log counter to avoid spam (throttle can happen 10x/sec)
     private var throttleLogCounter: Int = 0
 
+    // MARK: - PHASE 7.2: Synchronized Start for Multi-Room Audio
+
+    /// Target jiffies time for synchronized start (nil = start immediately)
+    private var syncStartJiffies: TimeInterval?
+
+    /// Monitoring timer for delayed start
+    private var syncStartMonitorTimer: Timer?
+
+    /// Flag to track if we're buffering for synchronized start
+    private var isWaitingForSyncStart: Bool = false
+
+    // MARK: - PHASE 7.4: Buffer Skip Ahead for Multi-Room Audio
+
+    /// Number of bytes remaining to skip (for drift correction when player is behind)
+    /// Decoder loop checks this and discards data instead of pushing to BASS
+    private var skipAheadBytesRemaining: Int = 0
+
+    /// Start playback at a specific jiffies time for synchronized multi-room audio
+    /// - Parameter targetJiffies: Target jiffies time (ProcessInfo.systemUptime when to start)
+    ///
+    /// This delays BASS_ChannelPlay() until the target time while continuing to buffer audio
+    /// data via BASS_StreamPutData(). This allows multiple players to start in sync.
+    func startAtJiffies(_ targetJiffies: TimeInterval) {
+        os_log(.info, log: logger, "🎯 PHASE 7.2: Scheduling synchronized start at jiffies: %.3f", targetJiffies)
+
+        // Store target jiffies and set waiting flag
+        syncStartJiffies = targetJiffies
+        isWaitingForSyncStart = true
+
+        // Start monitoring timer (check every 100ms like AudioPlayer)
+        startSyncStartMonitoring(targetJiffies: targetJiffies)
+    }
+
+    /// Start monitoring timer for synchronized start
+    private func startSyncStartMonitoring(targetJiffies: TimeInterval) {
+        // Clean up any existing timer first
+        stopSyncStartMonitoring()
+
+        os_log(.info, log: logger, "🎯 PHASE 7.2: Starting sync start monitoring timer")
+
+        syncStartMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+
+            let currentJiffies = ProcessInfo.processInfo.systemUptime
+
+            // Check if we've reached the target time
+            if currentJiffies >= targetJiffies {
+                os_log(.info, log: self.logger, "🎯 PHASE 7.2: Target jiffies reached! Current: %.3f >= Target: %.3f", currentJiffies, targetJiffies)
+                os_log(.info, log: self.logger, "▶️ PHASE 7.2: Starting synchronized playback NOW")
+
+                // Clear waiting flag and start playback
+                self.isWaitingForSyncStart = false
+                self.syncStartJiffies = nil
+                self.stopSyncStartMonitoring()
+
+                // Now actually start BASS playback
+                guard self.pushStream != 0 else {
+                    os_log(.error, log: self.logger, "❌ PHASE 7.2: Cannot start - no push stream")
+                    return
+                }
+
+                let result = BASS_ChannelPlay(self.pushStream, 0)
+
+                if result != 0 {
+                    // Apply muting if needed (for silent recovery)
+                    if self.muteNextStream {
+                        BASS_ChannelSetAttribute(self.pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+                        os_log(.info, log: self.logger, "🔇 PHASE 7.2: DSP gain = 0.001 (synchronized start with muting)")
+                    }
+
+                    os_log(.info, log: self.logger, "✅ PHASE 7.2: Synchronized playback started successfully (muted: %{public}s)", self.muteNextStream ? "YES" : "NO")
+                } else {
+                    let error = BASS_ErrorGetCode()
+                    os_log(.error, log: self.logger, "❌ PHASE 7.2: Synchronized play failed: %d", error)
+                }
+            }
+        }
+    }
+
+    /// Stop sync start monitoring timer
+    private func stopSyncStartMonitoring() {
+        syncStartMonitorTimer?.invalidate()
+        syncStartMonitorTimer = nil
+    }
+
+    // MARK: - PHASE 7.3: Silence Injection for Multi-Room Audio
+
+    /// Play silence for a specified duration (drift correction when player is ahead)
+    /// - Parameter duration: Duration of silence in seconds
+    ///
+    /// This injects zero bytes into the push stream to slow down playback and maintain sync.
+    /// Used when this player is ahead of the sync group and needs to pause momentarily.
+    func playSilence(duration: TimeInterval) {
+        guard pushStream != 0 else {
+            os_log(.error, log: logger, "❌ PHASE 7.3: Cannot play silence - no push stream")
+            return
+        }
+
+        guard duration > 0 else {
+            os_log(.info, log: logger, "🔇 PHASE 7.3: Zero duration silence - skipping")
+            return
+        }
+
+        os_log(.info, log: logger, "🔇 PHASE 7.3: Playing %.3f seconds of silence for drift correction", duration)
+
+        // Calculate how many bytes of silence to generate
+        // Float samples = 4 bytes per sample
+        let bytesPerSecond = sampleRate * channels * 4
+        let silenceBytes = Int(duration * Double(bytesPerSecond))
+
+        // Create buffer of zeros (silence in float PCM is 0.0)
+        let silenceBuffer = [Float](repeating: 0.0, count: silenceBytes / 4)
+
+        // Push silence to stream
+        let pushed = silenceBuffer.withUnsafeBytes { ptr in
+            BASS_StreamPutData(
+                pushStream,
+                UnsafeMutableRawPointer(mutating: ptr.baseAddress),
+                UInt32(silenceBytes)
+            )
+        }
+
+        if pushed == DWORD.max {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ PHASE 7.3: Failed to inject silence: BASS error %d", error)
+        } else {
+            // Track the silence in our total bytes pushed
+            totalBytesPushed += UInt64(silenceBytes)
+
+            let queuedAmount = Int(pushed)
+            os_log(.info, log: logger, "✅ PHASE 7.3: Injected %d bytes (%.3f seconds) of silence, queue now: %d KB",
+                   silenceBytes, duration, queuedAmount / 1024)
+        }
+    }
+
+    // MARK: - PHASE 7.4: Buffer Skip Ahead for Multi-Room Audio
+
+    /// Skip ahead by discarding decoded audio for a specified duration (drift correction when player is behind)
+    /// - Parameter duration: Duration to skip in seconds
+    ///
+    /// This reads from the decoder but doesn't push to BASS, effectively skipping ahead.
+    /// Used when this player is behind the sync group and needs to catch up.
+    func skipAhead(duration: TimeInterval) {
+        guard pushStream != 0 else {
+            os_log(.error, log: logger, "❌ PHASE 7.4: Cannot skip ahead - no push stream")
+            return
+        }
+
+        guard duration > 0 else {
+            os_log(.info, log: logger, "⏩ PHASE 7.4: Zero duration skip - ignoring")
+            return
+        }
+
+        os_log(.info, log: logger, "⏩ PHASE 7.4: Skipping ahead %.3f seconds for drift correction", duration)
+
+        // Calculate how many bytes to skip
+        // Float samples = 4 bytes per sample
+        let bytesPerSecond = sampleRate * channels * 4
+        let bytesToSkip = Int(duration * Double(bytesPerSecond))
+
+        // Set the skip counter - decoder loop will discard this many bytes
+        // Access is thread-safe because decoder loop runs on decodeQueue exclusively
+        skipAheadBytesRemaining = bytesToSkip
+
+        os_log(.info, log: logger, "⏩ PHASE 7.4: Will discard next %d bytes (%.3f seconds) from decoder",
+               bytesToSkip, duration)
+    }
+
     // MARK: - Delegate
 
     weak var delegate: AudioStreamDecoderDelegate?
@@ -225,6 +393,15 @@ class AudioStreamDecoder {
         guard pushStream != 0 else {
             os_log(.error, log: logger, "❌ Cannot start playback - no push stream")
             return false
+        }
+
+        // PHASE 7.2: If waiting for synchronized start, don't play immediately
+        // Decoder loop will continue buffering data via BASS_StreamPutData
+        // Timer will call BASS_ChannelPlay when target jiffies is reached
+        if isWaitingForSyncStart {
+            os_log(.info, log: logger, "🎯 PHASE 7.2: Buffering for synchronized start (target: %.3f) - NOT starting playback yet", syncStartJiffies ?? 0)
+            os_log(.info, log: logger, "📊 PHASE 7.2: Decoder will continue pushing data, playback will start at target time")
+            return true  // Return success - we're ready, just waiting for sync time
         }
 
         let result = BASS_ChannelPlay(pushStream, 0)
@@ -529,6 +706,14 @@ class AudioStreamDecoder {
         manualStop = true  // Mark as manual stop
         isDecoding = false
 
+        // PHASE 7.2: Clean up sync start monitoring
+        if isWaitingForSyncStart {
+            os_log(.info, log: logger, "🎯 PHASE 7.2: Canceling synchronized start due to manual stop")
+            stopSyncStartMonitoring()
+            isWaitingForSyncStart = false
+            syncStartJiffies = nil
+        }
+
         // Clear any pending track (user manually stopped, so don't start deferred track)
         if let pending = pendingTrack {
             os_log(.info, log: logger, "🎵 Clearing pending track due to manual stop")
@@ -712,6 +897,23 @@ class AudioStreamDecoder {
                     }
                 }
 
+                // PHASE 7.4: Check if we should skip this data (drift correction)
+                if self.skipAheadBytesRemaining > 0 {
+                    // Discard this data - don't push to BASS
+                    let bytesToDiscard = min(Int(bytesRead), self.skipAheadBytesRemaining)
+                    self.skipAheadBytesRemaining -= bytesToDiscard
+
+                    os_log(.info, log: self.logger, "⏩ PHASE 7.4: Discarding %d bytes (%.3f sec), %d bytes remaining to skip",
+                           bytesToDiscard, Double(bytesToDiscard) / Double(self.sampleRate * self.channels * 4),
+                           self.skipAheadBytesRemaining)
+
+                    // Still track position even though we're not pushing to BASS
+                    self.totalBytesPushed += UInt64(bytesRead)
+
+                    // Continue to next loop iteration - don't push this data
+                    continue
+                }
+
                 // Push decoded PCM to push stream (like squeezelite's write_cb to outputbuf)
                 let pcmData = Data(bytes: &buffer, count: Int(bytesRead))
                 let pushed = pcmData.withUnsafeBytes { ptr in
@@ -876,6 +1078,14 @@ class AudioStreamDecoder {
 
         // Clear stream info when cleaning up
         audioPlayer?.currentStreamInfo = nil
+
+        // PHASE 7.2: Clean up sync start monitoring
+        if isWaitingForSyncStart {
+            os_log(.info, log: logger, "🎯 PHASE 7.2: Cleaning up synchronized start timer")
+            stopSyncStartMonitoring()
+            isWaitingForSyncStart = false
+            syncStartJiffies = nil
+        }
 
         // Stop decoding
         isDecoding = false
