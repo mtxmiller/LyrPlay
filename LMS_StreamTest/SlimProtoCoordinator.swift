@@ -1090,6 +1090,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh triggered - lock screen should update immediately")
     }
 
+    /// Send STMl (buffer loaded) status to server (PHASE 7.7)
+    /// This signals that buffer has reached threshold and player is ready for synchronized start
+    func sendBufferLoaded() {
+        os_log(.info, log: logger, "📊 PHASE 7.7: Sending STMl (buffer loaded) to server")
+        // Like squeezelite: buffer reaches threshold → send STMl
+        // This allows server to check if ALL players are ready and transition from WAITING_TO_SYNC
+        client.sendStatus("STMl")
+    }
+
     func getCurrentAudioTime() -> Double {
         // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects

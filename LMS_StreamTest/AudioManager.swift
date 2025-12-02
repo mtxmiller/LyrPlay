@@ -630,4 +630,11 @@ extension AudioManager: AudioStreamDecoderDelegate {
         // This updates Material UI to show the new track that's NOW PLAYING
         slimClient?.sendTrackStarted()
     }
+
+    func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "📊 PHASE 7.7: Buffer ready threshold reached - sending STMl!")
+        // PHASE 7.7: Notify server that buffer is loaded and ready for synchronized start
+        // This allows server to transition from WAITING_TO_SYNC to PLAYING
+        slimClient?.sendBufferLoaded()
+    }
 }

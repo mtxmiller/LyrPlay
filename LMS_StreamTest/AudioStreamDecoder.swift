@@ -159,6 +159,18 @@ class AudioStreamDecoder {
     /// Decoder loop checks this and discards data instead of pushing to BASS
     private var skipAheadBytesRemaining: Int = 0
 
+    // MARK: - PHASE 7.7: Buffer Ready Signaling for Multi-Room Audio
+
+    /// Flag to track if we've sent STMl (buffer loaded) for current track
+    /// Reset when starting new track, set when buffer threshold reached
+    private var sentSTMl: Bool = false
+
+    /// Buffer threshold for STMl signaling (2 seconds of audio)
+    /// When buffer reaches this level, we signal server we're ready for sync
+    private var bufferReadyThreshold: Int {
+        return sampleRate * channels * 4 * 2  // 2 seconds
+    }
+
     /// Start playback at a specific jiffies time for synchronized multi-room audio
     /// - Parameter targetJiffies: Target jiffies time (ProcessInfo.systemUptime when to start)
     ///
@@ -562,6 +574,10 @@ class AudioStreamDecoder {
     ///   - replayGain: Linear gain multiplier from server (1.0 = no change)
     func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0, replayGain: Float = 1.0) {
         os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
+
+        // PHASE 7.7: Reset STMl flag for new track
+        sentSTMl = false
+        os_log(.info, log: logger, "🎯 PHASE 7.7: Reset sentSTMl flag for new track")
 
         // Apply replay gain for this track (stored and applied when not in silent recovery mode)
         if replayGain > 0.0 && replayGain != 1.0 {
@@ -971,6 +987,18 @@ class AudioStreamDecoder {
 
                 // Track total bytes for position calculation
                 self.totalBytesPushed += UInt64(bytesRead)
+
+                // PHASE 7.7: Check if buffer ready for STMl signaling
+                if !self.sentSTMl && playbackBuffered >= self.bufferReadyThreshold {
+                    os_log(.info, log: self.logger, "📊 PHASE 7.7: Buffer threshold reached (%d bytes >= %d), signaling STMl",
+                           playbackBuffered, self.bufferReadyThreshold)
+                    self.sentSTMl = true
+
+                    // Notify delegate on main thread (server expects STMl before synchronized start)
+                    DispatchQueue.main.async {
+                        self.delegate?.audioStreamDecoderBufferReady(self)
+                    }
+                }
             }
 
             os_log(.info, log: self.logger, "🛑 Decoder loop stopped")
@@ -1478,6 +1506,10 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Called when a deferred track (from format mismatch) starts playing
     /// This allows coordinator to send STMs notification to server
     func audioStreamDecoderDidStartDeferredTrack(_ decoder: AudioStreamDecoder)
+
+    /// Called when buffer reaches ready threshold (PHASE 7.7)
+    /// This allows coordinator to send STMl notification to server for sync readiness
+    func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder)
 }
 
 /// Buffer statistics
