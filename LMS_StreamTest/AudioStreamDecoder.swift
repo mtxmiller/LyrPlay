@@ -989,9 +989,12 @@ class AudioStreamDecoder {
                 self.totalBytesPushed += UInt64(bytesRead)
 
                 // PHASE 7.7: Check if buffer ready for STMl signaling
-                if !self.sentSTMl && playbackBuffered >= self.bufferReadyThreshold {
-                    os_log(.info, log: self.logger, "📊 PHASE 7.7: Buffer threshold reached (%d bytes >= %d), signaling STMl",
-                           playbackBuffered, self.bufferReadyThreshold)
+                // FIX: Use totalBytesPushed instead of playbackBuffered
+                // playbackBuffered is BASS's tiny internal buffer, not our push queue
+                // totalBytesPushed tracks how much we've actually queued for playback
+                if !self.sentSTMl && self.totalBytesPushed >= UInt64(self.bufferReadyThreshold) {
+                    os_log(.info, log: self.logger, "📊 PHASE 7.7: Buffer threshold reached (%llu bytes >= %d), signaling STMl",
+                           self.totalBytesPushed, self.bufferReadyThreshold)
                     self.sentSTMl = true
 
                     // Notify delegate on main thread (server expects STMl before synchronized start)
