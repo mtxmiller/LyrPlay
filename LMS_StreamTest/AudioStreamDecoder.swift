@@ -194,7 +194,11 @@ class AudioStreamDecoder {
 
         os_log(.info, log: logger, "🎯 PHASE 7.2: Starting sync start monitoring timer")
 
-        syncStartMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        // CRITICAL: Timer must be scheduled on main thread - socket callbacks are on background thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.syncStartMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
 
             let currentJiffies = ProcessInfo.processInfo.systemUptime
@@ -231,6 +235,7 @@ class AudioStreamDecoder {
                 }
             }
         }
+        } // end DispatchQueue.main.async
     }
 
     /// Stop sync start monitoring timer
