@@ -1349,6 +1349,21 @@ class AudioStreamDecoder {
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 Using existing decoder: %{public}s", track.url)
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 Mute state BEFORE stream recreation: muteNextStream=%{public}s", muteNextStream ? "TRUE" : "FALSE")
 
+        // CRITICAL FIX: Clear sync wait state - deferred tracks are NOT synchronized starts
+        // If we had a previous sync command, those flags are stale and will block playback
+        if isWaitingForSyncStart {
+            os_log(.info, log: logger, "[APP-RECOVERY] 🔄 Clearing stale sync wait state for deferred track")
+            isWaitingForSyncStart = false
+            syncStartJiffies = nil
+            stopSyncStartMonitoring()
+        }
+
+        // CRITICAL FIX: Prevent STMl from being sent for deferred track starts
+        // Deferred tracks send STMs immediately (not buffering for sync), so STMl would be invalid
+        // Server expects: BUFFERING → STMl → wait → strm 'u' → PLAYING
+        // Deferred track: start immediately → STMs → PLAYING (skip buffering phase)
+        sentSTMl = true  // Pretend we already sent it to prevent buffer callback from firing
+
         // Update our format to match the new track
         sampleRate = track.sampleRate
         channels = track.channels
