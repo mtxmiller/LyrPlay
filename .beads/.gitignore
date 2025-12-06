@@ -9,3 +9,9 @@ bd.pipe
 daemon.lock
 daemon.pid
 daemon.log
+
+# Temporary sync files
+beads.left.jsonl
+beads.left.meta.json
+# Local beads configuration (version-specific)
+.local_version

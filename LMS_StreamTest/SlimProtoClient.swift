@@ -312,6 +312,16 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
         }
 
+        // PHASE 5: Include sync group ID if we have one from previous connection
+        if let savedSyncGroup = settings.loadSyncGroupID() {
+            // Add null terminator after capabilities string
+            helloData.append(0)
+            // Append 10-byte sync group ID
+            helloData.append(savedSyncGroup)
+            os_log(.info, log: logger, "🔗 PHASE 5: Including saved sync group ID in HELO: %{public}s",
+                   savedSyncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
+        }
+
         // Create full message
         let command = "HELO".data(using: .ascii)!
         let length = UInt32(helloData.count).bigEndian
@@ -389,8 +399,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // Signal strength (2 bytes)
         statusData.append(Data([0xFF, 0xFF])) // Like C reference: 0xffff
         
-        // Jiffies (4 bytes)
-        let jiffies = UInt32(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 4294967.0) * 1000)
+        // Jiffies (4 bytes) - CRITICAL: Must use system uptime, NOT Unix epoch time
+        // Server calculates player's jiffies epoch based on this value
+        // Using wrong time source causes synchronized start to target far future
+        // squeezelite: gettime_ms() = system uptime in milliseconds
+        let jiffies = UInt32(ProcessInfo.processInfo.systemUptime * 1000)
         statusData.append(Data([
             UInt8((jiffies >> 24) & 0xff),
             UInt8((jiffies >> 16) & 0xff),

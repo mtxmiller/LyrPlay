@@ -126,6 +126,7 @@ class SettingsManager: ObservableObject {
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
+        static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -233,10 +234,31 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
 
         UserDefaults.standard.synchronize()
-        
+
         os_log(.info, log: logger, "Settings saved successfully")
     }
-    
+
+    // MARK: - PHASE 5: Sync Group Persistence
+
+    /// Save sync group ID to UserDefaults for reconnection persistence
+    func saveSyncGroupID(_ syncGroupID: Data) {
+        UserDefaults.standard.set(syncGroupID, forKey: Keys.syncGroupID)
+        UserDefaults.standard.synchronize()
+        os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID saved to UserDefaults")
+    }
+
+    /// Load saved sync group ID from UserDefaults
+    func loadSyncGroupID() -> Data? {
+        return UserDefaults.standard.data(forKey: Keys.syncGroupID)
+    }
+
+    /// Clear sync group ID (when player leaves sync group)
+    func clearSyncGroupID() {
+        UserDefaults.standard.removeObject(forKey: Keys.syncGroupID)
+        UserDefaults.standard.synchronize()
+        os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID cleared from UserDefaults")
+    }
+
     private func migrateSettingsIfNeeded() {
         let savedVersion = UserDefaults.standard.integer(forKey: Keys.settingsVersion)
         

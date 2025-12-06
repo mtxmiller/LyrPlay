@@ -33,6 +33,11 @@ class SlimProtoCoordinator: ObservableObject {
     private var isRestoringVolume = false
     private var backgroundedTime: Date?  // Track when app backgrounded for duration-based recovery
 
+    // MARK: - Player Synchronization (Multi-room Audio)
+    private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
+    private var jiffiesOffsetList: [TimeInterval] = []  // Track drift for corrections (max 8 entries)
+    private var syncGroupID: Data?  // 10-byte sync group ID from serv packet (PHASE 5)
+
     // MARK: - ICY Metadata Tracking
     private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
 
@@ -546,7 +551,12 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {
         // Record that we received a command (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
-        
+
+        // PHASE 5: Handle serv packet for sync group persistence
+        if command.type == "serv" {
+            handleServPacket(command.payload)
+        }
+
         // Forward to command handler
         commandHandler.processCommand(command)
     }
@@ -1080,6 +1090,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh triggered - lock screen should update immediately")
     }
 
+    /// Send STMl (buffer loaded) status to server (PHASE 7.7)
+    /// This signals that buffer has reached threshold and player is ready for synchronized start
+    func sendBufferLoaded() {
+        os_log(.info, log: logger, "📊 PHASE 7.7: Sending STMl (buffer loaded) to server")
+        // Like squeezelite: buffer reaches threshold → send STMl
+        // This allows server to check if ALL players are ready and transition from WAITING_TO_SYNC
+        client.sendStatus("STMl")
+    }
+
     func getCurrentAudioTime() -> Double {
         // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
@@ -1119,7 +1138,87 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
 // MARK: - Material-Style Time Tracking (Simplified)
 extension SlimProtoCoordinator {
-    
+
+    // MARK: - Player Synchronization: Jiffies Epoch Tracking
+
+    /// Track jiffies epoch for player synchronization (multi-room audio)
+    /// This maintains agreement on time base between player and server for synchronized playback
+    private func trackJiffiesEpoch(jiffies: UInt32, serverTimestamp: TimeInterval) {
+        // Convert jiffies (milliseconds) to seconds for comparison with server time
+        let jiffiesTime = Double(jiffies) / 1000.0
+
+        // Calculate offset between server time and local jiffies time
+        let offset = serverTimestamp - jiffiesTime
+
+        // Adjust epoch if we get a better estimate or handle wrap-around
+        // Update if offset is significantly different (>50s) or if this is first measurement
+        if jiffiesEpoch == 0 || offset < jiffiesEpoch || offset - jiffiesEpoch > 50 {
+            jiffiesEpoch = offset
+            os_log(.info, log: logger, "🔄 Jiffies epoch updated: %.3f (server: %.3f, jiffies: %.3f)",
+                   jiffiesEpoch, serverTimestamp, jiffiesTime)
+        }
+
+        // Track drift for sync corrections (like squeezelite)
+        let drift = offset - jiffiesEpoch
+        jiffiesOffsetList.insert(drift, at: 0)
+
+        // Keep only last 8 measurements for drift calculation
+        if jiffiesOffsetList.count > 8 {
+            jiffiesOffsetList.removeLast()
+        }
+
+        // Log drift if significant (for debugging sync issues)
+        if abs(drift) > 0.010 {  // Log if drift > 10ms
+            os_log(.debug, log: logger, "📊 Sync drift: %.3f ms (offset: %.3f, epoch: %.3f)",
+                   drift * 1000, offset, jiffiesEpoch)
+        }
+    }
+
+    /// Get current jiffies (milliseconds since app start)
+    /// This is the player's local timer that gets synchronized with server
+    private func gettime_ms() -> UInt32 {
+        // Use system uptime in milliseconds (monotonic, doesn't change with clock adjustments)
+        let uptimeSeconds = ProcessInfo.processInfo.systemUptime
+        let uptimeMilliseconds = UInt32(uptimeSeconds * 1000)
+        return uptimeMilliseconds
+    }
+
+    // MARK: - PHASE 5: Sync Group Persistence
+
+    /// Parse serv packet and extract sync group ID for multi-room persistence
+    private func handleServPacket(_ payload: Data) {
+        // serv packet structure (from SlimProto documentation):
+        // - Server IP (4 bytes)
+        // - HTTP port (2 bytes)
+        // - CLI port (2 bytes)
+        // - Sync group ID (10 bytes) - THIS IS WHAT WE NEED
+        // Total minimum: 18 bytes
+
+        guard payload.count >= 18 else {
+            os_log(.error, log: logger, "⚠️ PHASE 5: serv packet too short: %d bytes (expected >= 18)", payload.count)
+            return
+        }
+
+        // Extract sync group ID from bytes 8-17 (10 bytes)
+        let syncGroup = payload.subdata(in: 8..<18)
+
+        // Check if sync group is all zeros (no sync group)
+        let isEmptySyncGroup = syncGroup.allSatisfy { $0 == 0 }
+
+        if isEmptySyncGroup {
+            // No sync group - clear stored value
+            os_log(.info, log: logger, "🔗 PHASE 5: No sync group (player not synced)")
+            syncGroupID = nil
+            settings.clearSyncGroupID()
+        } else {
+            // Store sync group ID
+            os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID received: %{public}s",
+                   syncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
+            syncGroupID = syncGroup
+            settings.saveSyncGroupID(syncGroup)
+        }
+    }
+
     /// Update current server time from actual server responses (Material-style approach)
     func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
         // SIMPLIFIED: Update SimpleTimeTracker with Material-style approach
@@ -1206,7 +1305,13 @@ extension SlimProtoCoordinator {
             let duration = result["duration"] as? Double ?? 0.0
             let mode = result["mode"] as? String ?? "stop"
             let isPlaying = (mode == "play")
-            
+
+            // PHASE 1: Track jiffies epoch for player synchronization
+            // Get current local jiffies (milliseconds since app start)
+            let currentJiffies = gettime_ms()
+            // Update epoch tracking with server timestamp and local jiffies
+            trackJiffiesEpoch(jiffies: currentJiffies, serverTimestamp: serverTime)
+
             // Update our time tracking with REAL server time
             updateServerTime(position: serverTime, duration: duration, isPlaying: isPlaying)
 
@@ -1740,6 +1845,28 @@ extension SlimProtoCoordinator {
     func setPlayerVolume(_ volume: Float) {
         // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Setting player volume: %.2f", volume)
         audioManager.setVolume(volume)
+    }
+
+    // MARK: - PHASE 3: Synchronized Playback Control
+
+    /// Start playback at a specific jiffies time (for multi-room audio synchronization)
+    func startAtJiffies(_ targetJiffies: TimeInterval) {
+        os_log(.info, log: logger, "🎯 PHASE 3: Coordinator forwarding synchronized start to AudioManager")
+        audioManager.startAtJiffies(targetJiffies)
+    }
+
+    // MARK: - PHASE 4: Sync Drift Corrections
+
+    /// Play silence for a duration (timed pause for sync drift correction)
+    func playSilence(duration: TimeInterval) {
+        os_log(.info, log: logger, "⏸️🔇 PHASE 4: Coordinator forwarding play silence to AudioManager")
+        audioManager.playSilence(duration: duration)
+    }
+
+    /// Skip ahead by consuming buffer (sync drift correction)
+    func skipAhead(duration: TimeInterval) {
+        os_log(.info, log: logger, "⏩ PHASE 4: Coordinator forwarding skip ahead to AudioManager")
+        audioManager.skipAhead(duration: duration)
     }
 
     func getPlayerVolume() -> Float {

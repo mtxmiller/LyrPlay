@@ -48,6 +48,15 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Playback State (PHASE 3: Player Synchronization)
+    /// Playback state enum for synchronized multi-room audio
+    enum PlaybackState {
+        case stopped          // No playback
+        case buffering        // Loading stream data
+        case running          // Active playback
+        case startAt(jiffies: TimeInterval)  // Waiting for synchronized start time
+    }
+
     // MARK: - Published Properties
     @Published var currentStreamInfo: StreamInfo?
     @Published var currentOutputInfo: OutputDeviceInfo?
@@ -64,9 +73,13 @@ class AudioPlayer: NSObject, ObservableObject {
     private var isIntentionallyPaused = false
     private var isIntentionallyStopped = false
     private var metadataDuration: TimeInterval = 0.0
-    
+
     // Track timing (for reference only - track end detection now handled by NowPlayingManager with server time)
     private var trackStartTime: Date = Date()
+
+    // PHASE 3: Synchronized playback state and monitoring
+    private var playbackState: PlaybackState = .stopped
+    private var startAtMonitorTimer: Timer?
     
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
@@ -341,16 +354,162 @@ class AudioPlayer: NSObject, ObservableObject {
     func stop() {
         isIntentionallyStopped = true
         isIntentionallyPaused = false
-        
+        playbackState = .stopped
+        stopStartAtMonitoring()
+
         if currentStream != 0 {
             BASS_ChannelStop(currentStream)
             currentStream = 0
         }
-        
+
         delegate?.audioPlayerDidStop()
         os_log(.debug, log: logger, "⏹️ CBass stopped playback")
     }
-    
+
+    // MARK: - PHASE 3: Synchronized Start (OUTPUT_START_AT)
+
+    /// Start playback at a specific jiffies time (for multi-room sync)
+    /// Buffers audio but delays playback until local jiffies >= targetJiffies
+    func startAt(jiffies targetJiffies: TimeInterval) {
+        guard currentStream != 0 else {
+            os_log(.error, log: logger, "❌ startAt() called with no active stream")
+            return
+        }
+
+        os_log(.info, log: logger, "🎯 PHASE 3: Synchronized start requested at jiffies %.3f", targetJiffies)
+
+        // Enter OUTPUT_START_AT state
+        playbackState = .startAt(jiffies: targetJiffies)
+
+        // Start monitoring - check every 100ms if we've reached the target time
+        startStartAtMonitoring(targetJiffies: targetJiffies)
+    }
+
+    /// Monitor current jiffies and start playback when target time is reached
+    private func startStartAtMonitoring(targetJiffies: TimeInterval) {
+        // Stop any existing timer
+        stopStartAtMonitoring()
+
+        // Create timer on main thread to check jiffies every 100ms
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.startAtMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+
+                // Check if we're still in startAt state
+                guard case .startAt(let targetJiffies) = self.playbackState else {
+                    self.stopStartAtMonitoring()
+                    return
+                }
+
+                // Get current jiffies (milliseconds since app start)
+                let currentJiffies = ProcessInfo.processInfo.systemUptime
+
+                // Check if we've reached or passed the target time
+                // Also handle timeout (if target is >10s in future, something's wrong)
+                if currentJiffies >= targetJiffies || targetJiffies > currentJiffies + 10.0 {
+                    if targetJiffies > currentJiffies + 10.0 {
+                        os_log(.error, log: self.logger, "⚠️ Target jiffies %.3f is too far in future (>10s) - starting immediately", targetJiffies)
+                    } else {
+                        os_log(.info, log: self.logger, "✅ Jiffies target reached! (current: %.3f >= target: %.3f) - starting playback", currentJiffies, targetJiffies)
+                    }
+
+                    // Transition to running state
+                    self.playbackState = .running
+                    self.stopStartAtMonitoring()
+
+                    // Start actual BASS playback
+                    let result = BASS_ChannelPlay(self.currentStream, 0)
+
+                    if result != 0 {
+                        os_log(.info, log: self.logger, "▶️ PHASE 3: Synchronized playback started at jiffies %.3f", currentJiffies)
+                        self.delegate?.audioPlayerDidStartPlaying()
+                    } else {
+                        let errorCode = BASS_ErrorGetCode()
+                        os_log(.error, log: self.logger, "❌ Failed to start synchronized playback: %d", errorCode)
+                    }
+                } else {
+                    // Keep buffering - log every 1 second to avoid spam
+                    let delta = targetJiffies - currentJiffies
+                    if Int(delta * 10) % 10 == 0 {  // Log every ~1 second
+                        os_log(.debug, log: self.logger, "⏳ Buffering for sync start - waiting %.1f more seconds", delta)
+                    }
+                }
+            }
+
+            os_log(.info, log: self.logger, "🔄 Started jiffies monitoring timer for synchronized start")
+        }
+    }
+
+    /// Stop the startAt monitoring timer
+    private func stopStartAtMonitoring() {
+        startAtMonitorTimer?.invalidate()
+        startAtMonitorTimer = nil
+    }
+
+    // MARK: - PHASE 4: Sync Drift Corrections
+
+    /// Play silence for a duration (timed pause for sync drift correction)
+    /// Advances playback position without outputting audio
+    func playSilence(duration: TimeInterval) {
+        guard currentStream != 0 else {
+            os_log(.error, log: logger, "❌ playSilence() called with no active stream")
+            return
+        }
+
+        os_log(.info, log: logger, "⏸️🔇 PHASE 4: Playing silence for %.3f seconds (drift correction)", duration)
+
+        // Get current position in bytes
+        let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+
+        // Convert duration to bytes
+        let durationBytes = BASS_ChannelSeconds2Bytes(currentStream, duration)
+
+        // Calculate new position
+        let newPosBytes = currentPosBytes + durationBytes
+
+        // Set new position (effectively skips ahead, "playing" silence)
+        let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
+
+        if result != 0 {
+            os_log(.info, log: logger, "✅ PHASE 4: Silence played - advanced %.3f seconds", duration)
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to play silence: %d", errorCode)
+        }
+    }
+
+    /// Skip ahead by consuming buffer (sync drift correction)
+    /// Advances playback position to catch up with synchronized playback
+    func skipAhead(duration: TimeInterval) {
+        guard currentStream != 0 else {
+            os_log(.error, log: logger, "❌ skipAhead() called with no active stream")
+            return
+        }
+
+        os_log(.info, log: logger, "⏩ PHASE 4: Skipping ahead %.3f seconds (drift correction)", duration)
+
+        // Get current position in bytes
+        let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+
+        // Convert duration to bytes
+        let durationBytes = BASS_ChannelSeconds2Bytes(currentStream, duration)
+
+        // Calculate new position
+        let newPosBytes = currentPosBytes + durationBytes
+
+        // Set new position (skip ahead in buffer)
+        let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
+
+        if result != 0 {
+            os_log(.info, log: logger, "✅ PHASE 4: Skipped ahead %.3f seconds", duration)
+        } else {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to skip ahead: %d", errorCode)
+        }
+    }
+
     // MARK: - Time and State (MINIMAL CBASS)
     func getCurrentTime() -> Double {
         guard currentStream != 0 else { return 0.0 }
