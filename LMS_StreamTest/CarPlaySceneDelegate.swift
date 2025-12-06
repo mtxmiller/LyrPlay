@@ -8,41 +8,52 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     var interfaceController: CPInterfaceController?
     private var browseTemplate: CPListTemplate?
 
-        // MARK: - Services
+    // Cached data for fast template updates
+    private var cachedNewMusic: [Album] = []
+    private var cachedRandomReleases: [Album] = []
+    private var cachedPlaylists: [Playlist] = []
+
+    // MARK: - Services
 
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                    didConnect interfaceController: CPInterfaceController) {
+        let connectionStartTime = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: logger, "🚗 CARPLAY WILL CONNECT")
 
         self.interfaceController = interfaceController
 
-        // Initialize coordinator if needed
+        // Initialize coordinator if needed (non-blocking - connect is async)
         if AudioManager.shared.slimClient == nil {
             initializeCoordinator()
         }
 
-        // Build home page sections asynchronously
-        buildHomeTemplate { [weak self] template in
+        // PERFORMANCE FIX: Show template IMMEDIATELY with minimal content
+        let immediateTemplate = buildImmediateHomeTemplate()
+        self.browseTemplate = immediateTemplate
+
+        // Configure Now Playing template with Up Next button
+        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+        nowPlayingTemplate.isUpNextButtonEnabled = true
+        nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
+
+        // Set template immediately - user sees UI right away
+        interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
             guard let self = self else { return }
 
-            self.browseTemplate = template
-
-            // Configure Now Playing template with Up Next button
-            let nowPlayingTemplate = CPNowPlayingTemplate.shared
-            nowPlayingTemplate.isUpNextButtonEnabled = true
-            nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
-
-            // Set Browse template as root (NOT in a tab bar - CPNowPlayingTemplate can't be in tab bar)
-            interfaceController.setRootTemplate(template, animated: false) { success, error in
-                if let error = error {
-                    os_log(.error, log: self.logger, "❌ FAILED to set root template: %{public}s", error.localizedDescription)
-                } else if !success {
-                    os_log(.error, log: self.logger, "❌ FAILED to set root template: success=false, no error")
-                }
+            if let error = error {
+                os_log(.error, log: self.logger, "❌ FAILED to set root template: %{public}s", error.localizedDescription)
+            } else if !success {
+                os_log(.error, log: self.logger, "❌ FAILED to set root template: success=false, no error")
+            } else {
+                let elapsed = CFAbsoluteTimeGetCurrent() - connectionStartTime
+                os_log(.info, log: self.logger, "🚗 CARPLAY UI VISIBLE in %.3f seconds", elapsed)
             }
-
-            os_log(.info, log: self.logger, "🚗 CARPLAY CONNECTED SUCCESSFULLY")
         }
+
+        // Now load full content in background and update template
+        refreshHomeTemplateData()
+
+        os_log(.info, log: logger, "🚗 CARPLAY CONNECTED SUCCESSFULLY")
     }
 
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
@@ -810,6 +821,152 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
 
     // MARK: - Material-Style Home Page
+
+    /// Builds an immediate template with just the Resume item - no network calls
+    /// This allows CarPlay UI to appear instantly on connection
+    private func buildImmediateHomeTemplate() -> CPListTemplate {
+        // Resume Playback item - always available immediately
+        let resumeItem = CPListItem(
+            text: "▶︎ Resume Playback",
+            detailText: "Start or resume from saved position",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        resumeItem.handler = { [weak self] item, completion in
+            self?.handleResumePlayback()
+            self?.pushNowPlayingTemplate()
+            completion()
+        }
+
+        // Loading indicator item
+        let loadingItem = CPListItem(
+            text: "Loading...",
+            detailText: "Fetching music library",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+
+        let section = CPListSection(items: [resumeItem, loadingItem])
+        return CPListTemplate(title: "LyrPlay", sections: [section])
+    }
+
+    /// Fetches all home page data in PARALLEL, then updates the template
+    private func refreshHomeTemplateData() {
+        let fetchStartTime = CFAbsoluteTimeGetCurrent()
+        os_log(.info, log: logger, "🔄 Starting parallel data fetch for CarPlay home")
+
+        let group = DispatchGroup()
+
+        // Fetch all data sources in parallel
+        group.enter()
+        fetchNewMusicWithArtwork { [weak self] albums in
+            self?.cachedNewMusic = albums
+            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ New Music loaded: %d albums", albums.count)
+            group.leave()
+        }
+
+        group.enter()
+        fetchRandomReleasesWithArtwork { [weak self] albums in
+            self?.cachedRandomReleases = albums
+            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Random Releases loaded: %d albums", albums.count)
+            group.leave()
+        }
+
+        group.enter()
+        fetchPlaylists { [weak self] playlists in
+            self?.cachedPlaylists = playlists
+            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Playlists loaded: %d items", playlists.count)
+            group.leave()
+        }
+
+        // When all fetches complete, update the template
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
+            os_log(.info, log: self.logger, "🔄 All data fetched in %.3f seconds - updating template", elapsed)
+
+            self.updateHomeTemplateWithData()
+        }
+    }
+
+    /// Updates the home template with cached data
+    private func updateHomeTemplateWithData() {
+        guard let interfaceController = interfaceController else {
+            os_log(.error, log: logger, "❌ No interface controller for template update")
+            return
+        }
+
+        var items: [CPListTemplateItem] = []
+
+        // Item 1: Resume Playback (always first)
+        let resumeItem = CPListItem(
+            text: "▶︎ Resume Playback",
+            detailText: "Start or resume from saved position",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        resumeItem.handler = { [weak self] item, completion in
+            self?.handleResumePlayback()
+            self?.pushNowPlayingTemplate()
+            completion()
+        }
+        items.append(resumeItem)
+
+        // Add New Music row if we have albums
+        if let newMusicRow = buildAlbumImageRow(cachedNewMusic, title: "New Music") {
+            items.append(newMusicRow)
+        }
+
+        // Add Random Releases row if we have albums
+        if let randomRow = buildAlbumImageRow(cachedRandomReleases, title: "Random Releases") {
+            items.append(randomRow)
+        }
+
+        // Build sections
+        var sections: [CPListSection] = []
+
+        // Section 1: Resume + Album rows (no header)
+        sections.append(CPListSection(items: items))
+
+        // Section 2: Playlists with header
+        if !cachedPlaylists.isEmpty {
+            let playlistItems = cachedPlaylists.prefix(10).map { playlist -> CPListItem in
+                let item = CPListItem(
+                    text: playlist.name,
+                    detailText: playlist.trackCountDisplay,
+                    image: nil,
+                    accessoryImage: nil,
+                    accessoryType: .disclosureIndicator
+                )
+                item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                    self?.handlePlaylistSelection(playlist: playlist)
+                    completion()
+                }
+                return item
+            }
+            let playlistsSection = CPListSection(items: playlistItems, header: "Playlists", sectionIndexTitle: nil)
+            sections.append(playlistsSection)
+        }
+
+        // Create updated template
+        let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
+        self.browseTemplate = updatedTemplate
+
+        // Update the root template
+        interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
+            if let error = error {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to update template: %{public}s", error.localizedDescription)
+            } else if success {
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template updated with full content")
+            }
+        }
+    }
+
+    // MARK: - Legacy buildHomeTemplate (kept for reference, no longer used on connect)
 
     private func buildHomeTemplate(completion: @escaping (CPListTemplate) -> Void) {
         var items: [CPListTemplateItem] = []
