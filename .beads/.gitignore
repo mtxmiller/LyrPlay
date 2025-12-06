@@ -11,7 +11,12 @@ daemon.pid
 daemon.log
 
 # Temporary sync files
+beads.base.jsonl
 beads.left.jsonl
+beads.right.jsonl
+beads.base.meta.json
 beads.left.meta.json
+beads.right.meta.json
+*.db?*
 # Local beads configuration (version-specific)
 .local_version

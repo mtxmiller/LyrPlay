@@ -1,2 +1,2 @@
 # Beads JSONL merge driver for intelligent conflict resolution
-.beads/*.jsonl merge=beads-jsonl
+.beads/*.jsonl merge=beads
