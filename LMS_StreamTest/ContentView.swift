@@ -529,7 +529,9 @@ struct WebView: UIViewRepresentable {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "WebView")
     
     func makeUIView(context: Context) -> WKWebView {
-        os_log(.info, log: logger, "Creating WKWebView with Material Integration for URL: %{public}s", url.absoluteString)
+        // Mask credentials in URL for logging (security)
+        let maskedURL = url.absoluteString.replacingOccurrences(of: #"://[^:]+:[^@]+@"#, with: "://***:***@", options: .regularExpression)
+        os_log(.info, log: logger, "Creating WKWebView with Material Integration for URL: %{public}s", maskedURL)
         
         
         let configuration = WKWebViewConfiguration()
@@ -588,7 +590,7 @@ struct WebView: UIViewRepresentable {
         let settings = SettingsManager.shared
         if let authHeader = settings.generateAuthHeader() {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
-            os_log(.info, log: logger, "🔐 Added Authorization header for WebView (user: %{public}s)", settings.activeServerUsername)
+            os_log(.debug, log: logger, "🔐 Added Authorization header for WebView (user: %{public}s)", settings.activeServerUsername)
         } else {
             os_log(.debug, log: logger, "ℹ️ No authentication configured - loading WebView without credentials")
         }

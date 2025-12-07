@@ -270,7 +270,10 @@ class SlimProtoCommandHandler: ObservableObject {
                     if let extractedURL = extractURLFromHTTPRequest(httpRequest) {
                         // Inject credentials into URL for password-protected LMS servers
                         let url = SettingsManager.shared.injectCredentialsIntoURL(extractedURL)
-                        os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
+
+                        // Log URL with masked credentials for security
+                        let maskedURL = url.replacingOccurrences(of: #"://[^:]+:[^@]+@"#, with: "://***:***@", options: .regularExpression)
+                        os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, maskedURL)
 
                         // Check if this is a direct stream (autostart < '2') or HTTP stream (autostart >= '2')
                         // Per squeezelite: 0='direct wait', 1='direct play', 2/3='HTTP'

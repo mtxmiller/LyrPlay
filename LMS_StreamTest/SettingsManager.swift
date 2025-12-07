@@ -671,7 +671,7 @@ class SettingsManager: ObservableObject {
         components?.password = activeServerPassword
 
         if let modifiedURL = components?.url?.absoluteString {
-            os_log(.info, log: logger, "🔐 Injected credentials into stream URL (user: %{public}s)", activeServerUsername)
+            os_log(.debug, log: logger, "🔐 Injected credentials into stream URL (user: %{public}s)", activeServerUsername)
             return modifiedURL
         }
 
