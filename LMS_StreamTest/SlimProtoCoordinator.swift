@@ -1269,6 +1269,13 @@ extension SlimProtoCoordinator {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+
+        // Add HTTP Basic Authentication if configured
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            os_log(.debug, log: logger, "🔐 Added auth to JSON-RPC request (user: %{public}s)", settings.activeServerUsername)
+        }
+
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         
@@ -1614,6 +1621,13 @@ extension SlimProtoCoordinator {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+
+        // Add HTTP Basic Authentication if configured
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            os_log(.debug, log: logger, "🔐 Added auth to JSON-RPC request (user: %{public}s)", settings.activeServerUsername)
+        }
+
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         

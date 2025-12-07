@@ -31,6 +31,12 @@ class SettingsManager: ObservableObject {
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
+    // MARK: - Authentication Properties
+    @Published var serverUsername: String = ""
+    @Published var serverPassword: String = ""
+    @Published var backupServerUsername: String = ""
+    @Published var backupServerPassword: String = ""
+
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
     private(set) var deviceModel: String = "squeezelite"
@@ -203,6 +209,19 @@ class SettingsManager: ObservableObject {
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
 
+        // Load credentials from Keychain
+        if let primaryCreds = KeychainManager.shared.load(for: .primary) {
+            serverUsername = primaryCreds.username
+            serverPassword = primaryCreds.password
+            os_log(.info, log: logger, "✅ Loaded primary server credentials from Keychain (username: %{public}s)", primaryCreds.username)
+        }
+
+        if let backupCreds = KeychainManager.shared.load(for: .backup) {
+            backupServerUsername = backupCreds.username
+            backupServerPassword = backupCreds.password
+            os_log(.info, log: logger, "✅ Loaded backup server credentials from Keychain (username: %{public}s)", backupCreds.username)
+        }
+
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
     }
@@ -232,6 +251,29 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
+
+        // Save credentials to Keychain
+        if !serverUsername.isEmpty {
+            KeychainManager.shared.save(username: serverUsername, password: serverPassword, for: .primary)
+            os_log(.info, log: logger, "✅ Saved primary server credentials to Keychain")
+        } else {
+            KeychainManager.shared.delete(for: .primary)
+            os_log(.debug, log: logger, "Deleted primary server credentials (empty username)")
+        }
+
+        if !backupServerUsername.isEmpty {
+            KeychainManager.shared.save(username: backupServerUsername, password: backupServerPassword, for: .backup)
+            os_log(.info, log: logger, "✅ Saved backup server credentials to Keychain")
+        } else {
+            KeychainManager.shared.delete(for: .backup)
+            os_log(.debug, log: logger, "Deleted backup server credentials (empty username)")
+        }
+
+        // Update BASS auth header when credentials change
+        // Defer to next run loop to avoid initialization order issues
+        DispatchQueue.main.async {
+            AudioManager.shared.audioPlayer.updateAuthHeader()
+        }
 
         UserDefaults.standard.synchronize()
 
@@ -497,7 +539,9 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Computed Properties
     var webURL: String {
-        "http://\(activeServerHost):\(activeServerWebPort)/material/"
+        let baseURL = "http://\(activeServerHost):\(activeServerWebPort)/material/"
+        // Inject credentials for authenticated servers (Material's AJAX calls need them)
+        return injectCredentialsIntoURL(baseURL)
     }
 
     var formattedMACAddress: String {
@@ -535,6 +579,54 @@ class SettingsManager: ObservableObject {
         return currentActiveServer == .primary ? serverSlimProtoPort : backupServerSlimProtoPort
     }
 
+    var activeServerUsername: String {
+        return currentActiveServer == .primary ? serverUsername : backupServerUsername
+    }
+
+    var activeServerPassword: String {
+        return currentActiveServer == .primary ? serverPassword : backupServerPassword
+    }
+
+    var hasActiveServerAuthentication: Bool {
+        return !activeServerUsername.isEmpty
+    }
+
+    var hasPrimaryServerAuthentication: Bool {
+        return !serverUsername.isEmpty
+    }
+
+    var hasBackupServerAuthentication: Bool {
+        return !backupServerUsername.isEmpty
+    }
+
+    // MARK: - HTTP Basic Authentication
+
+    /// Generate HTTP Basic Authorization header for active server
+    /// - Returns: Authorization header string or nil if no credentials
+    func generateAuthHeader() -> String? {
+        return Self.generateAuthHeader(username: activeServerUsername, password: activeServerPassword)
+    }
+
+    /// Generate HTTP Basic Authorization header from credentials
+    /// - Parameters:
+    ///   - username: Username for authentication
+    ///   - password: Password for authentication
+    /// - Returns: Authorization header value (just "Basic <base64>") or nil if username is empty
+    static func generateAuthHeader(username: String, password: String) -> String? {
+        guard !username.isEmpty else {
+            return nil
+        }
+
+        let credentials = "\(username):\(password)"
+        guard let credentialsData = credentials.data(using: .utf8) else {
+            return nil
+        }
+
+        let base64Credentials = credentialsData.base64EncodedString()
+        // Return only the value part - the header name is added separately
+        return "Basic \(base64Credentials)"
+    }
+
     // MARK: - Server Switching
     func switchToBackupServer() {
         guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
@@ -553,5 +645,38 @@ class SettingsManager: ObservableObject {
         } else {
             switchToPrimaryServer()
         }
+    }
+
+    // MARK: - URL Authentication
+    /// Inject credentials into URL for HTTP Basic Auth
+    /// Converts http://server:port/path to http://username:password@server:port/path
+    /// - Parameter urlString: Original URL string
+    /// - Returns: URL with embedded credentials, or original URL if no auth or invalid
+    func injectCredentialsIntoURL(_ urlString: String) -> String {
+        guard hasActiveServerAuthentication else {
+            // No auth configured - return original URL
+            return urlString
+        }
+
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme,
+              let host = url.host else {
+            // Invalid URL - return original
+            return urlString
+        }
+
+        // Build URL with credentials: http://username:password@host:port/path
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.user = activeServerUsername
+        components?.password = activeServerPassword
+
+        if let modifiedURL = components?.url?.absoluteString {
+            os_log(.info, log: logger, "🔐 Injected credentials into stream URL (user: %{public}s)", activeServerUsername)
+            return modifiedURL
+        }
+
+        // Fallback: return original URL
+        os_log(.error, log: logger, "⚠️ Failed to inject credentials into URL, using original")
+        return urlString
     }
 }

@@ -92,6 +92,10 @@ class AudioPlayer: NSObject, ObservableObject {
     private var currentStreamFormat: String = "UNKNOWN"
     private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
 
+    // MARK: - HTTP Authentication
+    /// Stored auth header pointer - must be heap-allocated for BASS_CONFIG_NET_AGENT
+    private var authHeaderPointer: UnsafeMutablePointer<CChar>?
+
     // MARK: - Silent Recovery Support
     /// Flag to mute the next stream creation (for silent app foreground recovery)
     /// When true, stream volume is set to 0 immediately upon creation
@@ -195,6 +199,39 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Failed to load BASSOPUS plugin: %d", BASS_ErrorGetCode())
         }
 
+        // MARK: - HTTP Basic Authentication
+        // Configure auth header for password-protected LMS servers
+        // This applies to ALL BASS_StreamCreateURL() calls (both gapless and direct playback)
+        if let authHeader = settings.generateAuthHeader() {
+            // BASS requires format: "Authorization: Basic <base64>\r\n"
+            let headerWithLineEnd = authHeader + "\r\n"
+
+            // Free any existing auth header
+            if let existingPointer = authHeaderPointer {
+                free(existingPointer)
+            }
+
+            // Allocate persistent C string on heap using strdup (BASS stores this pointer)
+            headerWithLineEnd.withCString { cString in
+                authHeaderPointer = strdup(cString)
+            }
+
+            // Set global auth header for all BASS HTTP requests
+            // TEMPORARILY DISABLED - investigating if LMS streams need auth
+            // BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), authHeaderPointer)
+
+            os_log(.info, log: logger, "⚠️ BASS auth DISABLED - user: %{public}s (investigating stream auth)",
+                   settings.activeServerUsername)
+        } else {
+            // No authentication configured - clear any previous auth header
+            if let existingPointer = authHeaderPointer {
+                existingPointer.deallocate()
+                authHeaderPointer = nil
+            }
+            // BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), nil)
+            os_log(.debug, log: logger, "🔓 No authentication configured (BASS auth disabled)")
+        }
+
         // Enable ICY metadata for radio streams
         BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
 
@@ -205,6 +242,40 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
         os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
         #endif
+    }
+
+    /// Update HTTP Basic Auth header for BASS network requests
+    /// Call this when server credentials change to update the global auth configuration
+    func updateAuthHeader() {
+        if let authHeader = settings.generateAuthHeader() {
+            // BASS requires format: "Authorization: Basic <base64>\r\n"
+            let headerWithLineEnd = authHeader + "\r\n"
+
+            // Free any existing auth header
+            if let existingPointer = authHeaderPointer {
+                free(existingPointer)
+            }
+
+            // Allocate persistent C string on heap using strdup (BASS stores this pointer)
+            headerWithLineEnd.withCString { cString in
+                authHeaderPointer = strdup(cString)
+            }
+
+            // Set global auth header for all BASS HTTP requests
+            // TEMPORARILY DISABLED - investigating if LMS streams need auth
+            // BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), authHeaderPointer)
+
+            os_log(.info, log: logger, "⚠️ BASS auth DISABLED - user: %{public}s (investigating stream auth)",
+                   settings.activeServerUsername)
+        } else {
+            // No authentication configured - clear any previous auth header
+            if let existingPointer = authHeaderPointer {
+                existingPointer.deallocate()
+                authHeaderPointer = nil
+            }
+            // BASS_SetConfigPtr(DWORD(BASS_CONFIG_NET_AGENT), nil)
+            os_log(.debug, log: logger, "🔓 Cleared HTTP authentication (BASS auth disabled)")
+        }
     }
 
     // MARK: - Stream Playback (MINIMAL CBASS)
@@ -1015,6 +1086,11 @@ class AudioPlayer: NSObject, ObservableObject {
     deinit {
         NotificationCenter.default.removeObserver(self)
         cleanup()
+
+        // Free auth header memory
+        if let pointer = authHeaderPointer {
+            free(pointer)
+        }
 
         BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")

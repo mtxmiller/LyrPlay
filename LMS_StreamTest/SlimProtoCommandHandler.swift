@@ -267,7 +267,9 @@ class SlimProtoCommandHandler: ObservableObject {
                 if let httpRequest = String(data: httpData, encoding: .utf8) {
                     os_log(.info, log: logger, "HTTP request for %{public}s: %{public}s", formatName, httpRequest)
                     
-                    if let url = extractURLFromHTTPRequest(httpRequest) {
+                    if let extractedURL = extractURLFromHTTPRequest(httpRequest) {
+                        // Inject credentials into URL for password-protected LMS servers
+                        let url = SettingsManager.shared.injectCredentialsIntoURL(extractedURL)
                         os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, url)
 
                         // Check if this is a direct stream (autostart < '2') or HTTP stream (autostart >= '2')

@@ -394,7 +394,7 @@ Comprehensive error handling with user-friendly recovery:
 - **CarPlay Phase 1 COMPLETE** - Now Playing template with unified lock screen recovery
 - **External DAC Support** - Output device metrics display with sample rate monitoring for hardware audio interfaces
 - **WAV Format Support** - Lossless WAV playback with seeking capability (Qobuz compatibility)
-- **FLAC Auto-Routing** - Automatic legacy URL streaming for FLAC (BASSFLAC decode workaround)
+- **Unified Gapless Architecture** - All formats use push stream architecture for seamless playback
 - **Real-Time Stream Info** - Live display of current stream format, bitrate, and buffer status
 - **Universal network compatibility** - Server discovery works on all network configurations
 - **Enhanced audio streaming** - Superior FLAC, Opus, and multi-format support with native BASS codecs
@@ -472,7 +472,7 @@ These repositories provide definitive reference for:
 - **BASSFLAC Threading Fix**: Updated to BASSFLAC 2.4.17.1 with asynchronous frame decoding to fix `max_framesize=0` early termination issues in transcoded FLAC streams
 - **External DAC Support**: Output device metrics display with real-time sample rate monitoring for hardware audio interfaces
 - **WAV Format Support**: Lossless WAV playback with full seeking capability (Qobuz compatibility)
-- **FLAC Auto-Routing**: Automatic legacy URL streaming mode for FLAC files (BASSFLAC decode workaround)
+- **Unified Gapless Architecture**: All formats use BASS push stream architecture for seamless playback
 - **AAC Format Priority**: User-configurable AAC preferred format option for codec priority control
 - **Real-Time Stream Info**: Live display showing current stream format, bitrate, sample rate, and buffer status
 - **Enhanced Gapless Playback**: Fixed sync issues, boundary drift, and format mismatch transitions
@@ -568,7 +568,7 @@ For users who want additional server-side optimization, the previous server conf
   - Forces decode→raw→re-encode pipeline that generates complete FLAC headers
   - Uses LMS variables `$SAMPLESIZE$`, `$SAMPLERATE$`, `$CHANNELS$` for automatic bit depth detection
   - Handles both 16-bit and 24-bit FLAC files correctly by detecting source properties
-  - Outputs consistent 16-bit FLAC for legacy StreamingKit compatibility (`-b 16` flag) - CBass handles all bit depths natively
+  - Outputs consistent 16-bit FLAC for compatibility (`-b 16` flag) - BASS handles all bit depths natively
   - Uses sox for reliable audio processing and format conversion
   - Only affects the specific iOS device, other players use normal passthrough
 - **Performance Impact**: Minimal - transcoding happens in real-time on server with efficient compression level 0

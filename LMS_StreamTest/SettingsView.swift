@@ -409,6 +409,8 @@ struct ServerConfigView: View {
     @Environment(\.presentationMode) var presentationMode
     
     @State private var serverHost: String = ""
+    @State private var serverUsername: String = ""
+    @State private var serverPassword: String = ""
     @State private var validationErrors: [String] = []
     @State private var showingConnectionTest = false
     @State private var hasChanges = false
@@ -421,12 +423,39 @@ struct ServerConfigView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .onChange(of: serverHost) { _ in hasChanges = true }
-                
+
                 Text("Enter the IP address or hostname of your LMS server. You can find this in your LMS web interface under Settings → Network.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
+            Section(header: Text("Authentication (Optional)")) {
+                TextField("Username", text: $serverUsername)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .textContentType(.username)
+                    .onChange(of: serverUsername) { _ in hasChanges = true }
+
+                SecureField("Password", text: $serverPassword)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .textContentType(.password)
+                    .onChange(of: serverPassword) { _ in hasChanges = true }
+
+                Text("Leave blank if your server doesn't require authentication. Most LMS servers don't use passwords.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if !serverUsername.isEmpty {
+                    Button("Clear Credentials") {
+                        serverUsername = ""
+                        serverPassword = ""
+                        hasChanges = true
+                    }
+                    .foregroundColor(.red)
+                }
+            }
+
             if !validationErrors.isEmpty {
                 Section(header: Text("Validation Errors")) {
                     ForEach(validationErrors, id: \.self) { error in
@@ -456,6 +485,8 @@ struct ServerConfigView: View {
         }
         .onAppear {
             serverHost = settings.activeServerHost
+            serverUsername = settings.activeServerUsername
+            serverPassword = settings.activeServerPassword
         }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet()
@@ -494,8 +525,12 @@ struct ServerConfigView: View {
         // Save to the correct server based on which is currently active
         if settings.currentActiveServer == .primary {
             settings.serverHost = trimmedHost
+            settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.serverPassword = serverPassword
         } else {
             settings.backupServerHost = trimmedHost
+            settings.backupServerUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.backupServerPassword = serverPassword
         }
 
         settings.saveSettings()
@@ -911,6 +946,8 @@ struct BackupServerConfigView: View {
     @State private var backupHost: String = ""
     @State private var backupWebPort: String = "9000"
     @State private var backupSlimPort: String = "3483"
+    @State private var backupUsername: String = ""
+    @State private var backupPassword: String = ""
     @State private var hasChanges = false
     @State private var validationErrors: [String] = []
     
@@ -938,7 +975,7 @@ struct BackupServerConfigView: View {
                         .frame(width: 80)
                         .onChange(of: backupWebPort) { _ in hasChanges = true }
                 }
-                
+
                 HStack {
                     Text("Stream Port:")
                     Spacer()
@@ -949,7 +986,34 @@ struct BackupServerConfigView: View {
                         .onChange(of: backupSlimPort) { _ in hasChanges = true }
                 }
             }
-            
+
+            Section(header: Text("Authentication (Optional)")) {
+                TextField("Username", text: $backupUsername)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .textContentType(.username)
+                    .onChange(of: backupUsername) { _ in hasChanges = true }
+
+                SecureField("Password", text: $backupPassword)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .textContentType(.password)
+                    .onChange(of: backupPassword) { _ in hasChanges = true }
+
+                Text("Leave blank if your backup server doesn't require authentication.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if !backupUsername.isEmpty {
+                    Button("Clear Credentials") {
+                        backupUsername = ""
+                        backupPassword = ""
+                        hasChanges = true
+                    }
+                    .foregroundColor(.red)
+                }
+            }
+
             if !validationErrors.isEmpty {
                 Section(header: Text("Validation Errors")) {
                     ForEach(validationErrors, id: \.self) { error in
@@ -979,6 +1043,8 @@ struct BackupServerConfigView: View {
         backupHost = settings.backupServerHost
         backupWebPort = String(settings.backupServerWebPort)
         backupSlimPort = String(settings.backupServerSlimProtoPort)
+        backupUsername = settings.backupServerUsername
+        backupPassword = settings.backupServerPassword
     }
     
     private func saveSettings() {
@@ -1004,6 +1070,8 @@ struct BackupServerConfigView: View {
         settings.backupServerHost = trimmedHost
         settings.backupServerWebPort = webPortInt
         settings.backupServerSlimProtoPort = slimPortInt
+        settings.backupServerUsername = backupUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.backupServerPassword = backupPassword
         settings.saveSettings()
         hasChanges = false
         

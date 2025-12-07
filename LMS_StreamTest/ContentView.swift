@@ -133,6 +133,7 @@ struct ContentView: View {
                     url: url,
                     isLoading: $isLoading,
                     loadError: $loadError,
+                    hasConnectionError: $hasConnectionError,
                     webViewReference: $webView,
                     onSettingsPressed: {
                         showingSettings = true
@@ -301,22 +302,24 @@ struct ContentView: View {
     
     private var serverErrorView: some View {
         VStack(spacing: 20) {
-            Image(systemName: "exclamationmark.triangle")
+            Image(systemName: errorIcon)
                 .font(.largeTitle)
-                .foregroundColor(.orange)
-            
-            Text("Invalid LMS URL")
+                .foregroundColor(errorColor)
+
+            Text(errorTitle)
                 .font(.headline)
                 .foregroundColor(.red)
-            
+
             Text("Server: \(settings.activeServerHost)")
                 .font(.body)
                 .foregroundColor(.white)
-            
-            Text("Check your server configuration")
+
+            Text(errorMessage)
                 .font(.caption)
                 .foregroundColor(.secondary)
-            
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+
             Button("Open Settings") {
                 showingSettings = true
             }
@@ -324,6 +327,43 @@ struct ContentView: View {
             .padding(.horizontal, 40)
         }
         .padding()
+    }
+
+    // Error message helpers for serverErrorView
+    private var errorIcon: String {
+        if let error = loadError, error.contains("Authentication") {
+            return "lock.shield"
+        }
+        return "exclamationmark.triangle"
+    }
+
+    private var errorColor: Color {
+        if let error = loadError, error.contains("Authentication") {
+            return .red
+        }
+        return .orange
+    }
+
+    private var errorTitle: String {
+        if let error = loadError {
+            if error.contains("Authentication") {
+                return "Authentication Required"
+            } else if error.contains("Cannot find") {
+                return "Server Not Found"
+            }
+        }
+        return "Connection Error"
+    }
+
+    private var errorMessage: String {
+        if let error = loadError {
+            if error.contains("Authentication") {
+                return "Please check your username and password in settings. Most LMS servers don't require authentication."
+            } else if error.contains("Cannot find") {
+                return "Cannot reach the server. Check your server address and network connection."
+            }
+        }
+        return "Check your server configuration and network connection."
     }
     
     // MARK: - LyrPlay Loading Screen
@@ -482,6 +522,7 @@ struct WebView: UIViewRepresentable {
     let url: URL
     @Binding var isLoading: Bool
     @Binding var loadError: String?
+    @Binding var hasConnectionError: Bool
     @Binding var webViewReference: WKWebView?
     let onSettingsPressed: () -> Void
     
@@ -541,6 +582,15 @@ struct WebView: UIViewRepresentable {
             request.timeoutInterval = 10.0  // Fail fast if server is down!
 
             os_log(.info, log: logger, "⚠️ No cache - forcing network load with 10s timeout for fast failure")
+        }
+
+        // Add HTTP Basic Authentication header if credentials are configured
+        let settings = SettingsManager.shared
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            os_log(.info, log: logger, "🔐 Added Authorization header for WebView (user: %{public}s)", settings.activeServerUsername)
+        } else {
+            os_log(.debug, log: logger, "ℹ️ No authentication configured - loading WebView without credentials")
         }
 
         webView.load(request)
@@ -636,75 +686,99 @@ struct WebView: UIViewRepresentable {
         
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             os_log(.info, log: logger, "Finished loading Material interface")
-            
-            // CRITICAL: Inject JavaScript to handle Material's appSettings integration
-            let settingsHandlerScript = """
-            (function() {
-                console.log('LyrPlay: Injecting Material settings handler...');
-                
-                // Note: Lock screen/notification controls are now hidden via Material's hide=notif parameter
-                // Native iOS media controls are handled entirely by LyrPlay's NowPlayingManager
-                
-                // Override window.open to catch the appSettings URL
-                const originalOpen = window.open;
-                window.open = function(url, name, specs) {
-                    console.log('LyrPlay: window.open called with URL:', url);
-                    
-                    if (url && url.startsWith('lmsstream://')) {
-                        console.log('LyrPlay: Handling settings URL:', url);
-                        // Send message to Swift
-                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
-                            window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
+
+            // First, check if this is an error page (401 auth error, etc.)
+            webView.evaluateJavaScript("document.title") { title, error in
+                if let title = title as? String {
+                    os_log(.debug, log: self.logger, "📄 Page title: %{public}s", title)
+
+                    // Check if page indicates auth error
+                    let titleLower = title.lowercased()
+                    if titleLower.contains("401") || titleLower.contains("unauthorized") || titleLower.contains("authorization required") {
+                        os_log(.error, log: self.logger, "🔐 Detected 401 error page in WebView - title: %{public}s", title)
+                        DispatchQueue.main.async {
+                            self.parent.isLoading = false
+                            self.parent.loadError = "Authentication required - Please enter credentials in Settings"
+                            self.parent.hasConnectionError = true
+                            SettingsManager.shared.showFallbackSettingsButton = true
                         }
-                        return null; // Prevent actual navigation
+                        return
                     }
-                    
-                    // For other URLs, use original behavior
-                    return originalOpen.call(this, url, name, specs);
-                };
-                
-                // Also handle direct location changes
-                const originalLocation = window.location;
-                Object.defineProperty(window, 'location', {
-                    get: function() {
-                        return originalLocation;
-                    },
-                    set: function(url) {
-                        if (typeof url === 'string' && url.startsWith('lmsstream://')) {
-                            console.log('LyrPlay: Handling location change to:', url);
+                }
+
+                // If no error detected, proceed with normal Material setup
+                // CRITICAL: Inject JavaScript to handle Material's appSettings integration
+                let settingsHandlerScript = """
+                (function() {
+                    console.log('LyrPlay: Injecting Material settings handler...');
+
+                    // Note: Lock screen/notification controls are now hidden via Material's hide=notif parameter
+                    // Native iOS media controls are handled entirely by LyrPlay's NowPlayingManager
+
+                    // Override window.open to catch the appSettings URL
+                    const originalOpen = window.open;
+                    window.open = function(url, name, specs) {
+                        console.log('LyrPlay: window.open called with URL:', url);
+
+                        if (url && url.startsWith('lmsstream://')) {
+                            console.log('LyrPlay: Handling settings URL:', url);
+                            // Send message to Swift
                             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
                                 window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
                             }
-                            return;
+                            return null; // Prevent actual navigation
                         }
-                        originalLocation.href = url;
-                    }
-                });
-                
-                console.log('LyrPlay: Material settings handler injected successfully');
-            })();
-            """
-            
-            webView.evaluateJavaScript(settingsHandlerScript) { result, error in
-                if let error = error {
-                    os_log(.error, log: self.logger, "❌ Failed to inject settings handler: %{public}s", error.localizedDescription)
-                    // Enable fallback settings button and ensure loading is hidden
-                    DispatchQueue.main.async {
-                        SettingsManager.shared.showFallbackSettingsButton = true
-                        self.parent.isLoading = false
-                        os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (JS injection failed)")
-                    }
-                } else {
-                    os_log(.info, log: self.logger, "✅ Material settings handler injected successfully")
-                    // Disable fallback settings button and ensure loading is hidden
-                    DispatchQueue.main.async {
-                        SettingsManager.shared.showFallbackSettingsButton = false
-                        self.parent.isLoading = false
-                        os_log(.debug, log: self.logger, "✅ WebView: Setting isLoading = false (JS injection success)")
+
+                        // For other URLs, use original behavior
+                        return originalOpen.call(this, url, name, specs);
+                    };
+
+                    // Also handle direct location changes
+                    const originalLocation = window.location;
+                    Object.defineProperty(window, 'location', {
+                        get: function() {
+                            return originalLocation;
+                        },
+                        set: function(url) {
+                            if (typeof url === 'string' && url.startsWith('lmsstream://')) {
+                                console.log('LyrPlay: Handling location change to:', url);
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
+                                    window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
+                                }
+                                return;
+                            }
+                            originalLocation.href = url;
+                        }
+                    });
+
+                    console.log('LyrPlay: Material settings handler injected successfully');
+                })();
+                """
+
+                webView.evaluateJavaScript(settingsHandlerScript) { result, error in
+                    if let error = error {
+                        os_log(.error, log: self.logger, "❌ Failed to inject settings handler: %{public}s", error.localizedDescription)
+                        // Enable fallback settings button and ensure loading is hidden
+                        DispatchQueue.main.async {
+                            SettingsManager.shared.showFallbackSettingsButton = true
+                            self.parent.isLoading = false
+                            os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (JS injection failed)")
+                        }
+                    } else {
+                        os_log(.info, log: self.logger, "✅ Material settings handler injected successfully")
+                        // Disable fallback settings button and ensure loading is hidden
+                        DispatchQueue.main.async {
+                            SettingsManager.shared.showFallbackSettingsButton = false
+                            self.parent.isLoading = false
+                            // Clear connection error state - WebView loaded successfully
+                            self.parent.hasConnectionError = false
+                            self.parent.loadError = nil
+                            os_log(.debug, log: self.logger, "✅ WebView: Setting isLoading = false (JS injection success)")
+                        }
                     }
                 }
             }
-            
+
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -720,10 +794,45 @@ struct WebView: UIViewRepresentable {
         
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed provisional navigation: %{public}s", error.localizedDescription)
+
+            // Detect HTTP authentication errors (401) and other HTTP failures
+            var isAuthError = false
+            var httpStatusCode: Int = 0
+
+            if let urlError = error as? URLError {
+                // Check for HTTP errors via underlying NSError
+                if let underlyingError = urlError.userInfo[NSUnderlyingErrorKey] as? NSError {
+                    if let httpResponse = underlyingError.userInfo["_kCFStreamErrorCodeKey"] as? Int {
+                        httpStatusCode = httpResponse
+                    }
+                }
+            }
+
+            // NSURLErrorDomain with code -1012 is HTTP authentication failure
+            // NSURLErrorDomain with code -1003 is cannot find host
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain {
+                if nsError.code == -1012 {
+                    isAuthError = true
+                    os_log(.error, log: logger, "🔐 HTTP 401 Unauthorized - Authentication required")
+                } else if nsError.code == -1003 {
+                    os_log(.error, log: logger, "🌐 Cannot find host")
+                }
+            }
+
             DispatchQueue.main.async {
                 os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (didFailProvisionalNavigation)")
                 self.parent.isLoading = false
-                self.parent.loadError = "Connection failed: \(error.localizedDescription)"
+
+                // Set specific error messages based on error type
+                if isAuthError {
+                    self.parent.loadError = "Authentication failed - Wrong username or password"
+                    self.parent.hasConnectionError = true
+                } else {
+                    self.parent.loadError = "Connection failed: \(error.localizedDescription)"
+                    self.parent.hasConnectionError = true
+                }
+
                 // Enable fallback settings button on error
                 SettingsManager.shared.showFallbackSettingsButton = true
             }
