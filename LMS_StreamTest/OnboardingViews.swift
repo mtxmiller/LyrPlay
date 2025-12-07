@@ -216,6 +216,9 @@ struct ServerSetupView: View {
     @State private var serverHost = ""
     @State private var webPort = "9000"
     @State private var slimProtoPort = "3483"
+    @State private var serverUsername = ""
+    @State private var serverPassword = ""
+    @State private var showAuthSection = false
     @State private var validationErrors: [String] = []
     @State private var isDiscovering = false
     @State private var discoveredServers: [DiscoveredServer] = []
@@ -288,7 +291,7 @@ struct ServerSetupView: View {
                             text: $webPort,
                             keyboardType: .numberPad
                         )
-                        
+
                         FormField(
                             title: "Stream Port",
                             placeholder: "3483",
@@ -296,8 +299,71 @@ struct ServerSetupView: View {
                             keyboardType: .numberPad
                         )
                     }
+
+                    // Authentication (Optional)
+                    DisclosureGroup(
+                        isExpanded: $showAuthSection,
+                        content: {
+                            VStack(spacing: 16) {
+                                FormField(
+                                    title: "Username",
+                                    placeholder: "Leave blank if not required",
+                                    text: $serverUsername,
+                                    keyboardType: .default
+                                )
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Password")
+                                        .font(.subheadline)
+                                        .foregroundColor(.gray)
+
+                                    SecureField("Leave blank if not required", text: $serverPassword)
+                                        .padding()
+                                        .background(Color(white: 0.15))
+                                        .cornerRadius(8)
+                                        .foregroundColor(.white)
+                                }
+
+                                Text("Most LMS servers don't require authentication. Only enter credentials if your server has password protection enabled.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 4)
+
+                                if !serverUsername.isEmpty {
+                                    Button("Clear Credentials") {
+                                        serverUsername = ""
+                                        serverPassword = ""
+                                    }
+                                    .buttonStyle(SecondaryButtonStyle())
+                                    .font(.caption)
+                                }
+                            }
+                            .padding(.top, 12)
+                        },
+                        label: {
+                            HStack {
+                                Image(systemName: "lock.shield")
+                                    .foregroundColor(.blue)
+                                    .font(.system(size: 16))
+
+                                Text("Advanced: Authentication (Optional)")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white)
+
+                                Spacer()
+
+                                Image(systemName: showAuthSection ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
+                                    .foregroundColor(.blue)
+                                    .font(.system(size: 18))
+                            }
+                            .padding()
+                            .background(Color(white: 0.15))
+                            .cornerRadius(10)
+                        }
+                    )
+                    .accentColor(.blue)
                 }
-                
+
                 if !validationErrors.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(validationErrors, id: \.self) { error in
@@ -696,6 +762,11 @@ struct ServerSetupView: View {
         serverHost = settings.activeServerHost
         webPort = String(settings.activeServerWebPort)
         slimProtoPort = String(settings.activeServerSlimProtoPort)
+        serverUsername = settings.serverUsername
+        serverPassword = settings.serverPassword
+
+        // Auto-expand auth section if credentials exist
+        showAuthSection = !serverUsername.isEmpty
     }
     
     private func validateAndProceed() {
@@ -724,7 +795,12 @@ struct ServerSetupView: View {
         settings.serverHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.serverWebPort = webPortInt
         settings.serverSlimProtoPort = slimPortInt
-        
+        settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.serverPassword = serverPassword
+
+        // saveSettings() will automatically save credentials to Keychain
+        settings.saveSettings()
+
         onNext()
     }
 }
@@ -932,7 +1008,7 @@ struct TestDetailRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(detail.name)
                     .font(.headline)
-                    .foregroundColor(.black)
+                    .foregroundColor(.blue)
                 Text(detail.message)
                     .font(.caption)
                     .foregroundColor(.gray)

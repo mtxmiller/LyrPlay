@@ -406,10 +406,17 @@ class SettingsManager: ObservableObject {
         guard let url = URL(string: "http://\(host):\(port)/") else {
             return .failure("Invalid URL format")
         }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        request.setValue(customUserAgent, forHTTPHeaderField: "User-Agent")  // ADD THIS
+        request.setValue(customUserAgent, forHTTPHeaderField: "User-Agent")
+
+        // Add HTTP Basic Authentication if configured
+        if let authHeader = generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            os_log(.debug, log: logger, "🔐 Added auth to connection test")
+        }
+
         request.timeoutInterval = connectionTimeout
         
         do {
