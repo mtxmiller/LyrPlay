@@ -48,7 +48,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Playback State (PHASE 3: Player Synchronization)
+    // MARK: - Playback State (Player Synchronization)
     /// Playback state enum for synchronized multi-room audio
     enum PlaybackState {
         case stopped          // No playback
@@ -77,7 +77,7 @@ class AudioPlayer: NSObject, ObservableObject {
     // Track timing (for reference only - track end detection now handled by NowPlayingManager with server time)
     private var trackStartTime: Date = Date()
 
-    // PHASE 3: Synchronized playback state and monitoring
+    // Synchronized playback state and monitoring
     private var playbackState: PlaybackState = .stopped
     private var startAtMonitorTimer: Timer?
     
@@ -374,7 +374,7 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.debug, log: logger, "⏹️ CBass stopped playback")
     }
 
-    // MARK: - PHASE 3: Synchronized Start (OUTPUT_START_AT)
+    // MARK: - Synchronized Start (OUTPUT_START_AT)
 
     /// Start playback at a specific jiffies time (for multi-room sync)
     /// Buffers audio but delays playback until local jiffies >= targetJiffies
@@ -384,7 +384,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        os_log(.info, log: logger, "🎯 PHASE 3: Synchronized start requested at jiffies %.3f", targetJiffies)
+        os_log(.info, log: logger, "🎯 Synchronized start requested at jiffies %.3f", targetJiffies)
 
         // Enter OUTPUT_START_AT state
         playbackState = .startAt(jiffies: targetJiffies)
@@ -431,7 +431,7 @@ class AudioPlayer: NSObject, ObservableObject {
                     let result = BASS_ChannelPlay(self.currentStream, 0)
 
                     if result != 0 {
-                        os_log(.info, log: self.logger, "▶️ PHASE 3: Synchronized playback started at jiffies %.3f", currentJiffies)
+                        os_log(.info, log: self.logger, "▶️ Synchronized playback started at jiffies %.3f", currentJiffies)
                         self.delegate?.audioPlayerDidStartPlaying()
                     } else {
                         let errorCode = BASS_ErrorGetCode()
@@ -456,7 +456,7 @@ class AudioPlayer: NSObject, ObservableObject {
         startAtMonitorTimer = nil
     }
 
-    // MARK: - PHASE 4: Sync Drift Corrections
+    // MARK: - Sync Drift Corrections
 
     /// Play silence for a duration (timed pause for sync drift correction)
     /// Advances playback position without outputting audio
@@ -466,7 +466,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        os_log(.info, log: logger, "⏸️🔇 PHASE 4: Playing silence for %.3f seconds (drift correction)", duration)
+        os_log(.info, log: logger, "⏸️🔇 Playing silence for %.3f seconds (drift correction)", duration)
 
         // Get current position in bytes
         let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
@@ -481,7 +481,7 @@ class AudioPlayer: NSObject, ObservableObject {
         let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
 
         if result != 0 {
-            os_log(.info, log: logger, "✅ PHASE 4: Silence played - advanced %.3f seconds", duration)
+            os_log(.info, log: logger, "✅ Silence played - advanced %.3f seconds", duration)
         } else {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ Failed to play silence: %d", errorCode)
@@ -496,7 +496,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        os_log(.info, log: logger, "⏩ PHASE 4: Skipping ahead %.3f seconds (drift correction)", duration)
+        os_log(.info, log: logger, "⏩ Skipping ahead %.3f seconds (drift correction)", duration)
 
         // Get current position in bytes
         let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
@@ -511,7 +511,7 @@ class AudioPlayer: NSObject, ObservableObject {
         let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
 
         if result != 0 {
-            os_log(.info, log: logger, "✅ PHASE 4: Skipped ahead %.3f seconds", duration)
+            os_log(.info, log: logger, "✅ Skipped ahead %.3f seconds", duration)
         } else {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ Failed to skip ahead: %d", errorCode)

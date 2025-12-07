@@ -312,13 +312,13 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
         }
 
-        // PHASE 5: Include sync group ID if we have one from previous connection
+        // Include sync group ID if we have one from previous connection
         if let savedSyncGroup = settings.loadSyncGroupID() {
             // Add null terminator after capabilities string
             helloData.append(0)
             // Append 10-byte sync group ID
             helloData.append(savedSyncGroup)
-            os_log(.info, log: logger, "🔗 PHASE 5: Including saved sync group ID in HELO: %{public}s",
+            os_log(.info, log: logger, "🔗 Including saved sync group ID in HELO: %{public}s",
                    savedSyncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
         }
 

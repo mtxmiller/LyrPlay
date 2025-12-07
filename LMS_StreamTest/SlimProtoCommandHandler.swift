@@ -431,12 +431,12 @@ class SlimProtoCommandHandler: ObservableObject {
         } else {
             // Timed pause - play silence for interval milliseconds (sync drift correction)
             let intervalSeconds = TimeInterval(interval) / 1000.0
-            os_log(.info, log: logger, "⏸️🔇 PHASE 4: Timed pause - play silence for %.3f seconds (drift correction)", intervalSeconds)
+            os_log(.info, log: logger, "⏸️🔇 Timed pause - play silence for %.3f seconds (drift correction)", intervalSeconds)
 
             // Forward to coordinator which routes to AudioManager → AudioPlayer
             if let coordinator = delegate as? SlimProtoCoordinator {
                 coordinator.playSilence(duration: intervalSeconds)
-                os_log(.info, log: logger, "✅ PHASE 4: Timed pause initiated")
+                os_log(.debug, log: logger, "✅ Timed pause initiated")
             } else {
                 os_log(.error, log: logger, "❌ Cannot access coordinator for timed pause - falling back to regular pause")
                 isStreamPaused = true
@@ -445,15 +445,15 @@ class SlimProtoCommandHandler: ObservableObject {
         }
     }
 
-    // PHASE 4: Skip ahead command for sync drift correction
+    // Skip ahead command for sync drift correction
     private func handleSkipAheadCommand(interval: UInt32) {
         let intervalSeconds = TimeInterval(interval) / 1000.0
-        os_log(.info, log: logger, "⏩ PHASE 4: Skip ahead - consume buffer for %.3f seconds (drift correction)", intervalSeconds)
+        os_log(.info, log: logger, "⏩ Skip ahead - consume buffer for %.3f seconds (drift correction)", intervalSeconds)
 
         // Forward to coordinator which routes to AudioManager → AudioPlayer
         if let coordinator = delegate as? SlimProtoCoordinator {
             coordinator.skipAhead(duration: intervalSeconds)
-            os_log(.info, log: logger, "✅ PHASE 4: Skip ahead initiated")
+            os_log(.debug, log: logger, "✅ Skip ahead initiated")
         } else {
             os_log(.error, log: logger, "❌ Cannot access coordinator for skip ahead")
         }
@@ -507,7 +507,7 @@ class SlimProtoCommandHandler: ObservableObject {
 
             os_log(.info, log: logger, "🎯 Synchronized unpause - start at jiffies %.3f seconds", startAtJiffies)
 
-            // PHASE 3: Call AudioPlayer.startAt() for synchronized multi-room playback
+            // Call AudioPlayer.startAt() for synchronized multi-room playback
             if let coordinator = delegate as? SlimProtoCoordinator {
                 // Forward to coordinator which routes to AudioManager → AudioPlayer
                 coordinator.startAtJiffies(startAtJiffies)
@@ -515,7 +515,7 @@ class SlimProtoCommandHandler: ObservableObject {
                 isStreamPaused = false
                 isPausedByLockScreen = false
 
-                os_log(.info, log: logger, "✅ PHASE 3: Synchronized start initiated via coordinator")
+                os_log(.debug, log: logger, "✅ Synchronized start initiated via coordinator")
             } else {
                 // Fallback if coordinator not available
                 os_log(.error, log: logger, "❌ Cannot access coordinator for synchronized start - falling back to immediate resume")

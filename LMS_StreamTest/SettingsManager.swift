@@ -286,7 +286,7 @@ class SettingsManager: ObservableObject {
     func saveSyncGroupID(_ syncGroupID: Data) {
         UserDefaults.standard.set(syncGroupID, forKey: Keys.syncGroupID)
         UserDefaults.standard.synchronize()
-        os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID saved to UserDefaults")
+        os_log(.info, log: logger, "🔗 Sync group ID saved to UserDefaults")
     }
 
     /// Load saved sync group ID from UserDefaults
@@ -298,7 +298,7 @@ class SettingsManager: ObservableObject {
     func clearSyncGroupID() {
         UserDefaults.standard.removeObject(forKey: Keys.syncGroupID)
         UserDefaults.standard.synchronize()
-        os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID cleared from UserDefaults")
+        os_log(.info, log: logger, "🔗 Sync group ID cleared from UserDefaults")
     }
 
     private func migrateSettingsIfNeeded() {

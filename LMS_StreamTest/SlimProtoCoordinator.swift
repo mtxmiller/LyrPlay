@@ -552,7 +552,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Record that we received a command (shows connection is alive)
         connectionManager.recordHeartbeatResponse()
 
-        // PHASE 5: Handle serv packet for sync group persistence
+        // Handle serv packet for sync group persistence
         if command.type == "serv" {
             handleServPacket(command.payload)
         }
@@ -1093,7 +1093,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// Send STMl (buffer loaded) status to server (PHASE 7.7)
     /// This signals that buffer has reached threshold and player is ready for synchronized start
     func sendBufferLoaded() {
-        os_log(.info, log: logger, "📊 PHASE 7.7: Sending STMl (buffer loaded) to server")
+        os_log(.info, log: logger, "📊 Sending STMl (buffer loaded) to server")
         // Like squeezelite: buffer reaches threshold → send STMl
         // This allows server to check if ALL players are ready and transition from WAITING_TO_SYNC
         client.sendStatus("STMl")
@@ -1183,7 +1183,7 @@ extension SlimProtoCoordinator {
         return uptimeMilliseconds
     }
 
-    // MARK: - PHASE 5: Sync Group Persistence
+    // MARK: - Sync Group Persistence
 
     /// Parse serv packet and extract sync group ID for multi-room persistence
     private func handleServPacket(_ payload: Data) {
@@ -1195,7 +1195,7 @@ extension SlimProtoCoordinator {
         // Total minimum: 18 bytes
 
         guard payload.count >= 18 else {
-            os_log(.error, log: logger, "⚠️ PHASE 5: serv packet too short: %d bytes (expected >= 18)", payload.count)
+            os_log(.error, log: logger, "⚠️ serv packet too short: %d bytes (expected >= 18)", payload.count)
             return
         }
 
@@ -1207,12 +1207,12 @@ extension SlimProtoCoordinator {
 
         if isEmptySyncGroup {
             // No sync group - clear stored value
-            os_log(.info, log: logger, "🔗 PHASE 5: No sync group (player not synced)")
+            os_log(.info, log: logger, "🔗 No sync group (player not synced)")
             syncGroupID = nil
             settings.clearSyncGroupID()
         } else {
             // Store sync group ID
-            os_log(.info, log: logger, "🔗 PHASE 5: Sync group ID received: %{public}s",
+            os_log(.info, log: logger, "🔗 Sync group ID received: %{public}s",
                    syncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
             syncGroupID = syncGroup
             settings.saveSyncGroupID(syncGroup)
@@ -1861,25 +1861,25 @@ extension SlimProtoCoordinator {
         audioManager.setVolume(volume)
     }
 
-    // MARK: - PHASE 3: Synchronized Playback Control
+    // MARK: - Synchronized Playback Control
 
     /// Start playback at a specific jiffies time (for multi-room audio synchronization)
     func startAtJiffies(_ targetJiffies: TimeInterval) {
-        os_log(.info, log: logger, "🎯 PHASE 3: Coordinator forwarding synchronized start to AudioManager")
+        os_log(.info, log: logger, "🎯 Coordinator forwarding synchronized start to AudioManager")
         audioManager.startAtJiffies(targetJiffies)
     }
 
-    // MARK: - PHASE 4: Sync Drift Corrections
+    // MARK: - Sync Drift Corrections
 
     /// Play silence for a duration (timed pause for sync drift correction)
     func playSilence(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏸️🔇 PHASE 4: Coordinator forwarding play silence to AudioManager")
+        os_log(.info, log: logger, "⏸️🔇 Coordinator forwarding play silence to AudioManager")
         audioManager.playSilence(duration: duration)
     }
 
     /// Skip ahead by consuming buffer (sync drift correction)
     func skipAhead(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏩ PHASE 4: Coordinator forwarding skip ahead to AudioManager")
+        os_log(.info, log: logger, "⏩ Coordinator forwarding skip ahead to AudioManager")
         audioManager.skipAhead(duration: duration)
     }
 

@@ -209,7 +209,7 @@ class AudioManager: NSObject, ObservableObject {
     /// Start playback at a specific jiffies time (for player synchronization)
     /// Buffers audio but delays playback until target jiffies time is reached
     func startAtJiffies(_ targetJiffies: TimeInterval) {
-        os_log(.info, log: logger, "🎯 PHASE 3+7.2: AudioManager routing synchronized start")
+        os_log(.info, log: logger, "🎯 AudioManager routing synchronized start")
 
         // Activate audio session for playback
         activateAudioSession()
@@ -217,7 +217,7 @@ class AudioManager: NSObject, ObservableObject {
         // Route to appropriate player based on stream type
         if streamDecoder.hasValidStream() {
             // PHASE 7.2: Push streams now support synchronized start!
-            os_log(.info, log: logger, "🎯 PHASE 7.5: Routing to streamDecoder.startAtJiffies()")
+            os_log(.info, log: logger, "🎯 Routing to streamDecoder.startAtJiffies()")
             streamDecoder.startAtJiffies(targetJiffies)
         } else {
             // URL streams (legacy)
@@ -229,12 +229,12 @@ class AudioManager: NSObject, ObservableObject {
 
     /// Play silence for a duration (timed pause for sync drift correction)
     func playSilence(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏸️🔇 PHASE 4+7.3: AudioManager routing play silence")
+        os_log(.info, log: logger, "⏸️🔇 AudioManager routing play silence")
 
         // Route to appropriate player based on stream type
         if streamDecoder.hasValidStream() {
             // PHASE 7.3: Push streams now support silence injection!
-            os_log(.info, log: logger, "🔇 PHASE 7.5: Routing to streamDecoder.playSilence()")
+            os_log(.info, log: logger, "🔇 Routing to streamDecoder.playSilence()")
             streamDecoder.playSilence(duration: duration)
         } else {
             // URL streams (legacy)
@@ -244,12 +244,12 @@ class AudioManager: NSObject, ObservableObject {
 
     /// Skip ahead by consuming buffer (sync drift correction)
     func skipAhead(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏩ PHASE 4+7.4: AudioManager routing skip ahead")
+        os_log(.info, log: logger, "⏩ AudioManager routing skip ahead")
 
         // Route to appropriate player based on stream type
         if streamDecoder.hasValidStream() {
             // PHASE 7.4: Push streams now support buffer skip ahead!
-            os_log(.info, log: logger, "⏩ PHASE 7.5: Routing to streamDecoder.skipAhead()")
+            os_log(.info, log: logger, "⏩ Routing to streamDecoder.skipAhead()")
             streamDecoder.skipAhead(duration: duration)
         } else {
             // URL streams (legacy)
@@ -632,8 +632,8 @@ extension AudioManager: AudioStreamDecoderDelegate {
     }
 
     func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder) {
-        os_log(.info, log: logger, "📊 PHASE 7.7: Buffer ready threshold reached - sending STMl!")
-        // PHASE 7.7: Notify server that buffer is loaded and ready for synchronized start
+        os_log(.info, log: logger, "📊 Buffer ready threshold reached - sending STMl!")
+        // Notify server that buffer is loaded and ready for synchronized start
         // This allows server to transition from WAITING_TO_SYNC to PLAYING
         slimClient?.sendBufferLoaded()
     }
