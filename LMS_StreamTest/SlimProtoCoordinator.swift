@@ -1081,13 +1081,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // This updates Material to show the track that's NOW PLAYING (not just queued)
         client.sendStatus("STMs")
 
-        // CRITICAL FIX: Update lock screen metadata immediately for gapless transitions
-        // In push stream architecture, metadata updates don't happen automatically like URL streams
-        // So we need to manually trigger metadata refresh when track boundary is reached
-        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Triggering immediate metadata update for lock screen (gapless transition)")
-        fetchCurrentTrackMetadata()
+        // CRITICAL FIX: Delay metadata fetch to avoid race condition with server
+        // Server needs time to process STMs before we query metadata, otherwise it may
+        // return stale data (previous track) if metadata query arrives before STMs
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Delaying metadata fetch 500ms to let server process STMs first")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            os_log(.info, log: self.logger, "[BOUNDARY-DRIFT] 🔄 Now fetching metadata after STMs processing delay")
+            self.fetchCurrentTrackMetadata()
+        }
 
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh triggered - lock screen should update immediately")
+        os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs sent + time reset + metadata refresh scheduled - lock screen should update in 500ms")
     }
 
     /// Send STMl (buffer loaded) status to server (PHASE 7.7)
