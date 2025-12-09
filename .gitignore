@@ -120,3 +120,6 @@ Frameworks/bassflac.xcframework.backup_20251128/
 .grok/settings.json
 LMS_StreamTest.code-workspace
 .claude/
+
+# Beads daemon logs (local only)
+.beads/daemon-*.log.gz
