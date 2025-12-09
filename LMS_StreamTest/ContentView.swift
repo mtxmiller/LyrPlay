@@ -20,7 +20,8 @@ struct ContentView: View {
     @State private var hasConnectionError = false
     @State private var hasHandledError = false
     @State private var hasShownError = false
-    
+    @State private var previousActiveServer: SettingsManager.ServerType?
+
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
 
@@ -241,10 +242,26 @@ struct ContentView: View {
                 }
             }
         }
-        .onReceive(settings.$currentActiveServer) { _ in
-            // CRITICAL FIX: Reload WebView when server switches
-            os_log(.info, log: logger, "🔄 Active server changed to: %{public}s - reloading WebView", settings.currentActiveServer.displayName)
-            
+        .onReceive(settings.$currentActiveServer) { newServer in
+            // Track previous value and update at end of handler
+            defer { previousActiveServer = newServer }
+
+            // Skip first fire (initial subscription during view creation)
+            guard let previous = previousActiveServer else {
+                os_log(.debug, log: logger, "⏭️ Skipping initial currentActiveServer subscription (value: %{public}s)", newServer.displayName)
+                return
+            }
+
+            // Skip if server didn't actually change
+            guard previous != newServer else {
+                os_log(.debug, log: logger, "⏭️ Skipping - currentActiveServer unchanged (still: %{public}s)", newServer.displayName)
+                return
+            }
+
+            // Server actually changed - reload WebView and reconnect
+            os_log(.info, log: logger, "🔄 Active server changed: %{public}s → %{public}s - reloading WebView",
+                   previous.displayName, newServer.displayName)
+
             // Force WebView reload with new server URL
             if let webView = webView {
                 let newURL = URL(string: materialWebURL)!
@@ -252,13 +269,13 @@ struct ContentView: View {
                 webView.load(request)
                 os_log(.info, log: logger, "✅ WebView reloaded for server switch to: %{public}s", settings.activeServerHost)
             }
-            
-            // ALSO CRITICAL: Update SlimProto connection to new server
+
+            // Update SlimProto connection to new server
             slimProtoCoordinator.updateServerSettings(
                 host: settings.activeServerHost,
                 port: UInt16(settings.activeServerSlimProtoPort)
             )
-            
+
             // Reconnect SlimProto to new server
             Task {
                 await slimProtoCoordinator.restartConnection()
