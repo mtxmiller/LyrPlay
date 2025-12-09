@@ -137,12 +137,12 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS handles iOS audio session automatically (default behavior)
         // No BASS_CONFIG_IOS_SESSION configuration needed - BASS manages everything
 
-        // Initialize BASS without BASS_DEVICE_FREQ flag - let iOS auto-detect sample rate
-        // Per BASS docs: "sample format has no effect on iOS - device's native format is automatically used"
-        // iOS will automatically switch to match the stream's sample rate for external DACs
-        // This enables bit-perfect playback at 96kHz, 192kHz, etc.
-        let targetRate: DWORD = 192000  // Ignored on iOS - device uses native format automatically
-        let result = BASS_Init(-1, targetRate, 0, nil, nil)  // No BASS_DEVICE_FREQ - let iOS handle it
+        // Initialize BASS with BASS_DEVICE_FREQ flag to request high sample rate output
+        // BASS_DEVICE_FREQ tells iOS to set device output rate to match our request
+        // This must be combined with AVAudioSession.setPreferredSampleRate for proper sync
+        // Without this flag, iOS ignores targetRate and uses default (44.1/48kHz)
+        let targetRate: DWORD = 192000  // Request 192kHz - iOS will use max device capability
+        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
 
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
@@ -166,6 +166,18 @@ class AudioPlayer: NSObject, ObservableObject {
                 os_log(.info, log: logger, "📱 Standard iOS output (48kHz - built-in/AirPods)")
             } else if actualRate == 44100 {
                 os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
+            }
+
+            // CRITICAL: Check for BASS vs iOS mismatch (LMS_StreamTest-yg4)
+            // If BASS thinks 192kHz but iOS is at 48kHz, iOS will resample down
+            let iosRate = AVAudioSession.sharedInstance().sampleRate
+            os_log(.info, log: logger, "🔍 Sample Rate Verification: BASS=%dHz, iOS=%.0fHz", actualRate, iosRate)
+
+            if abs(Double(actualRate) - iosRate) > 100 {
+                os_log(.error, log: logger, "⚠️ MISMATCH DETECTED: BASS reports %dHz but iOS session is %.0fHz - audio will be resampled!", actualRate, iosRate)
+                os_log(.error, log: logger, "⚠️ This means high-res audio will be downsampled to %.0fHz by iOS", iosRate)
+            } else {
+                os_log(.info, log: logger, "✅ BASS and iOS sample rates match - bit-perfect output")
             }
         } else {
             os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
