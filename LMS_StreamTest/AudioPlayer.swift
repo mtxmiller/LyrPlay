@@ -137,11 +137,11 @@ class AudioPlayer: NSObject, ObservableObject {
         // BASS handles iOS audio session automatically (default behavior)
         // No BASS_CONFIG_IOS_SESSION configuration needed - BASS manages everything
 
-        // Initialize BASS with BASS_DEVICE_FREQ flag to request high sample rate output
-        // BASS_DEVICE_FREQ tells iOS to set device output rate to match our request
-        // This must be combined with AVAudioSession.setPreferredSampleRate for proper sync
-        // Without this flag, iOS ignores targetRate and uses default (44.1/48kHz)
-        let targetRate: DWORD = 192000  // Request 192kHz - iOS will use max device capability
+        // Initialize BASS with BASS_DEVICE_FREQ flag at 48kHz base rate
+        // 48kHz is the base of high-res family (48→96→192kHz clean multiples)
+        // Prevents upsampling while allowing DAC to negotiate up for high-res content
+        // BASS_DEVICE_FREQ flag enables DAC to output at higher rates when content matches
+        let targetRate: DWORD = 48000  // 48kHz family base for high-res compatibility
         let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
 
         if result == 0 {
