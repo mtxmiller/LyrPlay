@@ -633,6 +633,58 @@ class AudioStreamDecoder {
         // Update stream info for SettingsView display (using decoder stream info)
         updateStreamInfoFromDecoder(decoderStream)
 
+        // CRITICAL: Check if output device rate matches decoder rate (for bit-perfect playback)
+        // Per Ian @ un4seen: "the output device's sample rate needs to match the stream's sample rate"
+        // Use BASS_DEVICE_REINIT to change device rate without destroying streams
+        var deviceInfo = BASS_INFO()
+        if BASS_GetInfo(&deviceInfo) != 0 {
+            let deviceRate = Int(deviceInfo.freq)
+
+            if deviceRate != actualSampleRate {
+                os_log(.info, log: logger, "🔄 Device rate (%dHz) != stream rate (%dHz) - attempting reinit for bit-perfect playback", deviceRate, actualSampleRate)
+
+                // Reinit device to match stream using BASS_DEVICE_REINIT
+                // This changes hardware output rate without destroying streams
+                let result = BASS_Init(
+                    -1,
+                    DWORD(actualSampleRate),
+                    DWORD(BASS_DEVICE_FREQ | BASS_DEVICE_REINIT),
+                    nil,
+                    nil
+                )
+
+                // CRITICAL: Always check actual device rate after reinit attempt
+                // Even if BASS_Init fails, device might already be at correct rate
+                // Or hardware might be locked (built-in speaker at 48kHz)
+                BASS_GetInfo(&deviceInfo)
+                let finalDeviceRate = Int(deviceInfo.freq)
+
+                if finalDeviceRate == actualSampleRate {
+                    // Device is now at correct rate (reinit succeeded or was already correct)
+                    if result != 0 {
+                        os_log(.info, log: logger, "✅ Device reinitialized: %dHz → %dHz (bit-perfect)", deviceRate, finalDeviceRate)
+                    } else {
+                        // Reinit "failed" but rate is correct - device was already at target rate
+                        os_log(.debug, log: logger, "✅ Device already at %dHz (bit-perfect)", finalDeviceRate)
+                    }
+                } else {
+                    // Device rate couldn't be changed - hardware limitation
+                    // Built-in iPhone speaker/AirPods locked at 48kHz, external DACs may vary
+                    if result == 0 {
+                        let error = BASS_ErrorGetCode()
+                        os_log(.info, log: logger, "ℹ️ Device locked at %dHz (hardware limitation, error=%d) - audio will be resampled %dHz→%dHz", finalDeviceRate, error, actualSampleRate, finalDeviceRate)
+                    } else {
+                        os_log(.info, log: logger, "ℹ️ Device remains at %dHz (hardware limitation) - audio will be resampled %dHz→%dHz", finalDeviceRate, actualSampleRate, finalDeviceRate)
+                    }
+                }
+            } else {
+                os_log(.debug, log: logger, "✅ Device rate matches stream rate: %dHz (bit-perfect)", deviceRate)
+            }
+        } else {
+            let error = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ Failed to get device info: error=%d", error)
+        }
+
         // If sample rate doesn't match, we need to recreate push stream
         if actualSampleRate != sampleRate || actualChannels != channels {
             os_log(.error, log: logger, "⚠️ Format mismatch! Decoder: %dHz/%dch, Stream: %dHz/%dch",
