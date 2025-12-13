@@ -674,7 +674,7 @@
 					"-framework",
 					bassopus,
 				);
-				OTHER_SWIFT_FLAGS = "-D TESTFLIGHT";
+				OTHER_SWIFT_FLAGS = "\"-D TESTFLIGHT\"";
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

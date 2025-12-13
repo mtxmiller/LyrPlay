@@ -262,7 +262,7 @@ class PurchaseManager: ObservableObject {
 
 // MARK: - Debug Helpers
 
-#if DEBUG
+#if DEBUG || TESTFLIGHT
 extension PurchaseManager {
     /// Simulate purchase for testing UI (does not actually purchase)
     func simulatePurchase(_ productID: ProductID) {
