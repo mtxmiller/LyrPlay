@@ -21,14 +21,14 @@ class AppIconManager: ObservableObject {
 
     enum AppIcon: String, CaseIterable, Identifiable {
         case `default` = "Default"
-        case gradientShine = "AppIcon-GradientShine"
+        case gradientShine = "AppIcon-Gradient"
         case hiFi = "AppIcon-HiFi"
         case monochrome = "AppIcon-Monochrome"
         case neon = "AppIcon-Neon"
         case outrun = "AppIcon-Outrun"
         case red = "AppIcon-Red"
-        case retrowave = "AppIcon-Retrowave"
-        case reverseOut = "AppIcon-ReverseOut"
+        case retrowave = "AppIcon-Retro"
+        case reverseOut = "AppIcon-Reverse"
         case white = "AppIcon-White"
         case wordmarkWhite = "AppIcon-WordmarkWhite"
         case wordmark = "AppIcon-Wordmark"

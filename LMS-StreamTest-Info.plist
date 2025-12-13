@@ -91,11 +91,11 @@
 	<dict>
 		<key>CFBundleAlternateIcons</key>
 		<dict>
-			<key>AppIcon-GradientShine</key>
+			<key>AppIcon-Gradient</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
 				<array>
-					<string>AppIcon-GradientShine</string>
+					<string>AppIcon-Gradient</string>
 				</array>
 				<key>UIPrerenderedIcon</key>
 				<false/>
@@ -145,20 +145,20 @@
 				<key>UIPrerenderedIcon</key>
 				<false/>
 			</dict>
-			<key>AppIcon-Retrowave</key>
+			<key>AppIcon-Retro</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
 				<array>
-					<string>AppIcon-Retrowave</string>
+					<string>AppIcon-Retro</string>
 				</array>
 				<key>UIPrerenderedIcon</key>
 				<false/>
 			</dict>
-			<key>AppIcon-ReverseOut</key>
+			<key>AppIcon-Reverse</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
 				<array>
-					<string>AppIcon-ReverseOut</string>
+					<string>AppIcon-Reverse</string>
 				</array>
 				<key>UIPrerenderedIcon</key>
 				<false/>
