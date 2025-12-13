@@ -20,8 +20,8 @@ struct LMS_StreamTestApp: App {
 
         #if DEBUG
         // AUTO-UNLOCK ICON PACK FOR DEBUG BUILDS
-        //PurchaseManager.shared.simulatePurchase(.iconPack)
-        //os_log(.debug, log: logger, "🧪 DEBUG: Icon Pack auto-unlocked for testing")
+        PurchaseManager.shared.simulatePurchase(.iconPack)
+        os_log(.debug, log: logger, "🧪 DEBUG: Icon Pack auto-unlocked for testing")
         #endif
 
         os_log(.info, log: logger, "🚀 APP INITIALIZATION COMPLETE")
