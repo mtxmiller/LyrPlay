@@ -2,6 +2,7 @@
 // Buffer-level gapless playback implementation using BASS push streams
 // Based on squeezelite's proven architecture
 import Foundation
+import AVFoundation
 import os.log
 
 // MARK: - Global BASS Callbacks
@@ -633,56 +634,46 @@ class AudioStreamDecoder {
         // Update stream info for SettingsView display (using decoder stream info)
         updateStreamInfoFromDecoder(decoderStream)
 
-        // CRITICAL: Check if output device rate matches decoder rate (for bit-perfect playback)
-        // Per Ian @ un4seen: "the output device's sample rate needs to match the stream's sample rate"
-        // Use BASS_DEVICE_REINIT to change device rate without destroying streams
-        var deviceInfo = BASS_INFO()
-        if BASS_GetInfo(&deviceInfo) != 0 {
-            let deviceRate = Int(deviceInfo.freq)
+        // CRITICAL: Set iOS audio session rate to match content for bit-perfect playback
+        // Per Ian @ un4seen (topic 20831): Use AVAudioSession.setPreferredSampleRate
+        // "BASS will also detect when the output rate is changed" via this method
+        // This is the RECOMMENDED approach for iOS instead of BASS_DEVICE_REINIT
+        do {
+            let session = AVAudioSession.sharedInstance()
+            let currentRate = session.sampleRate
 
-            if deviceRate != actualSampleRate {
-                os_log(.info, log: logger, "🔄 Device rate (%dHz) != stream rate (%dHz) - attempting reinit for bit-perfect playback", deviceRate, actualSampleRate)
+            if Int(currentRate) != actualSampleRate {
+                os_log(.info, log: logger, "🔄 iOS session rate (%.0fHz) != stream rate (%dHz) - updating for bit-perfect playback", currentRate, actualSampleRate)
 
-                // Reinit device to match stream using BASS_DEVICE_REINIT
-                // This changes hardware output rate without destroying streams
-                let result = BASS_Init(
-                    -1,
-                    DWORD(actualSampleRate),
-                    DWORD(BASS_DEVICE_FREQ | BASS_DEVICE_REINIT),
-                    nil,
-                    nil
-                )
+                // Set preferred sample rate - iOS will honor this for external DACs
+                // Built-in speakers may remain locked at 48kHz (hardware limitation)
+                try session.setPreferredSampleRate(Double(actualSampleRate))
 
-                // CRITICAL: Always check actual device rate after reinit attempt
-                // Even if BASS_Init fails, device might already be at correct rate
-                // Or hardware might be locked (built-in speaker at 48kHz)
-                BASS_GetInfo(&deviceInfo)
-                let finalDeviceRate = Int(deviceInfo.freq)
+                // BASS automatically detects the rate change - verify what we got
+                var deviceInfo = BASS_INFO()
+                if BASS_GetInfo(&deviceInfo) != 0 {
+                    let finalRate = Int(deviceInfo.freq)
+                    let actualIOSRate = Int(session.sampleRate)
 
-                if finalDeviceRate == actualSampleRate {
-                    // Device is now at correct rate (reinit succeeded or was already correct)
-                    if result != 0 {
-                        os_log(.info, log: logger, "✅ Device reinitialized: %dHz → %dHz (bit-perfect)", deviceRate, finalDeviceRate)
+                    if finalRate == actualSampleRate && actualIOSRate == actualSampleRate {
+                        os_log(.info, log: logger, "✅ Bit-perfect playback: %.0fHz → %dHz (iOS session + BASS device)", currentRate, finalRate)
+                    } else if actualIOSRate == actualSampleRate {
+                        os_log(.info, log: logger, "✅ iOS session at %dHz (BASS shows %dHz)", actualIOSRate, finalRate)
                     } else {
-                        // Reinit "failed" but rate is correct - device was already at target rate
-                        os_log(.debug, log: logger, "✅ Device already at %dHz (bit-perfect)", finalDeviceRate)
-                    }
-                } else {
-                    // Device rate couldn't be changed - hardware limitation
-                    // Built-in iPhone speaker/AirPods locked at 48kHz, external DACs may vary
-                    if result == 0 {
-                        let error = BASS_ErrorGetCode()
-                        os_log(.info, log: logger, "ℹ️ Device locked at %dHz (hardware limitation, error=%d) - audio will be resampled %dHz→%dHz", finalDeviceRate, error, actualSampleRate, finalDeviceRate)
-                    } else {
-                        os_log(.info, log: logger, "ℹ️ Device remains at %dHz (hardware limitation) - audio will be resampled %dHz→%dHz", finalDeviceRate, actualSampleRate, finalDeviceRate)
+                        os_log(.info, log: logger, "ℹ️ Device limited to %dHz (iOS: %dHz) - audio will be resampled from %dHz", finalRate, actualIOSRate, actualSampleRate)
                     }
                 }
             } else {
-                os_log(.debug, log: logger, "✅ Device rate matches stream rate: %dHz (bit-perfect)", deviceRate)
+                os_log(.debug, log: logger, "✅ iOS session rate matches stream: %.0fHz (bit-perfect)", currentRate)
             }
-        } else {
-            let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Failed to get device info: error=%d", error)
+        } catch {
+            os_log(.error, log: logger, "❌ Failed to set preferred sample rate: %{public}s", error.localizedDescription)
+
+            // Still check BASS device rate for logging
+            var deviceInfo = BASS_INFO()
+            if BASS_GetInfo(&deviceInfo) != 0 {
+                os_log(.info, log: logger, "ℹ️ Continuing with BASS device at %dHz", Int(deviceInfo.freq))
+            }
         }
 
         // If sample rate doesn't match, we need to recreate push stream
