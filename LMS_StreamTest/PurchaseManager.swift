@@ -209,8 +209,8 @@ class PurchaseManager: ObservableObject {
             }
         }
 
-        #if DEBUG
-        // In debug mode, preserve simulated purchases
+        #if DEBUG || TESTFLIGHT
+        // In debug/testflight mode, preserve simulated purchases
         let debugPurchases = self.purchasedProductIDs
         if !debugPurchases.isEmpty {
             os_log(.debug, log: logger, "🧪 DEBUG: Preserving simulated purchases: %{public}s", debugPurchases.joined(separator: ", "))
