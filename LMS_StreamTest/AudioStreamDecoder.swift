@@ -674,12 +674,9 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "✅ Decoder created: %dHz, %dch (expected: %dHz, %dch)",
                actualSampleRate, actualChannels, sampleRate, channels)
 
-        // Update stream info for SettingsView display (using decoder stream info)
-        updateStreamInfoFromDecoder(decoderStream)
-
-        // NOTE: Don't set iOS sample rate here! This happens during PREFETCHING.
-        // Sample rate is set in initializePushStream() when we actually create/recreate the stream.
-        // Setting it here causes the CURRENT track to be resampled when the NEXT track is buffered.
+        // NOTE: Don't update stream info here! This happens during PREFETCHING.
+        // Stream info is updated when track actually starts (after startDecoderLoop).
+        // Updating here would show the NEXT track's sample rate while CURRENT track plays.
 
         // If sample rate doesn't match, we need to recreate push stream
         if actualSampleRate != sampleRate || actualChannels != channels {
@@ -767,6 +764,9 @@ class AudioStreamDecoder {
         isDecoding = true
         manualStop = false  // This is a fresh start, not a manual stop
         startDecoderLoop()
+
+        // Update stream info NOW (track is actually starting, not just buffering)
+        updateStreamInfoFromDecoder(decoderStream)
     }
 
     /// Stop current decoder stream
@@ -1450,6 +1450,9 @@ class AudioStreamDecoder {
         isDecoding = true
         manualStop = false
         startDecoderLoop()
+
+        // Update stream info NOW (deferred track is actually starting)
+        updateStreamInfoFromDecoder(decoderStream)
 
         // Notify delegate that deferred track started (for STMs)
         os_log(.error, log: logger, "[APP-RECOVERY] 📡 Notifying delegate of deferred track start")
