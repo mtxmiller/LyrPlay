@@ -254,7 +254,7 @@ struct SettingsView: View {
                                 Text("44.1 kHz").tag(44100)
                                 Text("48 kHz").tag(48000)
                                 Text("96 kHz").tag(96000)
-                                Text("192 kHz (No Limit)").tag(192000)
+                                Text("192 kHz").tag(192000)
                             }
                             .pickerStyle(.menu)
                         }
@@ -273,44 +273,6 @@ struct SettingsView: View {
                             }
                         }
                     }
-                }
-
-                // Advanced Section
-                Section(header: Text("Advanced")) {
-                    NavigationLink(destination: AdvancedConfigView()) {
-                        SettingsRow(
-                            icon: "gearshape.2",
-                            title: "Advanced Settings",
-                            value: "Ports, Timeouts",
-                            valueColor: .secondary
-                        )
-                    }
-                    
-                    
-                    Button(action: { showingCacheClearAlert = true }) {
-                        SettingsRow(
-                            icon: "trash.slash",
-                            title: "Clear Material Cache",
-                            value: isClearingCache ? "Clearing..." : "Tap to clear",
-                            valueColor: isClearingCache ? .orange : .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
-                    .disabled(isClearingCache)
-                    
-                }
-                
-                // Reset Section
-                Section(header: Text("Reset")) {
-                    Button(action: { showingResetAlert = true }) {
-                        SettingsRow(
-                            icon: "arrow.clockwise",
-                            title: "Reset All Settings",
-                            value: "Start over",
-                            valueColor: .red
-                        )
-                    }
-                    .foregroundColor(.red)
                 }
 
                 // App Icon Section
@@ -345,7 +307,7 @@ struct SettingsView: View {
                                     .font(.body)
                             }
 
-                            Text("Customize your home screen with 11 premium icon designs including retro wave themes!")
+                            Text("Support LyrPlay development and customize your home screen with 11 premium icon designs")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
@@ -398,7 +360,38 @@ struct SettingsView: View {
                     .foregroundColor(.primary)
                 }
 
-                Section(header: Text("About")) {
+                // Advanced & About Section (Combined)
+                Section(header: Text("Advanced & About")) {
+                    NavigationLink(destination: AdvancedConfigView()) {
+                        SettingsRow(
+                            icon: "gearshape.2",
+                            title: "Advanced Settings",
+                            value: "Ports, Timeouts",
+                            valueColor: .secondary
+                        )
+                    }
+
+                    Button(action: { showingCacheClearAlert = true }) {
+                        SettingsRow(
+                            icon: "trash.slash",
+                            title: "Clear Material Cache",
+                            value: isClearingCache ? "Clearing..." : "Tap to clear",
+                            valueColor: isClearingCache ? .orange : .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    .disabled(isClearingCache)
+
+                    Button(action: { showingResetAlert = true }) {
+                        SettingsRow(
+                            icon: "arrow.clockwise",
+                            title: "Reset All Settings",
+                            value: "Start over",
+                            valueColor: .red
+                        )
+                    }
+                    .foregroundColor(.red)
+
                     SettingsRow(
                         icon: "info.circle",
                         title: "Version",
