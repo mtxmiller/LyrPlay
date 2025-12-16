@@ -115,6 +115,15 @@ LyrPlay is free and open source. If it's been useful to you, consider supporting
 
 Your support helps maintain LyrPlay and add community-requested features!
 
+### PayPal Donations
+
+<div id="paypal-container-WWXW56JQE4GR4"></div>
+<script>
+  paypal.HostedButtons({
+    hostedButtonId: "WWXW56JQE4GR4",
+  }).render("#paypal-container-WWXW56JQE4GR4")
+</script>
+
 ## License
 
 See MIT License. 
