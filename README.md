@@ -117,7 +117,7 @@ Your support helps maintain LyrPlay and add community-requested features!
 
 ### PayPal Donations
 
-[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=WWXW56JQE4GR4)
+[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/WWXW56JQE4GR4)
 
 ## License
 
