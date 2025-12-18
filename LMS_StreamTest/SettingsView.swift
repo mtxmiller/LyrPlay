@@ -296,50 +296,33 @@ struct SettingsView: View {
                             }
                         }
                     } else {
-                        // Icon Pack locked - show paywall
-                        VStack(alignment: .leading, spacing: 12) {
+                        // Icon Pack locked - subtle navigation to preview
+                        NavigationLink(destination: IconPreviewView(
+                            onPurchaseError: { error in
+                                purchaseErrorMessage = error.localizedDescription
+                                showingPurchaseError = true
+                            }
+                        )) {
                             HStack {
                                 Image(systemName: "app.badge")
                                     .foregroundColor(.purple)
                                     .frame(width: 20)
 
-                                Text("Premium App Icons")
-                                    .font(.body)
-                            }
-
-                            Text("Support LyrPlay development and customize your home screen with 11 premium icon designs")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            if purchaseManager.isPurchasing {
-                                ProgressView()
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                            } else {
-                                Button(action: {
-                                    Task {
-                                        let success = await purchaseManager.purchase(.iconPack)
-                                        if !success, let error = purchaseManager.purchaseError {
-                                            purchaseErrorMessage = error.localizedDescription
-                                            showingPurchaseError = true
-                                        }
-                                    }
-                                }) {
-                                    HStack {
-                                        Image(systemName: "lock.open")
-                                        Text("Unlock Icon Pack - \(purchaseManager.iconPackPrice)")
-                                            .fontWeight(.semibold)
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.purple)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("App Icon")
+                                        .font(.body)
+                                    Text("11 premium designs available")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
                                 }
-                                .buttonStyle(.plain)
+
+                                Spacer()
+
+                                Text(purchaseManager.iconPackPrice)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
-                        .padding(.vertical, 4)
                     }
 
                     // Restore Purchases button
@@ -1615,7 +1598,148 @@ struct DetailItem: View {
     }
 }
 
-// MARK: - Icon Picker View
+// MARK: - Icon Preview View (Pre-purchase)
+struct IconPreviewView: View {
+    @ObservedObject private var purchaseManager = PurchaseManager.shared
+    @Environment(\.presentationMode) var presentationMode
+    var onPurchaseError: ((Error) -> Void)?
+
+    let columns = [
+        GridItem(.flexible()),
+        GridItem(.flexible()),
+        GridItem(.flexible())
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Header text
+                    Text("Preview all 11 premium icon designs. Purchase to customize your home screen.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+
+                    // Icon grid preview
+                    LazyVGrid(columns: columns, spacing: 20) {
+                        ForEach(AppIconManager.AppIcon.allCases) { icon in
+                            IconPreviewButton(icon: icon)
+                        }
+                    }
+                    .padding()
+                }
+            }
+
+            // Purchase footer
+            VStack(spacing: 12) {
+                Divider()
+
+                if purchaseManager.isPurchasing {
+                    ProgressView("Processing...")
+                        .padding()
+                } else {
+                    Button(action: {
+                        Task {
+                            let success = await purchaseManager.purchase(.iconPack)
+                            if success {
+                                // Dismiss and go to picker
+                                presentationMode.wrappedValue.dismiss()
+                            } else if let error = purchaseManager.purchaseError {
+                                onPurchaseError?(error)
+                            }
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "sparkles")
+                            Text("Get Icon Pack - \(purchaseManager.iconPackPrice)")
+                                .fontWeight(.medium)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.purple.opacity(0.1))
+                        .foregroundColor(.purple)
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.purple.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal)
+
+                    Text("Support LyrPlay development")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.bottom)
+            .background(Color(UIColor.systemGroupedBackground))
+        }
+        .navigationTitle("Premium Icons")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Icon Preview Button (Non-interactive preview)
+struct IconPreviewButton: View {
+    let icon: AppIconManager.AppIcon
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Icon preview
+            if let uiImage = loadIconImage(for: icon) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+            } else {
+                // Fallback placeholder
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(LinearGradient(
+                        colors: icon == .default ? [.blue, .purple] : [.purple, .pink],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .aspectRatio(1, contentMode: .fit)
+                    .overlay(
+                        Text(String(icon.displayName.prefix(1)))
+                            .font(.system(size: 40, weight: .bold))
+                            .foregroundColor(.white)
+                    )
+            }
+
+            // Icon name
+            VStack(spacing: 2) {
+                Text(icon.displayName)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+
+                Text(icon.description)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .frame(height: 36)
+        }
+    }
+
+    private func loadIconImage(for icon: AppIconManager.AppIcon) -> UIImage? {
+        if icon == .default {
+            if let iconsDictionary = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],
+               let primaryIconDict = iconsDictionary["CFBundlePrimaryIcon"] as? [String: Any],
+               let iconFiles = primaryIconDict["CFBundleIconFiles"] as? [String],
+               let lastIcon = iconFiles.last {
+                return UIImage(named: lastIcon)
+            }
+        }
+        let assetName = icon.previewImageName
+        return UIImage(named: assetName)
+    }
+}
+
+// MARK: - Icon Picker View (Post-purchase)
 struct IconPickerView: View {
     @ObservedObject private var appIconManager = AppIconManager.shared
     @State private var showingError = false
