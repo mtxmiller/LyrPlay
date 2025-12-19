@@ -20,7 +20,7 @@ struct LMS_StreamTestApp: App {
 
         #if DEBUG || TESTFLIGHT
         // AUTO-UNLOCK ICON PACK FOR TESTFLIGHT/DEBUG BUILDS
-        //PurchaseManager.shared.simulatePurchase(.iconPack)
+        PurchaseManager.shared.simulatePurchase(.iconPack)
         os_log(.debug, log: logger, "🧪 TESTFLIGHT: Icon Pack auto-unlocked for testing")
         #endif
 
