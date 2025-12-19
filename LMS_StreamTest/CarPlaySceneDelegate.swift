@@ -1639,22 +1639,42 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         let playerID = SettingsManager.shared.playerMACAddress
 
-        // Use playlistcontrol with play_index to load album and start at specific track
+        // Step 1: Load the album
         let loadCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)", "play_index:\(trackIndex)"]]
+            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(loadCommand) { [weak self] loadResponse in
             guard let self = self else { return }
 
-            DispatchQueue.main.async {
-                if !loadResponse.isEmpty {
-                    os_log(.info, log: self.logger, "✅ Successfully loaded album at track: %{public}s", track.title)
-                    self.pushNowPlayingTemplate()
-                } else {
-                    os_log(.error, log: self.logger, "❌ Failed to load album at track")
+            if loadResponse.isEmpty {
+                DispatchQueue.main.async {
+                    os_log(.error, log: self.logger, "❌ Failed to load album")
+                }
+                return
+            }
+
+            // Step 2: Jump to the selected track (same approach as playlist view)
+            let jumpCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "index", trackIndex]]
+            ]
+
+            coordinator.sendJSONRPCCommandDirect(jumpCommand) { [weak self] jumpResponse in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+
+                    if !jumpResponse.isEmpty {
+                        os_log(.info, log: self.logger, "✅ Successfully jumped to track: %{public}s", track.title)
+                        self.pushNowPlayingTemplate()
+                    } else {
+                        os_log(.error, log: self.logger, "❌ Failed to jump to track")
+                        // Still show now playing - album loaded, just at wrong track
+                        self.pushNowPlayingTemplate()
+                    }
                 }
             }
         }
