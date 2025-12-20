@@ -17,7 +17,11 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Interruption Handling** - Smart pause/resume for phone calls and other app interruptions
 - **Server Discovery** - Automatic LMS server detection with failover support
 - **iOS Optimized** - Native SwiftUI app with BASS-managed audio sessions
-- **Custom CarPlay Interface** - Native CarPlay interface with similar layout to Material Skin
+- **Custom CarPlay Interface** - Native CarPlay interface with album browsing, track lists, and playback controls
+- **Player Synchronization** - Sync playback across multiple LMS players
+- **HTTP Authentication** - Support for password-protected LMS servers
+- **Bit-Perfect USB DAC** - Sample rate matching for external audio interfaces
+- **Premium Icon Pack** - 11 alternate app icons available as optional in-app purchase
 
 ## Audio Format Support
 
