@@ -119,6 +119,10 @@ LyrPlay is free and open source. If it's been useful to you, consider supporting
 
 Your support helps maintain LyrPlay and add community-requested features!
 
+### PayPal Donations
+
+[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/WWXW56JQE4GR4)
+
 ## License
 
 See MIT License. 
