@@ -17,6 +17,13 @@ struct LMS_StreamTestApp: App {
         os_log(.info, log: logger, "🚀 APP INITIALIZATION START")
         os_log(.info, log: logger, "  @main App struct created")
         os_log(.info, log: logger, "  @UIApplicationDelegateAdaptor configured")
+
+        #if DEBUG || TESTFLIGHT
+        // AUTO-UNLOCK ICON PACK FOR TESTFLIGHT/DEBUG BUILDS
+        PurchaseManager.shared.simulatePurchase(.iconPack)
+        os_log(.debug, log: logger, "🧪 TESTFLIGHT: Icon Pack auto-unlocked for testing")
+        #endif
+
         os_log(.info, log: logger, "🚀 APP INITIALIZATION COMPLETE")
     }
 

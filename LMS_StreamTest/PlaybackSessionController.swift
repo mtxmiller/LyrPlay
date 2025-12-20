@@ -149,14 +149,26 @@ final class PlaybackSessionController {
         do {
             let session = AVAudioSession.sharedInstance()
 
-            // Let iOS automatically switch sample rates for external DACs
-            // setPreferredSampleRate() is broken on iOS 26 and prevents auto-switching
-            // iOS natively supports bit-perfect output with automatic rate matching
-            // try session.setPreferredSampleRate(192000)  // REMOVED - broken API
+            // Let iOS use default sample rate (48kHz on modern devices)
+            // Not calling setPreferredSampleRate - iOS defaults to 48kHz (iPhone 6S+)
+            // BASS will request higher rates via BASS_DEVICE_FREQ when DAC supports it
+            // Build 4 issue: Fixed 192kHz forced 96kHz content to upsample, causing artifacts
+            os_log(.info, log: logger, "📡 Using iOS default sample rate (48kHz on modern devices)")
 
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true, options: [])
-            os_log(.info, log: logger, "🔒 Audio session activated (iOS auto sample rate) for lock screen controls setup")
+
+            // Verify what iOS actually gave us
+            let actualIOSRate = session.sampleRate
+            os_log(.info, log: logger, "🔒 Audio session activated at %.0fHz (BASS requested 48kHz with BASS_DEVICE_FREQ)", actualIOSRate)
+
+            if actualIOSRate >= 192000 {
+                os_log(.info, log: logger, "✅ iOS honored 192kHz request - external DAC support active")
+            } else if actualIOSRate >= 96000 {
+                os_log(.info, log: logger, "✅ iOS provided 96kHz - external DAC partial support")
+            } else {
+                os_log(.info, log: logger, "📱 iOS limited to %.0fHz (device maximum or iOS 16+ regression)", actualIOSRate)
+            }
         } catch {
             os_log(.error, log: logger, "❌ Failed to activate session for lock screen: %{public}s", error.localizedDescription)
         }

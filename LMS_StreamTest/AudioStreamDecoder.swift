@@ -2,6 +2,7 @@
 // Buffer-level gapless playback implementation using BASS push streams
 // Based on squeezelite's proven architecture
 import Foundation
+import AVFoundation
 import os.log
 
 // MARK: - Global BASS Callbacks
@@ -350,6 +351,49 @@ class AudioStreamDecoder {
 
         os_log(.info, log: logger, "🎵 Creating push stream: %d Hz, %d channels", sampleRate, channels)
 
+        // CRITICAL: Set iOS audio session rate to match content for bit-perfect playback
+        // Per Ian @ un4seen (topic 20831): Use AVAudioSession.setPreferredSampleRate
+        // "BASS will also detect when the output rate is changed" via this method
+        // This is the RECOMMENDED approach for iOS instead of BASS_DEVICE_REINIT
+        // Called HERE (not during prefetch) so sample rate changes only when stream is actually recreated
+        do {
+            let session = AVAudioSession.sharedInstance()
+            let currentRate = session.sampleRate
+
+            if Int(currentRate) != sampleRate {
+                os_log(.info, log: logger, "🔄 iOS session rate (%.0fHz) != stream rate (%dHz) - updating for bit-perfect playback", currentRate, sampleRate)
+
+                // Set preferred sample rate - iOS will honor this for external DACs
+                // Built-in speakers may remain locked at 48kHz (hardware limitation)
+                try session.setPreferredSampleRate(Double(sampleRate))
+
+                // BASS automatically detects the rate change - verify what we got
+                var deviceInfo = BASS_INFO()
+                if BASS_GetInfo(&deviceInfo) != 0 {
+                    let finalRate = Int(deviceInfo.freq)
+                    let actualIOSRate = Int(session.sampleRate)
+
+                    if finalRate == sampleRate && actualIOSRate == sampleRate {
+                        os_log(.info, log: logger, "✅ Bit-perfect playback: %.0fHz → %dHz (iOS session + BASS device)", currentRate, finalRate)
+                    } else if actualIOSRate == sampleRate {
+                        os_log(.info, log: logger, "✅ iOS session at %dHz (BASS shows %dHz)", actualIOSRate, finalRate)
+                    } else {
+                        os_log(.info, log: logger, "ℹ️ Device limited to %dHz (iOS: %dHz) - audio will be resampled from %dHz", finalRate, actualIOSRate, sampleRate)
+                    }
+                }
+            } else {
+                os_log(.debug, log: logger, "✅ iOS session rate matches stream: %.0fHz (bit-perfect)", currentRate)
+            }
+        } catch {
+            os_log(.error, log: logger, "❌ Failed to set preferred sample rate: %{public}s", error.localizedDescription)
+
+            // Still check BASS device rate for logging
+            var deviceInfo = BASS_INFO()
+            if BASS_GetInfo(&deviceInfo) != 0 {
+                os_log(.info, log: logger, "ℹ️ Continuing with BASS device at %dHz", Int(deviceInfo.freq))
+            }
+        }
+
         // Create push stream with STREAMPROC_PUSH
         // STREAMPROC_PUSH is defined as (STREAMPROC*)-1 in bass.h
         // Use helper function from bridging header to get the sentinel value
@@ -630,8 +674,9 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "✅ Decoder created: %dHz, %dch (expected: %dHz, %dch)",
                actualSampleRate, actualChannels, sampleRate, channels)
 
-        // Update stream info for SettingsView display (using decoder stream info)
-        updateStreamInfoFromDecoder(decoderStream)
+        // NOTE: Don't update stream info here! This happens during PREFETCHING.
+        // Stream info is updated when track actually starts (after startDecoderLoop).
+        // Updating here would show the NEXT track's sample rate while CURRENT track plays.
 
         // If sample rate doesn't match, we need to recreate push stream
         if actualSampleRate != sampleRate || actualChannels != channels {
@@ -719,6 +764,9 @@ class AudioStreamDecoder {
         isDecoding = true
         manualStop = false  // This is a fresh start, not a manual stop
         startDecoderLoop()
+
+        // Update stream info NOW (track is actually starting, not just buffering)
+        updateStreamInfoFromDecoder(decoderStream)
     }
 
     /// Stop current decoder stream
@@ -1402,6 +1450,9 @@ class AudioStreamDecoder {
         isDecoding = true
         manualStop = false
         startDecoderLoop()
+
+        // Update stream info NOW (deferred track is actually starting)
+        updateStreamInfoFromDecoder(decoderStream)
 
         // Notify delegate that deferred track started (for STMs)
         os_log(.error, log: logger, "[APP-RECOVERY] 📡 Notifying delegate of deferred track start")

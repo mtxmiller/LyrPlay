@@ -3,6 +3,7 @@ import SwiftUI
 import os.log
 import WebKit
 import UniformTypeIdentifiers
+import StoreKit
 
 
 // MARK: - Main Settings View
@@ -18,6 +19,12 @@ struct SettingsView: View {
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
     @State private var isReconnecting = false
+
+    // App Icon state
+    @ObservedObject private var purchaseManager = PurchaseManager.shared
+    @ObservedObject private var appIconManager = AppIconManager.shared
+    @State private var showingPurchaseError = false
+    @State private var purchaseErrorMessage = ""
     private var appVersionDisplay: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
@@ -247,7 +254,7 @@ struct SettingsView: View {
                                 Text("44.1 kHz").tag(44100)
                                 Text("48 kHz").tag(48000)
                                 Text("96 kHz").tag(96000)
-                                Text("192 kHz (No Limit)").tag(192000)
+                                Text("192 kHz").tag(192000)
                             }
                             .pickerStyle(.menu)
                         }
@@ -268,8 +275,76 @@ struct SettingsView: View {
                     }
                 }
 
-                // Advanced Section
-                Section(header: Text("Advanced")) {
+                // App Icon Section
+                Section(header: Text("Appearance")) {
+                    if purchaseManager.hasIconPack {
+                        // Icon Pack unlocked - show picker
+                        NavigationLink(destination: IconPickerView()) {
+                            HStack {
+                                Image(systemName: "app.badge")
+                                    .foregroundColor(.purple)
+                                    .frame(width: 20)
+
+                                Text("App Icon")
+                                    .font(.body)
+
+                                Spacer()
+
+                                Text(appIconManager.currentIcon.displayName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } else {
+                        // Icon Pack locked - subtle navigation to preview
+                        NavigationLink(destination: IconPreviewView(
+                            onPurchaseError: { error in
+                                purchaseErrorMessage = error.localizedDescription
+                                showingPurchaseError = true
+                            }
+                        )) {
+                            HStack {
+                                Image(systemName: "app.badge")
+                                    .foregroundColor(.purple)
+                                    .frame(width: 20)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("App Icon")
+                                        .font(.body)
+                                    Text("11 premium designs available")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Text(purchaseManager.iconPackPrice)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    // Restore Purchases button
+                    Button(action: {
+                        Task {
+                            await purchaseManager.restorePurchases()
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundColor(.blue)
+                                .frame(width: 20)
+
+                            Text("Restore Purchases")
+                                .font(.body)
+                        }
+                    }
+                    .foregroundColor(.primary)
+                }
+
+                // Advanced & About Section (Combined)
+                Section(header: Text("Advanced & About")) {
                     NavigationLink(destination: AdvancedConfigView()) {
                         SettingsRow(
                             icon: "gearshape.2",
@@ -278,8 +353,7 @@ struct SettingsView: View {
                             valueColor: .secondary
                         )
                     }
-                    
-                    
+
                     Button(action: { showingCacheClearAlert = true }) {
                         SettingsRow(
                             icon: "trash.slash",
@@ -290,11 +364,7 @@ struct SettingsView: View {
                     }
                     .foregroundColor(.primary)
                     .disabled(isClearingCache)
-                    
-                }
-                
-                // Reset Section
-                Section(header: Text("Reset")) {
+
                     Button(action: { showingResetAlert = true }) {
                         SettingsRow(
                             icon: "arrow.clockwise",
@@ -304,9 +374,7 @@ struct SettingsView: View {
                         )
                     }
                     .foregroundColor(.red)
-                }
 
-                Section(header: Text("About")) {
                     SettingsRow(
                         icon: "info.circle",
                         title: "Version",
@@ -350,6 +418,11 @@ struct SettingsView: View {
             }
         } message: {
             Text("This will clear Material's web cache and reload the interface. This often fixes UI display issues.")
+        }
+        .alert("Purchase Error", isPresented: $showingPurchaseError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(purchaseErrorMessage)
         }
     }
     
@@ -1522,5 +1595,275 @@ struct DetailItem: View {
                 .fontWeight(.medium)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Icon Preview View (Pre-purchase)
+struct IconPreviewView: View {
+    @ObservedObject private var purchaseManager = PurchaseManager.shared
+    @Environment(\.presentationMode) var presentationMode
+    var onPurchaseError: ((Error) -> Void)?
+
+    let columns = [
+        GridItem(.flexible()),
+        GridItem(.flexible()),
+        GridItem(.flexible())
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Header text
+                    Text("Preview all 11 premium icon designs. Purchase to customize your home screen.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+
+                    // Icon grid preview
+                    LazyVGrid(columns: columns, spacing: 20) {
+                        ForEach(AppIconManager.AppIcon.allCases) { icon in
+                            IconPreviewButton(icon: icon)
+                        }
+                    }
+                    .padding()
+                }
+            }
+
+            // Purchase footer
+            VStack(spacing: 12) {
+                Divider()
+
+                if purchaseManager.isPurchasing {
+                    ProgressView("Processing...")
+                        .padding()
+                } else {
+                    Button(action: {
+                        Task {
+                            let success = await purchaseManager.purchase(.iconPack)
+                            if success {
+                                // Dismiss and go to picker
+                                presentationMode.wrappedValue.dismiss()
+                            } else if let error = purchaseManager.purchaseError {
+                                onPurchaseError?(error)
+                            }
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "sparkles")
+                            Text("Get Icon Pack - \(purchaseManager.iconPackPrice)")
+                                .fontWeight(.medium)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.purple.opacity(0.1))
+                        .foregroundColor(.purple)
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.purple.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal)
+
+                    Text("Support LyrPlay development")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.bottom)
+            .background(Color(UIColor.systemGroupedBackground))
+        }
+        .navigationTitle("Premium Icons")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Icon Preview Button (Non-interactive preview)
+struct IconPreviewButton: View {
+    let icon: AppIconManager.AppIcon
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Icon preview
+            if let uiImage = loadIconImage(for: icon) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+            } else {
+                // Fallback placeholder
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(LinearGradient(
+                        colors: icon == .default ? [.blue, .purple] : [.purple, .pink],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .aspectRatio(1, contentMode: .fit)
+                    .overlay(
+                        Text(String(icon.displayName.prefix(1)))
+                            .font(.system(size: 40, weight: .bold))
+                            .foregroundColor(.white)
+                    )
+            }
+
+            // Icon name
+            VStack(spacing: 2) {
+                Text(icon.displayName)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+
+                Text(icon.description)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .frame(height: 36)
+        }
+    }
+
+    private func loadIconImage(for icon: AppIconManager.AppIcon) -> UIImage? {
+        if icon == .default {
+            if let iconsDictionary = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],
+               let primaryIconDict = iconsDictionary["CFBundlePrimaryIcon"] as? [String: Any],
+               let iconFiles = primaryIconDict["CFBundleIconFiles"] as? [String],
+               let lastIcon = iconFiles.last {
+                return UIImage(named: lastIcon)
+            }
+        }
+        let assetName = icon.previewImageName
+        return UIImage(named: assetName)
+    }
+}
+
+// MARK: - Icon Picker View (Post-purchase)
+struct IconPickerView: View {
+    @ObservedObject private var appIconManager = AppIconManager.shared
+    @State private var showingError = false
+    @State private var errorMessage = ""
+    @Environment(\.presentationMode) var presentationMode
+
+    let columns = [
+        GridItem(.flexible()),
+        GridItem(.flexible()),
+        GridItem(.flexible())
+    ]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 20) {
+                ForEach(AppIconManager.AppIcon.allCases) { icon in
+                    IconButton(
+                        icon: icon,
+                        isSelected: icon == appIconManager.currentIcon
+                    ) {
+                        Task {
+                            do {
+                                try await appIconManager.setIcon(icon)
+                            } catch {
+                                errorMessage = error.localizedDescription
+                                showingError = true
+                            }
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("Choose Icon")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Error", isPresented: $showingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage)
+        }
+    }
+}
+
+// MARK: - Icon Button
+struct IconButton: View {
+    let icon: AppIconManager.AppIcon
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                // Icon preview
+                ZStack(alignment: .topTrailing) {
+                    // Try to load the actual app icon image
+                    if let uiImage = loadIconImage(for: icon) {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                    } else {
+                        // Fallback to placeholder
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(LinearGradient(
+                                colors: icon == .default ? [.blue, .purple] : [.purple, .pink],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ))
+                            .aspectRatio(1, contentMode: .fit)
+                            .overlay(
+                                Text(String(icon.displayName.prefix(1)))
+                                    .font(.system(size: 40, weight: .bold))
+                                    .foregroundColor(.white)
+                            )
+                    }
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .background(Circle().fill(Color.white))
+                            .font(.title2)
+                            .offset(x: 8, y: -8)
+                    }
+                }
+
+                // Icon name
+                VStack(spacing: 2) {
+                    Text(icon.displayName)
+                        .font(.caption)
+                        .fontWeight(isSelected ? .semibold : .regular)
+                        .foregroundColor(.primary)
+
+                    Text(icon.description)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
+                .frame(height: 36)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    // Try to load the actual icon from the asset catalog
+    private func loadIconImage(for icon: AppIconManager.AppIcon) -> UIImage? {
+        // For default icon, try to get the current app icon
+        if icon == .default {
+            if let iconsDictionary = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],
+               let primaryIconDict = iconsDictionary["CFBundlePrimaryIcon"] as? [String: Any],
+               let iconFiles = primaryIconDict["CFBundleIconFiles"] as? [String],
+               let lastIcon = iconFiles.last {
+                return UIImage(named: lastIcon)
+            }
+        }
+
+        // Try loading from asset catalog using the icon name
+        let assetName = icon.previewImageName
+        if let image = UIImage(named: assetName) {
+            return image
+        }
+
+        // Try loading from the alternate icon bundle location
+        // Alternate icons are typically in the app bundle root, not asset catalogs
+        return nil
     }
 }

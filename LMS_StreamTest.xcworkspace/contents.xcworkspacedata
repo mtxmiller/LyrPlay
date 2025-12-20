@@ -2,6 +2,9 @@
 <Workspace
    version = "1.0">
    <FileRef
+      location = "group:Products.storekit">
+   </FileRef>
+   <FileRef
       location = "group:LMS_StreamTest.xcodeproj">
    </FileRef>
    <FileRef

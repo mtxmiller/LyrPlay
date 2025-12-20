@@ -203,7 +203,7 @@ class SettingsManager: ObservableObject {
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
-        audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .compressed
+        audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .flac
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""

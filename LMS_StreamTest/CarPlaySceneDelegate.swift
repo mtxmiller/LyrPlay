@@ -50,8 +50,19 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Now load full content in background and update template
-        refreshHomeTemplateData()
+        // CONNECTION STATE CHECK: Only load data if coordinator is connected
+        // Give connection a brief moment to establish (coordinator.connect() is async)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+
+            if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+                os_log(.info, log: self.logger, "✅ Coordinator connected - loading home template data")
+                self.refreshHomeTemplateData()
+            } else {
+                os_log(.error, log: self.logger, "❌ Coordinator not connected after 1s - showing error state")
+                self.showConnectionError()
+            }
+        }
 
         os_log(.info, log: logger, "🚗 CARPLAY CONNECTED SUCCESSFULLY")
     }
@@ -813,6 +824,115 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         os_log(.error, log: logger, "🚗 CarPlay error: %{public}s", message)
     }
 
+    /// Shows connection error state with retry button
+    /// Called when initial CarPlay connection fails or network requests timeout
+    private func showConnectionError() {
+        os_log(.error, log: logger, "🚗 Showing connection error state in CarPlay")
+
+        // Resume button - still available even when disconnected
+        let resumeItem = CPListItem(
+            text: "▶︎ Resume Playback",
+            detailText: "Start or resume from saved position",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        resumeItem.handler = { [weak self] item, completion in
+            self?.handleResumePlayback()
+            self?.pushNowPlayingTemplate()
+            completion()
+        }
+
+        // Connection error item with retry action
+        let errorItem = CPListItem(
+            text: "⚠️ Cannot Connect to Server",
+            detailText: "Check network connection and server status",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+
+        // Retry button
+        let retryItem = CPListItem(
+            text: "🔄 Retry Connection",
+            detailText: "Attempt to reconnect to LMS server",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        retryItem.handler = { [weak self] item, completion in
+            self?.retryConnection()
+            completion()
+        }
+
+        let errorTemplate = CPListTemplate(
+            title: "LyrPlay",
+            sections: [CPListSection(items: [resumeItem, errorItem, retryItem])]
+        )
+
+        // Update the root template with error state
+        interfaceController?.setRootTemplate(errorTemplate, animated: true) { [weak self] success, error in
+            if let error = error {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to show error template: %{public}s", error.localizedDescription)
+            } else if success {
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Connection error state displayed")
+            }
+        }
+    }
+
+    /// Attempts to reconnect to LMS server and refresh CarPlay UI
+    /// Called when user taps "Retry Connection" button in error state
+    private func retryConnection() {
+        os_log(.info, log: logger, "🔄 User requested connection retry from CarPlay")
+
+        // Show loading state
+        let loadingItem = CPListItem(
+            text: "Connecting...",
+            detailText: "Attempting to connect to LMS server",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+
+        let loadingTemplate = CPListTemplate(
+            title: "LyrPlay",
+            sections: [CPListSection(items: [loadingItem])]
+        )
+
+        interfaceController?.setRootTemplate(loadingTemplate, animated: true)
+
+        // Reinitialize coordinator if needed
+        if AudioManager.shared.slimClient == nil {
+            os_log(.info, log: logger, "🔧 Reinitializing coordinator for retry...")
+            initializeCoordinator()
+        } else {
+            // Coordinator exists - attempt reconnection
+            os_log(.info, log: logger, "🔧 Coordinator exists - attempting reconnect...")
+            AudioManager.shared.slimClient?.connect()
+        }
+
+        // Check connection status after brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self else { return }
+
+            if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+                os_log(.info, log: self.logger, "✅ Retry successful - connection established")
+
+                // Show immediate template with resume button
+                let immediateTemplate = self.buildImmediateHomeTemplate()
+                self.browseTemplate = immediateTemplate
+                self.interfaceController?.setRootTemplate(immediateTemplate, animated: true)
+
+                // Load full data in background
+                self.refreshHomeTemplateData()
+            } else {
+                os_log(.error, log: self.logger, "❌ Retry failed - still not connected")
+                // Show error state again
+                self.showConnectionError()
+            }
+        }
+    }
+
     // MARK: - CPNowPlayingTemplateObserver
 
     func nowPlayingTemplateUpNextButtonTapped(_ nowPlayingTemplate: CPNowPlayingTemplate) {
@@ -881,14 +1001,24 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             group.leave()
         }
 
-        // When all fetches complete, update the template
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
+        // TIMEOUT FIX: Use group.wait with timeout instead of group.notify
+        // This prevents infinite loading if network requests hang
+        DispatchQueue.global().async { [weak self] in
+            let result = group.wait(timeout: .now() + 5.0)
 
-            let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
-            os_log(.info, log: self.logger, "🔄 All data fetched in %.3f seconds - updating template", elapsed)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
 
-            self.updateHomeTemplateWithData()
+                if result == .timedOut {
+                    let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
+                    os_log(.error, log: self.logger, "❌ Data fetch TIMED OUT after %.3f seconds - showing error", elapsed)
+                    self.showConnectionError()
+                } else {
+                    let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
+                    os_log(.info, log: self.logger, "🔄 All data fetched in %.3f seconds - updating template", elapsed)
+                    self.updateHomeTemplateWithData()
+                }
+            }
         }
     }
 
@@ -1327,8 +1457,237 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    /// Handle album selection - shows track list instead of immediate play
     private func playAlbum(_ album: Album) {
-        guard let coordinator = AudioManager.shared.slimClient else { return }
+        os_log(.info, log: logger, "🎵 Selected album: %{public}s by %{public}s", album.name, album.artist)
+
+        // Fetch album tracks and show track list (similar to playlist behavior)
+        fetchAlbumTracks(album: album) { [weak self] tracks in
+            guard let self = self else { return }
+
+            if tracks.isEmpty {
+                // Fallback: just load the album directly if no tracks found
+                os_log(.info, log: self.logger, "📂 No tracks found, loading album directly: %{public}s", album.name)
+                self.loadAlbumDirectly(album: album)
+            } else {
+                os_log(.info, log: self.logger, "🎶 Found %d tracks, displaying: %{public}s", tracks.count, album.name)
+                self.displayAlbumTracks(tracks, album: album)
+            }
+        }
+    }
+
+    /// Fetches tracks for an album from LMS
+    private func fetchAlbumTracks(album: Album, completion: @escaping ([PlaylistTrack]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available for album tracks")
+            completion([])
+            return
+        }
+
+        os_log(.info, log: logger, "🔍 Fetching tracks for album: %{public}s (ID: %{public}s)", album.name, album.id)
+
+        // Use "titles" query with album_id filter
+        // Tags: d=duration, a=artist, l=album, C=coverid, t=tracknum
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["titles", 0, 100, "album_id:\(album.id)", "tags:daltC"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else {
+                completion([])
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let titlesLoop = result["titles_loop"] as? [[String: Any]] else {
+                    os_log(.error, log: self.logger, "❌ Invalid album tracks response format")
+                    completion([])
+                    return
+                }
+
+                // Parse tracks from titles_loop response
+                let tracks = titlesLoop.enumerated().compactMap { (index, trackData) -> PlaylistTrack? in
+                    // Handle track ID
+                    let trackId: String
+                    if let stringId = trackData["id"] as? String {
+                        trackId = stringId
+                    } else if let intId = trackData["id"] as? Int {
+                        trackId = String(intId)
+                    } else {
+                        trackId = UUID().uuidString
+                    }
+
+                    let title = trackData["title"] as? String ?? "Unknown Track"
+                    let artist = trackData["artist"] as? String
+                    let albumName = trackData["album"] as? String
+                    let duration = trackData["duration"] as? Double
+                    let trackNum = trackData["tracknum"] as? Int
+
+                    // Get coverid for artwork
+                    let coverID: String?
+                    if let stringCoverID = trackData["coverid"] as? String {
+                        coverID = stringCoverID
+                    } else if let intCoverID = trackData["coverid"] as? Int {
+                        coverID = String(intCoverID)
+                    } else {
+                        coverID = nil
+                    }
+
+                    return PlaylistTrack(
+                        id: trackId,
+                        title: title,
+                        artist: artist,
+                        album: albumName,
+                        duration: duration,
+                        trackNumber: trackNum,
+                        artworkURL: coverID,
+                        albumID: album.id,
+                        artistID: nil,
+                        playlistIndex: index  // Use array index as track position in album
+                    )
+                }
+
+                os_log(.info, log: self.logger, "✅ Fetched %d tracks for album", tracks.count)
+                completion(tracks)
+            }
+        }
+    }
+
+    /// Display album tracks in a CarPlay list template
+    private func displayAlbumTracks(_ tracks: [PlaylistTrack], album: Album) {
+        // Limit to first 25 tracks for performance (CarPlay limitation)
+        let tracksToDisplay = Array(tracks.prefix(25))
+
+        // Load artwork for tracks
+        loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
+            guard let self = self else { return }
+
+            var trackItems: [CPListItem] = []
+
+            // Add "Play All" option at the top
+            let playAllItem = CPListItem(
+                text: "Play All",
+                detailText: "Play entire album",
+                image: album.artwork,  // Use album artwork for Play All
+                accessoryImage: nil,
+                accessoryType: .disclosureIndicator
+            )
+
+            playAllItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                self?.loadAlbumDirectly(album: album)
+                completion()
+            }
+            trackItems.append(playAllItem)
+
+            // Add individual tracks with artwork
+            for (index, track) in tracksToDisplay.enumerated() {
+                // Use coverID if available, otherwise use track ID as fallback
+                let artworkKey = track.artworkURL ?? track.id
+                let artwork = artworkCache[artworkKey]
+
+                // Format detail text with track number if available
+                var detailText = track.artist ?? album.artist
+                if let trackNum = track.trackNumber {
+                    detailText = "Track \(trackNum) • \(detailText)"
+                }
+
+                // Format duration
+                if let duration = track.duration, duration > 0 {
+                    let minutes = Int(duration) / 60
+                    let seconds = Int(duration) % 60
+                    let timeStr = String(format: "%d:%02d", minutes, seconds)
+                    detailText = "\(detailText) • \(timeStr)"
+                }
+
+                let item = CPListItem(
+                    text: track.title,
+                    detailText: detailText,
+                    image: artwork ?? album.artwork,  // Fall back to album artwork
+                    accessoryImage: nil,
+                    accessoryType: .disclosureIndicator
+                )
+
+                item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                    self?.playAlbumTrack(album: album, trackIndex: index, track: track)
+                    completion()
+                }
+
+                trackItems.append(item)
+            }
+
+            let tracksTemplate = CPListTemplate(
+                title: album.name,
+                sections: [CPListSection(items: trackItems)]
+            )
+
+            self.interfaceController?.pushTemplate(tracksTemplate, animated: true)
+            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
+        }
+    }
+
+    /// Plays album starting from a specific track
+    private func playAlbumTrack(album: Album, trackIndex: Int, track: PlaylistTrack) {
+        os_log(.info, log: logger, "🎯 Playing track %d from album: %{public}s", trackIndex, track.title)
+
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available")
+            return
+        }
+
+        let playerID = SettingsManager.shared.playerMACAddress
+
+        // Step 1: Load the album
+        let loadCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(loadCommand) { [weak self] loadResponse in
+            guard let self = self else { return }
+
+            if loadResponse.isEmpty {
+                DispatchQueue.main.async {
+                    os_log(.error, log: self.logger, "❌ Failed to load album")
+                }
+                return
+            }
+
+            // Step 2: Jump to the selected track (same approach as playlist view)
+            let jumpCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "index", trackIndex]]
+            ]
+
+            coordinator.sendJSONRPCCommandDirect(jumpCommand) { [weak self] jumpResponse in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+
+                    if !jumpResponse.isEmpty {
+                        os_log(.info, log: self.logger, "✅ Successfully jumped to track: %{public}s", track.title)
+                        self.pushNowPlayingTemplate()
+                    } else {
+                        os_log(.error, log: self.logger, "❌ Failed to jump to track")
+                        // Still show now playing - album loaded, just at wrong track
+                        self.pushNowPlayingTemplate()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Loads and plays entire album from the beginning
+    private func loadAlbumDirectly(album: Album) {
+        os_log(.info, log: logger, "📂 Loading album directly: %{public}s", album.name)
+
+        guard let coordinator = AudioManager.shared.slimClient else {
+            showErrorMessage("No connection to LMS server")
+            return
+        }
 
         let playerID = SettingsManager.shared.playerMACAddress
         let jsonRPCCommand: [String: Any] = [
@@ -1338,9 +1697,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else { return }
+
             DispatchQueue.main.async {
                 if !response.isEmpty {
-                    self?.pushNowPlayingTemplate()
+                    os_log(.info, log: self.logger, "✅ Album loaded successfully: %{public}s", album.name)
+                    self.pushNowPlayingTemplate()
+                } else {
+                    os_log(.error, log: self.logger, "❌ Failed to load album")
+                    self.showErrorMessage("Failed to load album. Please check connection and try again.")
                 }
             }
         }
