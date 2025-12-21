@@ -1524,7 +1524,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     let artist = trackData["artist"] as? String
                     let albumName = trackData["album"] as? String
                     let duration = trackData["duration"] as? Double
-                    let trackNum = trackData["tracknum"] as? Int
+                    // Handle tracknum as Int or String
+                    let trackNum: Int?
+                    if let intNum = trackData["tracknum"] as? Int {
+                        trackNum = intNum
+                    } else if let strNum = trackData["tracknum"] as? String, let parsed = Int(strNum) {
+                        trackNum = parsed
+                    } else if let numNum = trackData["tracknum"] as? NSNumber {
+                        trackNum = numNum.intValue
+                    } else {
+                        trackNum = nil
+                    }
 
                     // Get coverid for artwork
                     let coverID: String?
@@ -1558,8 +1568,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     /// Display album tracks in a CarPlay list template
     private func displayAlbumTracks(_ tracks: [PlaylistTrack], album: Album) {
+        // Sort tracks by track number for proper display order
+        let sortedTracks = tracks.sorted {
+            ($0.trackNumber ?? Int.max) < ($1.trackNumber ?? Int.max)
+        }
+
         // Limit to first 25 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(tracks.prefix(25))
+        let tracksToDisplay = Array(sortedTracks.prefix(25))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -1611,7 +1626,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 )
 
                 item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                    self?.playAlbumTrack(album: album, trackIndex: index, track: track)
+                    // Use trackNumber-1 since LMS loads albums in track number order (1-based to 0-based)
+                    let trackIndex = (track.trackNumber ?? 1) - 1
+                    self?.playAlbumTrack(album: album, trackIndex: trackIndex, track: track)
                     completion()
                 }
 
@@ -1639,42 +1656,22 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         let playerID = SettingsManager.shared.playerMACAddress
 
-        // Step 1: Load the album
+        // Use playlistcontrol with play_index to load album and start at specific track
         let loadCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+            "params": [playerID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)", "play_index:\(trackIndex)"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(loadCommand) { [weak self] loadResponse in
             guard let self = self else { return }
 
-            if loadResponse.isEmpty {
-                DispatchQueue.main.async {
-                    os_log(.error, log: self.logger, "❌ Failed to load album")
-                }
-                return
-            }
-
-            // Step 2: Jump to the selected track (same approach as playlist view)
-            let jumpCommand: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [playerID, ["playlist", "index", trackIndex]]
-            ]
-
-            coordinator.sendJSONRPCCommandDirect(jumpCommand) { [weak self] jumpResponse in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-
-                    if !jumpResponse.isEmpty {
-                        os_log(.info, log: self.logger, "✅ Successfully jumped to track: %{public}s", track.title)
-                        self.pushNowPlayingTemplate()
-                    } else {
-                        os_log(.error, log: self.logger, "❌ Failed to jump to track")
-                        // Still show now playing - album loaded, just at wrong track
-                        self.pushNowPlayingTemplate()
-                    }
+            DispatchQueue.main.async {
+                if !loadResponse.isEmpty {
+                    os_log(.info, log: self.logger, "✅ Successfully loaded album at track: %{public}s", track.title)
+                    self.pushNowPlayingTemplate()
+                } else {
+                    os_log(.error, log: self.logger, "❌ Failed to load album at track")
                 }
             }
         }
