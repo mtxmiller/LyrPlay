@@ -281,13 +281,22 @@ class SlimProtoCoordinator: ObservableObject {
     
     private func startPlaybackHeartbeat() {
         stopPlaybackHeartbeat()
-        
+
         // Only during active playback, send STMt every second like squeezelite
         playbackHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            
-            // Only send if actively playing (not paused/stopped)
-            if self.audioManager.getPlayerState() == "playing" && !self.commandHandler.isPausedByLockScreen {
+
+            // Only process if actively playing (not paused/stopped)
+            let playerState = self.audioManager.getPlayerState()
+            if playerState == "Playing" && !self.commandHandler.isPausedByLockScreen {
+                // UNIFIED RECOVERY: Save interpolated position every second (works offline)
+                // This continues updating position even when disconnected
+                let position = self.getCurrentTimeForSaving()
+                if position > 0 {
+                    UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                }
+
+                // Send STMt to server (will fail silently if disconnected)
                 self.client.sendStatus("STMt")
             }
         }
@@ -607,13 +616,11 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
                wasPlayingBeforeDisconnect ? "YES" : "NO", wasPausedBeforeDisconnect ? "YES" : "NO")
 
         // UNIFIED RECOVERY: Save position immediately (don't wait for timer)
-        // Use decoder position for accurate buffer-aware tracking
-        if audioManager.hasPushStream() {
-            let position = Double(audioManager.getPosition())
-            if position > 0 {
-                UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
-                os_log(.info, log: logger, "💾 Saved position on disconnect: %.2f seconds (from decoder)", position)
-            }
+        // Use interpolated server time (not decoder position) for accurate recovery
+        let position = getCurrentTimeForSaving()
+        if position > 0 {
+            UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+            os_log(.info, log: logger, "💾 Saved position on disconnect: %.2f seconds (interpolated)", position)
         }
 
         // Track if we were disconnected while in background (for app open recovery)
@@ -1434,16 +1441,14 @@ extension SlimProtoCoordinator {
             }
 
             // UNIFIED RECOVERY: Continuous position saving (LMS_StreamTest-6lb)
-            // Save decoder position every 3 seconds for accurate recovery after disconnect
-            if audioManager.hasPushStream() {
-                let decoderPosition = Double(audioManager.getPosition())
-                if decoderPosition > 0 {
-                    UserDefaults.standard.set(decoderPosition, forKey: "lyrplay_recovery_position")
-                    // Log position save (throttled to avoid spam)
-                    if shouldLog {
-                        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-                        os_log(.info, log: logger, "💾 Recovery: index %d (track %d) @ %.1fs", savedIndex, savedIndex + 1, decoderPosition)
-                    }
+            // Save interpolated server time for accurate recovery (works when connected)
+            // Note: When disconnected, playbackHeartbeatTimer handles this
+            if serverTime > 0 {
+                UserDefaults.standard.set(serverTime, forKey: "lyrplay_recovery_position")
+                // Log position save (throttled to avoid spam)
+                if shouldLog {
+                    let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+                    os_log(.info, log: logger, "💾 Recovery: index %d (track %d) @ %.1fs (server)", savedIndex, savedIndex + 1, serverTime)
                 }
             }
 
