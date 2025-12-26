@@ -205,17 +205,17 @@ struct ContentView: View {
 
                 if duration > 45 {
                     // Long background (> 45s) - likely disconnected, perform recovery
-                    os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - reconnecting and recovering position", duration)
+                    os_log(.info, log: logger, "📱 App Foreground: Long background (%.1fs) - setting appOpen trigger", duration)
 
-                    // Reconnect if needed
+                    // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
+                    slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
+
                     if !slimProtoCoordinator.isConnected {
+                        // Reconnect - slimProtoDidConnect will call handlePendingRecovery()
                         slimProtoCoordinator.connect()
-                    }
-
-                    // Wait for connection before recovery
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        os_log(.info, log: logger, "📱 App Foreground: Performing position recovery (shouldPlay: false)")
-                        slimProtoCoordinator.performPlaylistRecovery(shouldPlay: false)
+                    } else {
+                        // Already connected - trigger recovery directly
+                        slimProtoCoordinator.handlePendingRecovery()
                     }
                 } else {
                     // Brief background (< 45s) - skip recovery
