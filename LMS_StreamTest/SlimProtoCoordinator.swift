@@ -283,19 +283,14 @@ class SlimProtoCoordinator: ObservableObject {
         stopPlaybackHeartbeat()
 
         // Only during active playback, send STMt every second like squeezelite
+        // NOTE: Position saving moved to NowPlayingManager.updateNowPlayingTime() (LMS_StreamTest-6lb)
+        // NowPlayingManager's timer never stops, so position is saved even when disconnected
         playbackHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
 
             // Only process if actively playing (not paused/stopped)
             let playerState = self.audioManager.getPlayerState()
             if playerState == "Playing" && !self.commandHandler.isPausedByLockScreen {
-                // UNIFIED RECOVERY: Save interpolated position every second (works offline)
-                // This continues updating position even when disconnected
-                let position = self.getCurrentTimeForSaving()
-                if position > 0 {
-                    UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
-                }
-
                 // Send STMt to server (will fail silently if disconnected)
                 self.client.sendStatus("STMt")
             }
@@ -1440,17 +1435,8 @@ extension SlimProtoCoordinator {
                 shouldLog = true
             }
 
-            // UNIFIED RECOVERY: Continuous position saving (LMS_StreamTest-6lb)
-            // Save interpolated server time for accurate recovery (works when connected)
-            // Note: When disconnected, playbackHeartbeatTimer handles this
-            if serverTime > 0 {
-                UserDefaults.standard.set(serverTime, forKey: "lyrplay_recovery_position")
-                // Log position save (throttled to avoid spam)
-                if shouldLog {
-                    let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-                    os_log(.info, log: logger, "💾 Recovery: index %d (track %d) @ %.1fs (server)", savedIndex, savedIndex + 1, serverTime)
-                }
-            }
+            // NOTE: Position saving moved to NowPlayingManager.updateNowPlayingTime() (LMS_StreamTest-6lb)
+            // NowPlayingManager's timer never stops, so position is saved even when disconnected
 
             // UNIFIED RECOVERY: Sync track index from server when connected (LMS_StreamTest-6lb)
             // This ensures our local index is authoritative when server tells us current track
