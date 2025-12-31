@@ -620,7 +620,12 @@ struct WebView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // ADD THIS - check if host changed:
+        // FIX (LMS_StreamTest-nzk): Force layout update on iPad after app minimize/restore
+        // Without this, WebView can become horizontally compressed on iOS 26
+        uiView.setNeedsLayout()
+        uiView.layoutIfNeeded()
+
+        // Check if host changed - reload if server switched
         if let currentURL = uiView.url, currentURL.host != url.host {
             let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
             uiView.load(request)
