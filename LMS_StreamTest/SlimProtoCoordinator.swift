@@ -4,6 +4,14 @@ import Foundation
 import os.log
 import WebKit
 
+// MARK: - Recovery Trigger Types
+/// Defines what triggered a reconnection, determining recovery behavior
+enum RecoveryTrigger {
+    case none               // Normal connect (e.g., initial app launch)
+    case appOpen            // App opened after background - muted + paused
+    case lockScreen         // Lock screen play button - not muted + playing
+    case networkRestored    // Network came back - resume previous state
+}
 
 class SlimProtoCoordinator: ObservableObject {
     
@@ -32,6 +40,14 @@ class SlimProtoCoordinator: ObservableObject {
     private var isSavingVolume = false
     private var isRestoringVolume = false
     private var backgroundedTime: Date?  // Track when app backgrounded for duration-based recovery
+
+    // MARK: - Unified Recovery System (LMS_StreamTest-6lb)
+    /// What triggered the current/pending reconnection - determines recovery behavior
+    var pendingRecoveryTrigger: RecoveryTrigger = .none
+    /// Was audio playing when connection was lost? (for networkRestored recovery)
+    private var wasPlayingBeforeDisconnect: Bool = false
+    /// Was audio paused when connection was lost? (for networkRestored recovery)
+    private var wasPausedBeforeDisconnect: Bool = false
 
     // MARK: - Player Synchronization (Multi-room Audio)
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
@@ -265,13 +281,17 @@ class SlimProtoCoordinator: ObservableObject {
     
     private func startPlaybackHeartbeat() {
         stopPlaybackHeartbeat()
-        
+
         // Only during active playback, send STMt every second like squeezelite
+        // NOTE: Position saving moved to NowPlayingManager.updateNowPlayingTime() (LMS_StreamTest-6lb)
+        // NowPlayingManager's timer never stops, so position is saved even when disconnected
         playbackHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            
-            // Only send if actively playing (not paused/stopped)
-            if self.audioManager.getPlayerState() == "playing" && !self.commandHandler.isPausedByLockScreen {
+
+            // Only process if actively playing (not paused/stopped)
+            let playerState = self.audioManager.getPlayerState()
+            if playerState == "Playing" && !self.commandHandler.isPausedByLockScreen {
+                // Send STMt to server (will fail silently if disconnected)
                 self.client.sendStatus("STMt")
             }
         }
@@ -508,6 +528,58 @@ class SlimProtoCoordinator: ObservableObject {
             UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
         }
     }
+
+    // MARK: - Unified Recovery Handler (LMS_StreamTest-6lb)
+
+    /// Handle pending recovery based on trigger type - called from slimProtoDidConnect()
+    /// This is the SINGLE entry point for all recovery scenarios, preventing conflicts
+    func handlePendingRecovery() {
+        let trigger = pendingRecoveryTrigger
+        pendingRecoveryTrigger = .none  // Reset immediately to prevent double-execution
+
+        switch trigger {
+        case .appOpen:
+            // App open recovery: muted + paused (unique silent recovery feature)
+            guard settings.enableAppOpenRecovery else {
+                os_log(.info, log: logger, "🔇 App open recovery: disabled in settings - skipping")
+                return
+            }
+            os_log(.info, log: logger, "🔇 App open recovery: muted + paused")
+            audioManager.enableSilentRecoveryMode()  // Mute before server sends audio
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.performPlaylistRecovery(shouldPlay: false)
+            }
+
+        case .lockScreen:
+            // Lock screen recovery: not muted + playing
+            os_log(.info, log: logger, "🔊 Lock screen recovery: playing")
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.performPlaylistRecovery(shouldPlay: true)
+            }
+
+        case .networkRestored:
+            // Network restored: resume previous state
+            os_log(.info, log: logger, "🔄 Network restored recovery: wasPlaying=%{public}s", wasPlayingBeforeDisconnect ? "YES" : "NO")
+
+            // Only recover if we were playing or paused before disconnect
+            guard wasPlayingBeforeDisconnect || wasPausedBeforeDisconnect else {
+                os_log(.info, log: logger, "🔄 Network restored: was not playing/paused - no recovery needed")
+                return
+            }
+
+            let shouldPlay = wasPlayingBeforeDisconnect
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.performPlaylistRecovery(shouldPlay: shouldPlay)
+            }
+
+        case .none:
+            // No recovery needed - normal connect (e.g., initial app launch)
+            os_log(.info, log: logger, "📡 Normal connect - no recovery needed")
+        }
+    }
 }
 
 // MARK: - SlimProtoClientDelegate
@@ -516,19 +588,35 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         connectionManager.didConnect()
-        
+
         // Don't start any status timers here
         // Heartbeat only starts during playback
-        
+
         startServerTimeSync()
         setupNowPlayingManagerIntegration()
-        
-        
-        // Removed custom position recovery - server auto-resume handles position recovery
+
+        // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
+        // This replaces separate recovery calls in ContentView and sendLockScreenCommand
+        handlePendingRecovery()
     }
 
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
+
+        // UNIFIED RECOVERY: Capture playback state for networkRestored recovery (LMS_StreamTest-6lb)
+        let playerState = audioManager.getPlayerState()
+        wasPlayingBeforeDisconnect = (playerState == "Playing")
+        wasPausedBeforeDisconnect = (playerState == "Paused")
+        os_log(.info, log: logger, "📊 Disconnect state: wasPlaying=%{public}s, wasPaused=%{public}s",
+               wasPlayingBeforeDisconnect ? "YES" : "NO", wasPausedBeforeDisconnect ? "YES" : "NO")
+
+        // UNIFIED RECOVERY: Save position immediately (don't wait for timer)
+        // Use interpolated server time (not decoder position) for accurate recovery
+        let position = getCurrentTimeForSaving()
+        if position > 0 {
+            UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+            os_log(.info, log: logger, "💾 Saved position on disconnect: %.2f seconds (interpolated)", position)
+        }
 
         // Track if we were disconnected while in background (for app open recovery)
         if isAppInBackground {
@@ -536,7 +624,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
             os_log(.info, log: logger, "📱 Disconnected while in background - recovery will be needed")
         }
 
-        // CRITICAL: Save position for playlist recovery on any disconnect
+        // CRITICAL: Also save full recovery state (includes track index from server)
         saveCurrentPositionForRecovery()
 
         // Trust server-master architecture: Server controls playback via STRM commands
@@ -544,7 +632,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
         connectionManager.didDisconnect(error: error)
 
-        stopPlaybackHeartbeat()  // ← Correct timer
+        stopPlaybackHeartbeat()
         stopServerTimeSync()
     }
     
@@ -567,6 +655,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     func connectionManagerShouldReconnect() {
         os_log(.info, log: logger, "🔄 Connection manager requesting reconnection")
+
+        // UNIFIED RECOVERY: Set trigger if we were playing/paused before disconnect (LMS_StreamTest-6lb)
+        if wasPlayingBeforeDisconnect || wasPausedBeforeDisconnect {
+            pendingRecoveryTrigger = .networkRestored
+            os_log(.info, log: logger, "🔄 Network restored trigger set (wasPlaying: %{public}s)",
+                   wasPlayingBeforeDisconnect ? "YES" : "NO")
+        }
 
         // IMPROVED FAILOVER: Switch servers if current server keeps failing
         let reconnectionAttempts = connectionManager.getReconnectionAttempts()
@@ -1072,6 +1167,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
 
+        // UNIFIED RECOVERY: Increment track index on boundary (LMS_StreamTest-6lb)
+        // This works even when disconnected - ensures our local index tracks gapless transitions
+        let currentIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        UserDefaults.standard.set(currentIndex + 1, forKey: "lyrplay_recovery_index")
+        os_log(.info, log: logger, "📍 Track boundary: recovery index incremented to %d", currentIndex + 1)
+
         // CRITICAL FIX: Reset SimpleTimeTracker to 0 when new track starts
         // This ensures lock screen shows 0:00 for the new track, not stale time from previous track
         simpleTimeTracker.updateFromServer(time: 0.0, duration: 0.0, playing: true)
@@ -1326,12 +1427,24 @@ extension SlimProtoCoordinator {
             // Update our time tracking with REAL server time
             updateServerTime(position: serverTime, duration: duration, isPlaying: isPlaying)
 
-            // Log server time fetch, but throttle to every 10 seconds to reduce spam (like lock screen)
+            // Throttle logging to every 10 seconds to reduce spam
             let shouldLog: Bool
             if let lastLog = lastServerTimeFetchLog {
                 shouldLog = Date().timeIntervalSince(lastLog) >= 10.0
             } else {
                 shouldLog = true
+            }
+
+            // NOTE: Position saving moved to NowPlayingManager.updateNowPlayingTime() (LMS_StreamTest-6lb)
+            // NowPlayingManager's timer never stops, so position is saved even when disconnected
+
+            // UNIFIED RECOVERY: Sync track index from server when connected (LMS_StreamTest-6lb)
+            // This ensures our local index is authoritative when server tells us current track
+            if let serverIndex = result["playlist_cur_index"] as? Int {
+                UserDefaults.standard.set(serverIndex, forKey: "lyrplay_recovery_index")
+            } else if let serverIndexString = result["playlist_cur_index"] as? String,
+                      let serverIndex = Int(serverIndexString) {
+                UserDefaults.standard.set(serverIndex, forKey: "lyrplay_recovery_index")
             }
 
             if shouldLog {
@@ -1433,18 +1546,15 @@ extension SlimProtoCoordinator {
 
                 if duration > 45 {
                     // Long background (> 45s) - reconnect and recover position
-                    os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - reconnecting and recovering", duration)
+                    os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - setting lockScreen trigger", duration)
+
+                    // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
+                    pendingRecoveryTrigger = .lockScreen
 
                     // Trust BASS to auto-manage stream state during reconnection
                     // BASS handles iOS audio session activation/deactivation automatically
                     connect()
-
-                    // HYBRID FIX: Don't poll connection state (unreliable)
-                    // Just wait fixed time and ALWAYS call recovery (like e3ed788)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                        os_log(.info, log: self.logger, "🔒 Lock screen PLAY: Performing position recovery after reconnect wait")
-                        self.performPlaylistRecovery(shouldPlay: true)
-                    }
+                    // slimProtoDidConnect will call handlePendingRecovery()
                 } else {
                     // Brief background (< 45s) - just send play command (fast!)
                     os_log(.info, log: logger, "🔒 Lock screen PLAY: Brief background (%.1fs) - sending play command", duration)

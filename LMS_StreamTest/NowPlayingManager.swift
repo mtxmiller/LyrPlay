@@ -82,12 +82,26 @@ class NowPlayingManager: ObservableObject {
         lastUpdatedTime = currentTime
         lastUpdatedPlayingState = isPlaying
 
-        // Log lock screen time updates, but throttle to every 10 seconds to reduce spam
+        // Throttle logging to every 10 seconds to reduce spam
         let shouldLog: Bool
         if let lastLog = lastLockScreenLogTime {
             shouldLog = Date().timeIntervalSince(lastLog) >= 10.0
         } else {
             shouldLog = true
+        }
+
+        // UNIFIED RECOVERY (LMS_StreamTest-6lb): Save position for offline recovery
+        // This timer runs continuously (never stopped), so position is saved even when
+        // disconnected from server. Uses the same interpolated time shown on lock screen.
+        if isPlaying && currentTime > 0 {
+            UserDefaults.standard.set(currentTime, forKey: "lyrplay_recovery_position")
+            // Debug: Log position saves (throttled)
+            if shouldLog {
+                os_log(.info, log: logger, "💾 RECOVERY SAVE: %.2f seconds (source: %{public}s)", currentTime, "\(timeSource)")
+            }
+        } else if shouldLog {
+            // Debug: Log why we're NOT saving
+            os_log(.info, log: logger, "⚠️ NOT SAVING: isPlaying=%{public}s currentTime=%.2f", isPlaying ? "YES" : "NO", currentTime)
         }
 
         if shouldLog {
