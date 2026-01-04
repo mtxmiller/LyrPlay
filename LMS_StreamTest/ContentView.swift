@@ -174,6 +174,70 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
 
+            // FIX (LMS_StreamTest-nzk): Force WKWebView scrollView contentSize recalculation on iPad resume
+            // Root cause: WKWebView caches scrollView.contentSize based on initial viewport
+            // When app resumes, WKWebView frame updates but scrollView contentSize stays cached
+            // Result: viewport=1080 but body=535 (exactly half) due to cached content size
+            if let webView = webView {
+                // Step 1: Force native UIView layout update
+                webView.setNeedsLayout()
+                webView.layoutIfNeeded()
+
+                // Step 2: Force scrollView to recalculate contentSize by manipulating scroll position
+                // This triggers WKWebView's internal content size calculation
+                let scrollView = webView.scrollView
+                let oldOffset = scrollView.contentOffset
+                let oldSize = scrollView.contentSize
+
+                // Temporarily adjust scroll offset to force contentSize recalculation
+                // (WKWebView internally recalculates when scrollView is scrolled)
+                scrollView.setContentOffset(CGPoint(x: oldOffset.x + 1, y: oldOffset.y), animated: false)
+                scrollView.setContentOffset(oldOffset, animated: false)
+
+                os_log(.info, log: self.logger, "📐 Forced WKWebView scrollView refresh: contentSize %.0fx%.0f -> waiting for recalc",
+                       oldSize.width, oldSize.height)
+
+                // Step 3: Trigger Material layout recalculation via JavaScript
+                let recalculateLayoutScript = """
+                (function() {
+                    // Force Material's layout recalculation
+                    if (window.lmsApp && window.lmsApp.checkLayout) {
+                        console.log('Material: Calling checkLayout() - window.innerWidth=' + window.innerWidth);
+                        window.lmsApp.checkLayout();
+                    }
+
+                    // Force CSS variable recalculation
+                    if (document.documentElement) {
+                        let vh = window.innerHeight * 0.01;
+                        document.documentElement.style.setProperty('--vh', vh + 'px');
+                    }
+
+                    // Force Vue re-render
+                    if (window.lmsApp && window.lmsApp.$forceUpdate) {
+                        window.lmsApp.$forceUpdate();
+                    }
+
+                    // Dispatch resize events
+                    window.dispatchEvent(new Event('resize'));
+                    window.dispatchEvent(new Event('orientationchange'));
+
+                    // Force browser reflow
+                    setTimeout(function() {
+                        void document.body.offsetWidth;
+                        window.dispatchEvent(new Event('resize'));
+                        console.log('Material: Layout complete - body.clientWidth=' + document.body.clientWidth);
+                    }, 50);
+                })();
+                """
+                webView.evaluateJavaScript(recalculateLayoutScript) { _, error in
+                    if let error = error {
+                        os_log(.error, log: self.logger, "❌ Material layout recalculation failed: %{public}s", error.localizedDescription)
+                    } else {
+                        os_log(.info, log: self.logger, "✅ Material layout recalculation triggered")
+                    }
+                }
+            }
+
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

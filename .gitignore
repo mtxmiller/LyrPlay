@@ -124,3 +124,6 @@ LMS_StreamTest.code-workspace
 # Beads daemon logs (local only)
 .beads/daemon-*.log.gz
 App Icons/
+
+# bv (beads viewer) local config and caches
+.bv/
