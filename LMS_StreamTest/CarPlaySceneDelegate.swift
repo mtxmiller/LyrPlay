@@ -795,9 +795,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for images to load (shorter timeout since we're loading fewer)
+        // Wait for images to load (3s timeout for better CarPlay artwork reliability)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 2.0)
+            _ = group.wait(timeout: .now() + 3.0)
             DispatchQueue.main.async {
                 completion(artworkCache)
             }
