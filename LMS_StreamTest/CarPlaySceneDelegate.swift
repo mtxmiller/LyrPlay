@@ -313,8 +313,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
     
     private func displayPlaylistTracks(_ tracks: [PlaylistTrack], playlist: Playlist) {
-        // Limit to first 25 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(tracks.prefix(25))
+        // Limit to first 16 tracks for performance (CarPlay limitation)
+        let tracksToDisplay = Array(tracks.prefix(16))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -427,8 +427,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var trackDataArray: [(title: String, artist: String?, duration: Double?, playlistIndex: Int?, trackID: String?, coverID: String?, isCurrentTrack: Bool)] = []
 
         if let playlistLoop = status["playlist_loop"] as? [[String: Any]] {
-            // Limit to first 25 tracks for performance
-            let tracksToShow = Array(playlistLoop.prefix(25))
+            // Limit to first 16 tracks for performance
+            let tracksToShow = Array(playlistLoop.prefix(16))
 
             for (index, trackData) in tracksToShow.enumerated() {
                 let title = trackData["title"] as? String ?? "Unknown Track"
@@ -485,9 +485,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for artwork to load (with timeout), then build UI
+        // Wait for artwork to load (3s timeout for better CarPlay artwork reliability)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 2.0)
+            _ = group.wait(timeout: .now() + 3.0)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
