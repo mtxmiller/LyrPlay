@@ -301,6 +301,22 @@ final class PlaybackSessionController {
                     os_log(.error, log: self?.logger ?? OSLog.default, "❌ Shuffle command failed - no response")
                 } else {
                     os_log(.info, log: self?.logger ?? OSLog.default, "✅ Shuffle mode set to %d", newMode)
+
+                    // Update CarPlay button visual state by setting currentShuffleType
+                    DispatchQueue.main.async {
+                        let shuffleType: MPShuffleType
+                        switch newMode {
+                        case 1:
+                            shuffleType = .items  // Shuffle songs
+                        case 2:
+                            shuffleType = .collections  // Shuffle albums
+                        default:
+                            shuffleType = .off
+                        }
+                        MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = shuffleType
+                        os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay button state updated: %{public}s",
+                               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
+                    }
                 }
             }
         }

@@ -508,7 +508,7 @@ class NowPlayingManager: ObservableObject {
 
     // MARK: - Shuffle State Sync (for CarPlay shuffle button)
 
-    /// Updates MPNowPlayingInfoCenter with current shuffle state from LMS
+    /// Updates MPRemoteCommandCenter with current shuffle state from LMS
     /// Called after status queries to keep CarPlay shuffle button in sync
     func updateShuffleState(shuffleMode: Int) {
         // Map LMS shuffle mode to MPShuffleType
@@ -524,12 +524,11 @@ class NowPlayingManager: ObservableObject {
         }
 
         DispatchQueue.main.async {
-            var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-            nowPlayingInfo[MPNowPlayingInfoPropertyCurrentPlaybackDate] = Date()  // Force refresh
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+            // Update CarPlay button visual state via MPRemoteCommandCenter
+            MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = shuffleType
 
-            os_log(.info, log: self.logger, "🔀 Shuffle state updated: LMS mode %d → MPShuffleType %{public}s",
-                   shuffleMode, shuffleType == .off ? "off" : (shuffleType == .items ? "items" : "collections"))
+            os_log(.info, log: self.logger, "🔀 Shuffle state synced: LMS mode %d → CarPlay button %{public}s",
+                   shuffleMode, shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
         }
     }
 
