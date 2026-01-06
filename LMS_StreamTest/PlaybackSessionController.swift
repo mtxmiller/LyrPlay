@@ -249,40 +249,58 @@ final class PlaybackSessionController {
             return .commandFailed
         }
 
-        // Map MPShuffleType to LMS shuffle mode
-        // LMS: 0 = off, 1 = shuffle songs, 2 = shuffle albums
-        let mode: Int
-        switch shuffleType {
-        case .off:
-            mode = 0
-        case .items:
-            mode = 1  // Shuffle songs
-        case .collections:
-            mode = 2  // Shuffle albums
-        @unknown default:
-            mode = 0
-        }
-
-        os_log(.info, log: logger, "🔀 Shuffle command: %{public}s → LMS mode %d",
-               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"), mode)
-
+        // TOGGLE shuffle mode like lms-material does (0→1→2→0)
+        // Query current state first, then toggle to next
         let playerID = SettingsManager.shared.playerMACAddress
-        let command: [String: Any] = [
+
+        // Query current shuffle state
+        let statusCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [playerID, ["playlist", "shuffle", mode]]
+            "params": [playerID, ["status", "-", 1, "tags:"]]
         ]
 
-        coordinator.sendJSONRPCCommandDirect(command) { [weak self] response in
-            if response.isEmpty {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Shuffle command failed - no response")
+        os_log(.info, log: logger, "🔀 Shuffle button tapped - querying current state...")
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            // Parse current shuffle state from response
+            let currentShuffle: Int
+            if let result = response["result"] as? [String: Any],
+               let shuffleMode = result["playlist shuffle"] as? Int {
+                currentShuffle = shuffleMode
             } else {
-                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Shuffle mode set to %d", mode)
-                // Update MPNowPlayingInfoCenter with new shuffle state
-                DispatchQueue.main.async {
-                    var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-                    nowPlayingInfo[MPNowPlayingInfoPropertyDefaultPlaybackRate] = 1.0  // Force refresh
-                    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+                currentShuffle = 0  // Default to off if can't read
+                os_log(.info, log: self.logger, "⚠️ Could not read current shuffle state, defaulting to 0")
+            }
+
+            // Toggle to next state (lms-material pattern: 0→1→2→0)
+            let newMode: Int
+            switch currentShuffle {
+            case 2:
+                newMode = 0  // albums → off
+            case 1:
+                newMode = 2  // songs → albums
+            default:
+                newMode = 1  // off → songs
+            }
+
+            os_log(.info, log: self.logger, "🔀 Shuffle toggle: %d → %d (off=0, songs=1, albums=2)",
+                   currentShuffle, newMode)
+
+            // Send shuffle command to LMS
+            let shuffleCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "shuffle", newMode]]
+            ]
+
+            coordinator.sendJSONRPCCommandDirect(shuffleCommand) { [weak self] shuffleResponse in
+                if shuffleResponse.isEmpty {
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Shuffle command failed - no response")
+                } else {
+                    os_log(.info, log: self?.logger ?? OSLog.default, "✅ Shuffle mode set to %d", newMode)
                 }
             }
         }
