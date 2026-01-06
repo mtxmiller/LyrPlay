@@ -259,12 +259,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let jsonRPCCommand: [String: Any]
         if let numericId = playlist.originalNumericId {
             // Database playlist with numeric ID - use "playlistcontrol" command
-            // Include play_index:0 to start from the beginning
+            // LMS automatically starts from beginning (play_index is unreliable)
             os_log(.debug, log: logger, "Using playlistcontrol with ID: %d", numericId)
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
-                "params": [playerID, ["playlistcontrol", "cmd:load", "playlist_id:\(numericId)", "play_index:0"]]
+                "params": [playerID, ["playlistcontrol", "cmd:load", "playlist_id:\(numericId)"]]
             ]
         } else if let url = playlist.url {
             // File-based playlist - use "playlist load" command with URL and title
