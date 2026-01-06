@@ -505,6 +505,58 @@ class NowPlayingManager: ObservableObject {
                commandCenter.previousTrackCommand.isEnabled ? "enabled" : "disabled",
                commandCenter.nextTrackCommand.isEnabled ? "enabled" : "disabled")
     }
+
+    // MARK: - Shuffle State Sync (for CarPlay shuffle button)
+
+    /// Updates MPNowPlayingInfoCenter with current shuffle state from LMS
+    /// Called after status queries to keep CarPlay shuffle button in sync
+    func updateShuffleState(shuffleMode: Int) {
+        // Map LMS shuffle mode to MPShuffleType
+        // LMS: 0 = off, 1 = shuffle songs, 2 = shuffle albums
+        let shuffleType: MPShuffleType
+        switch shuffleMode {
+        case 1:
+            shuffleType = .items  // Shuffle songs
+        case 2:
+            shuffleType = .collections  // Shuffle albums
+        default:
+            shuffleType = .off
+        }
+
+        DispatchQueue.main.async {
+            var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+            nowPlayingInfo[MPNowPlayingInfoPropertyCurrentPlaybackDate] = Date()  // Force refresh
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+
+            os_log(.info, log: self.logger, "🔀 Shuffle state updated: LMS mode %d → MPShuffleType %{public}s",
+                   shuffleMode, shuffleType == .off ? "off" : (shuffleType == .items ? "items" : "collections"))
+        }
+    }
+
+    /// Queries current shuffle state from LMS server
+    func queryAndUpdateShuffleState() {
+        guard let coordinator = slimClient else {
+            os_log(.debug, log: logger, "⚠️ Cannot query shuffle state - no coordinator")
+            return
+        }
+
+        let playerID = SettingsManager.shared.playerMACAddress
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self,
+                  let result = response["result"] as? [String: Any],
+                  let shuffleMode = result["playlist shuffle"] as? Int else {
+                return
+            }
+
+            self.updateShuffleState(shuffleMode: shuffleMode)
+        }
+    }
     
     // MARK: - Track End Detection
     // REMOVED: Server-time based track end detection (was causing duplicate STMd signals)

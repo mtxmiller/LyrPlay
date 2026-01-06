@@ -31,10 +31,19 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let immediateTemplate = buildImmediateHomeTemplate()
         self.browseTemplate = immediateTemplate
 
-        // Configure Now Playing template with Up Next button
+        // Configure Now Playing template with Up Next button and Shuffle button
         let nowPlayingTemplate = CPNowPlayingTemplate.shared
         nowPlayingTemplate.isUpNextButtonEnabled = true
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
+
+        // Add shuffle button - uses built-in CPNowPlayingShuffleButton
+        // Button automatically syncs with MPRemoteCommandCenter.changeShuffleModeCommand
+        let shuffleButton = CPNowPlayingShuffleButton(handler: { [weak self] button in
+            // Handler is called when button is tapped, but actual shuffle logic
+            // is handled by MPRemoteCommandCenter.changeShuffleModeCommand in PlaybackSessionController
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
+        })
+        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
 
         // Set template immediately - user sees UI right away
         interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
@@ -52,14 +61,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // CONNECTION STATE CHECK: Only load data if coordinator is connected
         // Give connection a brief moment to establish (coordinator.connect() is async)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // Increased to 3s for better reliability on slower networks
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self = self else { return }
 
             if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                 os_log(.info, log: self.logger, "✅ Coordinator connected - loading home template data")
                 self.refreshHomeTemplateData()
             } else {
-                os_log(.error, log: self.logger, "❌ Coordinator not connected after 1s - showing error state")
+                os_log(.error, log: self.logger, "❌ Coordinator not connected after 3s - showing error state")
                 self.showConnectionError()
             }
         }
@@ -1003,8 +1013,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // TIMEOUT FIX: Use group.wait with timeout instead of group.notify
         // This prevents infinite loading if network requests hang
+        // Increased to 10s for better reliability on slower networks (artwork loading can be slow)
         DispatchQueue.global().async { [weak self] in
-            let result = group.wait(timeout: .now() + 5.0)
+            let result = group.wait(timeout: .now() + 10.0)
 
             DispatchQueue.main.async {
                 guard let self = self else { return }

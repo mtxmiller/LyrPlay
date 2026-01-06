@@ -38,6 +38,7 @@ protocol SlimProtoControlling: AnyObject {
     func connect()
     func sendLockScreenCommand(_ command: String)
     func saveCurrentPositionForRecovery()
+    func sendJSONRPCCommandDirect(_ command: [String: Any], completion: @escaping ([String: Any]) -> Void)
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -186,6 +187,7 @@ final class PlaybackSessionController {
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.changeShuffleModeCommand.isEnabled = true
 
         commandCenter.stopCommand.isEnabled = false
         commandCenter.skipForwardCommand.isEnabled = false
@@ -206,8 +208,14 @@ final class PlaybackSessionController {
         commandCenter.previousTrackCommand.addTarget { [weak self] _ in
             self?.handleRemoteCommand(.previous) ?? .commandFailed
         }
+        commandCenter.changeShuffleModeCommand.addTarget { [weak self] event in
+            guard let shuffleEvent = event as? MPChangeShuffleModeCommandEvent else {
+                return .commandFailed
+            }
+            return self?.handleShuffleCommand(shuffleEvent.shuffleType) ?? .commandFailed
+        }
 
-        os_log(.info, log: logger, "✅ Remote command center configured")
+        os_log(.info, log: logger, "✅ Remote command center configured (including shuffle)")
     }
 
     private func handleRemoteCommand(_ command: RemoteCommand) -> MPRemoteCommandHandlerStatus {
@@ -232,6 +240,53 @@ final class PlaybackSessionController {
         }
 
         os_log(.info, log: logger, "🔒 Remote command handled: %{public}s", command.slimCommand)
+        return .success
+    }
+
+    private func handleShuffleCommand(_ shuffleType: MPShuffleType) -> MPRemoteCommandHandlerStatus {
+        guard let coordinator = slimProtoProvider?() else {
+            os_log(.error, log: logger, "❌ SlimProto coordinator unavailable for shuffle command")
+            return .commandFailed
+        }
+
+        // Map MPShuffleType to LMS shuffle mode
+        // LMS: 0 = off, 1 = shuffle songs, 2 = shuffle albums
+        let mode: Int
+        switch shuffleType {
+        case .off:
+            mode = 0
+        case .items:
+            mode = 1  // Shuffle songs
+        case .collections:
+            mode = 2  // Shuffle albums
+        @unknown default:
+            mode = 0
+        }
+
+        os_log(.info, log: logger, "🔀 Shuffle command: %{public}s → LMS mode %d",
+               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"), mode)
+
+        let playerID = SettingsManager.shared.playerMACAddress
+        let command: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playlist", "shuffle", mode]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(command) { [weak self] response in
+            if response.isEmpty {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Shuffle command failed - no response")
+            } else {
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Shuffle mode set to %d", mode)
+                // Update MPNowPlayingInfoCenter with new shuffle state
+                DispatchQueue.main.async {
+                    var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                    nowPlayingInfo[MPNowPlayingInfoPropertyDefaultPlaybackRate] = 1.0  // Force refresh
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+                }
+            }
+        }
+
         return .success
     }
 
