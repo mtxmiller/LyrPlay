@@ -324,8 +324,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
     
     private func displayPlaylistTracks(_ tracks: [PlaylistTrack], playlist: Playlist) {
-        // Limit to first 16 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(tracks.prefix(16))
+        // Limit to first 15 tracks for faster CarPlay display
+        let tracksToDisplay = Array(tracks.prefix(15))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -357,7 +357,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 let item = CPListItem(
                     text: track.title,
                     detailText: track.detailText,
-                    image: artwork,
+                    image: artwork ?? createMusicPlaceholderImage(),
                     accessoryImage: nil,
                     accessoryType: .disclosureIndicator
                 )
@@ -438,8 +438,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var trackDataArray: [(title: String, artist: String?, duration: Double?, playlistIndex: Int?, trackID: String?, coverID: String?, isCurrentTrack: Bool)] = []
 
         if let playlistLoop = status["playlist_loop"] as? [[String: Any]] {
-            // Limit to first 16 tracks for performance
-            let tracksToShow = Array(playlistLoop.prefix(16))
+            // Limit to first 15 tracks for performance
+            let tracksToShow = Array(playlistLoop.prefix(15))
 
             for (index, trackData) in tracksToShow.enumerated() {
                 let title = trackData["title"] as? String ?? "Unknown Track"
@@ -523,7 +523,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     let item = CPListItem(
                         text: displayText,
                         detailText: detailText,
-                        image: artwork,
+                        image: artwork ?? createMusicPlaceholderImage(),
                         accessoryImage: nil,
                         accessoryType: trackData.isCurrentTrack ? .none : .disclosureIndicator
                     )
@@ -701,10 +701,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // This is a server query, not a player command - use "" for player ID
         // IMPORTANT: Use the format from LMS App - "playlist_id:ID" as a string parameter
         // Tags: d=duration, a=artist, l=album, C=coverid (for artwork)
+        // NOTE: Using -1 as start index to ensure we get ALL tracks including first
+        // Query 15 tracks (matches display limit) for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["playlists", "tracks", 0, 1000, "playlist_id:\(numericId)", "tags:dalC"]]
+            "params": ["", ["playlists", "tracks", -1, 15, "playlist_id:\(numericId)", "tags:dalC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -736,12 +738,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let playerID = SettingsManager.shared.playerMACAddress
-        // Request current track + next 24 tracks (25 total) for Up Next display
+        // Request current track + next 14 tracks (15 total) for Up Next display
         // Tags: I=track_id, R=rating, a=artist, d=duration, C=coverid
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [playerID, ["status", "-", 25, "tags:IRadC"]]
+            "params": [playerID, ["status", "-", 15, "tags:IRadC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1305,6 +1307,26 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    private func createMusicPlaceholderImage() -> UIImage {
+        let size = CGSize(width: 200, height: 200)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            // Blue background for individual tracks
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Single music note icon
+            let iconSize: CGFloat = 100
+            let iconRect = CGRect(x: (size.width - iconSize) / 2,
+                                 y: (size.height - iconSize) / 2,
+                                 width: iconSize,
+                                 height: iconSize)
+            if let icon = UIImage(systemName: "music.note")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+                icon.draw(in: iconRect)
+            }
+        }
+    }
+
     private func showFullNewMusicList() {
         // TODO: Implement full New Music list view
         os_log(.info, log: logger, "📋 Show full New Music list")
@@ -1519,10 +1541,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Use "titles" query with album_id filter
         // Tags: d=duration, a=artist, l=album, C=coverid, t=tracknum
+        // Query 15 tracks (matches display limit) for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["titles", 0, 100, "album_id:\(album.id)", "tags:daltC"]]
+            "params": ["", ["titles", 0, 15, "album_id:\(album.id)", "tags:daltC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1604,8 +1627,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             ($0.trackNumber ?? Int.max) < ($1.trackNumber ?? Int.max)
         }
 
-        // Limit to first 16 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(sortedTracks.prefix(16))
+        // Limit to first 15 tracks for performance (CarPlay limitation)
+        let tracksToDisplay = Array(sortedTracks.prefix(15))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -1617,7 +1640,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             let playAllItem = CPListItem(
                 text: "Play All",
                 detailText: "Play entire album",
-                image: album.artwork,  // Use album artwork for Play All
+                image: album.artwork ?? createMusicPlaceholderImage(),
                 accessoryImage: nil,
                 accessoryType: .disclosureIndicator
             )
@@ -1748,18 +1771,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        // Choose SF Symbol based on shuffle mode
+        // Choose SF Symbol and configuration based on shuffle mode
         let iconName: String
+        let config: UIImage.SymbolConfiguration?
+
         switch mode {
         case 1:
-            iconName = "shuffle.fill"  // Songs shuffle - FILLED (active/pressed look)
+            // Songs shuffle - use filled rendering mode for "pressed" look
+            iconName = "shuffle"
+            config = UIImage.SymbolConfiguration(paletteColors: [.white])
+                .applying(UIImage.SymbolConfiguration(weight: .bold))
         case 2:
-            iconName = "shuffle.circle"  // Albums shuffle - circle variant
+            // Albums shuffle - circle variant (always distinct)
+            iconName = "shuffle.circle"
+            config = nil
         default:
-            iconName = "shuffle"  // Off - outline (inactive)
+            // Off - regular outline
+            iconName = "shuffle"
+            config = UIImage.SymbolConfiguration(weight: .regular)
         }
 
-        guard let image = UIImage(systemName: iconName) else {
+        guard let baseImage = UIImage(systemName: iconName),
+              let image = config != nil ? baseImage.applyingSymbolConfiguration(config!) : baseImage else {
             os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
             return
         }
