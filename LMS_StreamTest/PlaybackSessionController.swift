@@ -39,6 +39,7 @@ protocol SlimProtoControlling: AnyObject {
     func sendLockScreenCommand(_ command: String)
     func saveCurrentPositionForRecovery()
     func sendJSONRPCCommandDirect(_ command: [String: Any], completion: @escaping ([String: Any]) -> Void)
+    func toggleShuffleMode(completion: ((Int) -> Void)?)
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -249,77 +250,11 @@ final class PlaybackSessionController {
             return .commandFailed
         }
 
-        // TOGGLE shuffle mode like lms-material does (0→1→2→0)
-        // Query current state first, then toggle to next
-        let playerID = SettingsManager.shared.playerMACAddress
+        os_log(.info, log: logger, "🔀 Shuffle command from MPRemoteCommandCenter")
 
-        // Query current shuffle state
-        let statusCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["status", "-", 1, "tags:"]]
-        ]
-
-        os_log(.info, log: logger, "🔀 Shuffle button tapped - querying current state...")
-
-        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
-            guard let self = self else { return }
-
-            // Parse current shuffle state from response
-            let currentShuffle: Int
-            if let result = response["result"] as? [String: Any],
-               let shuffleMode = result["playlist shuffle"] as? Int {
-                currentShuffle = shuffleMode
-            } else {
-                currentShuffle = 0  // Default to off if can't read
-                os_log(.info, log: self.logger, "⚠️ Could not read current shuffle state, defaulting to 0")
-            }
-
-            // Toggle to next state (lms-material pattern: 0→1→2→0)
-            let newMode: Int
-            switch currentShuffle {
-            case 2:
-                newMode = 0  // albums → off
-            case 1:
-                newMode = 2  // songs → albums
-            default:
-                newMode = 1  // off → songs
-            }
-
-            os_log(.info, log: self.logger, "🔀 Shuffle toggle: %d → %d (off=0, songs=1, albums=2)",
-                   currentShuffle, newMode)
-
-            // Send shuffle command to LMS
-            let shuffleCommand: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [playerID, ["playlist", "shuffle", newMode]]
-            ]
-
-            coordinator.sendJSONRPCCommandDirect(shuffleCommand) { [weak self] shuffleResponse in
-                if shuffleResponse.isEmpty {
-                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Shuffle command failed - no response")
-                } else {
-                    os_log(.info, log: self?.logger ?? OSLog.default, "✅ Shuffle mode set to %d", newMode)
-
-                    // Update CarPlay button visual state by setting currentShuffleType
-                    DispatchQueue.main.async {
-                        let shuffleType: MPShuffleType
-                        switch newMode {
-                        case 1:
-                            shuffleType = .items  // Shuffle songs
-                        case 2:
-                            shuffleType = .collections  // Shuffle albums
-                        default:
-                            shuffleType = .off
-                        }
-                        MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = shuffleType
-                        os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay button state updated: %{public}s",
-                               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
-                    }
-                }
-            }
-        }
+        // Use shared toggle logic in coordinator (same as CarPlay button)
+        // Lock screen/Control Center don't need icon updates (handled by MPRemoteCommandCenter)
+        coordinator.toggleShuffleMode(completion: nil)
 
         return .success
     }

@@ -3,6 +3,7 @@
 import Foundation
 import os.log
 import WebKit
+import MediaPlayer
 
 // MARK: - Recovery Trigger Types
 /// Defines what triggered a reconnection, determining recovery behavior
@@ -1620,7 +1621,72 @@ extension SlimProtoCoordinator {
         
         task.resume()
     }
-    
+
+    /// Toggles shuffle mode through LMS's 3-state cycle: off→songs→albums→off
+    /// Called by CarPlay shuffle button and MPRemoteCommandCenter
+    /// - Parameter completion: Optional callback with new shuffle mode (0=off, 1=songs, 2=albums)
+    public func toggleShuffleMode(completion: ((Int) -> Void)? = nil) {
+        let playerID = settings.playerMACAddress
+
+        // Query current shuffle state
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        os_log(.info, log: logger, "🔀 Shuffle toggle requested...")
+
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            let currentShuffle: Int
+            if let result = response["result"] as? [String: Any],
+               let shuffleMode = result["playlist shuffle"] as? Int {
+                currentShuffle = shuffleMode
+            } else {
+                currentShuffle = 0
+                os_log(.info, log: self.logger, "⚠️ Could not read shuffle state, defaulting to 0")
+            }
+
+            // Toggle to next state (0→1→2→0)
+            let newMode: Int
+            switch currentShuffle {
+            case 2: newMode = 0  // albums → off
+            case 1: newMode = 2  // songs → albums
+            default: newMode = 1  // off → songs
+            }
+
+            os_log(.info, log: self.logger, "🔀 Shuffle: %d → %d", currentShuffle, newMode)
+
+            // Send shuffle command
+            let shuffleCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "shuffle", newMode]]
+            ]
+
+            self.sendJSONRPCCommandDirect(shuffleCommand) { [weak self] shuffleResponse in
+                guard let self = self else { return }
+
+                if !shuffleResponse.isEmpty {
+                    os_log(.info, log: self.logger, "✅ Shuffle mode set to %d", newMode)
+
+                    // Update MPRemoteCommandCenter for lock screen/Control Center
+                    DispatchQueue.main.async {
+                        let shuffleType: MPShuffleType = newMode == 1 ? .items : (newMode == 2 ? .collections : .off)
+                        MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = shuffleType
+                        os_log(.info, log: self.logger, "🔀 Remote command center updated: %{public}s",
+                               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
+                    }
+
+                    // Notify CarPlay to update button icon
+                    completion?(newMode)
+                }
+            }
+        }
+    }
+
     // CRITICAL: Ensure SlimProto connection for audio streaming
     private func ensureSlimProtoConnection() {
         os_log(.info, log: logger, "🔧 Ensuring SlimProto connection for audio streaming...")

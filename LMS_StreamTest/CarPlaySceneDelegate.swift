@@ -36,13 +36,24 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.isUpNextButtonEnabled = true
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
 
-        // Add shuffle button - uses built-in CPNowPlayingShuffleButton
-        // Button automatically syncs with MPRemoteCommandCenter.changeShuffleModeCommand
-        let shuffleButton = CPNowPlayingShuffleButton(handler: { [weak self] button in
-            // Handler is called when button is tapped, but actual shuffle logic
-            // is handled by MPRemoteCommandCenter.changeShuffleModeCommand in PlaybackSessionController
+        // Add custom shuffle button with distinct icons for off/songs/albums
+        // Start with off state - will update icon when state changes
+        let shuffleImage = UIImage(systemName: "shuffle")!
+        let shuffleButton = CPNowPlayingImageButton(image: shuffleImage) { [weak self] button in
             os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
-        })
+
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
+                return
+            }
+
+            // Toggle shuffle and update button icon
+            coordinator.toggleShuffleMode { newMode in
+                DispatchQueue.main.async {
+                    self?.updateShuffleButtonIcon(for: newMode)
+                }
+            }
+        }
         nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
 
         // Set template immediately - user sees UI right away
@@ -485,9 +496,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for artwork to load (3s timeout for better CarPlay artwork reliability)
+        // Wait for artwork to load (2s timeout for faster playlist/album view display)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 3.0)
+            _ = group.wait(timeout: .now() + 2.0)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
@@ -767,7 +778,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        URLSession.shared.dataTask(with: url) { data, response, error in
+        // Create request with 3s timeout (matches other CarPlay artwork loading)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3.0
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let data = data, let image = UIImage(data: data) {
                 completion(image)
             } else {
@@ -781,9 +796,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var artworkCache: [String: UIImage] = [:]
         let cacheLock = NSLock()
 
-        // Only load artwork for first 25 tracks to improve performance
+        // Only load artwork for first 16 tracks to improve performance
         // CarPlay doesn't support lazy loading on scroll, so we load a limited set upfront
-        let tracksToLoad = tracks.prefix(25)
+        let tracksToLoad = tracks.prefix(16)
 
         // Build list of unique IDs to fetch artwork for
         // Use coverID if available, otherwise use track ID as fallback (LMS App pattern)
@@ -805,9 +820,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for images to load (3s timeout for better CarPlay artwork reliability)
+        // Wait for images to load (2s timeout for faster playlist/album view display)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 3.0)
+            _ = group.wait(timeout: .now() + 2.0)
             DispatchQueue.main.async {
                 completion(artworkCache)
             }
@@ -1183,9 +1198,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func buildAlbumImageRow(_ albums: [Album], title: String) -> CPListImageRowItem? {
         guard !albums.isEmpty else { return nil }
 
-        // Create grid images (up to 8 items for CPListImageRowItem)
+        // Create grid images (up to 6 items for CPListImageRowItem)
         // Render each image into a new bitmap context to ensure unique UIImage instances
-        let gridImages = albums.prefix(8).map { album -> UIImage in
+        let gridImages = albums.prefix(6).map { album -> UIImage in
             if let artwork = album.artwork {
                 // Render into a new graphics context to create a fresh UIImage
                 let renderer = UIGraphicsImageRenderer(size: artwork.size)
@@ -1224,8 +1239,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func buildPlaylistImageRow(_ playlists: [Playlist]) -> CPListImageRowItem? {
         guard !playlists.isEmpty else { return nil }
 
-        // Create grid images (up to 8 items)
-        let gridImages = playlists.prefix(8).map { playlist -> UIImage in
+        // Create grid images (up to 6 items)
+        let gridImages = playlists.prefix(6).map { playlist -> UIImage in
             return createPlaylistPlaceholderImage()
         }
 
@@ -1307,11 +1322,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         // Material skin: ["albums"] with ["sort:new", "tags:aajlqswyKSS24"]
-        // Request 8 albums (max for CPListImageRowItem)
+        // Request 6 albums for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 8, "sort:new", "tags:ajlqy"]]
+            "params": ["", ["albums", 0, 6, "sort:new", "tags:ajlqy"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1352,10 +1367,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         // Material skin: ["albums"] with ["sort:random", "tags:aajlqswyKSS24"]
+        // Request 6 albums for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 8, "sort:random", "tags:ajlqy"]]
+            "params": ["", ["albums", 0, 6, "sort:random", "tags:ajlqy"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1431,7 +1447,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             let albumCopy = album
             let indexCopy = index
 
-            URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            // Create request with 3s timeout (matches other CarPlay artwork loading)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 3.0
+
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
                 defer { group.leave() }
 
                 if let error = error {
@@ -1584,8 +1604,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             ($0.trackNumber ?? Int.max) < ($1.trackNumber ?? Int.max)
         }
 
-        // Limit to first 25 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(sortedTracks.prefix(25))
+        // Limit to first 16 tracks for performance (CarPlay limitation)
+        let tracksToDisplay = Array(sortedTracks.prefix(16))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -1717,6 +1737,52 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 }
             }
         }
+    }
+
+    // MARK: - Shuffle Button Icon Updates
+
+    /// Updates shuffle button icon based on LMS shuffle mode
+    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
+    private func updateShuffleButtonIcon(for mode: Int) {
+        guard let nowPlayingTemplate = interfaceController?.topTemplate as? CPNowPlayingTemplate else {
+            return
+        }
+
+        // Choose SF Symbol based on shuffle mode
+        let iconName: String
+        switch mode {
+        case 1:
+            iconName = "shuffle.fill"  // Songs shuffle - FILLED (active/pressed look)
+        case 2:
+            iconName = "shuffle.circle"  // Albums shuffle - circle variant
+        default:
+            iconName = "shuffle"  // Off - outline (inactive)
+        }
+
+        guard let image = UIImage(systemName: iconName) else {
+            os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
+            return
+        }
+
+        // Create new button with updated icon
+        let shuffleButton = CPNowPlayingImageButton(image: image) { [weak self] button in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
+
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable")
+                return
+            }
+
+            coordinator.toggleShuffleMode { newMode in
+                DispatchQueue.main.async {
+                    self?.updateShuffleButtonIcon(for: newMode)
+                }
+            }
+        }
+
+        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
+        os_log(.info, log: logger, "🔀 Shuffle button icon updated: %{public}s (mode %d)",
+               iconName, mode)
     }
 }
 
