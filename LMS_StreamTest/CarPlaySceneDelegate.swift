@@ -79,6 +79,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                 os_log(.info, log: self.logger, "✅ Coordinator connected - loading home template data")
                 self.refreshHomeTemplateData()
+                // Sync shuffle button with server state
+                self.syncShuffleButtonWithServer()
             } else {
                 os_log(.error, log: self.logger, "❌ Coordinator not connected after 3s - showing error state")
                 self.showConnectionError()
@@ -822,9 +824,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for images to load (2s timeout for faster playlist/album view display)
+        // Wait for images to load (3s timeout for playlist/album view display)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 2.0)
+            _ = group.wait(timeout: .now() + 3.0)
             DispatchQueue.main.async {
                 completion(artworkCache)
             }
@@ -1771,28 +1773,21 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        // Choose SF Symbol and configuration based on shuffle mode
+        // Choose SF Symbol based on shuffle mode
         let iconName: String
-        let config: UIImage.SymbolConfiguration?
-
         switch mode {
         case 1:
-            // Songs shuffle - use filled rendering mode for "pressed" look
-            iconName = "shuffle"
-            config = UIImage.SymbolConfiguration(paletteColors: [.white])
-                .applying(UIImage.SymbolConfiguration(weight: .bold))
+            // Songs/tracks shuffle - filled circle (pressed/active look)
+            iconName = "shuffle.circle.fill"
         case 2:
-            // Albums shuffle - circle variant (always distinct)
+            // Albums shuffle - outline circle
             iconName = "shuffle.circle"
-            config = nil
         default:
-            // Off - regular outline
+            // Off - normal shuffle icon
             iconName = "shuffle"
-            config = UIImage.SymbolConfiguration(weight: .regular)
         }
 
-        guard let baseImage = UIImage(systemName: iconName),
-              let image = config != nil ? baseImage.applyingSymbolConfiguration(config!) : baseImage else {
+        guard let image = UIImage(systemName: iconName) else {
             os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
             return
         }
@@ -1816,6 +1811,45 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
         os_log(.info, log: logger, "🔀 Shuffle button icon updated: %{public}s (mode %d)",
                iconName, mode)
+    }
+
+    /// Syncs shuffle button icon with current server state
+    /// Call this when CarPlay connects or Now Playing screen appears
+    private func syncShuffleButtonWithServer() {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.info, log: logger, "⚠️ Coordinator not available for shuffle sync")
+            return
+        }
+
+        let playerID = SettingsManager.shared.playerMACAddress
+
+        // Query current shuffle state from server
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        os_log(.info, log: logger, "🔀 Syncing shuffle button with server state...")
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            let shuffleMode: Int
+            if let result = response["result"] as? [String: Any],
+               let mode = result["playlist shuffle"] as? Int {
+                shuffleMode = mode
+                os_log(.info, log: self.logger, "🔀 Server shuffle state: %d", shuffleMode)
+            } else {
+                shuffleMode = 0
+                os_log(.info, log: self.logger, "⚠️ Could not read server shuffle state, defaulting to 0")
+            }
+
+            // Update button icon on main thread
+            DispatchQueue.main.async {
+                self.updateShuffleButtonIcon(for: shuffleMode)
+            }
+        }
     }
 }
 
