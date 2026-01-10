@@ -37,8 +37,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
 
         // Add custom shuffle button with distinct icons for off/songs/albums
-        // Start with off state - will update icon when state changes
-        let shuffleImage = UIImage(systemName: "shuffle")!
+        // Start with off state - will update icon when server state is synced
+        let shuffleConfig = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let shuffleImage = UIImage(systemName: "shuffle", withConfiguration: shuffleConfig)!
         let shuffleButton = CPNowPlayingImageButton(image: shuffleImage) { [weak self] button in
             os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
 
@@ -1769,9 +1770,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// Updates shuffle button icon based on LMS shuffle mode
     /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
     private func updateShuffleButtonIcon(for mode: Int) {
-        guard let nowPlayingTemplate = interfaceController?.topTemplate as? CPNowPlayingTemplate else {
-            return
-        }
+        // Use CPNowPlayingTemplate.shared directly - don't require it to be the top template
+        // The button was added to .shared on connect, so update it there regardless of
+        // which template is currently visible
+        let nowPlayingTemplate = CPNowPlayingTemplate.shared
 
         // Choose SF Symbol based on shuffle mode
         let iconName: String
@@ -1787,7 +1789,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             iconName = "shuffle"
         }
 
-        guard let image = UIImage(systemName: iconName) else {
+        // Use large configuration for better visibility on CarPlay display
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        guard let image = UIImage(systemName: iconName, withConfiguration: config) else {
             os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
             return
         }
