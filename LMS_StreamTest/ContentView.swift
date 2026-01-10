@@ -22,6 +22,11 @@ struct ContentView: View {
     @State private var hasShownError = false
     @State private var previousActiveServer: SettingsManager.ServerType?
 
+    /// Detect if running as iPad app on Mac (no status bar, so ignore top safe area)
+    private var isRunningOnMac: Bool {
+        ProcessInfo.processInfo.isiOSAppOnMac
+    }
+
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
 
@@ -128,7 +133,7 @@ struct ContentView: View {
                     .zIndex(1) // Ensure it appears above WebView
             }
             
-            // WebView that respects TOP safe area but ignores bottom
+            // WebView - on iOS respects top safe area for status bar, on Mac ignores all safe areas
             if let url = URL(string: materialWebURL), !hasConnectionError {
                 WebView(
                     url: url,
@@ -140,7 +145,9 @@ struct ContentView: View {
                         showingSettings = true
                     }
                 )
-                .ignoresSafeArea(.container, edges: .bottom)
+                // On Mac (iPad app), ignore all safe areas since there's no status bar/notch
+                // On iOS, respect top safe area for status bar but ignore bottom
+                .ignoresSafeArea(.container, edges: isRunningOnMac ? [.top, .bottom] : .bottom)
                 .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
                 .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
