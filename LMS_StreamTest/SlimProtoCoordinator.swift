@@ -1687,6 +1687,68 @@ extension SlimProtoCoordinator {
         }
     }
 
+    /// Sends pause command to server with confirmation and retry logic
+    /// Used for critical pause operations (CarPlay disconnect) where we must ensure server received it
+    /// - Parameters:
+    ///   - maxRetries: Maximum number of retry attempts (default 3)
+    ///   - completion: Optional callback with success/failure result
+    public func sendPauseWithConfirmation(maxRetries: Int = 3, completion: ((Bool) -> Void)? = nil) {
+        os_log(.info, log: logger, "⏸️ Sending pause with confirmation (max retries: %d)", maxRetries)
+
+        // Send initial pause command
+        sendLockScreenCommand("pause")
+
+        // After 1 second, verify server is paused
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.verifyServerPaused(retriesRemaining: maxRetries, completion: completion)
+        }
+    }
+
+    /// Verifies server is in paused state, retries pause command if not
+    private func verifyServerPaused(retriesRemaining: Int, completion: ((Bool) -> Void)?) {
+        let playerID = settings.playerMACAddress
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            if let result = response["result"] as? [String: Any],
+               let mode = result["mode"] as? String {
+
+                if mode == "pause" || mode == "stop" {
+                    os_log(.info, log: self.logger, "✅ Server confirmed paused (mode: %{public}s)", mode)
+                    completion?(true)
+                    return
+                }
+
+                os_log(.info, log: self.logger, "⚠️ Server mode is '%{public}s', not paused", mode)
+            } else {
+                os_log(.info, log: self.logger, "⚠️ Could not read server status")
+            }
+
+            // Server not paused - retry if we have attempts left
+            if retriesRemaining > 0 {
+                os_log(.info, log: self.logger, "🔄 Retrying pause command (%d attempts left)", retriesRemaining)
+
+                // Send pause command again
+                self.sendLockScreenCommand("pause")
+
+                // Wait and verify again with exponential backoff
+                let delay = 1.5 + Double(3 - retriesRemaining) * 0.5  // 1.5s, 2.0s, 2.5s
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    self.verifyServerPaused(retriesRemaining: retriesRemaining - 1, completion: completion)
+                }
+            } else {
+                os_log(.error, log: self.logger, "❌ Failed to confirm server pause after all retries")
+                completion?(false)
+            }
+        }
+    }
+
     // CRITICAL: Ensure SlimProto connection for audio streaming
     private func ensureSlimProtoConnection() {
         os_log(.info, log: logger, "🔧 Ensuring SlimProto connection for audio streaming...")
