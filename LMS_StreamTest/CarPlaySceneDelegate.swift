@@ -31,10 +31,31 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let immediateTemplate = buildImmediateHomeTemplate()
         self.browseTemplate = immediateTemplate
 
-        // Configure Now Playing template with Up Next button
+        // Configure Now Playing template with Up Next button and Shuffle button
         let nowPlayingTemplate = CPNowPlayingTemplate.shared
         nowPlayingTemplate.isUpNextButtonEnabled = true
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
+
+        // Add custom shuffle button with distinct icons for off/songs/albums
+        // Start with off state - will update icon when server state is synced
+        let shuffleConfig = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let shuffleImage = UIImage(systemName: "shuffle", withConfiguration: shuffleConfig)!
+        let shuffleButton = CPNowPlayingImageButton(image: shuffleImage) { [weak self] button in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
+
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
+                return
+            }
+
+            // Toggle shuffle and update button icon
+            coordinator.toggleShuffleMode { newMode in
+                DispatchQueue.main.async {
+                    self?.updateShuffleButtonIcon(for: newMode)
+                }
+            }
+        }
+        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
 
         // Set template immediately - user sees UI right away
         interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
@@ -52,14 +73,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // CONNECTION STATE CHECK: Only load data if coordinator is connected
         // Give connection a brief moment to establish (coordinator.connect() is async)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // Increased to 3s for better reliability on slower networks
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self = self else { return }
 
             if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                 os_log(.info, log: self.logger, "✅ Coordinator connected - loading home template data")
                 self.refreshHomeTemplateData()
+                // Sync shuffle button with server state
+                self.syncShuffleButtonWithServer()
             } else {
-                os_log(.error, log: self.logger, "❌ Coordinator not connected after 1s - showing error state")
+                os_log(.error, log: self.logger, "❌ Coordinator not connected after 3s - showing error state")
                 self.showConnectionError()
             }
         }
@@ -259,12 +283,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let jsonRPCCommand: [String: Any]
         if let numericId = playlist.originalNumericId {
             // Database playlist with numeric ID - use "playlistcontrol" command
-            // Include play_index:0 to start from the beginning
+            // LMS automatically starts from beginning (play_index is unreliable)
             os_log(.debug, log: logger, "Using playlistcontrol with ID: %d", numericId)
             jsonRPCCommand = [
                 "id": 1,
                 "method": "slim.request",
-                "params": [playerID, ["playlistcontrol", "cmd:load", "playlist_id:\(numericId)", "play_index:0"]]
+                "params": [playerID, ["playlistcontrol", "cmd:load", "playlist_id:\(numericId)"]]
             ]
         } else if let url = playlist.url {
             // File-based playlist - use "playlist load" command with URL and title
@@ -303,8 +327,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
     
     private func displayPlaylistTracks(_ tracks: [PlaylistTrack], playlist: Playlist) {
-        // Limit to first 25 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(tracks.prefix(25))
+        // Limit to first 15 tracks for faster CarPlay display
+        let tracksToDisplay = Array(tracks.prefix(15))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -336,7 +360,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 let item = CPListItem(
                     text: track.title,
                     detailText: track.detailText,
-                    image: artwork,
+                    image: artwork ?? createMusicPlaceholderImage(),
                     accessoryImage: nil,
                     accessoryType: .disclosureIndicator
                 )
@@ -417,8 +441,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var trackDataArray: [(title: String, artist: String?, duration: Double?, playlistIndex: Int?, trackID: String?, coverID: String?, isCurrentTrack: Bool)] = []
 
         if let playlistLoop = status["playlist_loop"] as? [[String: Any]] {
-            // Limit to first 25 tracks for performance
-            let tracksToShow = Array(playlistLoop.prefix(25))
+            // Limit to first 15 tracks for performance
+            let tracksToShow = Array(playlistLoop.prefix(15))
 
             for (index, trackData) in tracksToShow.enumerated() {
                 let title = trackData["title"] as? String ?? "Unknown Track"
@@ -475,7 +499,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for artwork to load (with timeout), then build UI
+        // Wait for artwork to load (2s timeout for faster playlist/album view display)
         DispatchQueue.global().async {
             _ = group.wait(timeout: .now() + 2.0)
 
@@ -502,7 +526,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     let item = CPListItem(
                         text: displayText,
                         detailText: detailText,
-                        image: artwork,
+                        image: artwork ?? createMusicPlaceholderImage(),
                         accessoryImage: nil,
                         accessoryType: trackData.isCurrentTrack ? .none : .disclosureIndicator
                     )
@@ -680,10 +704,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // This is a server query, not a player command - use "" for player ID
         // IMPORTANT: Use the format from LMS App - "playlist_id:ID" as a string parameter
         // Tags: d=duration, a=artist, l=album, C=coverid (for artwork)
+        // NOTE: Using -1 as start index to ensure we get ALL tracks including first
+        // Query 15 tracks (matches display limit) for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["playlists", "tracks", 0, 1000, "playlist_id:\(numericId)", "tags:dalC"]]
+            "params": ["", ["playlists", "tracks", -1, 15, "playlist_id:\(numericId)", "tags:dalC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -715,12 +741,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let playerID = SettingsManager.shared.playerMACAddress
-        // Request current track + next 24 tracks (25 total) for Up Next display
+        // Request current track + next 14 tracks (15 total) for Up Next display
         // Tags: I=track_id, R=rating, a=artist, d=duration, C=coverid
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [playerID, ["status", "-", 25, "tags:IRadC"]]
+            "params": [playerID, ["status", "-", 15, "tags:IRadC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -757,7 +783,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        URLSession.shared.dataTask(with: url) { data, response, error in
+        // Create request with 3s timeout (matches other CarPlay artwork loading)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3.0
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let data = data, let image = UIImage(data: data) {
                 completion(image)
             } else {
@@ -771,9 +801,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var artworkCache: [String: UIImage] = [:]
         let cacheLock = NSLock()
 
-        // Only load artwork for first 25 tracks to improve performance
+        // Only load artwork for first 16 tracks to improve performance
         // CarPlay doesn't support lazy loading on scroll, so we load a limited set upfront
-        let tracksToLoad = tracks.prefix(25)
+        let tracksToLoad = tracks.prefix(16)
 
         // Build list of unique IDs to fetch artwork for
         // Use coverID if available, otherwise use track ID as fallback (LMS App pattern)
@@ -795,9 +825,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // Wait for images to load (shorter timeout since we're loading fewer)
+        // Wait for images to load (3s timeout for playlist/album view display)
         DispatchQueue.global().async {
-            _ = group.wait(timeout: .now() + 2.0)
+            _ = group.wait(timeout: .now() + 3.0)
             DispatchQueue.main.async {
                 completion(artworkCache)
             }
@@ -1003,8 +1033,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // TIMEOUT FIX: Use group.wait with timeout instead of group.notify
         // This prevents infinite loading if network requests hang
+        // Increased to 10s for better reliability on slower networks (artwork loading can be slow)
         DispatchQueue.global().async { [weak self] in
-            let result = group.wait(timeout: .now() + 5.0)
+            let result = group.wait(timeout: .now() + 10.0)
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -1172,9 +1203,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func buildAlbumImageRow(_ albums: [Album], title: String) -> CPListImageRowItem? {
         guard !albums.isEmpty else { return nil }
 
-        // Create grid images (up to 8 items for CPListImageRowItem)
+        // Create grid images (up to 6 items for CPListImageRowItem)
         // Render each image into a new bitmap context to ensure unique UIImage instances
-        let gridImages = albums.prefix(8).map { album -> UIImage in
+        let gridImages = albums.prefix(6).map { album -> UIImage in
             if let artwork = album.artwork {
                 // Render into a new graphics context to create a fresh UIImage
                 let renderer = UIGraphicsImageRenderer(size: artwork.size)
@@ -1213,8 +1244,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func buildPlaylistImageRow(_ playlists: [Playlist]) -> CPListImageRowItem? {
         guard !playlists.isEmpty else { return nil }
 
-        // Create grid images (up to 8 items)
-        let gridImages = playlists.prefix(8).map { playlist -> UIImage in
+        // Create grid images (up to 6 items)
+        let gridImages = playlists.prefix(6).map { playlist -> UIImage in
             return createPlaylistPlaceholderImage()
         }
 
@@ -1279,6 +1310,26 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    private func createMusicPlaceholderImage() -> UIImage {
+        let size = CGSize(width: 200, height: 200)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            // Blue background for individual tracks
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Single music note icon
+            let iconSize: CGFloat = 100
+            let iconRect = CGRect(x: (size.width - iconSize) / 2,
+                                 y: (size.height - iconSize) / 2,
+                                 width: iconSize,
+                                 height: iconSize)
+            if let icon = UIImage(systemName: "music.note")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+                icon.draw(in: iconRect)
+            }
+        }
+    }
+
     private func showFullNewMusicList() {
         // TODO: Implement full New Music list view
         os_log(.info, log: logger, "📋 Show full New Music list")
@@ -1296,11 +1347,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         // Material skin: ["albums"] with ["sort:new", "tags:aajlqswyKSS24"]
-        // Request 8 albums (max for CPListImageRowItem)
+        // Request 6 albums for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 8, "sort:new", "tags:ajlqy"]]
+            "params": ["", ["albums", 0, 6, "sort:new", "tags:ajlqy"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1341,10 +1392,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         // Material skin: ["albums"] with ["sort:random", "tags:aajlqswyKSS24"]
+        // Request 6 albums for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 8, "sort:random", "tags:ajlqy"]]
+            "params": ["", ["albums", 0, 6, "sort:random", "tags:ajlqy"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1420,7 +1472,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             let albumCopy = album
             let indexCopy = index
 
-            URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            // Create request with 3s timeout (matches other CarPlay artwork loading)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 3.0
+
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
                 defer { group.leave() }
 
                 if let error = error {
@@ -1488,10 +1544,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Use "titles" query with album_id filter
         // Tags: d=duration, a=artist, l=album, C=coverid, t=tracknum
+        // Query 15 tracks (matches display limit) for faster CarPlay loading
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["titles", 0, 100, "album_id:\(album.id)", "tags:daltC"]]
+            "params": ["", ["titles", 0, 15, "album_id:\(album.id)", "tags:daltC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -1573,8 +1630,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             ($0.trackNumber ?? Int.max) < ($1.trackNumber ?? Int.max)
         }
 
-        // Limit to first 25 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(sortedTracks.prefix(25))
+        // Limit to first 15 tracks for performance (CarPlay limitation)
+        let tracksToDisplay = Array(sortedTracks.prefix(15))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -1586,7 +1643,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             let playAllItem = CPListItem(
                 text: "Play All",
                 detailText: "Play entire album",
-                image: album.artwork,  // Use album artwork for Play All
+                image: album.artwork ?? createMusicPlaceholderImage(),
                 accessoryImage: nil,
                 accessoryType: .disclosureIndicator
             )
@@ -1704,6 +1761,97 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     os_log(.error, log: self.logger, "❌ Failed to load album")
                     self.showErrorMessage("Failed to load album. Please check connection and try again.")
                 }
+            }
+        }
+    }
+
+    // MARK: - Shuffle Button Icon Updates
+
+    /// Updates shuffle button icon based on LMS shuffle mode
+    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
+    private func updateShuffleButtonIcon(for mode: Int) {
+        // Use CPNowPlayingTemplate.shared directly - don't require it to be the top template
+        // The button was added to .shared on connect, so update it there regardless of
+        // which template is currently visible
+        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+
+        // Choose SF Symbol based on shuffle mode
+        let iconName: String
+        switch mode {
+        case 1:
+            // Songs/tracks shuffle - filled circle (pressed/active look)
+            iconName = "shuffle.circle.fill"
+        case 2:
+            // Albums shuffle - outline circle
+            iconName = "shuffle.circle"
+        default:
+            // Off - normal shuffle icon
+            iconName = "shuffle"
+        }
+
+        // Use large configuration for better visibility on CarPlay display
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        guard let image = UIImage(systemName: iconName, withConfiguration: config) else {
+            os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
+            return
+        }
+
+        // Create new button with updated icon
+        let shuffleButton = CPNowPlayingImageButton(image: image) { [weak self] button in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
+
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable")
+                return
+            }
+
+            coordinator.toggleShuffleMode { newMode in
+                DispatchQueue.main.async {
+                    self?.updateShuffleButtonIcon(for: newMode)
+                }
+            }
+        }
+
+        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
+        os_log(.info, log: logger, "🔀 Shuffle button icon updated: %{public}s (mode %d)",
+               iconName, mode)
+    }
+
+    /// Syncs shuffle button icon with current server state
+    /// Call this when CarPlay connects or Now Playing screen appears
+    private func syncShuffleButtonWithServer() {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.info, log: logger, "⚠️ Coordinator not available for shuffle sync")
+            return
+        }
+
+        let playerID = SettingsManager.shared.playerMACAddress
+
+        // Query current shuffle state from server
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        os_log(.info, log: logger, "🔀 Syncing shuffle button with server state...")
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            let shuffleMode: Int
+            if let result = response["result"] as? [String: Any],
+               let mode = result["playlist shuffle"] as? Int {
+                shuffleMode = mode
+                os_log(.info, log: self.logger, "🔀 Server shuffle state: %d", shuffleMode)
+            } else {
+                shuffleMode = 0
+                os_log(.info, log: self.logger, "⚠️ Could not read server shuffle state, defaulting to 0")
+            }
+
+            // Update button icon on main thread
+            DispatchQueue.main.async {
+                self.updateShuffleButtonIcon(for: shuffleMode)
             }
         }
     }

@@ -38,6 +38,8 @@ protocol SlimProtoControlling: AnyObject {
     func connect()
     func sendLockScreenCommand(_ command: String)
     func saveCurrentPositionForRecovery()
+    func sendJSONRPCCommandDirect(_ command: [String: Any], completion: @escaping ([String: Any]) -> Void)
+    func toggleShuffleMode(completion: ((Int) -> Void)?)
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -186,6 +188,7 @@ final class PlaybackSessionController {
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.changeShuffleModeCommand.isEnabled = true
 
         commandCenter.stopCommand.isEnabled = false
         commandCenter.skipForwardCommand.isEnabled = false
@@ -206,8 +209,14 @@ final class PlaybackSessionController {
         commandCenter.previousTrackCommand.addTarget { [weak self] _ in
             self?.handleRemoteCommand(.previous) ?? .commandFailed
         }
+        commandCenter.changeShuffleModeCommand.addTarget { [weak self] event in
+            guard let shuffleEvent = event as? MPChangeShuffleModeCommandEvent else {
+                return .commandFailed
+            }
+            return self?.handleShuffleCommand(shuffleEvent.shuffleType) ?? .commandFailed
+        }
 
-        os_log(.info, log: logger, "✅ Remote command center configured")
+        os_log(.info, log: logger, "✅ Remote command center configured (including shuffle)")
     }
 
     private func handleRemoteCommand(_ command: RemoteCommand) -> MPRemoteCommandHandlerStatus {
@@ -232,6 +241,21 @@ final class PlaybackSessionController {
         }
 
         os_log(.info, log: logger, "🔒 Remote command handled: %{public}s", command.slimCommand)
+        return .success
+    }
+
+    private func handleShuffleCommand(_ shuffleType: MPShuffleType) -> MPRemoteCommandHandlerStatus {
+        guard let coordinator = slimProtoProvider?() else {
+            os_log(.error, log: logger, "❌ SlimProto coordinator unavailable for shuffle command")
+            return .commandFailed
+        }
+
+        os_log(.info, log: logger, "🔀 Shuffle command from MPRemoteCommandCenter")
+
+        // Use shared toggle logic in coordinator (same as CarPlay button)
+        // Lock screen/Control Center don't need icon updates (handled by MPRemoteCommandCenter)
+        coordinator.toggleShuffleMode(completion: nil)
+
         return .success
     }
 

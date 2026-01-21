@@ -3,6 +3,7 @@
 import Foundation
 import os.log
 import WebKit
+import MediaPlayer
 
 // MARK: - Recovery Trigger Types
 /// Defines what triggered a reconnection, determining recovery behavior
@@ -37,8 +38,6 @@ class SlimProtoCoordinator: ObservableObject {
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
     private var wasDisconnectedWhileInBackground: Bool = false
-    private var isSavingVolume = false
-    private var isRestoringVolume = false
     private var backgroundedTime: Date?  // Track when app backgrounded for duration-based recovery
 
     // MARK: - Unified Recovery System (LMS_StreamTest-6lb)
@@ -790,162 +789,6 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         sendJSONRPCCommandDirect(saveStateCommand) { _ in }
         sendJSONRPCCommandDirect(saveTimestampCommand) { _ in }
     }
-    
-    
-    private func saveServerVolumeAndMute() {
-        guard !isSavingVolume else {
-            os_log(.info, log: logger, "⚠️ Volume save already in progress - skipping duplicate call")
-            return
-        }
-        
-        isSavingVolume = true
-        os_log(.info, log: logger, "🔇 Saving current server volume and muting for silent recovery")
-        
-        let playerID = settings.playerMACAddress
-        
-        // Get current volume from server
-        let getVolumeCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["mixer", "volume", "?"]]
-        ]
-        
-        sendJSONRPCCommandDirect(getVolumeCommand) { [weak self] response in
-            guard let self = self else { return }
-            
-            if let result = response["result"] as? [String: Any],
-               let volume = result["_volume"] as? String {
-                
-                os_log(.info, log: self.logger, "📊 Current server volume to save: %{public}s", volume)
-                
-                // Save volume locally as backup in case server preferences fail
-                UserDefaults.standard.set(volume, forKey: "lastServerVolume")
-                
-                // Save current volume to preferences
-                let saveVolumeCommand: [String: Any] = [
-                    "id": 1,
-                    "method": "slim.request", 
-                    "params": [playerID, ["playerpref", "lyrPlaySavedVolume", volume]]
-                ]
-                
-                self.sendJSONRPCCommandDirect(saveVolumeCommand) { _ in
-                    os_log(.info, log: self.logger, "💾 Saved current volume: %{public}s", volume)
-                    
-                    // Now mute the server volume
-                    let muteCommand: [String: Any] = [
-                        "id": 1,
-                        "method": "slim.request",
-                        "params": [playerID, ["mixer", "volume", "0"]]
-                    ]
-                    
-                    self.sendJSONRPCCommandDirect(muteCommand) { _ in
-                        os_log(.info, log: self.logger, "🔇 Server volume muted for silent recovery")
-                        
-                        // Reset save flag when complete
-                        self.isSavingVolume = false
-                    }
-                }
-            } else {
-                os_log(.error, log: self.logger, "❌ Failed to get current server volume")
-                self.isSavingVolume = false
-            }
-        }
-    }
-    
-    private func restoreServerVolume() {
-        guard !isRestoringVolume else {
-            os_log(.info, log: logger, "⚠️ Volume restore already in progress - skipping duplicate call")
-            return
-        }
-        
-        isRestoringVolume = true
-        os_log(.info, log: logger, "🔊 Restoring server volume after recovery")
-        
-        let playerID = settings.playerMACAddress
-        
-        // Get saved volume from preferences
-        let getSavedVolumeCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["playerpref", "lyrPlaySavedVolume", "?"]]
-        ]
-        
-        sendJSONRPCCommandDirect(getSavedVolumeCommand) { [weak self] response in
-            guard let self = self else { return }
-            
-            if let result = response["result"] as? [String: Any],
-               let savedVolume = result["_p2"] as? String,
-               !savedVolume.isEmpty {
-                
-                // Restore the saved volume
-                let restoreVolumeCommand: [String: Any] = [
-                    "id": 1,
-                    "method": "slim.request",
-                    "params": [playerID, ["mixer", "volume", savedVolume]]
-                ]
-                
-                self.sendJSONRPCCommandDirect(restoreVolumeCommand) { _ in
-                    os_log(.info, log: self.logger, "🔊 Server volume restored to: %{public}s", savedVolume)
-                    
-                    // Clear the saved volume preference
-                    let clearVolumeCommand: [String: Any] = [
-                        "id": 1,
-                        "method": "slim.request",
-                        "params": [playerID, ["playerpref", "lyrPlaySavedVolume", ""]]
-                    ]
-                    
-                    self.sendJSONRPCCommandDirect(clearVolumeCommand) { _ in }
-                    
-                    // Also clear local backup since server restore succeeded
-                    UserDefaults.standard.removeObject(forKey: "lastServerVolume")
-                    
-                    // Reset volume restore flag
-                    self.isRestoringVolume = false
-                }
-            } else {
-                // Try local backup if server preferences failed
-                if let backupVolume = UserDefaults.standard.string(forKey: "lastServerVolume"),
-                   !backupVolume.isEmpty {
-                    
-                    os_log(.info, log: self.logger, "💾 Using local backup volume: %{public}s", backupVolume)
-                    
-                    // Restore using backup volume
-                    let restoreVolumeCommand: [String: Any] = [
-                        "id": 1,
-                        "method": "slim.request",
-                        "params": [playerID, ["mixer", "volume", backupVolume]]
-                    ]
-                    
-                    self.sendJSONRPCCommandDirect(restoreVolumeCommand) { _ in
-                        os_log(.info, log: self.logger, "🔊 Server volume restored from backup: %{public}s", backupVolume)
-                        
-                        // Clear the backup since it was used successfully
-                        UserDefaults.standard.removeObject(forKey: "lastServerVolume")
-                        
-                        // Reset volume restore flag
-                        self.isRestoringVolume = false
-                    }
-                } else {
-                    os_log(.info, log: self.logger, "ℹ️ No saved volume found - leaving current volume unchanged")
-                    
-                    // Reset volume restore flag even when no volume found
-                    self.isRestoringVolume = false
-                }
-            }
-        }
-    }
-    
-    private func resetVolumeFlags() {
-        // Reset both flags in case of errors or completion
-        isSavingVolume = false
-        isRestoringVolume = false
-        os_log(.debug, log: logger, "🔄 Volume flags reset")
-    }
-    
-    
-    
-    
-    
     
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
         os_log(.info, log: logger, "🌐 Network change - Available: %{public}s, Expensive: %{public}s",
@@ -1778,7 +1621,72 @@ extension SlimProtoCoordinator {
         
         task.resume()
     }
-    
+
+    /// Toggles shuffle mode through LMS's 3-state cycle: off→songs→albums→off
+    /// Called by CarPlay shuffle button and MPRemoteCommandCenter
+    /// - Parameter completion: Optional callback with new shuffle mode (0=off, 1=songs, 2=albums)
+    public func toggleShuffleMode(completion: ((Int) -> Void)? = nil) {
+        let playerID = settings.playerMACAddress
+
+        // Query current shuffle state
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        os_log(.info, log: logger, "🔀 Shuffle toggle requested...")
+
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            let currentShuffle: Int
+            if let result = response["result"] as? [String: Any],
+               let shuffleMode = result["playlist shuffle"] as? Int {
+                currentShuffle = shuffleMode
+            } else {
+                currentShuffle = 0
+                os_log(.info, log: self.logger, "⚠️ Could not read shuffle state, defaulting to 0")
+            }
+
+            // Toggle to next state (0→1→2→0)
+            let newMode: Int
+            switch currentShuffle {
+            case 2: newMode = 0  // albums → off
+            case 1: newMode = 2  // songs → albums
+            default: newMode = 1  // off → songs
+            }
+
+            os_log(.info, log: self.logger, "🔀 Shuffle: %d → %d", currentShuffle, newMode)
+
+            // Send shuffle command
+            let shuffleCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "shuffle", newMode]]
+            ]
+
+            self.sendJSONRPCCommandDirect(shuffleCommand) { [weak self] shuffleResponse in
+                guard let self = self else { return }
+
+                if !shuffleResponse.isEmpty {
+                    os_log(.info, log: self.logger, "✅ Shuffle mode set to %d", newMode)
+
+                    // Update MPRemoteCommandCenter for lock screen/Control Center
+                    DispatchQueue.main.async {
+                        let shuffleType: MPShuffleType = newMode == 1 ? .items : (newMode == 2 ? .collections : .off)
+                        MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = shuffleType
+                        os_log(.info, log: self.logger, "🔀 Remote command center updated: %{public}s",
+                               shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
+                    }
+
+                    // Notify CarPlay to update button icon
+                    completion?(newMode)
+                }
+            }
+        }
+    }
+
     // CRITICAL: Ensure SlimProto connection for audio streaming
     private func ensureSlimProtoConnection() {
         os_log(.info, log: logger, "🔧 Ensuring SlimProto connection for audio streaming...")
