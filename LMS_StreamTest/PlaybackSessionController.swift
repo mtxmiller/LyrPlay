@@ -40,6 +40,7 @@ protocol SlimProtoControlling: AnyObject {
     func saveCurrentPositionForRecovery()
     func sendJSONRPCCommandDirect(_ command: [String: Any], completion: @escaping ([String: Any]) -> Void)
     func toggleShuffleMode(completion: ((Int) -> Void)?)
+    func sendPauseWithConfirmation(maxRetries: Int, completion: ((Bool) -> Void)?)
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -114,6 +115,7 @@ final class PlaybackSessionController {
     private var wasPlayingBeforeCarPlayDetach = false
     private var lastCarPlayEvent: Date?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var interruptionHasEnded = false  // Track if iOS formally ended the interruption
 
     init(audioSession: AudioSessionManaging = AVAudioSession.sharedInstance(),
          notificationCenter: NotificationCenter = .default,
@@ -293,6 +295,9 @@ final class PlaybackSessionController {
 
         switch interruptionType {
         case .began:
+            // PAUSE FIX: Reset the ended flag when new interruption begins
+            interruptionHasEnded = false
+
             let interruptionKind = determineInterruptionType(userInfo: userInfo)
             let wasPlaying = playbackController?.isPlaying ?? false
             let shouldResume = shouldAutoResume(after: interruptionKind, wasPlaying: wasPlaying)
@@ -322,6 +327,9 @@ final class PlaybackSessionController {
                    options.contains(.shouldResume) ? "YES" : "NO",
                    shouldResume ? "YES" : "NO")
 
+            // PAUSE FIX: Mark that iOS has formally ended the interruption
+            // This prevents route change handler from prematurely resuming during phone calls
+            interruptionHasEnded = true
             interruptionContext = nil
 
             guard shouldResume else { return }
@@ -379,25 +387,36 @@ final class PlaybackSessionController {
             // Trust BASS to handle route changes automatically - no manual cleanup
         }
 
-        // PHONE CALL FIX: Check if we need to resume after interruption (phone call, etc.)
-        // iOS often doesn't fire interruption ended notification - handle resume via route change
-        // If we have an active interruption context AND we're now on a normal (non-phone) route, resume
-        if !currentHasPhoneRoute && interruptionContext != nil {
-            if let context = interruptionContext, context.shouldAutoResume {
-                os_log(.info, log: logger, "📞 Interruption ended via route change - auto-resuming")
+        // PHONE CALL FIX v3: More robust auto-resume after interruption
+        // REQUIRES: iOS formally ended the interruption (interruptionHasEnded flag)
+        // This prevents spurious route changes mid-call from triggering premature resume
+        if !currentHasPhoneRoute && interruptionContext != nil && interruptionHasEnded {
+            if let context = interruptionContext,
+               context.shouldAutoResume,
+               Date().timeIntervalSince(context.beganAt) > 2.0 {
+                // Only resume if: interrupted for >2s AND iOS sent interruption ended
+                os_log(.info, log: logger, "📞 Interruption ended via route change - auto-resuming (duration: %.1fs)",
+                       Date().timeIntervalSince(context.beganAt))
 
-                // Clear interruption context - we're handling it now
+                // Clear state - we're handling it now
                 interruptionContext = nil
+                interruptionHasEnded = false
 
                 // Send play command after a delay to allow BASS reinit to complete
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     self?.slimProtoProvider?()?.sendLockScreenCommand("play")
                     os_log(.info, log: self?.logger ?? OSLog.default, "📞 Sent play command after interruption ended")
                 }
-            } else {
+            } else if let context = interruptionContext, !context.shouldAutoResume {
                 os_log(.info, log: logger, "📞 Interruption ended but shouldNotResume")
                 interruptionContext = nil
+                interruptionHasEnded = false
+            } else {
+                os_log(.info, log: logger, "📞 Interruption too short (<2s) - skipping route-based resume")
             }
+        } else if !currentHasPhoneRoute && interruptionContext != nil && !interruptionHasEnded {
+            // Route changed but iOS hasn't formally ended the interruption - don't resume yet
+            os_log(.info, log: logger, "📞 Route changed but interruption not formally ended - waiting for iOS notification")
         }
 
         // Handle CarPlay connect/disconnect (these have their own session management)
@@ -442,15 +461,26 @@ final class PlaybackSessionController {
         wasPlayingBeforeCarPlayDetach = playbackController?.isPlaying ?? false
         beginBackgroundTask(named: "CarPlayDisconnect")
 
-        // BASS automatically handles route switching from CarPlay - just send server pause command
+        // PAUSE FIX: Use pause with confirmation to ensure server receives pause command
+        // Network may be transitioning (car WiFi → cellular) so fire-and-forget is unreliable
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
             if let coordinator = self.slimProtoProvider?() {
-                coordinator.sendLockScreenCommand("pause")
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
-                self.endBackgroundTask()
+                coordinator.sendPauseWithConfirmation(maxRetries: 3) { [weak self] success in
+                    if success {
+                        os_log(.info, log: self?.logger ?? OSLog.default, "✅ CarPlay disconnect: Server pause confirmed")
+                    } else {
+                        os_log(.error, log: self?.logger ?? OSLog.default, "❌ CarPlay disconnect: Failed to confirm server pause after retries")
+                    }
+                    // End background task after confirmation (success or failure)
+                    self?.endBackgroundTask()
+                }
+            } else {
+                // No coordinator - still end background task after delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                    self.endBackgroundTask()
+                }
             }
         }
     }
