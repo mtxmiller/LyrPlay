@@ -344,8 +344,14 @@ class NowPlayingManager: ObservableObject {
     
     private func loadArtwork(from url: URL) {
         os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s", url.absoluteString)
-        
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+
+        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
+        var request = URLRequest(url: url)
+        if let authHeader = SettingsManager.shared.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
                     os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
