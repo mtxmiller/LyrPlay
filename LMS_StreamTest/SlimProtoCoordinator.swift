@@ -1520,7 +1520,12 @@ extension SlimProtoCoordinator {
         request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 10.0
-        
+
+        // Add HTTP Basic Authentication if configured
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
@@ -1827,7 +1832,12 @@ extension SlimProtoCoordinator {
         request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
-        
+
+        // Add HTTP Basic Authentication if configured
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 os_log(.error, log: self.logger, "Enhanced metadata request failed: %{public}s", error.localizedDescription)
@@ -1878,6 +1888,11 @@ extension SlimProtoCoordinator {
                     artworkURL = artwork.hasPrefix("http") ? artwork : "http://\(settings.activeServerHost):\(settings.activeServerWebPort)\(artwork)"
                 } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
                     artworkURL = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverid)/cover.jpg"
+                }
+
+                // Inject credentials for password-protected LMS servers
+                if let url = artworkURL {
+                    artworkURL = settings.injectCredentialsIntoURL(url)
                 }
 
                 // Log final metadata result

@@ -787,6 +787,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var request = URLRequest(url: url)
         request.timeoutInterval = 3.0
 
+        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
+        if let authHeader = settings.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
         URLSession.shared.dataTask(with: request) { data, response, error in
             if let data = data, let image = UIImage(data: data) {
                 completion(image)
