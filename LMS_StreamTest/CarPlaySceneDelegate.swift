@@ -1092,10 +1092,24 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             items.append(randomRow)
         }
 
+        // Add Random Artists item
+        let randomArtistsItem = CPListItem(
+            text: "🎤 Random Artists",
+            detailText: "Discover artists from your library",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        randomArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showRandomArtists()
+            completion()
+        }
+        items.append(randomArtistsItem)
+
         // Build sections
         var sections: [CPListSection] = []
 
-        // Section 1: Resume + Album rows (no header)
+        // Section 1: Resume + Album rows + Random Artists (no header)
         sections.append(CPListSection(items: items))
 
         // Section 2: Playlists with header
@@ -1331,6 +1345,172 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                                  height: iconSize)
             if let icon = UIImage(systemName: "music.note")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
                 icon.draw(in: iconRect)
+            }
+        }
+    }
+
+    // MARK: - Random Artists
+
+    private func showRandomArtists() {
+        os_log(.info, log: logger, "🎤 Fetching random artists for CarPlay")
+
+        fetchRandomArtists { [weak self] artists in
+            guard let self = self else { return }
+
+            if artists.isEmpty {
+                os_log(.error, log: self.logger, "❌ No artists returned from LMS")
+                return
+            }
+
+            var artistItems: [CPListItem] = []
+
+            for artist in artists {
+                let detailText = artist.albumCount.map { "\($0) album\($0 == 1 ? "" : "s")" }
+                let item = CPListItem(
+                    text: artist.name,
+                    detailText: detailText,
+                    image: nil,
+                    accessoryImage: nil,
+                    accessoryType: .disclosureIndicator
+                )
+
+                item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                    self?.showArtistAlbums(artist: artist)
+                    completion()
+                }
+
+                artistItems.append(item)
+            }
+
+            let artistsTemplate = CPListTemplate(
+                title: "Random Artists",
+                sections: [CPListSection(items: artistItems)]
+            )
+
+            self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+            os_log(.info, log: self.logger, "✅ Displayed %d random artists", artistItems.count)
+        }
+    }
+
+    private func showArtistAlbums(artist: Artist) {
+        os_log(.info, log: logger, "🎤 Fetching albums for artist: %{public}s", artist.name)
+
+        fetchArtistAlbums(artistId: artist.id) { [weak self] albums in
+            guard let self = self else { return }
+
+            if albums.isEmpty {
+                os_log(.error, log: self.logger, "❌ No albums found for artist: %{public}s", artist.name)
+                return
+            }
+
+            // Load artwork for albums (reuse existing pattern)
+            self.loadArtworkForAlbums(albums) { [weak self] albumsWithArt in
+                guard let self = self else { return }
+
+                var albumItems: [CPListItem] = []
+
+                for album in albumsWithArt {
+                    let item = CPListItem(
+                        text: album.name,
+                        detailText: nil,
+                        image: album.artwork ?? self.createPlaceholderImage(),
+                        accessoryImage: nil,
+                        accessoryType: .disclosureIndicator
+                    )
+
+                    item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                        self?.playAlbum(album)
+                        completion()
+                    }
+
+                    albumItems.append(item)
+                }
+
+                let albumsTemplate = CPListTemplate(
+                    title: artist.name,
+                    sections: [CPListSection(items: albumItems)]
+                )
+
+                self.interfaceController?.pushTemplate(albumsTemplate, animated: true)
+                os_log(.info, log: self.logger, "✅ Displayed %d albums for %{public}s", albumItems.count, artist.name)
+            }
+        }
+    }
+
+    private func fetchRandomArtists(completion: @escaping ([Artist]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion([])
+            return
+        }
+
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["artists", 0, 20, "sort:random"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let artistsLoop = result["artists_loop"] as? [[String: Any]] else {
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to parse artists response")
+                    completion([])
+                    return
+                }
+
+                let artists = artistsLoop.compactMap { artistData -> Artist? in
+                    guard let id = artistData["id"] as? String ?? (artistData["id"] as? Int).map(String.init),
+                          let name = artistData["artist"] as? String else {
+                        return nil
+                    }
+
+                    // LMS may return textkey, not album count, so check for it
+                    let albumCount = artistData["album_count"] as? Int
+
+                    return Artist(id: id, name: name, albumCount: albumCount)
+                }
+
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Fetched %d random artists", artists.count)
+                completion(artists)
+            }
+        }
+    }
+
+    private func fetchArtistAlbums(artistId: String, completion: @escaping ([Album]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion([])
+            return
+        }
+
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["albums", 0, 15, "artist_id:\(artistId)", "tags:ajlqy"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let albumsLoop = result["albums_loop"] as? [[String: Any]] else {
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to parse artist albums response")
+                    completion([])
+                    return
+                }
+
+                let albums = albumsLoop.compactMap { albumData -> Album? in
+                    guard let id = albumData["id"] as? String ?? (albumData["id"] as? Int).map(String.init),
+                          let name = albumData["album"] as? String else {
+                        return nil
+                    }
+
+                    let artist = albumData["artist"] as? String ?? "Unknown Artist"
+                    let artworkTrackId = albumData["artwork_track_id"] as? String
+
+                    return Album(id: id, name: name, artist: artist, artworkTrackId: artworkTrackId, artwork: nil)
+                }
+
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Fetched %d albums for artist ID %{public}s", albums.count, artistId)
+                completion(albums)
             }
         }
     }
