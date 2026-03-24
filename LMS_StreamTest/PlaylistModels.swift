@@ -255,6 +255,14 @@ class UpNextQueue: ObservableObject {
     }
 }
 
+// MARK: - Artist Data Model
+
+struct Artist: Identifiable {
+    let id: String
+    let name: String
+    let albumCount: Int?
+}
+
 // MARK: - LMS API Response Models
 
 struct LMSPlaylistResponse: Codable {
