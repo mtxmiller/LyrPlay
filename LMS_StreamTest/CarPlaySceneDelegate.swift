@@ -1092,9 +1092,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             items.append(randomRow)
         }
 
+        // Add Browse Artists item (alphabetical)
+        let browseArtistsItem = CPListItem(
+            text: "Artists",
+            detailText: "Browse artists A–Z",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        browseArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showBrowseArtists()
+            completion()
+        }
+        items.append(browseArtistsItem)
+
         // Add Random Artists item
         let randomArtistsItem = CPListItem(
-            text: "🎤 Random Artists",
+            text: "Random Artists",
             detailText: "Discover artists from your library",
             image: nil,
             accessoryImage: nil,
@@ -1108,8 +1122,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Add Random Albums item
         let randomAlbumsItem = CPListItem(
-            text: "💿 Random Albums",
-            detailText: "Random albums from your library",
+            text: "More Random Releases",
+            detailText: "More random albums to explore",
             image: nil,
             accessoryImage: nil,
             accessoryType: .disclosureIndicator
@@ -1122,7 +1136,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Add Playlists item (navigates to full playlist list)
         let playlistsItem = CPListItem(
-            text: "🎵 Playlists",
+            text: "Playlists",
             detailText: "\(cachedPlaylists.count) playlists",
             image: nil,
             accessoryImage: nil,
@@ -1353,6 +1367,168 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                                  height: iconSize)
             if let icon = UIImage(systemName: "music.note")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
                 icon.draw(in: iconRect)
+            }
+        }
+    }
+
+    // MARK: - Browse Artists (Alphabetical)
+
+    private func showBrowseArtists() {
+        os_log(.info, log: logger, "🎤 Fetching artist index for CarPlay browse")
+
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+
+        // Fetch the letter index only (tags:ZZ returns no artist rows, just the index)
+        let indexCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["artists", 0, 0, "role_id:ALBUMARTIST", "tags:ZZ"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(indexCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                guard let result = response["result"] as? [String: Any],
+                      let indexList = result["indexList"] as? [[Any]] else {
+                    os_log(.error, log: self.logger, "❌ Failed to get artist index")
+                    return
+                }
+
+                // Parse index into [(letter, count)] pairs
+                var letterCounts: [(letter: String, count: Int)] = []
+                for entry in indexList {
+                    if let letter = entry[0] as? String, let count = entry[1] as? Int {
+                        letterCounts.append((letter, count))
+                    }
+                }
+
+                guard !letterCounts.isEmpty else {
+                    os_log(.error, log: self.logger, "❌ Empty artist index")
+                    return
+                }
+
+                // Build letter ranges: 2 letters each for manageable list sizes
+                let ranges: [(label: String, letters: [String])] = [
+                    ("A – B", ["A", "B"]),
+                    ("C – D", ["C", "D"]),
+                    ("E – F", ["E", "F"]),
+                    ("G – H", ["G", "H"]),
+                    ("I – J", ["I", "J"]),
+                    ("K – L", ["K", "L"]),
+                    ("M – N", ["M", "N"]),
+                    ("O – P", ["O", "P"]),
+                    ("Q – R", ["Q", "R"]),
+                    ("S – T", ["S", "T"]),
+                    ("U – V", ["U", "V"]),
+                    ("W – Z", ["W", "X", "Y", "Z"]),
+                    ("#",     ["#"])
+                ]
+
+                var rangeItems: [CPListItem] = []
+
+                for range in ranges {
+                    // Calculate offset and count for this range
+                    var rangeOffset = 0
+                    var rangeCount = 0
+                    var foundStart = false
+
+                    for lc in letterCounts {
+                        if range.letters.contains(lc.letter) {
+                            if !foundStart { foundStart = true }
+                            rangeCount += lc.count
+                        } else if !foundStart {
+                            rangeOffset += lc.count
+                        }
+                    }
+
+                    // Skip ranges with no artists
+                    guard rangeCount > 0 else { continue }
+
+                    let item = CPListItem(
+                        text: range.label,
+                        detailText: "\(rangeCount) artist\(rangeCount == 1 ? "" : "s")",
+                        image: nil,
+                        accessoryImage: nil,
+                        accessoryType: .disclosureIndicator
+                    )
+
+                    let offset = rangeOffset
+                    let count = rangeCount
+                    item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                        self?.fetchArtistsForRange(offset: offset, count: count, title: range.label)
+                        completion()
+                    }
+
+                    rangeItems.append(item)
+                }
+
+                let browseTemplate = CPListTemplate(
+                    title: "Artists",
+                    sections: [CPListSection(items: rangeItems)]
+                )
+
+                self.interfaceController?.pushTemplate(browseTemplate, animated: true)
+                os_log(.info, log: self.logger, "✅ Displayed artist index with %d ranges", rangeItems.count)
+            }
+        }
+    }
+
+    private func fetchArtistsForRange(offset: Int, count: Int, title: String) {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+
+        os_log(.info, log: logger, "🎤 Fetching artists for range %{public}s (offset: %d, count: %d)", title, offset, count)
+
+        let fetchCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["artists", offset, count, "role_id:ALBUMARTIST"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(fetchCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                guard let result = response["result"] as? [String: Any],
+                      let artistsLoop = result["artists_loop"] as? [[String: Any]] else {
+                    os_log(.error, log: self.logger, "❌ Failed to fetch artists for range %{public}s", title)
+                    return
+                }
+
+                let artists = artistsLoop.compactMap { artistData -> Artist? in
+                    guard let id = artistData["id"] as? String ?? (artistData["id"] as? Int).map(String.init),
+                          let name = artistData["artist"] as? String else {
+                        return nil
+                    }
+                    return Artist(id: id, name: name, albumCount: nil)
+                }
+
+                var artistItems: [CPListItem] = []
+
+                for artist in artists {
+                    let item = CPListItem(
+                        text: artist.name,
+                        detailText: nil,
+                        image: nil,
+                        accessoryImage: nil,
+                        accessoryType: .disclosureIndicator
+                    )
+
+                    item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                        self?.showArtistAlbums(artist: artist)
+                        completion()
+                    }
+
+                    artistItems.append(item)
+                }
+
+                let artistsTemplate = CPListTemplate(
+                    title: title,
+                    sections: [CPListSection(items: artistItems)]
+                )
+
+                self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+                os_log(.info, log: self.logger, "✅ Displayed %d artists for range %{public}s", artistItems.count, title)
             }
         }
     }
