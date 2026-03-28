@@ -164,17 +164,21 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        os_log(.info, log: logger, "📱 Pushing Now Playing template onto navigation stack...")
+        os_log(.info, log: logger, "📱 Showing Now Playing template...")
 
         let nowPlayingTemplate = CPNowPlayingTemplate.shared
 
-        interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
-            if let error = error {
-                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
-            } else if success {
-                os_log(.info, log: self.logger, "✅ Now Playing template pushed successfully")
-            } else {
-                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: success=false, no error")
+        // Pop to root first to avoid exceeding CarPlay's 5-template stack limit,
+        // then push Now Playing. This works regardless of browse depth.
+        interfaceController.popToRootTemplate(animated: false) { [weak self] success, error in
+            guard let self = self else { return }
+
+            interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
+                if let error = error {
+                    os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
+                } else if success {
+                    os_log(.info, log: self.logger, "✅ Now Playing template displayed")
+                }
             }
         }
     }
@@ -559,7 +563,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: queueItems)]
                 )
 
-                self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                // Pop back to Now Playing first, then push fresh Up Next
+                // Prevents stacking multiple Up Next templates on repeated taps
+                self.interfaceController?.popToRootTemplate(animated: false) { [weak self] _, _ in
+                    guard let self = self else { return }
+                    let nowPlaying = CPNowPlayingTemplate.shared
+                    self.interfaceController?.pushTemplate(nowPlaying, animated: false) { _, _ in
+                        self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                    }
+                }
                 os_log(.info, log: self.logger, "✅ Displayed Up Next queue with %d tracks", queueItems.count)
             }
         }
