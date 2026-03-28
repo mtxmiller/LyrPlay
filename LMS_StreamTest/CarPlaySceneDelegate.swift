@@ -1155,20 +1155,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         items.append(randomAlbumsItem)
 
-        // Add Refresh item at end of browse section
-        let refreshItem = CPListItem(
-            text: "Refresh",
-            detailText: "Reload home screen data",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        refreshItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.showHomeAndRefreshData()
-            completion()
-        }
-        items.append(refreshItem)
-
         // Add Playlists item (navigates to full playlist list)
         let playlistsItem = CPListItem(
             text: "Playlists",
@@ -1182,6 +1168,20 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion()
         }
         items.append(playlistsItem)
+
+        // Add Refresh item at bottom
+        let refreshItem = CPListItem(
+            text: "Refresh",
+            detailText: "Reload home screen data",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        refreshItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showHomeAndRefreshData()
+            completion()
+        }
+        items.append(refreshItem)
 
         // Build sections
         var sections: [CPListSection] = []
