@@ -915,12 +915,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Attempts to reconnect to LMS server and refresh CarPlay UI
-    /// Called when user taps "Retry Connection" button in error state
     private func retryConnection() {
         os_log(.info, log: logger, "🔄 User requested connection retry from CarPlay")
 
-        // Show loading state
+        // Already connected — skip reconnect, just refresh the CarPlay data
+        if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+            os_log(.info, log: logger, "✅ Already connected - refreshing CarPlay data only")
+            showHomeAndRefreshData()
+            return
+        }
+
+        // Show loading state while reconnecting
         let loadingItem = CPListItem(
             text: "Connecting...",
             detailText: "Attempting to connect to LMS server",
@@ -928,25 +933,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             accessoryImage: nil,
             accessoryType: .none
         )
-
         let loadingTemplate = CPListTemplate(
             title: "LyrPlay",
             sections: [CPListSection(items: [loadingItem])]
         )
-
         interfaceController?.setRootTemplate(loadingTemplate, animated: true)
 
-        // If already connected, skip reconnect and just refresh data
-        if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
-            os_log(.info, log: logger, "✅ Already connected - refreshing CarPlay data only")
-            let immediateTemplate = self.buildImmediateHomeTemplate()
-            self.browseTemplate = immediateTemplate
-            self.interfaceController?.setRootTemplate(immediateTemplate, animated: true)
-            self.refreshHomeTemplateData()
-            return
-        }
-
-        // Not connected - attempt reconnection
         if AudioManager.shared.slimClient == nil {
             os_log(.info, log: logger, "🔧 Reinitializing coordinator for retry...")
             initializeCoordinator()
@@ -955,23 +947,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             AudioManager.shared.slimClient?.connect()
         }
 
-        // Wait 5s for connection (socket timeout is 15s, give it reasonable time)
+        // Socket connect timeout is 15s — give it 5s before giving up
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self else { return }
 
             if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                 os_log(.info, log: self.logger, "✅ Retry successful - connection established")
-
-                let immediateTemplate = self.buildImmediateHomeTemplate()
-                self.browseTemplate = immediateTemplate
-                self.interfaceController?.setRootTemplate(immediateTemplate, animated: true)
-
-                self.refreshHomeTemplateData()
+                self.showHomeAndRefreshData()
             } else {
                 os_log(.error, log: self.logger, "❌ Retry failed - still not connected after 5s")
                 self.showConnectionError()
             }
         }
+    }
+
+    private func showHomeAndRefreshData() {
+        let immediateTemplate = buildImmediateHomeTemplate()
+        self.browseTemplate = immediateTemplate
+        interfaceController?.setRootTemplate(immediateTemplate, animated: true)
+        refreshHomeTemplateData()
     }
 
     // MARK: - CPNowPlayingTemplateObserver
