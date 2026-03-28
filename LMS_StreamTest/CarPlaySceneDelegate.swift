@@ -164,17 +164,21 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        os_log(.info, log: logger, "📱 Pushing Now Playing template onto navigation stack...")
+        os_log(.info, log: logger, "📱 Showing Now Playing template...")
 
         let nowPlayingTemplate = CPNowPlayingTemplate.shared
 
-        interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
-            if let error = error {
-                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
-            } else if success {
-                os_log(.info, log: self.logger, "✅ Now Playing template pushed successfully")
-            } else {
-                os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: success=false, no error")
+        // Pop to root first to avoid exceeding CarPlay's 5-template stack limit,
+        // then push Now Playing. This works regardless of browse depth.
+        interfaceController.popToRootTemplate(animated: false) { [weak self] success, error in
+            guard let self = self else { return }
+
+            interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
+                if let error = error {
+                    os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
+                } else if success {
+                    os_log(.info, log: self.logger, "✅ Now Playing template displayed")
+                }
             }
         }
     }
@@ -559,7 +563,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: queueItems)]
                 )
 
-                self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                // Pop back to Now Playing first, then push fresh Up Next
+                // Prevents stacking multiple Up Next templates on repeated taps
+                self.interfaceController?.popToRootTemplate(animated: false) { [weak self] _, _ in
+                    guard let self = self else { return }
+                    let nowPlaying = CPNowPlayingTemplate.shared
+                    self.interfaceController?.pushTemplate(nowPlaying, animated: false) { _, _ in
+                        self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                    }
+                }
                 os_log(.info, log: self.logger, "✅ Displayed Up Next queue with %d tracks", queueItems.count)
             }
         }
@@ -915,12 +927,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Attempts to reconnect to LMS server and refresh CarPlay UI
-    /// Called when user taps "Retry Connection" button in error state
     private func retryConnection() {
         os_log(.info, log: logger, "🔄 User requested connection retry from CarPlay")
 
-        // Show loading state
+        // Already connected — skip reconnect, just refresh the CarPlay data
+        if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+            os_log(.info, log: logger, "✅ Already connected - refreshing CarPlay data only")
+            showHomeAndRefreshData()
+            return
+        }
+
+        // Show loading state while reconnecting
         let loadingItem = CPListItem(
             text: "Connecting...",
             detailText: "Attempting to connect to LMS server",
@@ -928,44 +945,39 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             accessoryImage: nil,
             accessoryType: .none
         )
-
         let loadingTemplate = CPListTemplate(
             title: "LyrPlay",
             sections: [CPListSection(items: [loadingItem])]
         )
-
         interfaceController?.setRootTemplate(loadingTemplate, animated: true)
 
-        // Reinitialize coordinator if needed
         if AudioManager.shared.slimClient == nil {
             os_log(.info, log: logger, "🔧 Reinitializing coordinator for retry...")
             initializeCoordinator()
         } else {
-            // Coordinator exists - attempt reconnection
-            os_log(.info, log: logger, "🔧 Coordinator exists - attempting reconnect...")
+            os_log(.info, log: logger, "🔧 Coordinator exists but disconnected - reconnecting...")
             AudioManager.shared.slimClient?.connect()
         }
 
-        // Check connection status after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+        // Socket connect timeout is 15s — give it 5s before giving up
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self else { return }
 
             if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                 os_log(.info, log: self.logger, "✅ Retry successful - connection established")
-
-                // Show immediate template with resume button
-                let immediateTemplate = self.buildImmediateHomeTemplate()
-                self.browseTemplate = immediateTemplate
-                self.interfaceController?.setRootTemplate(immediateTemplate, animated: true)
-
-                // Load full data in background
-                self.refreshHomeTemplateData()
+                self.showHomeAndRefreshData()
             } else {
-                os_log(.error, log: self.logger, "❌ Retry failed - still not connected")
-                // Show error state again
+                os_log(.error, log: self.logger, "❌ Retry failed - still not connected after 5s")
                 self.showConnectionError()
             }
         }
+    }
+
+    private func showHomeAndRefreshData() {
+        let immediateTemplate = buildImmediateHomeTemplate()
+        self.browseTemplate = immediateTemplate
+        interfaceController?.setRootTemplate(immediateTemplate, animated: true)
+        refreshHomeTemplateData()
     }
 
     // MARK: - CPNowPlayingTemplateObserver
@@ -1047,8 +1059,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
                 if result == .timedOut {
                     let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
-                    os_log(.error, log: self.logger, "❌ Data fetch TIMED OUT after %.3f seconds - showing error", elapsed)
-                    self.showConnectionError()
+                    os_log(.error, log: self.logger, "⚠️ Data fetch TIMED OUT after %.3f seconds - showing partial data", elapsed)
+
+                    // Show whatever data we have instead of error
+                    // Only show error if we got absolutely nothing
+                    if self.cachedNewMusic.isEmpty && self.cachedRandomReleases.isEmpty && self.cachedPlaylists.isEmpty {
+                        os_log(.error, log: self.logger, "❌ No data loaded at all - showing connection error")
+                        self.showConnectionError()
+                    } else {
+                        os_log(.info, log: self.logger, "✅ Partial data available - showing home template")
+                        self.updateHomeTemplateWithData()
+                    }
                 } else {
                     let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
                     os_log(.info, log: self.logger, "🔄 All data fetched in %.3f seconds - updating template", elapsed)
@@ -1147,6 +1168,20 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion()
         }
         items.append(playlistsItem)
+
+        // Add Refresh item at bottom
+        let refreshItem = CPListItem(
+            text: "Refresh",
+            detailText: "Reload home screen data",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        refreshItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showHomeAndRefreshData()
+            completion()
+        }
+        items.append(refreshItem)
 
         // Build sections
         var sections: [CPListSection] = []
