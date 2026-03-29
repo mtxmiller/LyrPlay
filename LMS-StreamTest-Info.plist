@@ -62,6 +62,10 @@
 	<string>LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.</string>
 	<key>NSSiriUsageDescription</key>
 	<string>LyrPlay uses Siri to play music from your Lyrion Music Server with voice commands.</string>
+	<key>INIntentsSupported</key>
+	<array>
+		<string>INPlayMediaIntent</string>
+	</array>
 	<key>INSupportedMediaCategories</key>
 	<array>
 		<string>INMediaCategoryMusic</string>
