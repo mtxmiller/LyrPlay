@@ -650,29 +650,15 @@ struct WebView: UIViewRepresentable {
             webViewReference = webView
         }
 
-        // HYBRID CACHING APPROACH:
-        // - First load (no cache): Force network with fast timeout (fail fast if server down)
-        // - Subsequent loads (has cache): Use cache for instant load, verify server in background
+        // Let WKWebView use its own internal cache (WKWebsiteDataStore).
+        // Previously checked URLCache.shared which is a URLSession cache — WKWebView
+        // doesn't use it, so the check always returned false and forced network loads.
+        // .useProtocolCachePolicy respects HTTP cache headers (ETag, Cache-Control),
+        // giving instant loads when cached and fresh fetches when stale.
+        var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy)
+        request.timeoutInterval = 15.0
 
-        let hasCache = URLCache.shared.cachedResponse(for: URLRequest(url: url)) != nil
-
-        var request: URLRequest
-        if hasCache {
-            // Have cache - load from cache for speed, verify server in background
-            request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
-            request.timeoutInterval = 30.0  // Can wait longer since cache will show
-
-            os_log(.info, log: logger, "✅ Cache available - loading from cache, verifying server in background")
-
-            // Verify server reachability in background
-            context.coordinator.verifyServerReachability(url: url)
-        } else {
-            // No cache - MUST load from network with FAST timeout
-            request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-            request.timeoutInterval = 10.0  // Fail fast if server is down!
-
-            os_log(.info, log: logger, "⚠️ No cache - forcing network load with 10s timeout for fast failure")
-        }
+        os_log(.info, log: logger, "Loading Material interface with protocol cache policy")
 
         // Add HTTP Basic Authentication header if credentials are configured
         let settings = SettingsManager.shared
@@ -773,12 +759,20 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             os_log(.info, log: logger, "📡 WebView: Started loading Material interface")
             DispatchQueue.main.async {
-                os_log(.debug, log: self.logger, "🔄 WebView: Setting isLoading = true")
-                self.parent.isLoading = true
                 self.parent.loadError = nil
             }
         }
         
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // didCommit fires when the first byte of content arrives (HTML received).
+            // Show the WebView now for progressive loading instead of waiting for
+            // didFinish (all sub-resources). Users see the page building like a browser.
+            os_log(.info, log: logger, "WebView committed - showing interface (progressive load)")
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
+            }
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             os_log(.info, log: logger, "Finished loading Material interface")
 
