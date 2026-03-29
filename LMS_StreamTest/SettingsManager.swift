@@ -140,9 +140,6 @@ class SettingsManager: ObservableObject {
     // MARK: - Singleton
     static let shared = SettingsManager()
 
-    // MARK: - App Group for Siri Extension
-    private let sharedDefaults = UserDefaults(suiteName: "group.elm.LyrPlay")
-
     private init() {
         loadSettings()
         if playerMACAddress.isEmpty {
@@ -151,13 +148,10 @@ class SettingsManager: ObservableObject {
         if playerName.isEmpty {
             playerName = "iOS Player"
         }
-        
+
         // UPDATED: Set FLAC-first priority order with StreamingKit
         // REMOVED: preferredFormats initialization - capabilities hardcoded
         saveSettings()
-
-        // Sync settings to App Group for Siri Extension access
-        syncToAppGroup()
     }
     
     // MARK: - User-Agent for Web Requests
@@ -284,49 +278,6 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.synchronize()
 
         os_log(.info, log: logger, "Settings saved successfully")
-
-        // Sync critical settings to App Group for Siri Extension
-        syncToAppGroup()
-    }
-
-    // MARK: - App Group Sync for Siri Extension
-
-    /// Sync critical settings to App Group container for Siri Intents Extension access.
-    /// Called from init() (handles upgrade scenario) and saveSettings().
-    func syncToAppGroup() {
-        guard let sharedDefaults = sharedDefaults else {
-            os_log(.error, log: logger, "Failed to access App Group UserDefaults")
-            return
-        }
-
-        // Sync the active server's settings (primary or backup)
-        let activeHost: String
-        let activeWebPort: Int
-        let activeUsername: String
-        let activePassword: String
-
-        switch currentActiveServer {
-        case .primary:
-            activeHost = serverHost
-            activeWebPort = serverWebPort
-            activeUsername = serverUsername
-            activePassword = serverPassword
-        case .backup:
-            activeHost = backupServerHost
-            activeWebPort = backupServerWebPort
-            activeUsername = backupServerUsername
-            activePassword = backupServerPassword
-        }
-
-        sharedDefaults.set(activeHost, forKey: "serverHost")
-        sharedDefaults.set(activeWebPort, forKey: "serverWebPort")
-        sharedDefaults.set(activeUsername, forKey: "serverUsername")
-        sharedDefaults.set(activePassword, forKey: "serverPassword")
-        sharedDefaults.set(playerMACAddress, forKey: "playerMAC")
-        sharedDefaults.synchronize()
-
-        os_log(.info, log: logger, "Synced settings to App Group for Siri Extension (host: %{public}s, port: %d)",
-               activeHost, activeWebPort)
     }
 
     // MARK: - PHASE 5: Sync Group Persistence

@@ -17,8 +17,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private var connectionObserver: NSObjectProtocol?
     private var hasLoadedData = false
 
-    // Debounce timer for artwork template updates
-    private var artworkUpdateTimer: Timer?
 
     // MARK: - Services
 
@@ -86,7 +84,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             loadCarPlayData()
         } else {
             os_log(.info, log: logger, "⏳ Waiting for coordinator connection...")
-            // Observe connection state changes
+            // Observe connection state changes — kept alive even after timeout
+            // so late connections still recover the UI
             connectionObserver = NotificationCenter.default.addObserver(
                 forName: .slimProtoDidConnect,
                 object: nil, queue: .main
@@ -96,16 +95,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 self.loadCarPlayData()
             }
 
-            // Timeout fallback: if not connected after 5s, show error
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            // Timeout fallback: show error but keep observer alive for late recovery
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                 guard let self = self, !self.hasLoadedData else { return }
                 // One more check in case connection happened without notification
                 if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
                     os_log(.info, log: self.logger, "✅ Coordinator connected (timeout check) - loading data")
                     self.loadCarPlayData()
                 } else {
-                    os_log(.error, log: self.logger, "❌ Coordinator not connected after 5s - showing error")
+                    os_log(.error, log: self.logger, "❌ Coordinator not connected after 8s - showing error (observer still active)")
                     self.showConnectionError()
+                    // NOTE: connectionObserver stays alive — if coordinator connects later,
+                    // loadCarPlayData() will fire and replace the error template
                 }
             }
         }
@@ -829,8 +830,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let settings = SettingsManager.shared
-        // Use simple cover.jpg like LMS App does (not sized version)
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverID)/cover.jpg"
+        // Request 200x200 thumbnail for CarPlay list views — full-res is too slow
+        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverID)/cover_200x200_o.jpg"
 
         guard let url = URL(string: urlString) else {
             completion(nil)
@@ -1016,10 +1017,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
 
     private func showHomeAndRefreshData() {
-        let immediateTemplate = buildImmediateHomeTemplate()
-        self.browseTemplate = immediateTemplate
-        interfaceController?.setRootTemplate(immediateTemplate, animated: true)
-        refreshHomeTemplateData()
+        // Reset state to allow reload, then fetch fresh data
+        hasLoadedData = false
+        loadCarPlayData()
     }
 
     // MARK: - CPNowPlayingTemplateObserver
@@ -1120,13 +1120,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Updates the home template with cached data
-    private func updateHomeTemplateWithData() {
-        guard let interfaceController = interfaceController else {
-            os_log(.error, log: logger, "❌ No interface controller for template update")
-            return
-        }
-
+    /// Build the home screen sections from cached data.
+    /// Shared by both setRootTemplate (initial) and updateSections (artwork refresh).
+    private func buildHomeTemplateSections() -> [CPListSection] {
         var items: [CPListTemplateItem] = []
 
         // Item 1: Resume Playback (always first)
@@ -1224,24 +1220,41 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         items.append(refreshItem)
 
-        // Build sections
-        var sections: [CPListSection] = []
+        return [CPListSection(items: items)]
+    }
 
-        // Single section with all items
-        sections.append(CPListSection(items: items))
+    /// Initial template load — calls setRootTemplate once.
+    /// Used by Phase 1 (metadata ready, placeholder artwork).
+    private func updateHomeTemplateWithData() {
+        guard let interfaceController = interfaceController else {
+            os_log(.error, log: logger, "❌ No interface controller for template update")
+            return
+        }
 
-        // Create updated template
+        let sections = buildHomeTemplateSections()
         let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
         self.browseTemplate = updatedTemplate
 
-        // Update the root template
         interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
             if let error = error {
                 os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to update template: %{public}s", error.localizedDescription)
             } else if success {
-                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template updated with full content")
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template set as root")
             }
         }
+    }
+
+    /// Artwork refresh — updates sections in-place without replacing root template.
+    /// This avoids CarPlay crashes from overlapping setRootTemplate animations.
+    private func updateHomeTemplateSections() {
+        guard let browseTemplate = browseTemplate else {
+            os_log(.error, log: logger, "❌ No browse template for section update")
+            return
+        }
+
+        let sections = buildHomeTemplateSections()
+        browseTemplate.updateSections(sections)
+        os_log(.info, log: logger, "✅ Home template sections updated with artwork")
     }
 
     // MARK: - Legacy buildHomeTemplate (kept for reference, no longer used on connect)
@@ -1484,55 +1497,79 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     return
                 }
 
-                // Build letter ranges: 2 letters each for manageable list sizes
-                let ranges: [(label: String, letters: [String])] = [
-                    ("A – B", ["A", "B"]),
-                    ("C – D", ["C", "D"]),
-                    ("E – F", ["E", "F"]),
-                    ("G – H", ["G", "H"]),
-                    ("I – J", ["I", "J"]),
-                    ("K – L", ["K", "L"]),
-                    ("M – N", ["M", "N"]),
-                    ("O – P", ["O", "P"]),
-                    ("Q – R", ["Q", "R"]),
-                    ("S – T", ["S", "T"]),
-                    ("U – V", ["U", "V"]),
-                    ("W – Z", ["W", "X", "Y", "Z"]),
-                    ("#",     ["#"])
-                ]
+                // Build adaptive ranges from actual artist counts.
+                // Letters with many artists (e.g. "S" with 150) get their own row.
+                // Sparse letters get grouped. Target: index page fits within vehicle's item limit.
+                let maxItems = CPListTemplate.maximumItemCount
+                let totalArtists = letterCounts.reduce(0) { $0 + $1.count }
+                // Aim for index page to have at most maxItems entries
+                // Each entry should cover roughly totalArtists/maxItems artists
+                let targetPerRange = max(15, totalArtists / max(maxItems, 12))
+                let maxPerRange = targetPerRange
+                var ranges: [(label: String, letters: [String], offset: Int, count: Int)] = []
+                var currentLetters: [String] = []
+                var currentCount = 0
+                var currentOffset = 0
+                var runningOffset = 0
+
+                for lc in letterCounts {
+                    // If this single letter exceeds the threshold, flush what we have then give it its own row
+                    if lc.count >= maxPerRange && !currentLetters.isEmpty {
+                        let label = currentLetters.count == 1 ? currentLetters[0] : "\(currentLetters.first!) – \(currentLetters.last!)"
+                        ranges.append((label, currentLetters, currentOffset, currentCount))
+                        currentLetters = []
+                        currentCount = 0
+                        currentOffset = runningOffset
+                    }
+
+                    currentLetters.append(lc.letter)
+                    currentCount += lc.count
+
+                    // If adding this letter pushed us over the threshold, flush
+                    if currentCount >= maxPerRange {
+                        let label = currentLetters.count == 1 ? currentLetters[0] : "\(currentLetters.first!) – \(currentLetters.last!)"
+                        ranges.append((label, currentLetters, currentOffset, currentCount))
+                        currentLetters = []
+                        currentCount = 0
+                        currentOffset = runningOffset + lc.count
+                    }
+
+                    runningOffset += lc.count
+                }
+
+                // Flush remaining letters
+                if !currentLetters.isEmpty {
+                    // If only a few left, merge with the last range to avoid a tiny trailing group
+                    if currentCount < 10 && !ranges.isEmpty {
+                        var last = ranges.removeLast()
+                        last.letters.append(contentsOf: currentLetters)
+                        last.count += currentCount
+                        let label = "\(last.letters.first!) – \(currentLetters.last!)"
+                        ranges.append((label, last.letters, last.offset, last.count))
+                    } else {
+                        let label = currentLetters.count == 1 ? currentLetters[0] : "\(currentLetters.first!) – \(currentLetters.last!)"
+                        ranges.append((label, currentLetters, currentOffset, currentCount))
+                    }
+                }
 
                 var rangeItems: [CPListItem] = []
 
                 for range in ranges {
-                    // Calculate offset and count for this range
-                    var rangeOffset = 0
-                    var rangeCount = 0
-                    var foundStart = false
-
-                    for lc in letterCounts {
-                        if range.letters.contains(lc.letter) {
-                            if !foundStart { foundStart = true }
-                            rangeCount += lc.count
-                        } else if !foundStart {
-                            rangeOffset += lc.count
-                        }
-                    }
-
-                    // Skip ranges with no artists
-                    guard rangeCount > 0 else { continue }
+                    guard range.count > 0 else { continue }
 
                     let item = CPListItem(
                         text: range.label,
-                        detailText: "\(rangeCount) artist\(rangeCount == 1 ? "" : "s")",
+                        detailText: "\(range.count) artist\(range.count == 1 ? "" : "s")",
                         image: nil,
                         accessoryImage: nil,
                         accessoryType: .disclosureIndicator
                     )
 
-                    let offset = rangeOffset
-                    let count = rangeCount
+                    let offset = range.offset
+                    let count = range.count
+                    let title = range.label
                     item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                        self?.fetchArtistsForRange(offset: offset, count: count, title: range.label)
+                        self?.fetchArtistsForRange(offset: offset, count: count, title: title)
                         completion()
                     }
 
@@ -1553,12 +1590,17 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func fetchArtistsForRange(offset: Int, count: Int, title: String) {
         guard let coordinator = AudioManager.shared.slimClient else { return }
 
-        os_log(.info, log: logger, "🎤 Fetching artists for range %{public}s (offset: %d, count: %d)", title, offset, count)
+        // Query vehicle's item limit, reserve 1 slot for "More..." if needed
+        let maxItems = CPListTemplate.maximumItemCount
+        let pageSize = min(count, max(maxItems - 1, 10))
+
+        os_log(.info, log: logger, "🎤 Fetching artists for %{public}s (offset: %d, count: %d, pageSize: %d, maxItems: %d)",
+               title, offset, count, pageSize, maxItems)
 
         let fetchCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["artists", offset, count, "role_id:ALBUMARTIST"]]
+            "params": ["", ["artists", offset, pageSize, "role_id:ALBUMARTIST"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(fetchCommand) { [weak self] response in
@@ -1598,13 +1640,32 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     artistItems.append(item)
                 }
 
+                // Add "More..." if there are remaining artists beyond this page
+                let remaining = count - pageSize
+                if remaining > 0 {
+                    let moreItem = CPListItem(
+                        text: "More (\(remaining) remaining)",
+                        detailText: nil,
+                        image: nil,
+                        accessoryImage: nil,
+                        accessoryType: .disclosureIndicator
+                    )
+                    let nextOffset = offset + pageSize
+                    moreItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                        self?.fetchArtistsForRange(offset: nextOffset, count: remaining, title: title)
+                        completion()
+                    }
+                    artistItems.append(moreItem)
+                }
+
                 let artistsTemplate = CPListTemplate(
                     title: title,
                     sections: [CPListSection(items: artistItems)]
                 )
 
                 self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
-                os_log(.info, log: self.logger, "✅ Displayed %d artists for range %{public}s", artistItems.count, title)
+                os_log(.info, log: self.logger, "✅ Displayed %d artists for %{public}s (%d remaining)",
+                       artists.count, title, max(0, count - pageSize))
             }
         }
     }
@@ -1933,36 +1994,45 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Phase 2: Load artwork for cached albums individually.
-    /// Updates the template as each image arrives so artwork pops in progressively.
+    /// Phase 2: Load all artwork in parallel, then update sections once.
+    /// One updateSections() call after all images arrive — stable and fast on LAN.
     private func loadArtworkInBackground() {
-        os_log(.info, log: logger, "🎨 Phase 2: Loading artwork progressively")
+        os_log(.info, log: logger, "🎨 Phase 2: Loading artwork")
 
         let settings = SettingsManager.shared
+        let group = DispatchGroup()
 
         for (index, album) in cachedNewMusic.enumerated() {
+            group.enter()
             loadSingleArtwork(album: album, settings: settings) { [weak self] image in
-                guard let self = self, let image = image else { return }
-                self.cachedNewMusic[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
-                self.scheduleArtworkTemplateUpdate()
+                if let self = self, let image = image, index < self.cachedNewMusic.count {
+                    self.cachedNewMusic[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                }
+                group.leave()
             }
         }
 
         for (index, album) in cachedRandomReleases.enumerated() {
+            group.enter()
             loadSingleArtwork(album: album, settings: settings) { [weak self] image in
-                guard let self = self, let image = image else { return }
-                self.cachedRandomReleases[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
-                self.scheduleArtworkTemplateUpdate()
+                if let self = self, let image = image, index < self.cachedRandomReleases.count {
+                    self.cachedRandomReleases[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                }
+                group.leave()
             }
         }
-    }
 
-    /// Debounce template updates so rapid artwork arrivals don't crash CarPlay.
-    /// Waits 0.5s after the last image arrives before refreshing the template.
-    private func scheduleArtworkTemplateUpdate() {
-        artworkUpdateTimer?.invalidate()
-        artworkUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
-            self?.updateHomeTemplateWithData()
+        DispatchQueue.global().async { [weak self] in
+            let result = group.wait(timeout: .now() + 6.0)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if result == .timedOut {
+                    os_log(.info, log: self.logger, "🎨 Artwork timed out - updating with what we have")
+                } else {
+                    os_log(.info, log: self.logger, "🎨 All artwork loaded")
+                }
+                self.updateHomeTemplateSections()
+            }
         }
     }
 
@@ -1973,14 +2043,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover.jpg"
+        // Request 100x100 thumbnail — CarPlay grid images are small.
+        // Full-res cover art (1000x1000+) was causing 9s+ load times.
+        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
         guard let url = URL(string: urlString) else {
             completion(nil)
             return
         }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = 4.0
 
         URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
@@ -2112,7 +2184,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 continue
             }
 
-            let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover.jpg"
+            let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
 
             guard let url = URL(string: urlString) else {
                 os_log(.error, log: self.logger, "❌ Invalid artwork URL for album ID: %{public}s", album.id)

@@ -8,10 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
-		6B4072052F786A7900575768 /* Intents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B4072042F786A7900575768 /* Intents.framework */; };
-		6B4072102F786A7900575768 /* IntentsUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B40720F2F786A7900575768 /* IntentsUI.framework */; };
-		6B40721A2F786A7900575768 /* LyrPlayIntentsUI.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6B40720E2F786A7900575768 /* LyrPlayIntentsUI.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		6B40721D2F786A7900575768 /* LyrPlayIntents.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6B4072032F786A7900575768 /* LyrPlayIntents.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
@@ -20,20 +16,6 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		6B4072182F786A7900575768 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 6B40720D2F786A7900575768;
-			remoteInfo = LyrPlayIntentsUI;
-		};
-		6B40721B2F786A7900575768 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 6B4072022F786A7900575768;
-			remoteInfo = LyrPlayIntents;
-		};
 		6B9C4D5F2DEB81F600D22FD6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
@@ -50,21 +32,6 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		6B40721E2F786A7900575768 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				6B40721D2F786A7900575768 /* LyrPlayIntents.appex in Embed Foundation Extensions */,
-				6B40721A2F786A7900575768 /* LyrPlayIntentsUI.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
 		016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		073519E6407F6C79CA0220C3 /* Pods-LMS_StreamTestTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.debug.xcconfig"; sourceTree = "<group>"; };
@@ -72,10 +39,6 @@
 		4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.debug.xcconfig"; sourceTree = "<group>"; };
 		479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.release.xcconfig"; sourceTree = "<group>"; };
 		6B149E012EC746BE0057B9C1 /* LMS_StreamTest.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LMS_StreamTest.entitlements; sourceTree = "<group>"; };
-		6B4072032F786A7900575768 /* LyrPlayIntents.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LyrPlayIntents.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		6B4072042F786A7900575768 /* Intents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Intents.framework; path = System/Library/Frameworks/Intents.framework; sourceTree = SDKROOT; };
-		6B40720E2F786A7900575768 /* LyrPlayIntentsUI.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LyrPlayIntentsUI.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		6B40720F2F786A7900575768 /* IntentsUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IntentsUI.framework; path = System/Library/Frameworks/IntentsUI.framework; sourceTree = SDKROOT; };
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -89,40 +52,7 @@
 		EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		6B4072232F786A7900575768 /* Exceptions for "LyrPlayIntents" folder in "LyrPlayIntents" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 6B4072022F786A7900575768 /* LyrPlayIntents */;
-		};
-		6B4072252F786A7900575768 /* Exceptions for "LyrPlayIntentsUI" folder in "LyrPlayIntentsUI" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 6B40720D2F786A7900575768 /* LyrPlayIntentsUI */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		6B4072062F786A7900575768 /* LyrPlayIntents */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				6B4072232F786A7900575768 /* Exceptions for "LyrPlayIntents" folder in "LyrPlayIntents" target */,
-			);
-			path = LyrPlayIntents;
-			sourceTree = "<group>";
-		};
-		6B4072112F786A7900575768 /* LyrPlayIntentsUI */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				6B4072252F786A7900575768 /* Exceptions for "LyrPlayIntentsUI" folder in "LyrPlayIntentsUI" target */,
-			);
-			path = LyrPlayIntentsUI;
-			sourceTree = "<group>";
-		};
 		6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = LMS_StreamTest;
@@ -141,22 +71,6 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		6B4072002F786A7900575768 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				6B4072052F786A7900575768 /* Intents.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		6B40720B2F786A7900575768 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				6B4072102F786A7900575768 /* IntentsUI.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		6B9C4D4B2DEB81F500D22FD6 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -207,8 +121,6 @@
 				6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D612DEB81F600D22FD6 /* LMS_StreamTestTests */,
 				6B9C4D6B2DEB81F600D22FD6 /* LMS_StreamTestUITests */,
-				6B4072062F786A7900575768 /* LyrPlayIntents */,
-				6B4072112F786A7900575768 /* LyrPlayIntentsUI */,
 				6BF845792DEB86CA00C2BB2A /* Frameworks */,
 				6B9C4D4F2DEB81F500D22FD6 /* Products */,
 				320BF7DFBD3CADF66E446357 /* Pods */,
@@ -221,8 +133,6 @@
 				6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */,
 				6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */,
 				6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */,
-				6B4072032F786A7900575768 /* LyrPlayIntents.appex */,
-				6B40720E2F786A7900575768 /* LyrPlayIntentsUI.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -236,8 +146,6 @@
 				016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */,
 				EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */,
 				323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */,
-				6B4072042F786A7900575768 /* Intents.framework */,
-				6B40720F2F786A7900575768 /* IntentsUI.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -245,50 +153,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		6B4072022F786A7900575768 /* LyrPlayIntents */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 6B4072242F786A7900575768 /* Build configuration list for PBXNativeTarget "LyrPlayIntents" */;
-			buildPhases = (
-				6B4071FF2F786A7900575768 /* Sources */,
-				6B4072002F786A7900575768 /* Frameworks */,
-				6B4072012F786A7900575768 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				6B4072062F786A7900575768 /* LyrPlayIntents */,
-			);
-			name = LyrPlayIntents;
-			packageProductDependencies = (
-			);
-			productName = LyrPlayIntents;
-			productReference = 6B4072032F786A7900575768 /* LyrPlayIntents.appex */;
-			productType = "com.apple.product-type.app-extension";
-		};
-		6B40720D2F786A7900575768 /* LyrPlayIntentsUI */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 6B4072262F786A7900575768 /* Build configuration list for PBXNativeTarget "LyrPlayIntentsUI" */;
-			buildPhases = (
-				6B40720A2F786A7900575768 /* Sources */,
-				6B40720B2F786A7900575768 /* Frameworks */,
-				6B40720C2F786A7900575768 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				6B4072112F786A7900575768 /* LyrPlayIntentsUI */,
-			);
-			name = LyrPlayIntentsUI;
-			packageProductDependencies = (
-			);
-			productName = LyrPlayIntentsUI;
-			productReference = 6B40720E2F786A7900575768 /* LyrPlayIntentsUI.appex */;
-			productType = "com.apple.product-type.app-extension";
-		};
 		6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6B9C4D722DEB81F600D22FD6 /* Build configuration list for PBXNativeTarget "LMS_StreamTest" */;
@@ -299,13 +163,10 @@
 				6B9C4D4C2DEB81F500D22FD6 /* Resources */,
 				F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */,
 				9A1B2C3D4E5F6A7B8C9D0E1F /* Embed BASS Frameworks */,
-				6B40721E2F786A7900575768 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				6B4072192F786A7900575768 /* PBXTargetDependency */,
-				6B40721C2F786A7900575768 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */,
@@ -366,15 +227,9 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2600;
+				LastSwiftUpdateCheck = 1620;
 				LastUpgradeCheck = 1620;
 				TargetAttributes = {
-					6B4072022F786A7900575768 = {
-						CreatedOnToolsVersion = 26.0.1;
-					};
-					6B40720D2F786A7900575768 = {
-						CreatedOnToolsVersion = 26.0.1;
-					};
 					6B9C4D4D2DEB81F500D22FD6 = {
 						CreatedOnToolsVersion = 16.2;
 					};
@@ -405,27 +260,11 @@
 				6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D5D2DEB81F600D22FD6 /* LMS_StreamTestTests */,
 				6B9C4D672DEB81F600D22FD6 /* LMS_StreamTestUITests */,
-				6B4072022F786A7900575768 /* LyrPlayIntents */,
-				6B40720D2F786A7900575768 /* LyrPlayIntentsUI */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		6B4072012F786A7900575768 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		6B40720C2F786A7900575768 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		6B9C4D4C2DEB81F500D22FD6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -556,20 +395,6 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		6B4071FF2F786A7900575768 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		6B40720A2F786A7900575768 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		6B9C4D4A2DEB81F500D22FD6 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -594,16 +419,6 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		6B4072192F786A7900575768 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 6B40720D2F786A7900575768 /* LyrPlayIntentsUI */;
-			targetProxy = 6B4072182F786A7900575768 /* PBXContainerItemProxy */;
-		};
-		6B40721C2F786A7900575768 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 6B4072022F786A7900575768 /* LyrPlayIntents */;
-			targetProxy = 6B40721B2F786A7900575768 /* PBXContainerItemProxy */;
-		};
 		6B9C4D602DEB81F600D22FD6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */;
@@ -617,124 +432,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		6B40721F2F786A7900575768 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = LyrPlayIntents/LyrPlayIntents.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 74BKX23N3K;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = LyrPlayIntents/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LyrPlayIntents;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.LyrPlayIntents";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		6B4072202F786A7900575768 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = LyrPlayIntents/LyrPlayIntents.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 74BKX23N3K;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = LyrPlayIntents/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LyrPlayIntents;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.LyrPlayIntents";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
-		6B4072212F786A7900575768 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 74BKX23N3K;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = LyrPlayIntentsUI/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LyrPlayIntentsUI;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.LyrPlayIntentsUI";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		6B4072222F786A7900575768 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 74BKX23N3K;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = LyrPlayIntentsUI/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LyrPlayIntentsUI;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.LyrPlayIntentsUI";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
 		6B9C4D702DEB81F600D22FD6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -862,7 +559,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
@@ -931,7 +628,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
@@ -1073,24 +770,6 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		6B4072242F786A7900575768 /* Build configuration list for PBXNativeTarget "LyrPlayIntents" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				6B40721F2F786A7900575768 /* Debug */,
-				6B4072202F786A7900575768 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		6B4072262F786A7900575768 /* Build configuration list for PBXNativeTarget "LyrPlayIntentsUI" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				6B4072212F786A7900575768 /* Debug */,
-				6B4072222F786A7900575768 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		6B9C4D492DEB81F500D22FD6 /* Build configuration list for PBXProject "LMS_StreamTest" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -42,12 +42,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             os_log(.info, log: logger, "🔷 SCENE ROUTING COMPLETE - CarPlay config created")
             return config
         } else {
-            // Main app scene - register SceneDelegate for Siri intent delivery
-            // SwiftUI still manages the window via @main App struct
-            os_log(.info, log: logger, "📱 MAIN APP SCENE DETECTED - registering SceneDelegate for Siri intents")
-            let config = UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
-            config.delegateClass = SceneDelegate.self
-            return config
+            // Main app scene - SwiftUI handles this automatically via @main App struct
+            os_log(.info, log: logger, "📱 MAIN APP SCENE DETECTED - SwiftUI will handle automatically")
+            return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
         }
     }
 
