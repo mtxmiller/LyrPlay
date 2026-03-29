@@ -1062,60 +1062,82 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
 
     /// Two-phase home data loading:
-    /// Phase 1: Fetch metadata (fast JSON-RPC), show template with placeholder images immediately
-    /// Phase 2: Load artwork in background, update template when images arrive
+    /// Fetch metadata + artwork together, then show template once (fully loaded).
+    /// With 200x200 thumbnails this completes in ~1s on LAN — no placeholder flash.
     private func refreshHomeTemplateData() {
         let fetchStartTime = CFAbsoluteTimeGetCurrent()
-        os_log(.info, log: logger, "🔄 Phase 1: Fetching metadata (no artwork) for CarPlay home")
+        os_log(.info, log: logger, "🔄 Fetching metadata + artwork for CarPlay home")
 
-        let group = DispatchGroup()
+        let metadataGroup = DispatchGroup()
 
-        // Phase 1: Fetch metadata only (no artwork downloads)
-        group.enter()
+        // Fetch metadata (fast JSON-RPC)
+        metadataGroup.enter()
         fetchAlbumMetadata(sort: "new") { [weak self] albums in
             self?.cachedNewMusic = albums
-            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ New Music metadata: %d albums", albums.count)
-            group.leave()
+            metadataGroup.leave()
         }
 
-        group.enter()
+        metadataGroup.enter()
         fetchAlbumMetadata(sort: "random") { [weak self] albums in
             self?.cachedRandomReleases = albums
-            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Random Releases metadata: %d albums", albums.count)
-            group.leave()
+            metadataGroup.leave()
         }
 
-        group.enter()
+        metadataGroup.enter()
         fetchPlaylists { [weak self] playlists in
             self?.cachedPlaylists = playlists
-            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Playlists loaded: %d items", playlists.count)
-            group.leave()
+            metadataGroup.leave()
         }
 
-        // Phase 1 timeout: metadata fetches should be fast (no images)
         DispatchQueue.global().async { [weak self] in
-            let result = group.wait(timeout: .now() + 5.0)
+            let metaResult = metadataGroup.wait(timeout: .now() + 5.0)
 
-            DispatchQueue.main.async {
-                guard let self = self else { return }
+            guard let self = self else { return }
 
-                let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
-
-                if result == .timedOut {
-                    os_log(.error, log: self.logger, "⚠️ Metadata fetch timed out after %.3f seconds", elapsed)
+            if metaResult == .timedOut {
+                DispatchQueue.main.async {
                     if self.cachedNewMusic.isEmpty && self.cachedRandomReleases.isEmpty && self.cachedPlaylists.isEmpty {
+                        os_log(.error, log: self.logger, "⚠️ Metadata fetch timed out - showing error")
                         self.showConnectionError()
                         return
                     }
                 }
+            }
 
-                os_log(.info, log: self.logger, "✅ Phase 1 complete in %.3f seconds - showing template with placeholders", elapsed)
+            // Now load all artwork (200x200 thumbnails, ~1s on LAN)
+            let artworkGroup = DispatchGroup()
+            let settings = SettingsManager.shared
 
-                // Show template immediately with placeholder artwork
+            for (index, album) in self.cachedNewMusic.enumerated() {
+                artworkGroup.enter()
+                self.loadSingleArtwork(album: album, settings: settings) { [weak self] image in
+                    if let self = self, let image = image, index < self.cachedNewMusic.count {
+                        self.cachedNewMusic[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                    }
+                    artworkGroup.leave()
+                }
+            }
+
+            for (index, album) in self.cachedRandomReleases.enumerated() {
+                artworkGroup.enter()
+                self.loadSingleArtwork(album: album, settings: settings) { [weak self] image in
+                    if let self = self, let image = image, index < self.cachedRandomReleases.count {
+                        self.cachedRandomReleases[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                    }
+                    artworkGroup.leave()
+                }
+            }
+
+            let artResult = artworkGroup.wait(timeout: .now() + 6.0)
+
+            DispatchQueue.main.async {
+                let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
+                if artResult == .timedOut {
+                    os_log(.info, log: self.logger, "🎨 Artwork timed out after %.3fs - showing what we have", elapsed)
+                } else {
+                    os_log(.info, log: self.logger, "✅ Metadata + artwork loaded in %.3fs", elapsed)
+                }
                 self.updateHomeTemplateWithData()
-
-                // Phase 2: Load artwork in background, then refresh template
-                self.loadArtworkInBackground()
             }
         }
     }
@@ -1244,18 +1266,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Artwork refresh — updates sections in-place without replacing root template.
-    /// This avoids CarPlay crashes from overlapping setRootTemplate animations.
-    private func updateHomeTemplateSections() {
-        guard let browseTemplate = browseTemplate else {
-            os_log(.error, log: logger, "❌ No browse template for section update")
-            return
-        }
-
-        let sections = buildHomeTemplateSections()
-        browseTemplate.updateSections(sections)
-        os_log(.info, log: logger, "✅ Home template sections updated with artwork")
-    }
 
     // MARK: - Legacy buildHomeTemplate (kept for reference, no longer used on connect)
 
@@ -1994,47 +2004,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Phase 2: Load all artwork in parallel, then update sections once.
-    /// One updateSections() call after all images arrive — stable and fast on LAN.
-    private func loadArtworkInBackground() {
-        os_log(.info, log: logger, "🎨 Phase 2: Loading artwork")
-
-        let settings = SettingsManager.shared
-        let group = DispatchGroup()
-
-        for (index, album) in cachedNewMusic.enumerated() {
-            group.enter()
-            loadSingleArtwork(album: album, settings: settings) { [weak self] image in
-                if let self = self, let image = image, index < self.cachedNewMusic.count {
-                    self.cachedNewMusic[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
-                }
-                group.leave()
-            }
-        }
-
-        for (index, album) in cachedRandomReleases.enumerated() {
-            group.enter()
-            loadSingleArtwork(album: album, settings: settings) { [weak self] image in
-                if let self = self, let image = image, index < self.cachedRandomReleases.count {
-                    self.cachedRandomReleases[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
-                }
-                group.leave()
-            }
-        }
-
-        DispatchQueue.global().async { [weak self] in
-            let result = group.wait(timeout: .now() + 6.0)
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if result == .timedOut {
-                    os_log(.info, log: self.logger, "🎨 Artwork timed out - updating with what we have")
-                } else {
-                    os_log(.info, log: self.logger, "🎨 All artwork loaded")
-                }
-                self.updateHomeTemplateSections()
-            }
-        }
-    }
 
     /// Load artwork for a single album. Calls completion on main thread.
     private func loadSingleArtwork(album: Album, settings: SettingsManager, completion: @escaping (UIImage?) -> Void) {
