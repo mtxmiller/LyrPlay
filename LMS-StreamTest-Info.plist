@@ -60,6 +60,17 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.</string>
+	<key>NSSiriUsageDescription</key>
+	<string>LyrPlay uses Siri to play music from your Lyrion Music Server with voice commands.</string>
+	<key>INSupportedMediaCategories</key>
+	<array>
+		<string>INMediaCategoryMusic</string>
+		<string>INMediaCategoryGeneral</string>
+	</array>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>com.lmsstream.siri-play</string>
+	</array>
 	<key>UISupportedCarPlayContentTypes</key>
 	<array>
 		<string>audio</string>

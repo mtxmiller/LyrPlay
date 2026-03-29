@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import Intents
 import os.log
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -16,6 +17,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Manual session setup in AppDelegate would conflict with BASS_CONFIG_IOS_SESSION
         os_log(.info, log: logger, "AVAudioSession will be managed by BASS framework")
         
+        // Request Siri authorization for voice commands
+        INPreferences.requestSiriAuthorization { [weak self] status in
+            os_log(.info, log: self?.logger ?? OSLog.default, "Siri authorization status: %d", status.rawValue)
+        }
+
         os_log(.info, log: logger, "App launch completed")
         return true
     }
@@ -36,10 +42,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             os_log(.info, log: logger, "🔷 SCENE ROUTING COMPLETE - CarPlay config created")
             return config
         } else {
-            // Main app scene - SwiftUI handles this automatically via @main App struct
-            os_log(.info, log: logger, "📱 MAIN APP SCENE DETECTED - SwiftUI will handle automatically")
-            // Return default config and let SwiftUI manage it
-            return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+            // Main app scene - register SceneDelegate for Siri intent delivery
+            // SwiftUI still manages the window via @main App struct
+            os_log(.info, log: logger, "📱 MAIN APP SCENE DETECTED - registering SceneDelegate for Siri intents")
+            let config = UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+            config.delegateClass = SceneDelegate.self
+            return config
         }
     }
 

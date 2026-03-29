@@ -132,14 +132,80 @@ class SlimProtoCoordinator: ObservableObject {
             object: nil
         )
 
+        // Observe Siri media playback intents
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleSiriPlayMediaIntent),
+            name: NSNotification.Name("SiriPlayMediaIntent"),
+            object: nil
+        )
+
         #if DEBUG
         os_log(.info, log: logger, "✅ Background observers configured for duration-based recovery")
+        os_log(.info, log: logger, "✅ Siri intent observer configured")
         #endif
     }
 
     @objc private func handleAppDidEnterBackground() {
         backgroundedTime = Date()
         os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
+    }
+
+    // MARK: - Siri Intent Handling
+
+    @objc private func handleSiriPlayMediaIntent(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let identifier = userInfo["identifier"] as? String else {
+            os_log(.error, log: logger, "Siri intent notification missing identifier")
+            return
+        }
+
+        os_log(.info, log: logger, "🎤 SIRI: Handling media playback - identifier: %{public}s", identifier)
+
+        if !connectionManager.connectionState.isConnected {
+            os_log(.info, log: logger, "🎤 SIRI: Not connected - initiating connection")
+            connect()
+            // Intent will be retried via checkPendingSiriIntent() after connection
+            SceneDelegate.pendingMediaIdentifier = identifier
+        } else {
+            playSiriMedia(identifier: identifier)
+        }
+    }
+
+    /// Play media from a Siri voice command.
+    /// Identifier format: "artist_id:42", "album_id:123", "track_id:789"
+    func playSiriMedia(identifier: String) {
+        // Validate identifier format (must be "type:id")
+        guard identifier.contains(":") else {
+            os_log(.error, log: logger, "🎤 SIRI: Invalid identifier format: %{public}s", identifier)
+            return
+        }
+
+        let playerMAC = settings.playerMACAddress
+        let command: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerMAC, ["playlistcontrol", "cmd:load", identifier]]
+        ]
+
+        os_log(.info, log: logger, "🎤 SIRI: Sending playlistcontrol command - %{public}s", identifier)
+
+        sendJSONRPCCommandDirect(command) { [weak self] response in
+            if let error = response["error"] {
+                os_log(.error, log: self?.logger ?? OSLog.default, "🎤 SIRI: Playback command failed - %{public}s", String(describing: error))
+            } else {
+                os_log(.info, log: self?.logger ?? OSLog.default, "🎤 SIRI: Playback started successfully")
+            }
+        }
+    }
+
+    /// Check for pending Siri intent after connection is established.
+    /// Called from connection success handler.
+    func checkPendingSiriIntent() {
+        if let identifier = SceneDelegate.consumePendingIntent() {
+            os_log(.info, log: logger, "🎤 SIRI: Processing pending intent - %{public}s", identifier)
+            playSiriMedia(identifier: identifier)
+        }
     }
 
     // MARK: - Public Interface
@@ -597,6 +663,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
+
+        // Check for pending Siri intent (cold launch case)
+        checkPendingSiriIntent()
     }
 
     func slimProtoDidDisconnect(error: Error?) {

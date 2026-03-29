@@ -458,10 +458,14 @@ The codebase follows modern iOS development practices with comprehensive error h
   - App Store validation compliance
 - **Status**: **COMPLETED** - CBass migration fully implemented and tested
 
+### SiriKit vs App Intents
+LyrPlay uses SiriKit `INPlayMediaIntent` for iOS 15.6+ compatibility. Apple still recommends SiriKit for media playback domains. When minimum deployment target reaches iOS 16+, evaluate migration to App Intents framework.
+
 ### Platform Compatibility
 - **macOS**: Supported via "Designed for iPad" compatibility mode
 - **visionOS**: Not currently supported
 - **CarPlay**: Phase 1 complete (Now Playing template), Phase 2 browse interface planned
+- **Siri**: Voice commands via INPlayMediaIntent ("Hey Siri, play [artist] on LyrPlay")
 - **Background Limitations**: Standard iOS background audio restrictions apply
 
 ## Reference Source Code
