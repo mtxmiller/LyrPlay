@@ -18,6 +18,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Server Discovery** - Automatic LMS server detection with failover support
 - **iOS Optimized** - Native SwiftUI app with BASS-managed audio sessions
 - **Custom CarPlay Interface** - Native CarPlay interface with album browsing, track lists, and playback controls
+- **Siri Voice Commands** - "Hey Siri, play [artist/album/song] on LyrPlay" with automatic LMS search
 - **Player Synchronization** - Sync playback across multiple LMS players
 - **HTTP Authentication** - Support for password-protected LMS servers
 - **Bit-Perfect USB DAC** - Sample rate matching for external audio interfaces
