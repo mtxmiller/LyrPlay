@@ -707,35 +707,7 @@ struct WebView: UIViewRepresentable {
             os_log(.info, log: logger, "Coordinator initialized with Material settings handler")
         }
 
-        // MARK: - Server Reachability Verification
-        func verifyServerReachability(url: URL) {
-            // Quick HEAD request to server to verify it's up
-            // This runs in background while cache loads for instant UI
-            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-            request.httpMethod = "HEAD"
-            request.timeoutInterval = 5.0  // Quick timeout
 
-            os_log(.info, log: logger, "🔍 Verifying server reachability in background...")
-
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                if let error = error {
-                    // Server unreachable - set error even though cache loaded
-                    os_log(.error, log: self.logger, "❌ Server unreachable: %{public}s", error.localizedDescription)
-                    DispatchQueue.main.async {
-                        self.parent.loadError = "Server unreachable: \(error.localizedDescription)"
-                    }
-                } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
-                    // Server returned error status
-                    os_log(.error, log: self.logger, "❌ Server error: HTTP %d", httpResponse.statusCode)
-                    DispatchQueue.main.async {
-                        self.parent.loadError = "Server error: HTTP \(httpResponse.statusCode)"
-                    }
-                } else {
-                    // Success - cache is valid and server is up
-                    os_log(.info, log: self.logger, "✅ Server reachability verified - cache is fresh")
-                }
-            }.resume()
-        }
 
         // MARK: - Material Settings Integration Handler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

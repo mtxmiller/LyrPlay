@@ -3,6 +3,10 @@
 import Foundation
 import os.log
 import WebKit
+
+extension Notification.Name {
+    static let slimProtoDidConnect = Notification.Name("SlimProtoDidConnect")
+}
 import MediaPlayer
 
 // MARK: - Recovery Trigger Types
@@ -666,6 +670,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
         // Check for pending Siri intent (cold launch case)
         checkPendingSiriIntent()
+
+        // Notify observers (CarPlay uses this for event-driven data loading)
+        NotificationCenter.default.post(name: .slimProtoDidConnect, object: nil)
     }
 
     func slimProtoDidDisconnect(error: Error?) {

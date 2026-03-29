@@ -13,6 +13,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private var cachedRandomReleases: [Album] = []
     private var cachedPlaylists: [Playlist] = []
 
+    // Connection observer for event-driven data loading
+    private var connectionObserver: NSObjectProtocol?
+    private var hasLoadedData = false
+
+    // Debounce timer for artwork template updates
+    private var artworkUpdateTimer: Timer?
+
     // MARK: - Services
 
     @objc func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
@@ -71,20 +78,35 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
         }
 
-        // CONNECTION STATE CHECK: Only load data if coordinator is connected
-        // Give connection a brief moment to establish (coordinator.connect() is async)
-        // Increased to 3s for better reliability on slower networks
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self = self else { return }
+        // EVENT-DRIVEN DATA LOADING: Load data as soon as coordinator is connected.
+        // No hardcoded delays. If already connected, load immediately.
+        hasLoadedData = false
+        if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+            os_log(.info, log: logger, "✅ Coordinator already connected - loading data immediately")
+            loadCarPlayData()
+        } else {
+            os_log(.info, log: logger, "⏳ Waiting for coordinator connection...")
+            // Observe connection state changes
+            connectionObserver = NotificationCenter.default.addObserver(
+                forName: .slimProtoDidConnect,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self = self, !self.hasLoadedData else { return }
+                os_log(.info, log: self.logger, "✅ Coordinator connected (via notification) - loading data")
+                self.loadCarPlayData()
+            }
 
-            if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
-                os_log(.info, log: self.logger, "✅ Coordinator connected - loading home template data")
-                self.refreshHomeTemplateData()
-                // Sync shuffle button with server state
-                self.syncShuffleButtonWithServer()
-            } else {
-                os_log(.error, log: self.logger, "❌ Coordinator not connected after 3s - showing error state")
-                self.showConnectionError()
+            // Timeout fallback: if not connected after 5s, show error
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                guard let self = self, !self.hasLoadedData else { return }
+                // One more check in case connection happened without notification
+                if let coordinator = AudioManager.shared.slimClient, coordinator.isConnected {
+                    os_log(.info, log: self.logger, "✅ Coordinator connected (timeout check) - loading data")
+                    self.loadCarPlayData()
+                } else {
+                    os_log(.error, log: self.logger, "❌ Coordinator not connected after 5s - showing error")
+                    self.showConnectionError()
+                }
             }
         }
 
@@ -98,8 +120,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         os_log(.info, log: logger, "  Interface Controller: %{public}s", String(describing: interfaceController))
 
         self.interfaceController = nil
+        // Clean up connection observer
+        if let observer = connectionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            connectionObserver = nil
+        }
+        hasLoadedData = false
         os_log(.info, log: logger, "  ✅ Interface controller cleared")
         os_log(.info, log: logger, "🚗 CARPLAY DISCONNECTED")
+    }
+
+    /// Load CarPlay browse data and sync shuffle state.
+    /// Called once when coordinator connection is confirmed.
+    private func loadCarPlayData() {
+        guard !hasLoadedData else { return }
+        hasLoadedData = true
+        // Clean up observer since we no longer need it
+        if let observer = connectionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            connectionObserver = nil
+        }
+        refreshHomeTemplateData()
+        syncShuffleButtonWithServer()
     }
 
     // MARK: - Browse Actions
@@ -1019,25 +1061,27 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         return CPListTemplate(title: "LyrPlay", sections: [section])
     }
 
-    /// Fetches all home page data in PARALLEL, then updates the template
+    /// Two-phase home data loading:
+    /// Phase 1: Fetch metadata (fast JSON-RPC), show template with placeholder images immediately
+    /// Phase 2: Load artwork in background, update template when images arrive
     private func refreshHomeTemplateData() {
         let fetchStartTime = CFAbsoluteTimeGetCurrent()
-        os_log(.info, log: logger, "🔄 Starting parallel data fetch for CarPlay home")
+        os_log(.info, log: logger, "🔄 Phase 1: Fetching metadata (no artwork) for CarPlay home")
 
         let group = DispatchGroup()
 
-        // Fetch all data sources in parallel
+        // Phase 1: Fetch metadata only (no artwork downloads)
         group.enter()
-        fetchNewMusicWithArtwork { [weak self] albums in
+        fetchAlbumMetadata(sort: "new") { [weak self] albums in
             self?.cachedNewMusic = albums
-            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ New Music loaded: %d albums", albums.count)
+            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ New Music metadata: %d albums", albums.count)
             group.leave()
         }
 
         group.enter()
-        fetchRandomReleasesWithArtwork { [weak self] albums in
+        fetchAlbumMetadata(sort: "random") { [weak self] albums in
             self?.cachedRandomReleases = albums
-            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Random Releases loaded: %d albums", albums.count)
+            os_log(.debug, log: self?.logger ?? OSLog.default, "✅ Random Releases metadata: %d albums", albums.count)
             group.leave()
         }
 
@@ -1048,33 +1092,30 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             group.leave()
         }
 
-        // TIMEOUT FIX: Use group.wait with timeout instead of group.notify
-        // This prevents infinite loading if network requests hang
-        // Increased to 10s for better reliability on slower networks (artwork loading can be slow)
+        // Phase 1 timeout: metadata fetches should be fast (no images)
         DispatchQueue.global().async { [weak self] in
-            let result = group.wait(timeout: .now() + 10.0)
+            let result = group.wait(timeout: .now() + 5.0)
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
-                if result == .timedOut {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
-                    os_log(.error, log: self.logger, "⚠️ Data fetch TIMED OUT after %.3f seconds - showing partial data", elapsed)
+                let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
 
-                    // Show whatever data we have instead of error
-                    // Only show error if we got absolutely nothing
+                if result == .timedOut {
+                    os_log(.error, log: self.logger, "⚠️ Metadata fetch timed out after %.3f seconds", elapsed)
                     if self.cachedNewMusic.isEmpty && self.cachedRandomReleases.isEmpty && self.cachedPlaylists.isEmpty {
-                        os_log(.error, log: self.logger, "❌ No data loaded at all - showing connection error")
                         self.showConnectionError()
-                    } else {
-                        os_log(.info, log: self.logger, "✅ Partial data available - showing home template")
-                        self.updateHomeTemplateWithData()
+                        return
                     }
-                } else {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - fetchStartTime
-                    os_log(.info, log: self.logger, "🔄 All data fetched in %.3f seconds - updating template", elapsed)
-                    self.updateHomeTemplateWithData()
                 }
+
+                os_log(.info, log: self.logger, "✅ Phase 1 complete in %.3f seconds - showing template with placeholders", elapsed)
+
+                // Show template immediately with placeholder artwork
+                self.updateHomeTemplateWithData()
+
+                // Phase 2: Load artwork in background, then refresh template
+                self.loadArtworkInBackground()
             }
         }
     }
@@ -1853,6 +1894,106 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // TODO: Implement full Random Releases list view
         os_log(.info, log: logger, "📋 Show full Random Releases list")
     }
+
+    // MARK: - Fast Metadata Fetch (No Artwork)
+
+    /// Fetch album metadata without downloading artwork images.
+    /// Returns Album objects with nil artwork for immediate template display.
+    private func fetchAlbumMetadata(sort: String, completion: @escaping ([Album]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion([])
+            return
+        }
+
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["albums", 0, 6, "sort:\(sort)", "tags:ajlqy"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { response in
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any],
+                      let albumsLoop = result["albums_loop"] as? [[String: Any]] else {
+                    completion([])
+                    return
+                }
+
+                let albums = albumsLoop.compactMap { albumData -> Album? in
+                    guard let id = albumData["id"] as? String ?? (albumData["id"] as? Int).map(String.init),
+                          let name = albumData["album"] as? String else {
+                        return nil
+                    }
+                    let artist = albumData["artist"] as? String ?? "Unknown Artist"
+                    let artworkTrackId = albumData["artwork_track_id"] as? String
+                    return Album(id: id, name: name, artist: artist, artworkTrackId: artworkTrackId, artwork: nil)
+                }
+                completion(albums)
+            }
+        }
+    }
+
+    /// Phase 2: Load artwork for cached albums individually.
+    /// Updates the template as each image arrives so artwork pops in progressively.
+    private func loadArtworkInBackground() {
+        os_log(.info, log: logger, "🎨 Phase 2: Loading artwork progressively")
+
+        let settings = SettingsManager.shared
+
+        for (index, album) in cachedNewMusic.enumerated() {
+            loadSingleArtwork(album: album, settings: settings) { [weak self] image in
+                guard let self = self, let image = image else { return }
+                self.cachedNewMusic[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                self.scheduleArtworkTemplateUpdate()
+            }
+        }
+
+        for (index, album) in cachedRandomReleases.enumerated() {
+            loadSingleArtwork(album: album, settings: settings) { [weak self] image in
+                guard let self = self, let image = image else { return }
+                self.cachedRandomReleases[index] = Album(id: album.id, name: album.name, artist: album.artist, artworkTrackId: album.artworkTrackId, artwork: image)
+                self.scheduleArtworkTemplateUpdate()
+            }
+        }
+    }
+
+    /// Debounce template updates so rapid artwork arrivals don't crash CarPlay.
+    /// Waits 0.5s after the last image arrives before refreshing the template.
+    private func scheduleArtworkTemplateUpdate() {
+        artworkUpdateTimer?.invalidate()
+        artworkUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            self?.updateHomeTemplateWithData()
+        }
+    }
+
+    /// Load artwork for a single album. Calls completion on main thread.
+    private func loadSingleArtwork(album: Album, settings: SettingsManager, completion: @escaping (UIImage?) -> Void) {
+        guard let artworkId = album.artworkTrackId else {
+            completion(nil)
+            return
+        }
+
+        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover.jpg"
+        guard let url = URL(string: urlString) else {
+            completion(nil)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5.0
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                if let data = data, error == nil, let image = UIImage(data: data) {
+                    completion(image)
+                } else {
+                    completion(nil)
+                }
+            }
+        }.resume()
+    }
+
+    // MARK: - Legacy Artwork Fetch Methods (used by Phase 2 and drill-down views)
 
     private func fetchNewMusicWithArtwork(completion: @escaping ([Album]) -> Void) {
         guard let coordinator = AudioManager.shared.slimClient else {
