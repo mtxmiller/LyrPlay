@@ -5,6 +5,10 @@ import os.log
 import WebKit
 import MediaPlayer
 
+extension Notification.Name {
+    static let slimProtoDidConnect = Notification.Name("SlimProtoDidConnect")
+}
+
 // MARK: - Recovery Trigger Types
 /// Defines what triggered a reconnection, determining recovery behavior
 enum RecoveryTrigger {
@@ -597,6 +601,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
+
+        // Notify observers (CarPlay uses this for event-driven data loading)
+        NotificationCenter.default.post(name: .slimProtoDidConnect, object: nil)
     }
 
     func slimProtoDidDisconnect(error: Error?) {

@@ -139,7 +139,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Singleton
     static let shared = SettingsManager()
-    
+
     private init() {
         loadSettings()
         if playerMACAddress.isEmpty {
@@ -148,7 +148,7 @@ class SettingsManager: ObservableObject {
         if playerName.isEmpty {
             playerName = "iOS Player"
         }
-        
+
         // UPDATED: Set FLAC-first priority order with StreamingKit
         // REMOVED: preferredFormats initialization - capabilities hardcoded
         saveSettings()
