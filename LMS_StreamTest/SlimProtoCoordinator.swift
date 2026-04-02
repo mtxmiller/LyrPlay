@@ -891,6 +891,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             client.sendStatus("STMs")
         } else {
             os_log(.info, log: logger, "🎵 Gapless track - STMs will be sent at track boundary")
+            // Gapless diagnostics: record buffer state when gapless STRM arrives
+            GaplessDiagnostics.shared.recordGaplessSTRM(buffer: audioManager.getDiagnosticSnapshot())
         }
 
         // Start periodic server time fetching for lock screen updates
@@ -990,6 +992,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
         os_log(.error, log: logger, "📊 This means: All track data decoded, boundary marked, audio still playing from buffer")
 
+        // Gapless diagnostics: record buffer state at decode complete
+        GaplessDiagnostics.shared.recordDecodeComplete(buffer: audioManager.getDiagnosticSnapshot())
+
         // CRITICAL: Mark gapless flag BEFORE sending STMd to prevent race condition!
         // If server responds very quickly (local network), the new STRM could arrive
         // before the next line executes, causing isGapless to be false when it should be true
@@ -1016,6 +1021,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let timestamp = Date()
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
+
+        // Gapless diagnostics: record buffer state when track boundary reached
+        GaplessDiagnostics.shared.recordTrackStarted(buffer: audioManager.getDiagnosticSnapshot())
 
         // UNIFIED RECOVERY: Increment track index on boundary (LMS_StreamTest-6lb)
         // This works even when disconnected - ensures our local index tracks gapless transitions

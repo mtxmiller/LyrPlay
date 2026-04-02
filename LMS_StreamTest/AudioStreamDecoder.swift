@@ -1258,6 +1258,17 @@ class AudioStreamDecoder {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯 PREDICTION: New audio should play at %.2f seconds (drift: %.3f sec)",
                predictedPlaybackTime, driftPrediction)
 
+        // Gapless diagnostics: record buffer breakdown at boundary mark
+        let snapshot = GaplessDiagnostics.BufferSnapshot(
+            playbackBuffer: Int(playbackBuffered), queueSize: queuedAmount,
+            playbackPosition: playbackPos, sampleRate: sampleRate, channels: channels
+        )
+        GaplessDiagnostics.shared.recordBoundaryMarked(
+            buffer: snapshot,
+            boundaryPosition: trackBoundaryPosition!,
+            secondsUntilBoundary: secondsUntilBoundary
+        )
+
         // Set sync callback for this boundary
         // CRITICAL: Use BASS_SYNC_POS without MIXTIME so callback fires when audio is HEARD, not when mixed!
         // MIXTIME would fire ~0.5s early (when audio reaches mix buffer, ahead of playback)
@@ -1591,6 +1602,25 @@ struct BufferStats {
     let bufferedBytes: Int
     let playbackPosition: UInt64
     let bufferPercentage: Int
+}
+
+/// Detailed buffer snapshot for gapless diagnostics
+extension AudioStreamDecoder {
+    func getDiagnosticSnapshot() -> GaplessDiagnostics.BufferSnapshot {
+        guard pushStream != 0 else {
+            return GaplessDiagnostics.BufferSnapshot(
+                playbackBuffer: 0, queueSize: 0, playbackPosition: 0,
+                sampleRate: sampleRate, channels: channels
+            )
+        }
+        let pb = Int(BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
+        let q = Int(BASS_StreamPutData(pushStream, nil, 0))
+        let pos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        return GaplessDiagnostics.BufferSnapshot(
+            playbackBuffer: pb, queueSize: q, playbackPosition: pos,
+            sampleRate: sampleRate, channels: channels
+        )
+    }
 }
 
 /// Track metadata for boundary updates
