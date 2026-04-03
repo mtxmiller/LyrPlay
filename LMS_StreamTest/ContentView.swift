@@ -175,6 +175,9 @@ struct ContentView: View {
             // App open recovery should only be triggered by willEnterForegroundNotification
             // Having it in both onAppear and willEnterForeground caused double execution
         }
+        .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
+            pushStreamInfoToWebView()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             isAppInBackground = true
         }
@@ -358,6 +361,62 @@ struct ContentView: View {
     // MARK: - Helper Functions
     private func getLyrPlayPlayerName() -> String {
         return settings.effectivePlayerName
+    }
+
+    // MARK: - Stream Info WebView Bridge
+    private func pushStreamInfoToWebView() {
+        guard let webView = webView else { return }
+
+        // Clear stream text when no info available (between tracks, disconnected)
+        guard let streamInfo = audioManager.audioPlayer.currentStreamInfo else {
+            webView.evaluateJavaScript("window.lyrplayStreamText = null;", completionHandler: nil)
+            return
+        }
+
+        // Sanitize format string for safe JS interpolation
+        let safeFormat = streamInfo.format
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+
+        let js = """
+        (function() {
+            var parts = [];
+            parts.push('\(safeFormat)');
+            parts.push('\(streamInfo.sampleRate / 1000)kHz');
+            parts.push('\(streamInfo.bitDepth)bit');
+            if (\(streamInfo.bitrate) > 0) parts.push(Math.round(\(streamInfo.bitrate)) + 'kbps');
+            window.lyrplayStreamText = parts.join(', ');
+
+            // Start polling replacer if not already running
+            if (!window.lyrplayTechReplacer) {
+                window.lyrplayTechReplacer = setInterval(function() {
+                    if (!window.lyrplayStreamText) return;
+                    // Mobile/full now playing view
+                    var npTech = document.querySelector('.np-tech');
+                    if (npTech) {
+                        var text = npTech.textContent;
+                        // Preserve track count (" · 11 of 16") if present
+                        var trackCount = '';
+                        var sepIdx = text.indexOf(' \\u2022 ');
+                        
+                        if (sepIdx >= 0) trackCount = text.substring(sepIdx);
+                        var target = window.lyrplayStreamText + trackCount;
+                        if (npTech.textContent !== target) {
+                            npTech.textContent = target;
+                        }
+                    }
+                    // Desktop bar view
+                    var npBar = document.querySelector('.np-bar-tech');
+                    if (npBar && npBar.textContent.length > 0) {
+                        if (npBar.textContent !== window.lyrplayStreamText) {
+                            npBar.textContent = window.lyrplayStreamText;
+                        }
+                    }
+                }, 1000);
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     // MARK: - Material Integration URL
@@ -748,6 +807,12 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             os_log(.info, log: logger, "Finished loading Material interface")
 
+            // Skip injection for about:blank and non-Material pages
+            guard let url = webView.url, url.absoluteString != "about:blank" else {
+                os_log(.debug, log: logger, "⏭️ Skipping JS injection for non-Material page")
+                return
+            }
+
             // First, check if this is an error page (401 auth error, etc.)
             webView.evaluateJavaScript("document.title") { title, error in
                 if let title = title as? String {
@@ -794,23 +859,35 @@ struct WebView: UIViewRepresentable {
                         return originalOpen.call(this, url, name, specs);
                     };
 
-                    // Also handle direct location changes
-                    const originalLocation = window.location;
-                    Object.defineProperty(window, 'location', {
-                        get: function() {
-                            return originalLocation;
-                        },
-                        set: function(url) {
-                            if (typeof url === 'string' && url.startsWith('lmsstream://')) {
-                                console.log('LyrPlay: Handling location change to:', url);
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
-                                    window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
-                                }
-                                return;
-                            }
-                            originalLocation.href = url;
+                    // Note: Direct location changes to lmsstream:// are handled by
+                    // the native WKNavigationDelegate (decidePolicyFor) which intercepts
+                    // the URL at the navigation level. No JS override needed.
+
+                    // Rename "Application" to "LyrPlay Settings" in sidebar menu.
+                    // Material renders the sidebar once into DOM (v-show, not v-if),
+                    // so we poll until the text node exists and replace it directly.
+                    if (typeof TB_APP_SETTINGS !== 'undefined') {
+                        TB_APP_SETTINGS.stitle = 'LyrPlay Settings';
+                        TB_APP_SETTINGS.title = 'LyrPlay Settings';
+                    }
+                    var renameChecks = 0;
+                    var renameTimer = setInterval(function() {
+                        renameChecks++;
+                        // Also keep the global updated in case Vue re-reads it
+                        if (typeof TB_APP_SETTINGS !== 'undefined') {
+                            TB_APP_SETTINGS.stitle = 'LyrPlay Settings';
+                            TB_APP_SETTINGS.title = 'LyrPlay Settings';
                         }
-                    });
+                        // Find and replace in DOM - check all potential text containers
+                        var els = document.querySelectorAll('.v-list-tile__title, .v-list-tile-title');
+                        for (var i = 0; i < els.length; i++) {
+                            if (els[i].textContent.trim() === 'Application') {
+                                els[i].textContent = 'LyrPlay Settings';
+                                console.log('LyrPlay: Renamed Application -> LyrPlay Settings in DOM');
+                            }
+                        }
+                        if (renameChecks > 30) clearInterval(renameTimer);
+                    }, 500);
 
                     console.log('LyrPlay: Material settings handler injected successfully');
                 })();
