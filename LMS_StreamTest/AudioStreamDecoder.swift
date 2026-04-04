@@ -1227,41 +1227,40 @@ class AudioStreamDecoder {
 
     /// Mark current buffer position as track boundary for gapless transition
     private func markTrackBoundary() {
-        // CRITICAL FIX: Don't use write position - it's stale by the time sync is registered!
-        // Instead, predict exactly when new track audio will start playing
-        // Formula: current_playback_position + total_buffered_bytes
+        // SQUEEZELITE-STYLE: Use totalBytesPushed as the boundary position.
+        // This is our "writep" — the exact byte offset where Track B begins in the push stream.
+        // BASS_SYNC_POS fires when BASS_ChannelGetPosition (our "readp") reaches this value.
+        // Previous approach predicted boundary = playbackPos + playbackBuffer + queue,
+        // which sampled 3 non-atomic BASS APIs and drifted ~42s with large queues.
+        trackBoundaryPosition = totalBytesPushed
 
         let playbackPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
         let playbackBuffered = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
-        let queuedAmount = Int(BASS_StreamPutData(pushStream, nil, 0))  // Get current queue size without adding data
+        let queuedAmount = Int(BASS_StreamPutData(pushStream, nil, 0))
         let totalBuffered = queuedAmount + Int(playbackBuffered)
 
-        // EXACT: Boundary = when new track's first sample will be heard
-        trackBoundaryPosition = UInt64(playbackPos + UInt64(totalBuffered))
+        let bytesPerSec = sampleRate * channels * 4
+        let boundarySeconds = Double(trackBoundaryPosition!) / Double(bytesPerSec)
+        let playbackSeconds = Double(playbackPos) / Double(bytesPerSec)
+        let oldPredicted = UInt64(playbackPos + UInt64(totalBuffered))
 
-        let boundarySeconds = Double(trackBoundaryPosition!) / Double(sampleRate * channels * 4)
-        let playbackSeconds = Double(playbackPos) / Double(sampleRate * channels * 4)
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 TRACK BOUNDARY MARKED at PREDICTED position: %llu bytes (%.2f seconds)", trackBoundaryPosition!, boundarySeconds)
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Current playback position: %llu bytes (%.2f seconds)", playbackPos, playbackSeconds)
-
-        // Calculate how long until boundary is reached
-        let bytesUntilBoundary = Int64(trackBoundaryPosition!) - Int64(playbackPos)
-        let secondsUntilBoundary = Double(bytesUntilBoundary) / Double(sampleRate * channels * 4)
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Playback will reach boundary in %.2f seconds (%lld bytes ahead)", secondsUntilBoundary, bytesUntilBoundary)
-
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 BUFFER AT BOUNDARY MARK: playback=%d KB, queue=%d KB, total=%d KB (%.1f MB)",
+        os_log(.error, log: logger, "[BOUNDARY] 🎯 BOUNDARY = totalBytesPushed: %llu (%.2fs)", trackBoundaryPosition!, boundarySeconds)
+        os_log(.error, log: logger, "[BOUNDARY] 📊 playbackPos: %llu (%.2fs), old predicted would be: %llu (delta: %lld bytes)",
+               playbackPos, playbackSeconds, oldPredicted, Int64(oldPredicted) - Int64(trackBoundaryPosition!))
+        os_log(.error, log: logger, "[BOUNDARY] 📊 buffer: pb=%dKB, queue=%dKB, total=%dKB (%.1fMB)",
                playbackBuffered / 1024, queuedAmount / 1024, totalBuffered / 1024, Double(totalBuffered) / 1_048_576)
 
-        // This should now be accurate - boundary = current + buffer
-        let predictedPlaybackTime = Double(playbackPos + UInt64(totalBuffered)) / Double(sampleRate * channels * 4)
-        let driftPrediction = predictedPlaybackTime - boundarySeconds
-        os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯 PREDICTION: New audio should play at %.2f seconds (drift: %.3f sec)",
-               predictedPlaybackTime, driftPrediction)
+        let bytesUntilBoundary = Int64(trackBoundaryPosition!) - Int64(playbackPos)
+        let secondsUntilBoundary = Double(bytesUntilBoundary) / Double(bytesPerSec)
+        os_log(.error, log: logger, "[BOUNDARY] 📊 ETA: %.2fs (%lld bytes ahead of playback)", secondsUntilBoundary, bytesUntilBoundary)
 
         // Gapless diagnostics: record buffer breakdown at boundary mark
+        let rawRenderPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE | BASS_POS_DECODE))
+        let renderPos = rawRenderPos == UInt64.max ? playbackPos : rawRenderPos
         let snapshot = GaplessDiagnostics.BufferSnapshot(
             playbackBuffer: Int(playbackBuffered), queueSize: queuedAmount,
-            playbackPosition: playbackPos, sampleRate: sampleRate, channels: channels
+            playbackPosition: playbackPos, renderPosition: renderPos,
+            sampleRate: sampleRate, channels: channels
         )
         GaplessDiagnostics.shared.recordBoundaryMarked(
             buffer: snapshot,
@@ -1610,15 +1609,17 @@ extension AudioStreamDecoder {
         guard pushStream != 0 else {
             return GaplessDiagnostics.BufferSnapshot(
                 playbackBuffer: 0, queueSize: 0, playbackPosition: 0,
-                sampleRate: sampleRate, channels: channels
+                renderPosition: 0, sampleRate: sampleRate, channels: channels
             )
         }
         let pb = Int(BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
         let q = Int(BASS_StreamPutData(pushStream, nil, 0))
         let pos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+        let rawRpos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE | BASS_POS_DECODE))
+        let rpos = rawRpos == UInt64.max ? pos : rawRpos  // Fallback if BASS_POS_DECODE unsupported
         return GaplessDiagnostics.BufferSnapshot(
             playbackBuffer: pb, queueSize: q, playbackPosition: pos,
-            sampleRate: sampleRate, channels: channels
+            renderPosition: rpos, sampleRate: sampleRate, channels: channels
         )
     }
 }

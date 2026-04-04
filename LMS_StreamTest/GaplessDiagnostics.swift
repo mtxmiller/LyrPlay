@@ -18,23 +18,37 @@ class GaplessDiagnostics {
     struct BufferSnapshot {
         let playbackBuffer: Int      // BASS_DATA_AVAILABLE (bytes)
         let queueSize: Int           // BASS_StreamPutData(nil, 0) (bytes)
-        let playbackPosition: UInt64 // BASS_ChannelGetPosition (bytes)
+        let playbackPosition: UInt64 // BASS_ChannelGetPosition BASS_POS_BYTE (bytes)
+        let renderPosition: UInt64   // BASS_ChannelGetPosition BASS_POS_DECODE (bytes)
         let sampleRate: Int
         let channels: Int
 
         var totalBuffered: Int { playbackBuffer + queueSize }
 
+        var bytesPerSecond: Int { sampleRate * channels * 4 }
+
         var secondsRemaining: Double {
-            let bytesPerSecond = sampleRate * channels * 4 // float32
             guard bytesPerSecond > 0 else { return 0 }
             return Double(totalBuffered) / Double(bytesPerSecond)
+        }
+
+        var playbackSeconds: Double {
+            guard bytesPerSecond > 0 else { return 0 }
+            return Double(playbackPosition) / Double(bytesPerSecond)
+        }
+
+        var renderSeconds: Double {
+            guard bytesPerSecond > 0 else { return 0 }
+            return Double(renderPosition) / Double(bytesPerSecond)
         }
 
         var formatted: String {
             let pbKB = playbackBuffer / 1024
             let qKB = queueSize / 1024
             let totalKB = totalBuffered / 1024
-            return "playback=\(pbKB)KB, queue=\(qKB)KB, total=\(totalKB)KB (\(String(format: "%.1f", secondsRemaining))s)"
+            let renderDelta = Int64(renderPosition) - Int64(playbackPosition)
+            let renderDeltaMs = bytesPerSecond > 0 ? Double(renderDelta) / Double(bytesPerSecond) * 1000 : 0
+            return "pos=\(String(format: "%.1f", playbackSeconds))s, render=\(String(format: "%.1f", renderSeconds))s (Δ\(String(format: "%.0f", renderDeltaMs))ms), pb=\(pbKB)KB, q=\(qKB)KB, total=\(totalKB)KB (\(String(format: "%.1f", secondsRemaining))s)"
         }
     }
 
@@ -49,13 +63,29 @@ class GaplessDiagnostics {
         let id: Int
         let startTime: Date
         var events: [TransitionEvent] = []
+        var boundaryPosition: UInt64 = 0       // BASS_SYNC_POS target
+        var predictedEtaSeconds: Double = 0    // ETA at time boundary was marked
 
         var stmdTime: Date? { events.first(where: { $0.name == "STMd" })?.timestamp }
         var stmsTime: Date? { events.first(where: { $0.name == "STMs" })?.timestamp }
+        var boundaryTime: Date? { events.first(where: { $0.name == "Boundary marked" })?.timestamp }
 
         var totalGapSeconds: Double? {
             guard let stmd = stmdTime, let stms = stmsTime else { return nil }
             return stms.timeIntervalSince(stmd)
+        }
+
+        /// Actual time from boundary mark to STMs
+        var actualBoundaryToStms: Double? {
+            guard let bm = boundaryTime, let stms = stmsTime else { return nil }
+            return stms.timeIntervalSince(bm)
+        }
+
+        /// How early/late STMs fired vs prediction (negative = early)
+        var boundaryDriftSeconds: Double? {
+            guard let actual = actualBoundaryToStms else { return nil }
+            guard predictedEtaSeconds > 0 else { return nil }
+            return actual - predictedEtaSeconds
         }
     }
 
@@ -85,6 +115,8 @@ class GaplessDiagnostics {
     /// Call when track boundary is marked in AudioStreamDecoder
     func recordBoundaryMarked(buffer: BufferSnapshot, boundaryPosition: UInt64, secondsUntilBoundary: Double) {
         queue.sync {
+            current?.boundaryPosition = boundaryPosition
+            current?.predictedEtaSeconds = secondsUntilBoundary
             let extra = "boundary=\(boundaryPosition), eta=\(String(format: "%.1f", secondsUntilBoundary))s"
             appendEvent(name: "Boundary marked", buffer: buffer, extra: extra)
         }
@@ -134,6 +166,13 @@ class GaplessDiagnostics {
             for record in all {
                 let gap = record.totalGapSeconds.map { String(format: "%.1fs", $0) } ?? "in progress"
                 lines.append("Transition #\(record.id) — \(formatDate(record.startTime)) — gap: \(gap)")
+
+                // Show boundary drift analysis if we have data
+                if let drift = record.boundaryDriftSeconds {
+                    let direction = drift < 0 ? "EARLY" : "LATE"
+                    lines.append("  ⚡ DRIFT: \(String(format: "%.1f", abs(drift)))s \(direction) (predicted \(String(format: "%.1f", record.predictedEtaSeconds))s, actual \(String(format: "%.1f", record.actualBoundaryToStms!))s)")
+                    lines.append("  ⚡ Boundary target: \(record.boundaryPosition) bytes")
+                }
 
                 for event in record.events {
                     let offset = event.timestamp.timeIntervalSince(record.startTime)
