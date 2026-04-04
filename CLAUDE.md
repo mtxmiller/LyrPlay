@@ -11,13 +11,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **LyrPlay** (formerly LMS_StreamTest) is an iOS SwiftUI application that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). The app acts as a Squeezebox player replacement, allowing iOS devices to connect to LMS instances and stream high-quality audio with native FLAC support.
 
 ### Current Status: **LIVE ON APP STORE** 🌟
-- ✅ **Version 1.5 Live on App Store** - StreamingKit-based stable release with major stability improvements
-- ✅ **Version 1.7 in TestFlight** - CarPlay Browse + External DAC support + WAV format + Enhanced gapless playback
-- ✅ **CBass Audio Framework Migration COMPLETE** - Superior FLAC, Opus, and multi-format support with BASS auto-managed audio sessions
+- ✅ **Version 1.7.6 Live on App Store** - Full-featured release with CBass audio, CarPlay Browse, Siri, gapless playback
+- ✅ **Version 1.7.7 in Development** - Gapless playback refinements and stream info overlay enhancements
+- ✅ **CBass Audio Framework** - BASS-powered audio engine with FLAC, AAC, MP4A, MP3, Opus, OGG, WAV support
 - ✅ **Gapless Playback** - True gapless transitions using BASS push stream architecture
-- ✅ **CarPlay Support** - Phase 1 complete with Now Playing template and lock screen recovery integration
+- ✅ **CarPlay Support** - Full Now Playing + Browse interface with playlist navigation and artwork
+- ✅ **Siri Voice Commands** - "Hey Siri, play [artist] on LyrPlay" via INPlayMediaIntent
 - ✅ **macOS Compatibility** - iPad app runs on macOS via "Designed for iPad" setting
-- ✅ **Enhanced Audio Format Support** - FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS library integration
+- ✅ **Enhanced Audio Format Support** - FLAC, AAC, MP4A, MP3, Opus, OGG, WAV with native BASS library integration
 - ✅ **Improved Interruption Handling** - Fixed phone call interruptions with proper server pause/resume commands
 - ✅ **Mobile Transcode Capability** - Optional server-side transcoding for mobile data optimization
 - ✅ **Broader Device Support** - iOS 15.6+ deployment target for compatibility with older devices
@@ -102,28 +103,18 @@ The audio system is built on the CBass framework with BASS-managed audio session
 LyrPlay implements CarPlay support using iOS scene delegation architecture:
 
 #### **Scene Delegate Architecture**
-- **AppDelegate**: Routes scene connections based on session role (main app vs. CarPlay)
-- **SceneDelegate**: Manages main app window using UIHostingController with SwiftUI ContentView
+- **AppDelegate**: Routes scene connections for CarPlay; also handles Siri intents via `SiriMediaHandler`
 - **CarPlaySceneDelegate**: Manages CarPlay interface using CPTemplateApplicationSceneDelegate
-- **SwiftUI Integration**: Uses `@UIApplicationDelegateAdaptor` to bridge SwiftUI App lifecycle with UIKit scene delegates
+- **SwiftUI Integration**: Main app window managed by SwiftUI `@main` / `WindowGroup`; uses `@UIApplicationDelegateAdaptor` to bridge to AppDelegate for CarPlay and Siri
 
 #### **Scene Configuration** (Info.plist)
+The main app window is managed by SwiftUI (`@main` / `WindowGroup`). Only the CarPlay scene is configured in Info.plist:
 ```xml
 <key>UIApplicationSceneManifest</key>
 <dict>
     <key>UISceneConfigurations</key>
     <dict>
-        <!-- Main app scene -->
-        <key>UIWindowSceneSessionRoleApplication</key>
-        <array>
-            <dict>
-                <key>UISceneConfigurationName</key>
-                <string>Default Configuration</string>
-                <key>UISceneDelegateClassName</key>
-                <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
-            </dict>
-        </array>
-        <!-- CarPlay scene -->
+        <!-- CarPlay scene only - main app uses SwiftUI WindowGroup -->
         <key>CPTemplateApplicationSceneSessionRoleApplication</key>
         <array>
             <dict>
@@ -146,11 +137,11 @@ LyrPlay implements CarPlay support using iOS scene delegation architecture:
 - **Remote Commands**: Play/pause/next/previous via PlaybackSessionController
 - **Lock Screen Recovery**: CarPlay play button triggers same recovery as lock screen (45s threshold)
 
-**Phase 2 - Browse Interface (PLANNED)**:
-- CPListTemplate for library/playlist browsing
-- LMS JSON-RPC integration for metadata
-- Search functionality
-- Tab bar navigation
+**Phase 2 - Browse Interface (COMPLETED)**:
+- **CPListTemplate**: Library and playlist browsing with artwork
+- **LMS JSON-RPC**: Metadata integration for browse content
+- **CarPlay Home**: Playlists, refresh button, album artwork display
+- **Single-pass loading**: Optimized CarPlay home loading with artwork
 
 #### **CarPlay Entitlements**
 ```xml
@@ -238,7 +229,7 @@ This unified approach eliminates timing conflicts and provides consistent behavi
 
 ### Key Dependencies
 - **CocoaAsyncSocket**: Network socket communication for SlimProto (via CocoaPods)
-- **CBass/BASS**: BASS audio library (Bass, BassFLAC, BassOpus) integrated via bridging header
+- **CBass/BASS**: BASS audio library (bass, bassflac, bassopus xcframeworks) integrated via bridging header
 - **WebKit**: Embedded Material LMS interface
 - **Build Automation**: Automated CBundleVersion fixes for App Store compliance
 
@@ -347,8 +338,8 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Current Version**: 1.7 in TestFlight (External DAC + WAV + Enhanced gapless)
-- **Live Version**: 1.5 (StreamingKit-based, App Store)
+- **Current Version**: 1.7.7 build 5 in development (gapless refinements + stream info overlay)
+- **Live Version**: 1.7.6 (App Store - CBass audio, CarPlay Browse, Siri, gapless playback)
 
 ## Testing Structure
 
@@ -390,7 +381,7 @@ Comprehensive error handling with user-friendly recovery:
 - **iOS 15.6+** deployment target (broad device compatibility)
 - **Xcode 16.0+** for SwiftUI support and modern project format
 - **CocoaPods** for CocoaAsyncSocket dependency
-- **BASS audio library** integrated via Swift bridging header (libbass.a, libbassmix.a, libbassflac.a, libbassopus.a)
+- **BASS audio library** integrated via Swift bridging header (bass.xcframework, bassflac.xcframework, bassopus.xcframework)
 
 ### Key Build Settings
 - Background modes: Audio, fetch, processing
@@ -402,26 +393,26 @@ Comprehensive error handling with user-friendly recovery:
 **LyrPlay is now a stable, production-ready App Store application** with active development continuing on advanced features:
 
 ### Completed Core Platform ✅
-- **Stable App Store presence** - Version 1.5 live on App Store
-- **CBass Audio Framework COMPLETE** - Full migration from StreamingKit to high-performance BASS library
+- **Stable App Store presence** - Version 1.7.6 live on App Store
+- **CBass Audio Framework** - BASS-powered audio engine (FLAC, AAC, MP4A, MP3, Opus, OGG, WAV)
 - **Gapless Playback** - True gapless transitions using BASS push stream architecture with enhanced sync reliability
-- **BASS Auto-Managed Sessions** - Eliminated manual AVAudioSession management, BASS handles all scenarios automatically
-- **CarPlay Phase 1 COMPLETE** - Now Playing template with unified lock screen recovery
+- **BASS Auto-Managed Sessions** - BASS handles all AVAudioSession lifecycle automatically
+- **CarPlay Complete** - Now Playing template + Browse interface with playlist navigation and artwork
+- **Siri Voice Commands** - INPlayMediaIntent handled in main app via SiriMediaHandler
 - **External DAC Support** - Output device metrics display with sample rate monitoring for hardware audio interfaces
 - **WAV Format Support** - Lossless WAV playback with seeking capability (Qobuz compatibility)
 - **Unified Gapless Architecture** - All formats use push stream architecture for seamless playback
 - **Real-Time Stream Info** - Live display of current stream format, bitrate, and buffer status
 - **Universal network compatibility** - Server discovery works on all network configurations
-- **Enhanced audio streaming** - Superior FLAC, Opus, and multi-format support with native BASS codecs
 - **Professional UI Experience** - LyrPlay loading screen with animated branding and Material integration
 - **Background audio** - Full iOS background modes with lock screen integration
 - **iOS 15.6+ Support** - Broad device compatibility from iOS 15.6 through latest iOS
 
-### Active Development Areas 🔧
-- **CarPlay Phase 2** - Browse interface with library/playlist navigation (in progress)
+### Active Development Areas 🔧 (v1.7.7)
+- **Gapless Playback Refinement** - Fixing premature CarPlay/server UI sync during transitions
+- **Stream Info Overlay** - Hardware output rate display and decoder throttle improvements
 - **FLAC Seeking Enhancement** - Continued refinement of FLAC playback with WAV fallback option
-- **Performance Optimizations** - Buffer management and gapless transition refinements
-- **External DAC Optimization** - Enhanced hardware audio interface support and monitoring
+- **Performance Optimizations** - Buffer management and transition timing refinements
 
 ### Technical Excellence
 The codebase follows modern iOS development practices with comprehensive error handling, proper async/await patterns, and extensive logging for production debugging. All major user-reported issues from GitHub have been resolved.
@@ -446,25 +437,16 @@ The codebase follows modern iOS development practices with comprehensive error h
 - **Testing Required**: New BASSFLAC threading fix may resolve seeking issues
 - **Affects**: Only FLAC format; MP3, AAC, Opus, OGG, WAV seeking works normally
 
-### CBass Migration Benefits ✅
-- **Problem**: StreamingKit limitations with FLAC seeking and multi-format support
-- **Solution**: Complete migration to BASS audio library via bridging header
-- **Benefits**:
-  - Gapless playback with push stream architecture
-  - Enhanced Opus codec support
-  - Better multi-format audio handling (except FLAC seeking)
-  - BASS auto-managed audio sessions
-  - Improved performance and reliability
-  - App Store validation compliance
-- **Status**: **COMPLETED** - CBass migration fully implemented and tested
-
-### SiriKit vs App Intents
-LyrPlay uses SiriKit `INPlayMediaIntent` for iOS 15.6+ compatibility. Apple still recommends SiriKit for media playback domains. When minimum deployment target reaches iOS 16+, evaluate migration to App Intents framework.
+### Siri Voice Commands (v1.7.6) ✅
+- **Implementation**: INPlayMediaIntent handled in main app via `SiriMediaHandler` class in AppDelegate
+- **Architecture**: AppDelegate implements `application(_:handlerFor:)` returning `SiriMediaHandler`
+- **Note**: No Intents Extension target exists; intent routing is handled entirely in the main app (App Store validation constraint)
+- **Future**: When minimum deployment target reaches iOS 16+, evaluate migration to App Intents framework
 
 ### Platform Compatibility
 - **macOS**: Supported via "Designed for iPad" compatibility mode
 - **visionOS**: Not currently supported
-- **CarPlay**: Phase 1 complete (Now Playing template), Phase 2 browse interface planned
+- **CarPlay**: Complete - Now Playing template + Browse interface with playlist navigation
 - **Siri**: Voice commands via INPlayMediaIntent ("Hey Siri, play [artist] on LyrPlay")
 - **Background Limitations**: Standard iOS background audio restrictions apply
 
@@ -473,19 +455,38 @@ LyrPlay uses SiriKit `INPlayMediaIntent` for iOS 15.6+ compatibility. Apple stil
 When updating the application, reference the following source code repositories for implementation details and protocol understanding:
 
 ### Available Reference Sources
-- **slimserver** folder: Complete Lyrion Music Server source code for protocol understanding
-- **squeezelite** folder: Reference Squeezebox player implementation
-- **lms-material** folder: Material skin web interface source code
-- **CBass Framework**: Swift Package Manager integration of BASS audio library
-- **BASS Documentation**: https://github.com/Treata11/CBass - CBass Swift wrapper documentation
 
-These repositories provide definitive reference for:
-- SlimProto protocol implementation
-- Audio streaming protocols and formats
-- Server communication patterns
-- Material skin metadata handling approaches
+**Always consult these reference repos** when implementing or debugging features. They are the authoritative source for understanding server behavior, protocol details, and UI patterns:
+
+- **slimserver** (`./slimserver/`): Complete Lyrion Music Server source code. **Consult for**: SlimProto protocol commands, server-side playlist/streaming logic, JSON-RPC API behavior, transcoding rules, player management
+- **squeezelite** (`./squeezelite/`): Reference C implementation of a Squeezebox player. **Consult for**: SlimProto client implementation patterns, HELO/STAT/STRm message handling, audio buffer management, decode/output pipeline architecture, gapless transition logic
+- **lms-material** (`~/Downloads/lms-material/`): Material skin web interface source code. **Consult for**: LMS JSON-RPC API usage patterns, metadata handling, playlist/browse UI interaction with server, WebView JavaScript injection patterns
+- **CBass Framework**: Swift Package Manager integration of BASS audio library
+- **BASS API Documentation** (`./docs/bass_documentation/`): Complete HTML reference for all BASS functions, configs, and types. Key files: `BASS_StreamCreate.html`, `BASS_StreamPutData.html`, `BASS_ChannelSetSync.html`, `BASS_CONFIG_IOS_SESSION.html`, `bassflac.html`, `bassopus.html`
+- **CBass Swift Wrapper**: https://github.com/Treata11/CBass - Swift package wrapping BASS library
+- **Project docs** (`./docs/`): Implementation plans, analysis documents, and architecture notes from past development work (authentication, CarPlay, gapless, FLAC seeking, monetization, squeezelite analysis, etc.)
+- **Obsidian Wiki**: `/Users/ericmiller/Library/Mobile Documents/iCloud~md~obsidian/Documents/Eric's personal/LyrPlay Dev/` - Development wiki with architecture notes, version summaries, and implementation analysis
+
+**When to use these references:**
+- Implementing or modifying SlimProto commands → check squeezelite for the C reference, slimserver for server expectations
+- Working with LMS JSON-RPC API → check lms-material for proven call patterns and response handling
+- Debugging server/player interaction → cross-reference all three to understand the full communication flow
+- Adding Material WebView features → check lms-material for JavaScript APIs and UI patterns
 
 ## Recent Updates and Improvements
+
+### Version 1.7.7 - Gapless Refinement Release (in development) 🔧
+- **Gapless Boundary Fix**: Use write position instead of prediction for accurate transitions
+- **Decoder Throttle**: Check total buffer (playback + queue) for proper flow control
+- **Stream Info Overlay**: Show actual hardware output rate, fix Material JS injection
+- **CarPlay/Server Sync**: Diagnostics for premature UI sync during gapless transitions
+
+### Version 1.7.6 - Siri & CarPlay Browse Release (March 2026) ✅
+- **Siri Voice Commands**: INPlayMediaIntent handled in main app via SiriMediaHandler
+- **CarPlay Browse Interface**: Full playlist browsing with artwork and refresh
+- **CarPlay Home Optimization**: Single-pass loading with artwork display
+- **WebView Performance**: Proper cache policy and progressive display
+- **Stability Fixes**: CarPlay stability improvements, dead Siri extension code cleanup
 
 ### Version 1.7 - External DAC & Format Enhancement Release (December 2025) ✅
 - **BASSFLAC Threading Fix**: Updated to BASSFLAC 2.4.17.1 with asynchronous frame decoding to fix `max_framesize=0` early termination issues in transcoded FLAC streams
@@ -503,28 +504,16 @@ These repositories provide definitive reference for:
 - **Removed Reconnect Bit**: Simplified reconnection strategy, playlist jump recovery now handles all scenarios
 
 ### Version 1.6 - CBass Migration & CarPlay Release (November 2025) ✅
-- **Complete Audio Engine Upgrade**: Migration from StreamingKit to BASS library via bridging header
+- **Complete Audio Engine Upgrade**: Migration to BASS audio library via bridging header
 - **Gapless Playback**: True gapless transitions using BASS push stream architecture
-- **BASS Auto-Managed Sessions**: Removed manual AVAudioSession management, BASS handles all scenarios automatically
-- **CarPlay Phase 1**: Now Playing template with scene delegate architecture and unified lock screen recovery
-- **Enhanced FLAC Support**: Native BASS library integration with superior codec handling for all bit depths
-- **Professional Loading Screen**: LyrPlay branded loading experience with animations
+- **BASS Auto-Managed Sessions**: Removed manual AVAudioSession management
+- **CarPlay Phase 1**: Now Playing template with scene delegate architecture
+- **Enhanced FLAC Support**: Native BASS library integration for all bit depths
 - **iOS 15.6+ Compatibility**: Broad device support from iOS 15.6 onwards
-- **Mobile Transcode Support**: Optional server-side transcoding for data optimization
-- **App Store Ready**: All framework validation issues resolved with automated build fixes
-- **Repository Cleanup**: Organized codebase with GitHub sponsorship support
 
-### Version 1.5 - Major Stability Release (January 2025) ✅
-- **Server Discovery Revolution**: Complete rewrite of UDP discovery protocol with universal network compatibility
-- **Volume Recovery Fixed**: Eliminated race conditions in app-open recovery system with dual-backup approach
-- **Mobile-First Defaults**: FLAC disabled by default for better mobile performance and data usage optimization
-- **New App Icon**: Fresh, modern design with App Store compliance (no transparency)
-- **Enhanced Stability**: Comprehensive bug fixes and reliability improvements
-
-### Version 1.4 - Initial App Store Release (2024) ✅  
-- **First public release**: Established LyrPlay as a premium Squeezebox replacement on iOS App Store
-- **Stable foundation**: Core SlimProto implementation with Material UI integration
-- **FLAC support**: Native high-quality audio streaming with StreamingKit integration
+### Earlier Versions (v1.4-1.5)
+- **v1.5** (January 2025): Server discovery rewrite, volume recovery fixes, mobile-first defaults
+- **v1.4** (2024): Initial App Store release with core SlimProto and Material UI
 
 ### Metadata Simplification (2024)
 - **Simplified metadata tags**: Reduced from 35+ tags to Material skin's minimal set for efficiency
@@ -532,12 +521,10 @@ These repositories provide definitive reference for:
 - **Duration preservation**: Fixed radio stream duration loss during metadata refresh
 - **Conditional updates**: Only update metadata fields when server explicitly provides them
 
-### Recovery Methods Enhancement
-- **Lock screen recovery**: Simple position recovery when disconnected and user presses lock screen play
-- **Custom position banking**: Server-side player preferences storage for app open recovery with silent server-muted recovery
+### Recovery Methods
+- **Lock screen recovery**: Position recovery when disconnected and user presses lock screen play
+- **Playlist jump recovery**: Unified recovery mechanism for all scenarios (lock screen, CarPlay, backgrounding)
 - **Connection state management**: Enhanced reconnection strategies with proper state handling
-- **Server time synchronization**: Refined timing mechanisms for gapless playback
-- **Legacy app open recovery**: Removed and replaced with custom position banking system to prevent conflicts
 
 ### Previous Approaches (Historical Reference)
 
@@ -553,67 +540,15 @@ While elegant in theory, the reconnect bit approach proved unreliable in product
 
 **Current Approach:** LyrPlay now relies on playlist jump recovery with position banking for all reconnection scenarios, providing consistent and reliable playback restoration across all conditions.
 
-### Major Fixes Completed
-
-#### CBass Audio Framework Migration - COMPLETED ✅
-- **Previous Issue**: StreamingKit error 2 (STKAudioPlayerErrorStreamParseBytesFailed) when seeking into FLAC files
-- **Root Cause**: StreamingKit limitations with FLAC seeking and multi-format support
-- **Solution**: Complete migration to BASS audio library integrated via Swift bridging header
-- **Benefits Achieved**:
-  - **Gapless Playback**: True gapless transitions using BASS push stream architecture
-  - **Enhanced Format Support**: FLAC, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
-  - **BASS Auto-Management**: Automatic AVAudioSession handling eliminates manual management conflicts
-  - **Superior Audio Quality**: Direct codec integration with optimal performance
-  - **Phone Call Recovery**: Proper interruption handling with server pause/resume commands
-  - **Cross-Platform**: iOS and macOS support via "Designed for iPad" compatibility
-- **Known Limitation**: FLAC seeking currently non-functional with push stream architecture (under investigation)
-
-#### Legacy FLAC Server Configuration (Still Available)
-For users who want additional server-side optimization, the previous server configuration method is still documented:
-- **Implementation**: Add device-specific transcode rule to LMS server's `convert.conf` file
-- **Server Configuration Required**:
-  ```
-  # Add this rule BEFORE the default "flc flc * *" line in convert.conf
-  flc flc * 02:70:68:8c:51:41
-          # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
-          [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
-  ```
-- **User Instructions**:
-  1. Replace `02:70:68:8c:51:41` with your device's MAC address (shown in LMS web interface)
-  2. Add the rule to LMS server's `convert.conf` file before existing FLAC rules
-  3. Restart LMS server for changes to take effect
-  4. FLAC seeking will now work properly with fresh headers on every seek operation
-- **Technical Details**:
-  - Forces decode→raw→re-encode pipeline that generates complete FLAC headers
-  - Uses LMS variables `$SAMPLESIZE$`, `$SAMPLERATE$`, `$CHANNELS$` for automatic bit depth detection
-  - Handles both 16-bit and 24-bit FLAC files correctly by detecting source properties
-  - Outputs consistent 16-bit FLAC for compatibility (`-b 16` flag) - BASS handles all bit depths natively
-  - Uses sox for reliable audio processing and format conversion
-  - Only affects the specific iOS device, other players use normal passthrough
-- **Performance Impact**: Minimal - transcoding happens in real-time on server with efficient compression level 0
-- **Bit Depth Support**: Supports all FLAC bit depths (16-bit, 24-bit, 32-bit) with automatic detection and conversion to 16-bit output
-
-#### Audio Session Optimization - COMPLETED
-- **Problem**: Forced sample rate settings (44.1kHz/48kHz) potentially interfering with FLAC playback
-- **Solution**: Commented out forced sample rate settings in AudioSessionManager.swift
-- **Files Modified**: AudioSessionManager.swift - `setupForLosslessAudio()` and `setupForCompressedAudio()`
-- **Impact**: StreamingKit and audio content now determine optimal sample rates automatically
-
-#### Silent Position Recovery System - COMPLETED
-- **Problem**: Audio snippets heard during custom position recovery (play → seek → pause sequences)
-- **Root Cause**: App-level volume control only affects StreamingKit internal volume, not system audio output
-- **Solution**: Server-side volume control using LMS mixer commands for truly silent recovery
-- **Implementation**: 
-  - `saveServerVolumeAndMute()`: Query current server volume, save to preferences, set server volume to 0
-  - `performCustomPositionRecovery()`: Execute play → seek → pause sequence with server muted
-  - `restoreServerVolume()`: Retrieve saved volume from preferences and restore server volume
-- **Files Modified**: SlimProtoCoordinator.swift - custom position recovery methods
-- **Technical Details**:
-  - Uses LMS JSON-RPC `["mixer", "volume", "?"]` to get current volume
-  - Stores volume in player preferences: `["playerpref", "lyrPlaySavedVolume", volume]`
-  - Sets server volume to 0: `["mixer", "volume", "0"]` during recovery
-  - Restores original volume after recovery completes
-- **Impact**: Completely silent position recovery with no audio snippets during app reopening
+### Legacy FLAC Server Configuration (Still Available)
+For users who want server-side FLAC seeking optimization via `convert.conf`:
+```
+# Add this rule BEFORE the default "flc flc * *" line in convert.conf
+flc flc * 02:70:68:8c:51:41
+        # IFT:{START=--skip=%t}U:{END=--until=%v}D:{RESAMPLE=-r %d}
+        [flac] -dcs $START$ $END$ --force-raw-format --sign=signed --endian=little -- $FILE$ | [sox] -q -t raw --encoding signed-integer -b $SAMPLESIZE$ -r $SAMPLERATE$ -c $CHANNELS$ -L - -t flac -r 44100 -C 0 -b 16 -
+```
+Replace MAC address with your device's (shown in LMS web interface). Forces decode/re-encode pipeline that generates complete FLAC headers for seeking.
 
 ## Repository Migration Status - COMPLETED ✅
 
@@ -640,36 +575,23 @@ The LyrPlay repository has been successfully created and configured:
 - **All pushes/pulls**: Go to LyrPlay repository
 - **Build commands**: Still use `LMS_StreamTest.xcworkspace` (no changes needed)
 
-## Remaining Tasks for App Store Submission
-
-### High Priority (Required)
-- [ ] **Test final build** - Verify all iOS-only functionality works correctly
-- [ ] **Generate archive build** - Create final .ipa for App Store submission
-- [ ] **Submit to App Store Connect** - Upload build and configure metadata
-
-### Medium Priority (Optional)
-- [ ] **Privacy Manifest** - Create PrivacyInfo.xcprivacy file (iOS 17+ requirement)
-- [ ] **Screenshot preparation** - Create App Store screenshots for iPhone/iPad
-- [ ] **App Store review notes** - Prepare notes explaining HTTP usage for LMS servers
-
-### App Store Connect Configuration
-When submitting, use these prepared values:
+## App Store Connect Configuration
 - **Support URL**: https://github.com/mtxmiller/LyrPlay/issues
-- **Marketing URL**: (optional) https://github.com/mtxmiller/LyrPlay
+- **Marketing URL**: https://github.com/mtxmiller/LyrPlay
 - **Keywords**: flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,lossless,material
 - **Category**: Music
 - **Content Rating**: 4+ (No objectionable content)
 
 ---
 
-**Last Updated**: December 2025 - Version 1.7 External DAC & Format Enhancement Release ✅
+**Last Updated**: April 2026 - Version 1.7.6 App Store / 1.7.7 in development
 
 ### Production Status
-- **App Store Version**: 1.5 (StreamingKit-based, stable)
-- **TestFlight Version**: 1.7 (CBass/BASS library with external DAC support and WAV format)
+- **App Store Version**: 1.7.6 (CBass audio, CarPlay Browse, Siri, gapless playback)
+- **Development Version**: 1.7.7 build 5 (gapless refinements, stream info overlay)
 - **Active User Base**: Production app with GitHub community support
 
-### Current Capabilities (v1.7)
+### Current Capabilities (v1.7.6+)
 - **Audio Engine**: BASS library integrated via Swift bridging header
 - **Gapless Playback**: ✅ Enhanced with improved sync reliability and format mismatch handling
 - **FLAC Support**: ✅ Auto-routing to legacy URL streaming mode (workaround for seeking)
@@ -677,17 +599,19 @@ When submitting, use these prepared values:
 - **Format Seeking**: ✅ MP3, AAC, Opus, OGG, WAV seeking works normally
 - **External DAC**: ✅ Real-time sample rate monitoring and output device metrics
 - **Audio Session Management**: BASS auto-managed (manual management removed)
-- **CarPlay**: Phase 1 complete (Now Playing template), Phase 2 in development
+- **CarPlay**: ✅ Complete - Now Playing + Browse interface with playlist navigation
+- **Siri**: ✅ Voice commands via INPlayMediaIntent in main app
 - **Platform Support**: iOS 15.6+ and macOS via "Designed for iPad" compatibility
 - **Audio Formats**: FLAC, WAV, AAC, MP4A, MP3, Opus, OGG with native BASS codecs
 
-### Active Development Priorities
-1. **CarPlay Phase 2** - Browse interface for library/playlist navigation (in progress)
-2. **FLAC Seeking Enhancement** - Continued refinement with WAV fallback option
-3. **External DAC Optimization** - Enhanced hardware audio interface support
+### Active Development Priorities (v1.7.7)
+1. **Gapless Playback Refinement** - Fixing premature CarPlay/server UI sync during transitions
+2. **Stream Info Overlay** - Hardware output rate and decoder throttle improvements
+3. **FLAC Seeking Enhancement** - Continued refinement with WAV fallback option
 
 ### Architecture Notes
 - **Playlist Jump Recovery**: Critical for position recovery across backgrounding, lock screen, CarPlay scenarios
 - **45-Second Threshold**: Lock screen/CarPlay recovery triggers after 45s backgrounding
 - **Scene Delegate Architecture**: SwiftUI + UIKit bridge for CarPlay support
+- **Siri Routing**: INPlayMediaIntent handled in AppDelegate via SiriMediaHandler (not via Intents Extension)
 - **Reconnect Bit Removed**: Simplified to playlist jump recovery for all reconnection scenarios
