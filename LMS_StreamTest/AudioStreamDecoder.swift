@@ -115,9 +115,11 @@ class AudioStreamDecoder {
         let channels: Int
     }
 
-    /// Maximum buffer size before throttling (in bytes)
-    /// Default: ~4 seconds @ 44.1kHz stereo float = 44100 * 2 * 4 * 4 = 705,600 bytes
-    private let maxBufferSize: Int = 705_600
+    /// Maximum total buffer (playback + queue) before throttling decoder.
+    /// Squeezelite uses ~10s but runs on LAN. We need cellular dead spot resilience.
+    /// 30 seconds at 48kHz stereo float32 = 48000 * 2 * 4 * 30 = 11,520,000 bytes (~11MB).
+    /// Tradeoff: STMd fires ~30s before track end (vs 260s before with old unbounded queue).
+    private let maxBufferSize: Int = 11_520_000
 
     // MARK: - Silent Recovery Support
     /// Flag to mute the next stream creation (for silent app foreground recovery)
@@ -411,10 +413,9 @@ class AudioStreamDecoder {
             return
         }
 
-        // CRITICAL: Set hard limit on queue buffer to prevent runaway memory usage
-        // This prevents decoding entire podcasts (60min = 1.2GB!) into RAM
-        // 600 MB = room for large FLAC files (500MB+) and gapless playback queue
-        let hardLimitBytes: Float = 600_000_000  // 600 MB
+        // Safety net: BASS hard limit on queue (above our throttle target)
+        // Throttle targets ~30s (11.5MB), this is a backstop at ~50MB
+        let hardLimitBytes: Float = 50_000_000  // 50 MB
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_PUSH_LIMIT), hardLimitBytes)
         os_log(.info, log: logger, "🔒 Set push stream queue limit: %.0f MB", hardLimitBytes / 1_048_576)
 
@@ -859,10 +860,13 @@ class AudioStreamDecoder {
                     break
                 }
 
-                let buffered = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+                // Check TOTAL buffer: playback buffer + push queue
+                // Like squeezelite checking _buf_space(outputbuf) before each decode
+                let throttlePB = Int(BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
+                let throttleQ = Int(BASS_StreamPutData(self.pushStream, nil, 0))
 
-                // Throttle if buffer is getting full (like squeezelite)
-                if buffered > self.maxBufferSize {
+                // Throttle if total buffer is full (~10s of audio)
+                if (throttlePB + throttleQ) > self.maxBufferSize {
                     Thread.sleep(forTimeInterval: 0.05)
                     continue
                 }
