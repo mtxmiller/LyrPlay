@@ -306,7 +306,13 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
             // Update stream info for UI display (also updates output device info)
-            updateStreamInfo()
+            // Only use push stream info if decoder hasn't already set the real source info
+            if currentStreamInfo == nil {
+                updateStreamInfo()
+            } else {
+                // Decoder already set stream info — just update output device info
+                updateOutputDeviceInfo()
+            }
 
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()

@@ -178,6 +178,9 @@ struct ContentView: View {
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()
         }
+        .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
+            pushStreamInfoToWebView()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             isAppInBackground = true
         }
@@ -378,11 +381,15 @@ struct ContentView: View {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "'", with: "\\'")
 
+        // Use output device sample rate (actual hardware output) if available,
+        // otherwise fall back to stream info sample rate
+        let outputSampleRate = audioManager.audioPlayer.currentOutputInfo?.outputSampleRate ?? streamInfo.sampleRate
+
         let js = """
         (function() {
             var parts = [];
             parts.push('\(safeFormat)');
-            parts.push('\(streamInfo.sampleRate / 1000)kHz');
+            parts.push('\(outputSampleRate / 1000)kHz');
             parts.push('\(streamInfo.bitDepth)bit');
             if (\(streamInfo.bitrate) > 0) parts.push(Math.round(\(streamInfo.bitrate)) + 'kbps');
             window.lyrplayStreamText = parts.join(', ');
