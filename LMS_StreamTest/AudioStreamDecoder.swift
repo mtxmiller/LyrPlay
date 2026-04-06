@@ -134,6 +134,10 @@ class AudioStreamDecoder {
     /// Server sends as 16.16 fixed point, converted to float (e.g., 0.501 for -6dB)
     private var currentReplayGain: Float = 1.0
 
+    /// Pending replay gain for next track (like squeezelite's output.next_replay_gain)
+    /// Stored when gapless preload arrives, applied when playback reaches the track boundary
+    private var pendingReplayGain: Float?
+
     /// Registered sync handles (for cleanup)
     private var trackBoundarySyncs: [HSYNC] = []
 
@@ -630,11 +634,20 @@ class AudioStreamDecoder {
         sentSTMl = false
         os_log(.info, log: logger, "🎯 Reset sentSTMl flag for new track")
 
-        // Always apply replay gain at track boundaries (even if unity)
         // Server sends 0.0 when track has no ReplayGain metadata — treat as unity (1.0)
-        // This ensures VOLDSP doesn't leak from a previous track during gapless transitions
         let effectiveGain = (replayGain > 0.0) ? replayGain : 1.0
-        setReplayGain(effectiveGain)
+
+        if isNewTrack {
+            // Gapless: defer gain until playback reaches the track boundary
+            // Like squeezelite's output.next_replay_gain (slimproto.c:384)
+            // Current track keeps playing with currentReplayGain until boundary fires
+            pendingReplayGain = effectiveGain
+            os_log(.info, log: logger, "🎚️ ReplayGain deferred for gapless: pending=%.4f (current=%.4f)", effectiveGain, currentReplayGain)
+        } else {
+            // Non-gapless (first track / skip): apply immediately, buffer was flushed
+            pendingReplayGain = nil
+            setReplayGain(effectiveGain)
+        }
 
         // Store track start time offset for server-side seeks
         trackStartTimeOffset = startTime
@@ -782,6 +795,9 @@ class AudioStreamDecoder {
             isWaitingForSyncStart = false
             syncStartJiffies = nil
         }
+
+        // Clear pending replay gain (no boundary will fire after manual stop)
+        pendingReplayGain = nil
 
         // Clear any pending track (user manually stopped, so don't start deferred track)
         if let pending = pendingTrack {
@@ -1378,6 +1394,14 @@ class AudioStreamDecoder {
         // Don't update it here - it's already correct!
         // The boundary position IS the track start position
 
+        // Apply pending ReplayGain now that playback has reached the new track
+        // Like squeezelite's output.c:161: current_replay_gain = next_replay_gain
+        if let pending = pendingReplayGain {
+            os_log(.info, log: logger, "🎚️ ReplayGain boundary swap: %.4f → %.4f", currentReplayGain, pending)
+            setReplayGain(pending)
+            pendingReplayGain = nil
+        }
+
         // Notify delegate of track transition - THIS SENDS STMs!
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📡 ABOUT TO SEND STMs - notifying delegate now...")
         delegate?.audioStreamDecoderDidReachTrackBoundary(self)
@@ -1448,6 +1472,13 @@ class AudioStreamDecoder {
 
         os_log(.error, log: logger, "[APP-RECOVERY] 🔄 Initializing new push stream: %dHz, %dch", sampleRate, channels)
         initializePushStream(sampleRate: sampleRate, channels: channels)
+
+        // Promote pending ReplayGain — fresh stream, no old audio to protect
+        if let pending = pendingReplayGain {
+            os_log(.info, log: logger, "🎚️ ReplayGain deferred→active for format-mismatch track: %.4f", pending)
+            setReplayGain(pending)
+            pendingReplayGain = nil
+        }
 
         os_log(.error, log: logger, "[APP-RECOVERY] ▶️ Calling startPlayback() - should apply muting if muteNextStream=TRUE")
         startPlayback()
