@@ -249,6 +249,27 @@ struct ContentView: View {
                         os_log(.info, log: self.logger, "✅ Material layout recalculation triggered")
                     }
                 }
+
+                // Check if Material's Cometd connection is still alive after backgrounding.
+                // If dead, trigger reconnect via Material's own bus event (same path as
+                // Material's built-in visibilitychange handler in server.js).
+                let cometdHealthCheck = """
+                (function() {
+                    if (typeof lmsIsConnected !== 'undefined' && !lmsIsConnected) {
+                        console.log('LyrPlay: Cometd disconnected after background - reconnecting');
+                        if (typeof bus !== 'undefined' && bus.$emit) {
+                            bus.$emit('reconnect');
+                        }
+                        return 'reconnecting';
+                    }
+                    return 'connected';
+                })();
+                """
+                webView.evaluateJavaScript(cometdHealthCheck) { result, error in
+                    if let status = result as? String {
+                        os_log(.info, log: self.logger, "Cometd health check: %{public}s", status)
+                    }
+                }
             }
 
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
@@ -384,6 +405,8 @@ struct ContentView: View {
         // Use output device sample rate (actual hardware output) if available,
         // otherwise fall back to stream info sample rate
         let outputSampleRate = audioManager.audioPlayer.currentOutputInfo?.outputSampleRate ?? streamInfo.sampleRate
+        // Guard against NaN/infinity from BASS — neither is a valid JS numeric literal
+        let safeBitrate = streamInfo.bitrate.isNaN || streamInfo.bitrate.isInfinite ? 0.0 : streamInfo.bitrate
 
         let js = """
         (function() {
@@ -391,7 +414,7 @@ struct ContentView: View {
             parts.push('\(safeFormat)');
             parts.push('\(outputSampleRate / 1000)kHz');
             parts.push('\(streamInfo.bitDepth)bit');
-            if (\(streamInfo.bitrate) > 0) parts.push(Math.round(\(streamInfo.bitrate)) + 'kbps');
+            if (\(safeBitrate) > 0) parts.push(Math.round(\(safeBitrate)) + 'kbps');
             window.lyrplayStreamText = parts.join(', ');
 
             // Start polling replacer if not already running
@@ -926,6 +949,14 @@ struct WebView: UIViewRepresentable {
 
         }
         
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            os_log(.error, log: logger, "WebView content process terminated by iOS - reloading Material interface")
+            DispatchQueue.main.async {
+                self.parent.isLoading = true
+            }
+            webView.reload()
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed to load Material interface: %{public}s", error.localizedDescription)
             DispatchQueue.main.async {

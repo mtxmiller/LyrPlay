@@ -861,8 +861,11 @@ class AudioStreamDecoder {
 
                 // Check TOTAL buffer: playback buffer + push queue
                 // Like squeezelite checking _buf_space(outputbuf) before each decode
-                let throttlePB = Int(BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
-                let throttleQ = Int(BASS_StreamPutData(self.pushStream, nil, 0))
+                let rawPB = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+                let rawQ = BASS_StreamPutData(self.pushStream, nil, 0)
+                // BASS returns -1 (DWORD.max) on error (e.g. stream ended) — treat as 0
+                let throttlePB = (rawPB == DWORD.max) ? 0 : Int(rawPB)
+                let throttleQ = (rawQ == DWORD.max) ? 0 : Int(rawQ)
 
                 // Throttle if total buffer is full (~10s of audio)
                 if (throttlePB + throttleQ) > self.maxBufferSize {
