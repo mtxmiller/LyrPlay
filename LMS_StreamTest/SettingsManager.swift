@@ -28,6 +28,7 @@ class SettingsManager: ObservableObject {
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = .compressed
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
+    @Published var keepScreenAwake: Bool = false  // Prevent screen sleep during playback
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -129,6 +130,7 @@ class SettingsManager: ObservableObject {
         static let currentActiveServer = "CurrentActiveServer"
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
+        static let keepScreenAwake = "KeepScreenAwake"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
@@ -205,6 +207,7 @@ class SettingsManager: ObservableObject {
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
         audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .flac
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
+        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? false
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
@@ -248,6 +251,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
+        UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)

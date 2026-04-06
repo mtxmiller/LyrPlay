@@ -242,6 +242,27 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
 
+                    Toggle(isOn: $settings.keepScreenAwake) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "moon.zzz")
+                                    .foregroundColor(.indigo)
+                                    .frame(width: 20)
+                                Text("Keep Screen Awake")
+                                    .font(.body)
+                            }
+                            Text("Prevent screen from sleeping while audio is playing")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .onChange(of: settings.keepScreenAwake) { _ in
+                        settings.saveSettings()
+                        PlaybackSessionController.shared.applyIdleTimerSetting()
+                    }
+                    .padding(.vertical, 4)
+
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
