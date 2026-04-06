@@ -91,6 +91,7 @@ class AudioPlayer: NSObject, ObservableObject {
     private var currentStreamURL: String = ""
     private var currentStreamFormat: String = "UNKNOWN"
     private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
+    private var currentReplayGain: Float = 1.0  // Active ReplayGain value (for restore after muting)
 
     // MARK: - Silent Recovery Support
     /// Flag to mute the next stream creation (for silent app foreground recovery)
@@ -590,12 +591,12 @@ class AudioPlayer: NSObject, ObservableObject {
         return volume
     }
 
-    /// Restore DSP gain to 1.0 after silent recovery
+    /// Restore DSP gain after silent recovery (respects active ReplayGain)
     func restoreDSPGain() {
         guard currentStream != 0 else { return }
 
-        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 1.0)
-        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), currentReplayGain)
+        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to %.4f (ReplayGain-aware)", currentReplayGain)
     }
 
     // MARK: - ReplayGain Support
@@ -614,8 +615,10 @@ class AudioPlayer: NSObject, ObservableObject {
         // - BASS_ATTRIB_VOL controls playback volume and would interfere with user volume
         // - VOLDSP works on decoding channels and is present in the DSP chain
 
-        // Clamp to reasonable range to prevent distortion
-        let clampedGain = min(replayGain, 2.0)  // Max 2x gain (~6dB boost)
+        // Clamp to safe range — squeezelite doesn't clamp at this stage,
+        // but we cap at 4.0 (~+12dB) to prevent extreme amplification
+        let clampedGain = min(max(replayGain, 0.0), 4.0)
+        currentReplayGain = clampedGain  // Store for restore after silent recovery
 
         let success = BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), clampedGain)
 

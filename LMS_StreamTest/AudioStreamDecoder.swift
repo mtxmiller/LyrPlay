@@ -529,12 +529,12 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (manual muting)")
     }
 
-    /// Restore DSP gain to 1.0 after silent recovery
+    /// Restore DSP gain after silent recovery (respects active ReplayGain)
     func restoreDSPGain() {
         guard pushStream != 0 else { return }
 
-        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 1.0)
-        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), currentReplayGain)
+        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to %.4f (ReplayGain-aware)", currentReplayGain)
     }
 
     // MARK: - Volume Control (Server UI Volume)
@@ -573,8 +573,9 @@ class AudioStreamDecoder {
     /// Uses BASS_ATTRIB_VOLDSP for sample-level gain (like squeezelite)
     /// - Parameter gain: Linear gain multiplier (e.g., 0.501 for -6dB, 1.412 for +3dB)
     func setReplayGain(_ gain: Float) {
-        // Clamp to prevent distortion (max 2x = +6dB boost)
-        let clampedGain = min(max(gain, 0.0), 2.0)
+        // Clamp to safe range — squeezelite doesn't clamp at this stage,
+        // but we cap at 4.0 (~+12dB) to prevent extreme amplification
+        let clampedGain = min(max(gain, 0.0), 4.0)
         currentReplayGain = clampedGain
 
         guard pushStream != 0 else {
@@ -629,13 +630,11 @@ class AudioStreamDecoder {
         sentSTMl = false
         os_log(.info, log: logger, "🎯 Reset sentSTMl flag for new track")
 
-        // Apply replay gain for this track (stored and applied when not in silent recovery mode)
-        if replayGain > 0.0 && replayGain != 1.0 {
-            setReplayGain(replayGain)
-        } else {
-            // Reset to default (no gain adjustment)
-            currentReplayGain = 1.0
-        }
+        // Always apply replay gain at track boundaries (even if unity)
+        // Server sends 0.0 when track has no ReplayGain metadata — treat as unity (1.0)
+        // This ensures VOLDSP doesn't leak from a previous track during gapless transitions
+        let effectiveGain = (replayGain > 0.0) ? replayGain : 1.0
+        setReplayGain(effectiveGain)
 
         // Store track start time offset for server-side seeks
         trackStartTimeOffset = startTime
