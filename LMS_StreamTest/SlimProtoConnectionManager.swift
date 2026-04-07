@@ -46,12 +46,10 @@ class SlimProtoConnectionManager {
     private var totalConsecutiveFailures: Int = 0  // TOTAL failures across all servers (never resets until success)
     private let maxReconnectionAttempts: Int = 8  // Increased for better persistence
     private let maxTotalFailuresBeforeError: Int = 12  // After 12 total failures (both servers tried), show error
-    private let baseReconnectionDelay: TimeInterval = 2.0
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
 
     private var wasConnectedBeforeTimeout: Bool = false
-    private var disconnectionDuration: TimeInterval = 0
     
     
     // MARK: - Health Monitoring
@@ -473,8 +471,11 @@ class SlimProtoConnectionManager {
             lastDisconnectionReason = .unknown
             os_log(.info, log: logger, "🔌 Disconnected gracefully")
         }
-        
 
+        // Auto-reconnect: schedule retry if disconnection reason allows it
+        if lastDisconnectionReason.shouldAutoReconnect && isNetworkAvailable {
+            scheduleReconnection()
+        }
     }
     
     // Add this method to detect timeout scenarios
@@ -568,19 +569,18 @@ class SlimProtoConnectionManager {
         return true
     }
     
-    private func calculateReconnectionDelay() -> TimeInterval {
-        // Base delay increases with attempts
-        let exponentialDelay = baseReconnectionDelay * pow(2.0, Double(reconnectionAttempts))
-        
-        // Cap the delay based on context
-        let maxDelay: TimeInterval = isInBackground ? 60.0 : 30.0
-        let delay = min(exponentialDelay, maxDelay)
-        
-        // Add jitter to avoid thundering herd
-        let jitter = Double.random(in: 0.8...1.2)
-        return delay * jitter
+    private func scheduleReconnection() {
+        stopReconnectionTimer()
+
+        let delay: TimeInterval = 5.0  // Match squeezelite's fixed 5-second retry
+
+        os_log(.info, log: logger, "🔄 Scheduling reconnection in %.0f seconds", delay)
+
+        reconnectionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.attemptReconnection()
+        }
     }
-    
+
     private func stopReconnectionTimer() {
         reconnectionTimer?.invalidate()
         reconnectionTimer = nil

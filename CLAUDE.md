@@ -338,7 +338,7 @@ flac,lms,squeezebox,audio,streaming,music,player,logitech,media,server,hifi,loss
 - **Device Support**: iPhone and iPad (TARGETED_DEVICE_FAMILY = "1,2")
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for existing TestFlight/App Store compatibility)
 - **Display Name**: LyrPlay
-- **Current Version**: 1.7.7 build 5 in development (gapless refinements + stream info overlay)
+- **Current Version**: 1.7.7 build 11 in development (gapless refinements + stream info overlay + auto-reconnect)
 - **Live Version**: 1.7.6 (App Store - CBass audio, CarPlay Browse, Siri, gapless playback)
 
 ## Testing Structure
@@ -588,7 +588,7 @@ The LyrPlay repository has been successfully created and configured:
 
 ### Production Status
 - **App Store Version**: 1.7.6 (CBass audio, CarPlay Browse, Siri, gapless playback)
-- **Development Version**: 1.7.7 build 5 (gapless refinements, stream info overlay)
+- **Development Version**: 1.7.7 build 11 (gapless refinements, stream info overlay, auto-reconnect)
 - **Active User Base**: Production app with GitHub community support
 
 ### Current Capabilities (v1.7.6+)
