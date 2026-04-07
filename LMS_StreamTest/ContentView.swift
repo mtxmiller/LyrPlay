@@ -27,6 +27,13 @@ struct ContentView: View {
         ProcessInfo.processInfo.isiOSAppOnMac
     }
 
+    /// Get the device's top safe area inset (status bar / notch / Dynamic Island height)
+    private var topSafeAreaInset: CGFloat {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first else { return 0 }
+        return window.safeAreaInsets.top
+    }
+
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
 
@@ -145,9 +152,8 @@ struct ContentView: View {
                         showingSettings = true
                     }
                 )
-                // On Mac (iPad app), ignore all safe areas since there's no status bar/notch
-                // On iOS, respect top safe area for status bar but ignore bottom
-                .ignoresSafeArea(.container, edges: isRunningOnMac ? [.top, .bottom] : .bottom)
+                // WebView fills edge-to-edge; Material's topPad query param handles status bar spacing
+                .ignoresSafeArea(.container, edges: [.top, .bottom])
                 .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
                 .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
@@ -464,15 +470,21 @@ struct ContentView: View {
         // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
         // Material skin handles data freshness via its own API calls
 
+        // Material topPad: tells Material to extend toolbar background into the status bar area
+        // while keeping interactive elements below it (toolbar icons, nav drawer items, etc.)
+        let topPad = Int(topSafeAreaInset)
+        let topPadParam = topPad > 0 ? "&topPad=\(topPad)" : ""
+
         // Add Material skin query parameters:
         // - hide=mediaControls: Hides lock screen/notification settings (prevents Material web player from interfering with native iOS lock screen)
         //   NOTE: Material code checks for 'mediaControls' not 'notif' (ui-settings.js:506)
         // - appSettings: Custom iOS app settings integration
         // - player: Show only specified player when iOS Player Focus is enabled
+        // - topPad: Extends Material toolbar background behind iOS status bar
         if settings.iOSPlayerFocus {
-            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         } else {
-            return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
 
