@@ -875,6 +875,22 @@ struct WebView: UIViewRepresentable {
                 }
 
                 // If no error detected, proceed with normal Material setup
+
+                // Inject topPad for status bar spacing — the URL param may be 0 on first
+                // launch (safe area not yet available), so we always set it here where
+                // the webView is in the view hierarchy and the window insets are known.
+                let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+                if topInset > 0 {
+                    let topPadScript = """
+                    (function() {
+                        document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
+                        if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
+                        console.log('LyrPlay: Set topPad to \(topInset)px via JS injection');
+                    })();
+                    """
+                    webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+                }
+
                 // CRITICAL: Inject JavaScript to handle Material's appSettings integration
                 let settingsHandlerScript = """
                 (function() {
