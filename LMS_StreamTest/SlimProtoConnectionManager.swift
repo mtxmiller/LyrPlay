@@ -41,7 +41,7 @@ class SlimProtoConnectionManager {
     private var backgroundStartTime: Date?
     
     // MARK: - Reconnection Logic
-    private var reconnectionTimer: Timer?
+    private var reconnectionWorkItem: DispatchWorkItem?
     private var reconnectionAttempts: Int = 0  // Per-server counter (resets on server switch)
     private var totalConsecutiveFailures: Int = 0  // TOTAL failures across all servers (never resets until success)
     private let maxReconnectionAttempts: Int = 8  // Increased for better persistence
@@ -429,7 +429,7 @@ class SlimProtoConnectionManager {
         lastSuccessfulConnection = Date()
         reconnectionAttempts = 0
         totalConsecutiveFailures = 0  // CRITICAL: Reset total failures on successful connection
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
 
         // Start health monitoring
         let interval = isInBackground ? 30.0 : 15.0
@@ -570,27 +570,30 @@ class SlimProtoConnectionManager {
     }
     
     private func scheduleReconnection() {
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
 
         let delay: TimeInterval = 5.0  // Match squeezelite's fixed 5-second retry
 
         os_log(.info, log: logger, "🔄 Scheduling reconnection in %.0f seconds", delay)
 
-        reconnectionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        // Use DispatchQueue instead of Timer — didDisconnect() can be called from
+        // the socket's background queue, which has no RunLoop for Timer to fire on.
+        reconnectionWorkItem = DispatchWorkItem { [weak self] in
             self?.attemptReconnection()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: reconnectionWorkItem!)
     }
 
-    private func stopReconnectionTimer() {
-        reconnectionTimer?.invalidate()
-        reconnectionTimer = nil
+    private func cancelScheduledReconnection() {
+        reconnectionWorkItem?.cancel()
+        reconnectionWorkItem = nil
     }
 
     // MARK: - Manual Control
     func userInitiatedDisconnection() {
         os_log(.info, log: logger, "🔄 User initiated disconnection")
         lastDisconnectionReason = .userInitiated
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
         stopHealthMonitoring()
     }
 
@@ -636,7 +639,7 @@ class SlimProtoConnectionManager {
     // MARK: - Cleanup
     deinit {
         NotificationCenter.default.removeObserver(self)
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
         stopHealthMonitoring()
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()
