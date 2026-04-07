@@ -864,6 +864,10 @@ class AudioStreamDecoder {
 
             os_log(.info, log: self.logger, "🔄 Decoder loop started")
 
+            // Snapshot for no-progress timeout: detect streams that never produce audio
+            let loopStartTime = Date()
+            let bytesAtLoopStart = self.totalBytesPushed
+
             // Buffer for decoded PCM (4KB chunks like squeezelite)
             let bufferSize = 4096
             var buffer = [Float](repeating: 0, count: bufferSize)
@@ -929,6 +933,18 @@ class AudioStreamDecoder {
                             os_log(.debug, log: self.logger, "⏳ Decoder buffer empty (HTTP still active), waiting...")
                             self.lastBufferEmptyLogTime = now
                         }
+
+                        // No-progress timeout: if 10s with no new audio decoded, stream is undecodable
+                        if self.totalBytesPushed == bytesAtLoopStart && now.timeIntervalSince(loopStartTime) > 10.0 {
+                            os_log(.error, log: self.logger, "❌ Decoder timeout: 10s with no audio decoded - stream may be undecodable")
+                            if !self.manualStop {
+                                DispatchQueue.main.async {
+                                    self.delegate?.audioStreamDecoderDidEncounterError(self, error: -1)
+                                }
+                            }
+                            break
+                        }
+
                         Thread.sleep(forTimeInterval: 0.01)
                         continue
                     }
@@ -964,6 +980,17 @@ class AudioStreamDecoder {
                             }
                         } else {
                             os_log(.info, log: self.logger, "⏹️ Track decode stopped (manual skip)")
+                        }
+                        break
+                    }
+
+                    // No-progress timeout: if 10s with no new audio decoded, stream is undecodable
+                    if self.totalBytesPushed == bytesAtLoopStart && Date().timeIntervalSince(loopStartTime) > 10.0 {
+                        os_log(.error, log: self.logger, "❌ Decoder timeout: 10s with no audio decoded - stream may be undecodable")
+                        if !self.manualStop {
+                            DispatchQueue.main.async {
+                                self.delegate?.audioStreamDecoderDidEncounterError(self, error: -1)
+                            }
                         }
                         break
                     }
