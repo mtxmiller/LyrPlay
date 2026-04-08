@@ -154,6 +154,20 @@ struct ContentView: View {
                 )
                 // WebView fills edge-to-edge; Material's topPad query param handles status bar spacing
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
+                // Update Material topPad on rotation — portrait has ~59px (Dynamic Island),
+                // landscape has 0px. GeometryReader fires after layout commits with correct insets.
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onChange(of: geometry.safeAreaInsets.top) { newTop in
+                                let inset = Int(newTop)
+                                webView?.evaluateJavaScript(
+                                    "(function(){document.documentElement.style.setProperty('--top-pad','\(inset)px');console.log('LyrPlay: topPad updated to \(inset)px');})()",
+                                    completionHandler: nil
+                                )
+                            }
+                    }
+                )
                 .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
                 .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
