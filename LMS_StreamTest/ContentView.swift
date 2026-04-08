@@ -162,7 +162,7 @@ struct ContentView: View {
                             .onChange(of: geometry.safeAreaInsets.top) { newTop in
                                 let inset = Int(newTop)
                                 webView?.evaluateJavaScript(
-                                    "(function(){document.documentElement.style.setProperty('--top-pad','\(inset)px');console.log('LyrPlay: topPad updated to \(inset)px');})()",
+                                    "(function(){document.documentElement.style.setProperty('--top-pad','\(inset)px');if(typeof queryParams!=='undefined'){queryParams.topPad=\(inset);}console.log('LyrPlay: topPad updated to \(inset)px after rotation');})()",
                                     completionHandler: nil
                                 )
                             }
@@ -858,6 +858,19 @@ struct WebView: UIViewRepresentable {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
             }
+
+            // Inject topPad early — on slow connections, didFinish may be minutes away.
+            // The DOM exists at didCommit so we can set the CSS variable before Material's
+            // Vue created() reads it. This prevents overlapping icons in the status bar area.
+            let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+            let topPadScript = """
+            (function() {
+                document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
+                if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
+                console.log('LyrPlay: Set topPad to \(topInset)px via didCommit (early injection)');
+            })();
+            """
+            webView.evaluateJavaScript(topPadScript, completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -893,16 +906,39 @@ struct WebView: UIViewRepresentable {
                 // Inject topPad for status bar spacing — the URL param may be 0 on first
                 // launch (safe area not yet available), so we always set it here where
                 // the webView is in the view hierarchy and the window insets are known.
+                // Always inject (even when 0) to correct stale values from URL param or prior orientation.
                 let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
-                if topInset > 0 {
-                    let topPadScript = """
+                let topPadScript = """
+                (function() {
+                    document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
+                    if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
+                    console.log('LyrPlay: Set topPad to \(topInset)px via didFinish injection');
+                })();
+                """
+                webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+
+                // Verify topPad took effect after a short delay — Material's Vue may
+                // overwrite it during its own initialization. Retry once if mismatched.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    let expectedInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+                    let verifyScript = """
                     (function() {
-                        document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
-                        if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
-                        console.log('LyrPlay: Set topPad to \(topInset)px via JS injection');
+                        var current = getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();
+                        var expected = '\(expectedInset)px';
+                        if (current !== expected) {
+                            document.documentElement.style.setProperty('--top-pad', expected);
+                            if (typeof queryParams !== 'undefined') { queryParams.topPad = \(expectedInset); }
+                            console.log('LyrPlay: topPad verification FIXED: was ' + current + ', set to ' + expected);
+                            return 'fixed:' + current + '->' + expected;
+                        }
+                        return 'ok:' + current;
                     })();
                     """
-                    webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+                    webView.evaluateJavaScript(verifyScript) { result, _ in
+                        if let result = result as? String {
+                            os_log(.info, log: self.logger, "topPad verify: %{public}s", result)
+                        }
+                    }
                 }
 
                 // CRITICAL: Inject JavaScript to handle Material's appSettings integration
