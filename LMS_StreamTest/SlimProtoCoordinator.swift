@@ -1387,6 +1387,14 @@ extension SlimProtoCoordinator {
 
         // Save position on pause commands (creates save point for future recovery)
         if command.lowercased() == "pause" {
+            // Local save first (instant, survives network transitions like CarPlay disconnect)
+            let position = getCurrentTimeForSaving()
+            if position > 0 {
+                UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+                UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
+            }
+            // Server roundtrip overwrites with authoritative data if reachable
             saveCurrentPositionForRecovery()
             os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
         }
