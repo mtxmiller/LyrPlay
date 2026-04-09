@@ -621,7 +621,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         let position = getCurrentTimeForSaving()
         if position > 0 {
             UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
-            os_log(.info, log: logger, "💾 Saved position on disconnect: %.2f seconds (interpolated)", position)
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
+            os_log(.info, log: logger, "💾 Saved recovery state on disconnect: %.2f seconds (interpolated)", position)
         }
 
         // Track if we were disconnected while in background (for app open recovery)
