@@ -597,11 +597,6 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "🎚️ ReplayGain applied: %.4f", clampedGain)
     }
 
-    /// Get current replay gain value
-    func getReplayGain() -> Float {
-        return currentReplayGain
-    }
-
     /// Apply stored volume and replay gain to current stream
     /// Called after stream creation or when restoring from muted state
     private func applyStoredGainSettings() {
@@ -1237,43 +1232,6 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "✅ Cleanup complete")
     }
 
-    // MARK: - Buffer Feeding
-
-    /// Feed decoded PCM data to BASS buffer
-    /// - Parameters:
-    ///   - data: Decoded PCM audio data
-    ///   - isNewTrack: Whether this marks the start of a new track
-    func feedDecodedAudio(_ data: Data, isNewTrack: Bool) {
-        guard pushStream != 0 else {
-            os_log(.error, log: logger, "❌ Cannot feed data - no push stream")
-            return
-        }
-
-        // If this is a new track, mark the boundary
-        if isNewTrack {
-            markTrackBoundary()
-        }
-
-        // Push decoded PCM data to BASS buffer
-        let pushed = data.withUnsafeBytes { ptr in
-            BASS_StreamPutData(
-                pushStream,
-                UnsafeMutableRawPointer(mutating: ptr.baseAddress),
-                UInt32(data.count)
-            )
-        }
-
-        if pushed == DWORD.max {  // -1 in C unsigned = 0xFFFFFFFF
-            let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ StreamPutData failed: %d", error)
-        } else {
-            os_log(.debug, log: logger, "📊 Pushed %d bytes to buffer", pushed)
-        }
-
-        // Monitor buffer health
-        monitorBufferLevel()
-    }
-
     /// Mark current buffer position as track boundary for gapless transition
     private func markTrackBoundary() {
         // SQUEEZELITE-STYLE: Use totalBytesPushed as the boundary position.
@@ -1355,23 +1313,6 @@ class AudioStreamDecoder {
         }
 
         return buffered
-    }
-
-    /// Get detailed buffer statistics
-    func getBufferStats() -> BufferStats {
-        guard pushStream != 0 else {
-            return BufferStats(bufferedBytes: 0, playbackPosition: 0, bufferPercentage: 0)
-        }
-
-        let buffered = Int(BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
-        let position = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
-        let percentage = min(100, Int((Double(buffered) / Double(maxBufferSize)) * 100))
-
-        return BufferStats(
-            bufferedBytes: buffered,
-            playbackPosition: UInt64(position),
-            bufferPercentage: percentage
-        )
     }
 
     // MARK: - Track Boundary Handling
@@ -1658,13 +1599,6 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Called when buffer reaches ready threshold (PHASE 7.7)
     /// This allows coordinator to send STMl notification to server for sync readiness
     func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder)
-}
-
-/// Buffer statistics
-struct BufferStats {
-    let bufferedBytes: Int
-    let playbackPosition: UInt64
-    let bufferPercentage: Int
 }
 
 /// Detailed buffer snapshot for gapless diagnostics

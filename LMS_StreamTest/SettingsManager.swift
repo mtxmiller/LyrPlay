@@ -521,33 +521,6 @@ class SettingsManager: ObservableObject {
         saveSettings()
     }
     
-    // MARK: - Validation
-    func validateConfiguration() -> [String] {
-        var errors: [String] = []
-        
-        if serverHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append("Server host is required")
-        }
-        
-        if playerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append("Player name is required")
-        }
-        
-        if serverWebPort < 1 || serverWebPort > 65535 {
-            errors.append("Web port must be between 1 and 65535")
-        }
-        
-        if serverSlimProtoPort < 1 || serverSlimProtoPort > 65535 {
-            errors.append("SlimProto port must be between 1 and 65535")
-        }
-        
-        if connectionTimeout < 1 || connectionTimeout > 60 {
-            errors.append("Connection timeout must be between 1 and 60 seconds")
-        }
-        
-        return errors
-    }
-    
     // MARK: - Computed Properties
     var webURL: String {
         let baseURL = "http://\(activeServerHost):\(activeServerWebPort)/material/"

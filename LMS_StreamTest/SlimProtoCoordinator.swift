@@ -1330,12 +1330,6 @@ extension SlimProtoCoordinator {
         return time
     }
     
-    /// Handle track end detection from server time (replaces unreliable BASS_SYNC_END)
-    func handleTrackEndFromServerTime() {
-        os_log(.info, log: logger, "🎵 Track end detected via server time - forwarding to command handler")
-        commandHandler.notifyTrackEnded()
-    }
-    
     /// Set WebView reference for Material UI refresh
     func setWebView(_ webView: WKWebView) {
         self.webView = webView
@@ -2007,7 +2001,4 @@ extension SlimProtoCoordinator {
         audioManager.skipAhead(duration: duration)
     }
 
-    func getPlayerVolume() -> Float {
-        return audioManager.getVolume()
-    }
 }

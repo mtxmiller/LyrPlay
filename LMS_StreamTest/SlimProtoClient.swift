@@ -51,11 +51,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var hasRequestedInitialStatus = false
     
     // MARK: - Time Reporting State
-    private var playbackStartTime: Date?
-    private var pausedPosition: Double = 0.0
     private var isPaused: Bool = false
     private var isStreamActive: Bool = false
-    private var lastKnownPosition: Double = 0.0
     
     private var lastSuccessfulConnection: Date?
 

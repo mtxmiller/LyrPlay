@@ -137,17 +137,4 @@ class KeychainManager {
         }
     }
 
-    /// Check if credentials exist for a server
-    /// - Parameter serverKey: Which server (primary or backup)
-    /// - Returns: True if credentials are stored
-    func hasCredentials(for serverKey: ServerKey) -> Bool {
-        return load(for: serverKey) != nil
-    }
-
-    /// Clear all LMS credentials (for reset/logout)
-    func clearAll() {
-        os_log(.info, log: logger, "Clearing all LMS credentials")
-        delete(for: .primary)
-        delete(for: .backup)
-    }
 }
