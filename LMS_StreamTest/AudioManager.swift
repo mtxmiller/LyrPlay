@@ -120,7 +120,17 @@ class AudioManager: NSObject, ObservableObject {
             os_log(.info, log: logger, "📊 Creating new push stream (first track)")
             streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
 
-            // Start playback
+            // CRITICAL: Apply ReplayGain BEFORE starting playback
+            // Without this, BASS_ChannelPlay initializes the DSP chain with VOLDSP=1.0 (unity),
+            // and the first audio frames play without ReplayGain until startDecodingFromURL sets it.
+            // This matches AudioPlayer's URL stream path which sets gain before BASS_ChannelPlay.
+            let effectiveGain = (replayGain > 0.0) ? replayGain : 1.0
+            if effectiveGain != 1.0 {
+                streamDecoder.setReplayGain(effectiveGain)
+                os_log(.info, log: logger, "🎚️ Pre-applied ReplayGain %.4f before first playback start", effectiveGain)
+            }
+
+            // Start playback (DSP chain now has correct VOLDSP from the start)
             if streamDecoder.startPlayback() {
                 os_log(.info, log: logger, "✅ Push stream playback started")
             } else {
