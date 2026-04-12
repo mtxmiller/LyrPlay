@@ -572,7 +572,7 @@ class SlimProtoConnectionManager {
     private func scheduleReconnection() {
         cancelScheduledReconnection()
 
-        let delay: TimeInterval = 5.0  // Match squeezelite's fixed 5-second retry
+        let delay: TimeInterval = 2.0  // Fast retry for responsive failover to backup server
 
         os_log(.info, log: logger, "🔄 Scheduling reconnection in %.0f seconds", delay)
 

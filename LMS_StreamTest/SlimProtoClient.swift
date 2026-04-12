@@ -125,8 +125,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         os_log(.info, log: logger, "Attempting to connect to %{public}s:%d", host, port)
         
         do {
-            // CRITICAL FIX: Use longer timeout for more reliable connections
-            try socket.connect(toHost: host, onPort: port, withTimeout: 15)
+            // 4s TCP connect timeout enables fast failover to backup server (issue #76)
+            try socket.connect(toHost: host, onPort: port, withTimeout: 4)
         } catch {
             os_log(.error, log: logger, "Connection error: %{public}s", error.localizedDescription)
         }
