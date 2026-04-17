@@ -25,7 +25,6 @@ class SettingsManager: ObservableObject {
     @Published var backupServerWebPort: Int = 9000
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
-    @Published var automaticFailoverEnabled: Bool = true
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = .compressed
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
@@ -128,7 +127,6 @@ class SettingsManager: ObservableObject {
         static let backupServerWebPort = "BackupServerWebPort"
         static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
         static let isBackupServerEnabled = "IsBackupServerEnabled"
-        static let automaticFailoverEnabled = "AutomaticFailoverEnabled"
         static let currentActiveServer = "CurrentActiveServer"
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
@@ -204,7 +202,6 @@ class SettingsManager: ObservableObject {
         backupServerWebPort = UserDefaults.standard.object(forKey: Keys.backupServerWebPort) as? Int ?? 9000
         backupServerSlimProtoPort = UserDefaults.standard.object(forKey: Keys.backupServerSlimProtoPort) as? Int ?? 3483
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
-        automaticFailoverEnabled = UserDefaults.standard.object(forKey: Keys.automaticFailoverEnabled) as? Bool ?? true
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
@@ -251,7 +248,6 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerWebPort, forKey: Keys.backupServerWebPort)
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
-        UserDefaults.standard.set(automaticFailoverEnabled, forKey: Keys.automaticFailoverEnabled)
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
@@ -529,7 +525,6 @@ class SettingsManager: ObservableObject {
         backupServerWebPort = 9000
         backupServerSlimProtoPort = 3483
         isBackupServerEnabled = false
-        automaticFailoverEnabled = true
         currentActiveServer = .primary  // Reset to primary server
 
         // Reset CBass buffer settings to conservative defaults

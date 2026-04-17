@@ -41,8 +41,8 @@ struct SettingsView: View {
                         SettingsRow(
                             icon: "server.rack",
                             title: "Server Address",
-                            value: settings.serverHost.isEmpty ? "Not Set" : settings.serverHost,
-                            valueColor: settings.serverHost.isEmpty ? .red : .secondary
+                            value: settings.activeServerHost.isEmpty ? "Not Set" : settings.activeServerHost,
+                            valueColor: settings.activeServerHost.isEmpty ? .red : .secondary
                         )
                     }
                     
@@ -67,7 +67,7 @@ struct SettingsView: View {
                 }
                 
                 // Backup Server Section
-                Section {
+                Section(header: Text("Backup Server")) {
                     Toggle(isOn: $settings.isBackupServerEnabled) {
                         SettingsRow(
                             icon: "server.rack",
@@ -79,7 +79,7 @@ struct SettingsView: View {
                     .onChange(of: settings.isBackupServerEnabled) { _ in
                         settings.saveSettings()
                     }
-
+                    
                     if settings.isBackupServerEnabled {
                         NavigationLink(destination: BackupServerConfigView()) {
                             SettingsRow(
@@ -89,20 +89,7 @@ struct SettingsView: View {
                                 valueColor: settings.backupServerHost.isEmpty ? .red : .secondary
                             )
                         }
-
-                        Toggle(isOn: $settings.automaticFailoverEnabled) {
-                            SettingsRow(
-                                icon: "arrow.triangle.2.circlepath",
-                                title: "Automatic Failover",
-                                value: settings.automaticFailoverEnabled ? "On" : "Off",
-                                valueColor: settings.automaticFailoverEnabled ? .green : .secondary
-                            )
-                        }
-                        .disabled(settings.backupServerHost.isEmpty)
-                        .onChange(of: settings.automaticFailoverEnabled) { _ in
-                            settings.saveSettings()
-                        }
-
+                        
                         HStack {
                             SettingsRow(
                                 icon: "switch.2",
@@ -110,21 +97,15 @@ struct SettingsView: View {
                                 value: settings.currentActiveServer.displayName,
                                 valueColor: .blue
                             )
-
+                            
                             Spacer()
-
+                            
                             Button("Switch") {
                                 settings.switchToOtherServer()
                             }
                             .buttonStyle(.bordered)
                             .disabled(!settings.isBackupServerEnabled || settings.backupServerHost.isEmpty)
                         }
-                    }
-                } header: {
-                    Text("Backup Server")
-                } footer: {
-                    if settings.isBackupServerEnabled {
-                        Text("When off, the app won't switch servers for you. If your active server goes unreachable, playback stops until you tap Switch or connectivity returns.")
                     }
                 }
                 
@@ -638,9 +619,9 @@ struct ServerConfigView: View {
             }
         }
         .onAppear {
-            serverHost = settings.serverHost
-            serverUsername = settings.serverUsername
-            serverPassword = settings.serverPassword
+            serverHost = settings.activeServerHost
+            serverUsername = settings.activeServerUsername
+            serverPassword = settings.activeServerPassword
         }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet(
@@ -649,11 +630,11 @@ struct ServerConfigView: View {
                     let auth = SettingsManager.generateAuthHeader(username: serverUsername, password: serverPassword)
                     let r = await settings.testConnection(
                         host: typed,
-                        webPort: settings.serverWebPort,
-                        slimProtoPort: settings.serverSlimProtoPort,
+                        webPort: settings.activeServerWebPort,
+                        slimProtoPort: settings.activeServerSlimProtoPort,
                         authHeader: auth
                     )
-                    return (typed, settings.serverWebPort, settings.serverSlimProtoPort, r)
+                    return (typed, settings.activeServerWebPort, settings.activeServerSlimProtoPort, r)
                 },
                 testBackup: nil,
                 primaryIsActive: true,
@@ -680,11 +661,16 @@ struct ServerConfigView: View {
             return
         }
 
-        // ServerConfigView always edits the primary server. Backup is edited
-        // via BackupServerConfigView — keeps the mapping one row → one field.
-        settings.serverHost = trimmedHost
-        settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        settings.serverPassword = serverPassword
+        // Save to the correct server based on which is currently active
+        if settings.currentActiveServer == .primary {
+            settings.serverHost = trimmedHost
+            settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.serverPassword = serverPassword
+        } else {
+            settings.backupServerHost = trimmedHost
+            settings.backupServerUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.backupServerPassword = serverPassword
+        }
 
         settings.saveSettings()
         hasChanges = false
