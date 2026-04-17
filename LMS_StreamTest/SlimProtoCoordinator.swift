@@ -675,7 +675,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         let reconnectionAttempts = connectionManager.getReconnectionAttempts()
 
         // Try backup server if primary fails once (fast failover, issue #76)
-        if settings.currentActiveServer == .primary &&
+        if settings.automaticFailoverEnabled &&
+           settings.currentActiveServer == .primary &&
            reconnectionAttempts >= 1 &&
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
@@ -693,8 +694,12 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             connectionManager.resetReconnectionAttempts()
         }
         // Try primary server if backup fails once (fast failover)
-        else if settings.currentActiveServer == .backup &&
-                reconnectionAttempts >= 1 {
+        // Guard on non-empty primary host (symmetric with forward branch) — prevents
+        // snapping to an empty/unreachable primary and reconnect-looping.
+        else if settings.automaticFailoverEnabled &&
+                settings.currentActiveServer == .backup &&
+                reconnectionAttempts >= 1 &&
+                !settings.serverHost.isEmpty {
 
             os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary", reconnectionAttempts)
             settings.switchToPrimaryServer()
