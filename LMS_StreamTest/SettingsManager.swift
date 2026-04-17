@@ -362,51 +362,52 @@ class SettingsManager: ObservableObject {
         case networkError(String)
     }
     
-    func testConnection() async -> ConnectionTestResult {
-        os_log(.info, log: logger, "Testing connection to %{public}s", serverHost)
-        
-        guard !serverHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    func testConnection(
+        host: String,
+        webPort: Int,
+        slimProtoPort: Int,
+        authHeader: String?
+    ) async -> ConnectionTestResult {
+        os_log(.info, log: logger, "Testing connection to %{public}s", host)
+
+        let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanHost.isEmpty else {
             return .invalidHost("Host address cannot be empty")
         }
-        
-        let cleanHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         // Note: Local network permission is triggered by server discovery UDP broadcasts
-        
-        let webTestResult = await testHTTPConnection(host: cleanHost, port: serverWebPort)
+
+        let webTestResult = await testHTTPConnection(host: cleanHost, port: webPort, authHeader: authHeader)
         switch webTestResult {
+        case .offline(let msg):
+            return .networkError(msg)
         case .failure(let error):
-            // Enhanced error message for potential local network permission issues
-            if error.contains("offline") || error.contains("network") {
-                return .webPortFailure("Connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
-            }
             return .webPortFailure(error)
         case .success:
             break
         }
-        
-        let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: serverSlimProtoPort)
+
+        let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: slimProtoPort)
         switch slimProtoTestResult {
+        case .offline(let msg):
+            return .networkError(msg)
         case .failure(let error):
-            // Enhanced error message for potential local network permission issues
-            if error.contains("offline") || error.contains("network") {
-                return .slimProtoPortFailure("Stream connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
-            }
             return .slimProtoPortFailure(error)
         case .success:
             break
         }
-        
+
         os_log(.info, log: logger, "Connection test successful")
         return .success
     }
-    
+
     private enum PortTestResult {
         case success
         case failure(String)
+        case offline(String)
     }
-    
-    private func testHTTPConnection(host: String, port: Int) async -> PortTestResult {
+
+    private func testHTTPConnection(host: String, port: Int, authHeader: String?) async -> PortTestResult {
         guard let url = URL(string: "http://\(host):\(port)/") else {
             return .failure("Invalid URL format")
         }
@@ -415,17 +416,16 @@ class SettingsManager: ObservableObject {
         request.httpMethod = "HEAD"
         request.setValue(customUserAgent, forHTTPHeaderField: "User-Agent")
 
-        // Add HTTP Basic Authentication if configured
-        if let authHeader = generateAuthHeader() {
+        if let authHeader = authHeader {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
             os_log(.debug, log: logger, "🔐 Added auth to connection test")
         }
 
         request.timeoutInterval = connectionTimeout
-        
+
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            
+
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode < 400 {
                     os_log(.info, log: logger, "HTTP test successful - Status: %d", httpResponse.statusCode)
@@ -438,53 +438,67 @@ class SettingsManager: ObservableObject {
             }
         } catch {
             os_log(.error, log: logger, "HTTP test failed: %{public}s", error.localizedDescription)
-            return .failure("HTTP connection failed: \(error.localizedDescription)")
-        }
-    }
-    
-    private func testTCPConnection(host: String, port: Int) async -> PortTestResult {
-        return await withCheckedContinuation { continuation in
-            let queue = DispatchQueue(label: "com.lmsstream.connectiontest")
-            
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host),
-                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
-                using: .tcp
-            )
-            
-            var hasResumed = false
-            
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if !hasResumed {
-                        hasResumed = true
-                        os_log(.info, log: self.logger, "TCP connection test successful")
-                        connection.cancel()
-                        continuation.resume(returning: .success)
-                    }
-                case .failed(let error):
-                    if !hasResumed {
-                        hasResumed = true
-                        os_log(.error, log: self.logger, "TCP connection test failed: %{public}s", error.localizedDescription)
-                        continuation.resume(returning: .failure("TCP connection failed: \(error.localizedDescription)"))
-                    }
-                case .cancelled:
-                    break
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .notConnectedToInternet, .dataNotAllowed, .networkConnectionLost:
+                    return .offline("iPhone is offline. Reconnect to Wi-Fi or cellular to test.")
                 default:
                     break
                 }
             }
-            
-            connection.start(queue: queue)
-            
-            queue.asyncAfter(deadline: .now() + connectionTimeout) {
-                if !hasResumed {
-                    hasResumed = true
-                    connection.cancel()
-                    continuation.resume(returning: .failure("Connection timeout"))
+            return .failure("HTTP connection failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func testTCPConnection(host: String, port: Int) async -> PortTestResult {
+        let queue = DispatchQueue(label: "com.lmsstream.connectiontest")
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+            using: .tcp
+        )
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var hasResumed = false
+
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if !hasResumed {
+                            hasResumed = true
+                            os_log(.info, log: self.logger, "TCP connection test successful")
+                            connection.cancel()
+                            continuation.resume(returning: .success)
+                        }
+                    case .failed(let error):
+                        if !hasResumed {
+                            hasResumed = true
+                            os_log(.error, log: self.logger, "TCP connection test failed: %{public}s", error.localizedDescription)
+                            continuation.resume(returning: .failure("TCP connection failed: \(error.localizedDescription)"))
+                        }
+                    case .cancelled:
+                        if !hasResumed {
+                            hasResumed = true
+                            continuation.resume(returning: .failure("Connection cancelled"))
+                        }
+                    default:
+                        break
+                    }
+                }
+
+                connection.start(queue: queue)
+
+                queue.asyncAfter(deadline: .now() + connectionTimeout) {
+                    if !hasResumed {
+                        hasResumed = true
+                        connection.cancel()
+                        continuation.resume(returning: .failure("Connection timeout"))
+                    }
                 }
             }
+        } onCancel: {
+            connection.cancel()
         }
     }
     
@@ -581,6 +595,15 @@ class SettingsManager: ObservableObject {
 
     var hasBackupServerAuthentication: Bool {
         return !backupServerUsername.isEmpty
+    }
+
+    // MARK: - Backup Server Test Helpers
+    var shouldTestBackup: Bool {
+        isBackupServerEnabled && !backupServerHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isBackupConfiguredButEmpty: Bool {
+        isBackupServerEnabled && backupServerHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - HTTP Basic Authentication

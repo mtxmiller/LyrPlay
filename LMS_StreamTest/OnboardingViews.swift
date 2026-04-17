@@ -930,12 +930,18 @@ struct ConnectionTestView: View {
         ]
         
         Task {
-            let result = await settings.testConnection()
-            
+            let auth = SettingsManager.generateAuthHeader(username: settings.serverUsername, password: settings.serverPassword)
+            let result = await settings.testConnection(
+                host: settings.serverHost,
+                webPort: settings.serverWebPort,
+                slimProtoPort: settings.serverSlimProtoPort,
+                authHeader: auth
+            )
+
             await MainActor.run {
                 testResult = result
                 updateTestDetails(for: result)
-                
+
                 switch result {
                 case .success:
                     testState = .success

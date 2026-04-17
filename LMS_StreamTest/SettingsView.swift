@@ -436,7 +436,31 @@ struct SettingsView: View {
             audioPlayer.updateOutputDeviceInfo()
         }
         .sheet(isPresented: $showingConnectionTest) {
-            ConnectionTestSheet()
+            ConnectionTestSheet(
+                testPrimary: {
+                    let auth = SettingsManager.generateAuthHeader(username: settings.serverUsername, password: settings.serverPassword)
+                    let r = await settings.testConnection(
+                        host: settings.serverHost,
+                        webPort: settings.serverWebPort,
+                        slimProtoPort: settings.serverSlimProtoPort,
+                        authHeader: auth
+                    )
+                    return (settings.serverHost, settings.serverWebPort, settings.serverSlimProtoPort, r)
+                },
+                testBackup: settings.shouldTestBackup ? {
+                    let auth = SettingsManager.generateAuthHeader(username: settings.backupServerUsername, password: settings.backupServerPassword)
+                    let r = await settings.testConnection(
+                        host: settings.backupServerHost,
+                        webPort: settings.backupServerWebPort,
+                        slimProtoPort: settings.backupServerSlimProtoPort,
+                        authHeader: auth
+                    )
+                    return (settings.backupServerHost, settings.backupServerWebPort, settings.backupServerSlimProtoPort, r)
+                } : nil,
+                primaryIsActive: settings.currentActiveServer == .primary,
+                backupLabel: settings.shouldTestBackup ? settings.backupServerHost
+                           : settings.isBackupConfiguredButEmpty ? "Not configured" : nil
+            )
         }
         .sheet(isPresented: $showingMACInfo) {
             MACInfoSheet()
@@ -600,23 +624,27 @@ struct ServerConfigView: View {
             serverPassword = settings.activeServerPassword
         }
         .sheet(isPresented: $showingConnectionTest) {
-            ConnectionTestSheet()
+            ConnectionTestSheet(
+                testPrimary: {
+                    let typed = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let auth = SettingsManager.generateAuthHeader(username: serverUsername, password: serverPassword)
+                    let r = await settings.testConnection(
+                        host: typed,
+                        webPort: settings.activeServerWebPort,
+                        slimProtoPort: settings.activeServerSlimProtoPort,
+                        authHeader: auth
+                    )
+                    return (typed, settings.activeServerWebPort, settings.activeServerSlimProtoPort, r)
+                },
+                testBackup: nil,
+                primaryIsActive: true,
+                backupLabel: nil
+            )
         }
     }
-    
+
     private func testConnection() {
-        // Temporarily save the host for testing
-        let originalHost = settings.serverHost
-        settings.serverHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        
         showingConnectionTest = true
-        
-        // Restore original if test is cancelled
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if !showingConnectionTest {
-                settings.serverHost = originalHost
-            }
-        }
     }
     
     private func saveSettings() {
@@ -841,81 +869,71 @@ struct AdvancedConfigView: View {
 
 // MARK: - Connection Test Sheet
 struct ConnectionTestSheet: View {
-    @StateObject private var settings = SettingsManager.shared
+    typealias TestOutcome = (host: String, webPort: Int, slimPort: Int, result: SettingsManager.ConnectionTestResult)
+
+    let testPrimary: () async -> TestOutcome
+    let testBackup: (() async -> TestOutcome)?
+    let primaryIsActive: Bool
+    let backupLabel: String?  // nil = no backup card; "Not configured" = empty-placeholder
+
     @Environment(\.presentationMode) var presentationMode
-    
+
+    @State private var primary: TestOutcome?
+    @State private var backup: TestOutcome?
     @State private var testState: TestState = .idle
-    @State private var testResult: SettingsManager.ConnectionTestResult?
-    @State private var testDetails: [ConnectionTestView.TestDetail] = []
-    
-    enum TestState {
-        case idle
-        case testing
-        case completed
+    @State private var testTask: Task<Void, Never>?
+
+    enum TestState { case idle, testing, completed }
+
+    private var hasBackup: Bool { testBackup != nil }
+    private var isBackupPlaceholder: Bool {
+        testBackup == nil && backupLabel == "Not configured"
     }
-    
+
     var body: some View {
         NavigationView {
-            VStack(spacing: 30) {
-                VStack(spacing: 16) {
-                    Image(systemName: iconForState)
-                        .font(.largeTitle)
-                        .foregroundColor(colorForState)
-                    
-                    Text(titleForState)
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    
-                    Text("Server: \(settings.activeServerHost)")
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 40)
-                
-                if !testDetails.isEmpty {
-                    VStack(spacing: 16) {
-                        ForEach(testDetails.indices, id: \.self) { index in
-                            TestDetailRow(detail: testDetails[index])
-                        }
+            ScrollView {
+                VStack(spacing: 24) {
+                    headerView
+
+                    serverCard(
+                        title: "Primary",
+                        outcome: primary,
+                        isActive: primaryIsActive && hasBackup
+                    )
+
+                    if isBackupPlaceholder {
+                        backupPlaceholderCard
+                    } else if hasBackup {
+                        serverCard(
+                            title: "Backup",
+                            outcome: backup,
+                            isActive: !primaryIsActive && hasBackup
+                        )
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                }
-                
-                if testState == .testing {
-                    ProgressView("Testing connection...")
-                        .progressViewStyle(CircularProgressViewStyle())
-                }
-                
-                if testState == .completed {
-                    if let result = testResult {
-                        Text(messageForResult(result))
+
+                    if testState == .completed {
+                        Text(summaryMessage)
                             .font(.body)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
                     }
-                }
-                
-                Spacer()
-                
-                VStack(spacing: 12) {
-                    if testState == .idle || testState == .completed {
-                        Button("Test Connection") {
-                            runConnectionTest()
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
+
+                    VStack(spacing: 12) {
+                        Button("Test Connection") { runTest() }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(testState == .testing)
+
+                        Button("Close") { presentationMode.wrappedValue.dismiss() }
+                            .buttonStyle(SecondaryButtonStyle())
                     }
-                    
-                    Button("Close") {
-                        presentationMode.wrappedValue.dismiss()
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
+                    .padding(.top, 8)
+                    .padding(.bottom, 20)
                 }
-                .padding(.bottom, 40)
+                .padding(.horizontal)
+                .padding(.top, 24)
             }
-            .padding(.horizontal)
             .navigationTitle("Connection Test")
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarItems(trailing: Button("Done") {
@@ -923,111 +941,238 @@ struct ConnectionTestSheet: View {
             })
         }
         .onAppear {
-            if testState == .idle {
-                runConnectionTest()
-            }
+            if testState == .idle { runTest() }
+        }
+        .onDisappear {
+            testTask?.cancel()
         }
     }
-    
-    private var iconForState: String {
+
+    // MARK: - Header
+
+    private var headerView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: headerIcon)
+                .font(.largeTitle)
+                .foregroundColor(headerColor)
+            Text(headerTitle)
+                .font(.title2)
+                .fontWeight(.semibold)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    private var headerIcon: String {
+        switch overallStatus {
+        case .idle, .testing: return "network"
+        case .allGreen: return "checkmark.circle.fill"
+        case .mixed: return "exclamationmark.triangle.fill"
+        case .allRed: return "xmark.circle.fill"
+        }
+    }
+
+    private var headerColor: Color {
+        switch overallStatus {
+        case .idle, .testing: return .blue
+        case .allGreen: return .green
+        case .mixed: return .orange
+        case .allRed: return .red
+        }
+    }
+
+    private var headerTitle: String {
+        switch overallStatus {
+        case .idle: return "Ready to Test"
+        case .testing: return "Testing Connection"
+        case .allGreen:
+            return hasBackup ? "Both servers reachable" : "Connection Successful"
+        case .mixed:
+            return isPrimaryFail ? "Failover ready" : "Backup unreachable"
+        case .allRed:
+            return hasBackup ? "Neither reachable" : "Connection Failed"
+        }
+    }
+
+    // MARK: - Status Aggregation
+
+    private enum OverallStatus { case idle, testing, allGreen, mixed, allRed }
+
+    private var overallStatus: OverallStatus {
         switch testState {
-        case .idle:
-            return "network"
-        case .testing:
-            return "network"
+        case .idle: return .idle
+        case .testing: return .testing
         case .completed:
-            if case .success = testResult {
-                return "checkmark.circle.fill"
-            } else {
-                return "xmark.circle.fill"
+            let p = isSuccess(primary?.result)
+            if hasBackup {
+                let b = isSuccess(backup?.result)
+                if p && b { return .allGreen }
+                if !p && !b { return .allRed }
+                return .mixed
             }
+            return p ? .allGreen : .allRed
         }
     }
-    
-    private var colorForState: Color {
-        switch testState {
+
+    private var isPrimaryFail: Bool { !isSuccess(primary?.result) }
+
+    private func isSuccess(_ r: SettingsManager.ConnectionTestResult?) -> Bool {
+        if case .success = r { return true }
+        return false
+    }
+
+    // MARK: - Server Card
+
+    @ViewBuilder
+    private func serverCard(title: String, outcome: TestOutcome?, isActive: Bool) -> some View {
+        let webPort = outcome?.webPort
+        let slimPort = outcome?.slimPort
+        let host = outcome?.host
+
+        let webDetail = rowDetail(
+            label: "Web Interface\(webPort.map { " (Port \($0))" } ?? "")",
+            kind: .web,
+            result: outcome?.result
+        )
+        let slimDetail = rowDetail(
+            label: "Stream Protocol\(slimPort.map { " (Port \($0))" } ?? "")",
+            kind: .slim,
+            result: outcome?.result
+        )
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                if isActive {
+                    Text("ACTIVE")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(4)
+                }
+                Spacer()
+                if let host = host {
+                    Text(host)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            VStack(spacing: 0) {
+                TestDetailRow(detail: webDetail)
+                TestDetailRow(detail: slimDetail)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(cardA11yLabel(title: title, host: host, isActive: isActive, web: webDetail, slim: slimDetail))
+    }
+
+    private var backupPlaceholderCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Backup")
+                    .font(.headline)
+                Spacer()
+                Text("Not configured")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            Text("Tap Backup Server Address in Settings to configure.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Backup server is enabled but no address is set. Open Settings to configure.")
+    }
+
+    // MARK: - Row Detail Mapping
+
+    private enum RowKind { case web, slim }
+
+    private func rowDetail(label: String, kind: RowKind, result: SettingsManager.ConnectionTestResult?) -> ConnectionTestView.TestDetail {
+        if testState == .testing {
+            return .init(name: label, status: .testing, message: "Testing...")
+        }
+        guard let result = result else {
+            return .init(name: label, status: .testing, message: "Waiting...")
+        }
+        switch (kind, result) {
+        case (_, .success):
+            return .init(name: label, status: .success, message: "Connected")
+        case (.web, .webPortFailure(let e)):
+            return .init(name: label, status: .failure, message: e)
+        case (.slim, .webPortFailure):
+            return .init(name: label, status: .testing, message: "Skipped")
+        case (.web, .slimProtoPortFailure):
+            return .init(name: label, status: .success, message: "Connected")
+        case (.slim, .slimProtoPortFailure(let e)):
+            return .init(name: label, status: .failure, message: e)
+        case (_, .invalidHost(let e)):
+            return .init(name: label, status: .failure, message: e)
+        case (_, .timeout):
+            return .init(name: label, status: .failure, message: "Timed out")
+        case (_, .networkError(let e)):
+            return .init(name: label, status: .failure, message: e)
+        }
+    }
+
+    // MARK: - Accessibility
+
+    private func cardA11yLabel(title: String, host: String?, isActive: Bool, web: ConnectionTestView.TestDetail, slim: ConnectionTestView.TestDetail) -> String {
+        let hostStr = host ?? "address unknown"
+        let activeStr = isActive ? " Active server." : ""
+        return "\(title) server \(hostStr).\(activeStr) \(web.name): \(statusWord(web.status)). \(slim.name): \(statusWord(slim.status))."
+    }
+
+    private func statusWord(_ s: ConnectionTestView.TestDetail.Status) -> String {
+        switch s {
+        case .testing: return "testing"
+        case .success: return "connected"
+        case .failure: return "failed"
+        }
+    }
+
+    // MARK: - Summary Message
+
+    private var summaryMessage: String {
+        switch overallStatus {
         case .idle, .testing:
-            return .blue
-        case .completed:
-            if case .success = testResult {
-                return .green
-            } else {
-                return .red
+            return ""
+        case .allGreen where !hasBackup:
+            return "Connection successful. Your LMS server is reachable and ready for streaming."
+        case .allGreen:
+            return "Both servers reachable. Failover is ready if your primary becomes unavailable."
+        case .mixed where isPrimaryFail:
+            return "Failover active — audio is playing from your backup server. Primary will resume automatically when reachable."
+        case .mixed:
+            return "Your primary is working, but backup is unreachable. Check the backup address or network to restore failover coverage."
+        case .allRed where !hasBackup:
+            return fallbackErrorMessage(primary?.result)
+        case .allRed:
+            if case .networkError = primary?.result {
+                return "iPhone is offline. Reconnect to Wi-Fi or cellular to test."
             }
+            return "Neither server is reachable. Check your network, VPN, or server addresses. If using a 10.x network, verify Local Network permission in iOS Settings."
         }
     }
-    
-    private var titleForState: String {
-        switch testState {
-        case .idle:
-            return "Ready to Test"
-        case .testing:
-            return "Testing Connection"
-        case .completed:
-            if case .success = testResult {
-                return "Connection Successful"
-            } else {
-                return "Connection Failed"
-            }
-        }
-    }
-    
-    private func runConnectionTest() {
-        testState = .testing
-        testDetails = [
-            ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .testing, message: "Testing..."),
-            ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Testing...")
-        ]
-        
-        Task {
-            let result = await settings.testConnection()
-            
-            await MainActor.run {
-                testResult = result
-                updateTestDetails(for: result)
-                testState = .completed
-            }
-        }
-    }
-    
-    private func updateTestDetails(for result: SettingsManager.ConnectionTestResult) {
+
+    private func fallbackErrorMessage(_ result: SettingsManager.ConnectionTestResult?) -> String {
+        guard let result = result else { return "" }
         switch result {
         case .success:
-            testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .success, message: "Connected")
-            ]
-            
-        case .webPortFailure(let error):
-            testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .testing, message: "Skipped")
-            ]
-            
-        case .slimProtoPortFailure(let error):
-            testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .success, message: "Connected"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
-            ]
-            
-        case .invalidHost(let error):
-            testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: error),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: error)
-            ]
-            
-        default:
-            testDetails = [
-                ConnectionTestView.TestDetail(name: "Web Interface (Port \(settings.activeServerWebPort))", status: .failure, message: "Failed"),
-                ConnectionTestView.TestDetail(name: "Stream Protocol (Port \(settings.activeServerSlimProtoPort))", status: .failure, message: "Failed")
-            ]
-        }
-    }
-    
-    private func messageForResult(_ result: SettingsManager.ConnectionTestResult) -> String {
-        switch result {
-        case .success:
-            return "All connections successful! Your LMS server is reachable and ready for streaming."
+            return ""
         case .webPortFailure:
             return "Cannot connect to LMS web interface. Check if LMS is running and the address is correct."
         case .slimProtoPortFailure:
@@ -1036,8 +1181,30 @@ struct ConnectionTestSheet: View {
             return "Invalid server address. Please check the hostname or IP address."
         case .timeout:
             return "Connection timed out. Check your network connection and server address."
-        case .networkError(let error):
-            return "Network error: \(error)"
+        case .networkError(let msg):
+            return msg
+        }
+    }
+
+    // MARK: - Run Test
+
+    private func runTest() {
+        testState = .testing
+        primary = nil
+        backup = nil
+
+        testTask = Task {
+            async let p = testPrimary()
+            async let b: TestOutcome? = testBackup?()
+            let (primaryOutcome, backupOutcome) = await (p, b)
+
+            if Task.isCancelled { return }
+
+            await MainActor.run {
+                primary = primaryOutcome
+                backup = backupOutcome
+                testState = .completed
+            }
         }
     }
 }
