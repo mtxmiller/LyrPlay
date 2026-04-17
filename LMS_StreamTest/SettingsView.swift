@@ -1490,7 +1490,7 @@ struct ServerDiscoveryRow: View {
                     Text(server.name)
                         .font(.headline)
                         .foregroundColor(.primary)
-                    Text("\(server.host):\(server.port)")
+                    Text(verbatim: "\(server.host):\(server.port)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
