@@ -124,13 +124,8 @@ class ServerDiscoveryManager: ObservableObject {
             return
         }
         
-        // Try broadcast discovery with fallback addresses
-        let targets = [
-            "255.255.255.255",      // Global broadcast
-            "192.168.1.255",        // Common home networks
-            "192.168.0.255",
-            "10.0.0.255"
-        ]
+        // Compute broadcast addresses from actual network interfaces
+        let targets = getLocalBroadcastAddresses()
         
         for target in targets {
             os_log(.info, log: logger, "🔍 Sending UDP discovery to %{public}s:3483", target)
@@ -205,6 +200,59 @@ class ServerDiscoveryManager: ObservableObject {
         completion(foundServers)
     }
     
+    /// Enumerate local network interfaces and return their IPv4 broadcast addresses.
+    /// Filters to Wi-Fi (en*) and bridge interfaces only — skips cellular (pdp_ip*),
+    /// AirDrop (awdl0), and hotspot AP (ap1). Falls back to 255.255.255.255 if no
+    /// interfaces are found. Global broadcast is always appended as a last resort.
+    private func getLocalBroadcastAddresses() -> [String] {
+        var addresses: [String] = []
+        var ifaddrsPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrsPtr) == 0, let firstAddr = ifaddrsPtr else {
+            os_log(.info, log: logger, "🔍 getifaddrs() failed, using global broadcast only")
+            return ["255.255.255.255"]
+        }
+        defer { freeifaddrs(ifaddrsPtr) }
+
+        var ptr = firstAddr
+        while true {
+            let flags = Int32(ptr.pointee.ifa_flags)
+
+            // Guard ifa_addr before dereferencing sa_family
+            if let addr = ptr.pointee.ifa_addr,
+               addr.pointee.sa_family == UInt8(AF_INET),
+               flags & IFF_UP != 0,
+               flags & IFF_BROADCAST != 0,
+               flags & IFF_LOOPBACK == 0 {
+
+                // Only Wi-Fi (en*) and bridge interfaces — skip cellular, AirDrop, hotspot AP
+                let name = String(cString: ptr.pointee.ifa_name)
+                if name.hasPrefix("en") || name.hasPrefix("bridge"),
+                   let broadcastAddr = ptr.pointee.ifa_dstaddr {
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(broadcastAddr, socklen_t(MemoryLayout<sockaddr_in>.size),
+                                  &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        let addrStr = String(cString: hostname)
+                        if !addresses.contains(addrStr) {
+                            addresses.append(addrStr)
+                            os_log(.info, log: self.logger, "🔍 Found broadcast address %{public}s on interface %{public}s", addrStr, name)
+                        }
+                    }
+                }
+            }
+
+            guard let next = ptr.pointee.ifa_next else { break }
+            ptr = next
+        }
+
+        // Always include global broadcast as fallback
+        if !addresses.contains("255.255.255.255") {
+            addresses.append("255.255.255.255")
+        }
+
+        os_log(.info, log: logger, "🔍 Discovery targets: %{public}@", addresses.joined(separator: ", "))
+        return addresses
+    }
+
     private func parseLMSResponse(_ data: Data, serverIP: String) -> DiscoveredServer? {
         // Parse LMS discovery response format: 'E' + TAG + length + data
         // Skip the 'E' prefix (already validated)
