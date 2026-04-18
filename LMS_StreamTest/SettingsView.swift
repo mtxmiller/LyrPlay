@@ -889,6 +889,7 @@ struct ConnectionTestSheet: View {
     let testBackup: (() async -> TestOutcome)?
     let primaryIsActive: Bool
     let backupLabel: String?  // nil = no backup card; "Not configured" = empty-placeholder
+    var primaryTitle: String = "Primary"  // Card label for the primary slot (e.g. "Backup" when invoked from BackupServerConfigView)
 
     @Environment(\.presentationMode) var presentationMode
 
@@ -911,7 +912,7 @@ struct ConnectionTestSheet: View {
                     headerView
 
                     serverCard(
-                        title: "Primary",
+                        title: primaryTitle,
                         outcome: primary,
                         isActive: primaryIsActive && hasBackup
                     )
@@ -1242,6 +1243,14 @@ struct BackupServerConfigView: View {
     @State private var backupPassword: String = ""
     @State private var hasChanges = false
     @State private var validationErrors: [String] = []
+    @State private var showingConnectionTest = false
+
+    private var webPortInt: Int? { Int(backupWebPort) }
+    private var slimPortInt: Int? { Int(backupSlimPort) }
+    private var trimmedHost: String { backupHost.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canTestConnection: Bool {
+        !trimmedHost.isEmpty && webPortInt != nil && slimPortInt != nil
+    }
     
     var body: some View {
         Form {
@@ -1315,6 +1324,13 @@ struct BackupServerConfigView: View {
                     }
                 }
             }
+
+            Section {
+                Button("Test Connection") {
+                    showingConnectionTest = true
+                }
+                .disabled(!canTestConnection)
+            }
         }
         .navigationTitle("Backup Server")
         .navigationBarTitleDisplayMode(.inline)
@@ -1329,8 +1345,31 @@ struct BackupServerConfigView: View {
         .onAppear {
             loadCurrentSettings()
         }
+        // Unlike ServerConfigView (typed host + saved ports), this tests typed host
+        // AND typed ports — backup ports are editable on this screen.
+        .sheet(isPresented: $showingConnectionTest) {
+            ConnectionTestSheet(
+                testPrimary: {
+                    let host = trimmedHost
+                    let web = webPortInt ?? settings.backupServerWebPort
+                    let slim = slimPortInt ?? settings.backupServerSlimProtoPort
+                    let auth = SettingsManager.generateAuthHeader(username: backupUsername, password: backupPassword)
+                    let r = await settings.testConnection(
+                        host: host,
+                        webPort: web,
+                        slimProtoPort: slim,
+                        authHeader: auth
+                    )
+                    return (host, web, slim, r)
+                },
+                testBackup: nil,
+                primaryIsActive: true,
+                backupLabel: nil,
+                primaryTitle: "Backup"
+            )
+        }
     }
-    
+
     private func loadCurrentSettings() {
         backupHost = settings.backupServerHost
         backupWebPort = String(settings.backupServerWebPort)

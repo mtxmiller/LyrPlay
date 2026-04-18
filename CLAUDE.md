@@ -21,6 +21,20 @@ xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 
 **Always use `LMS_StreamTest.xcworkspace`**, never `.xcodeproj` (CocoaPods requirement). Testing is manual.
 
+### Build, install, and launch on iPhone 12 (CLI)
+
+```bash
+# xcodebuild destination ID (from `xcodebuild -showdestinations`)
+IPHONE_BUILD_ID=00008120-001E04AC2631A01E
+# devicectl device UDID (from `xcrun devicectl list devices`)
+IPHONE_DEVICE_ID=0F3E3809-0541-5422-BCAB-4BD08382A7B6
+APP_PATH=~/Library/Developer/Xcode/DerivedData/LMS_StreamTest-bxujpsmokoklsfgfzaaehtmkkweo/Build/Products/Debug-iphoneos/LMS_StreamTest.app
+
+xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest -configuration Debug -destination "id=$IPHONE_BUILD_ID" -allowProvisioningUpdates build \
+  && xcrun devicectl device install app --device "$IPHONE_DEVICE_ID" "$APP_PATH" \
+  && xcrun devicectl device process launch --device "$IPHONE_DEVICE_ID" elm.LMS-StreamTest
+```
+
 ## Issue Tracking
 
 This project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking. Use `bd` commands, not markdown TODOs. Run `bd ready --json` for available work, `bd create "title" -t bug|feature|task -p 0-4 --json` to file issues, `bd close <id>` to complete.
