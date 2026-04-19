@@ -132,3 +132,6 @@ App Icons/
 .dolt/
 *.db
 .beads-credential-key
+
+# Archived duplicates / old files (local only)
+_archive/
