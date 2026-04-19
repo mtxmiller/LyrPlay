@@ -135,3 +135,9 @@ App Icons/
 
 # Archived duplicates / old files (local only)
 _archive/
+
+# Xcode workspace shared settings (local only)
+LMS_StreamTest.xcworkspace/xcshareddata/
+
+# Local test media (FLAC, cue sheets, etc.)
+test-content/
