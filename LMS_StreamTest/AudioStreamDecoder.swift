@@ -515,6 +515,13 @@ class AudioStreamDecoder {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔊 NO MUTING: muteNextStream = FALSE")
         }
 
+        // After AVAudioSession interruption (phone call) or route change, BASS may leave
+        // the output device in BASS_ACTIVE_PAUSED_DEVICE. BASS_ChannelPlay then succeeds
+        // but produces no audio. BASS docs: "BASS_Start can be used to force resumption."
+        let wasStarted = BASS_IsStarted()
+        BASS_Start()
+        os_log(.info, log: logger, "🔊 BASS_Start before resume (was started: %{public}s)", wasStarted != 0 ? "YES" : "NO")
+
         let result = BASS_ChannelPlay(pushStream, 0)
         if result != 0 {
             os_log(.error, log: logger, "[APP-RECOVERY] ✅ Push stream resumed successfully (muted: %{public}s)", muteNextStream ? "YES" : "NO")

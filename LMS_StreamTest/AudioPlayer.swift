@@ -353,8 +353,16 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream may have ended or failed")
             return
         }
-        
+
         isIntentionallyPaused = false
+
+        // After AVAudioSession interruption or route change, BASS may leave the output
+        // device paused (BASS_ACTIVE_PAUSED_DEVICE). BASS_ChannelPlay would then succeed
+        // but produce no audio. Force-resume the device per BASS docs.
+        let wasStarted = BASS_IsStarted()
+        BASS_Start()
+        os_log(.info, log: logger, "🔊 BASS_Start before play (was started: %{public}s)", wasStarted != 0 ? "YES" : "NO")
+
         let result = BASS_ChannelPlay(currentStream, 0)
         
         if result != 0 {
