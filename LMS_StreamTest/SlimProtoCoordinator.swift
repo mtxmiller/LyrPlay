@@ -143,6 +143,8 @@ class SlimProtoCoordinator: ObservableObject {
 
     @objc private func handleAppDidEnterBackground() {
         backgroundedTime = Date()
+        // Persist so recovery still fires after iOS kills the process during a long background
+        UserDefaults.standard.set(backgroundedTime, forKey: "lyrplay_backgrounded_at")
         os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
     }
 
@@ -201,8 +203,16 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     func getBackgroundDuration() -> TimeInterval? {
-        guard let bgTime = backgroundedTime else { return nil }
-        return Date().timeIntervalSince(bgTime)
+        if let bgTime = backgroundedTime {
+            return Date().timeIntervalSince(bgTime)
+        }
+        // In-memory value is lost when iOS terminates the process during long backgrounds.
+        // Fall back to the persisted timestamp so app-open and lock-screen-play recovery
+        // still fire on the relaunched process.
+        if let persistedBgTime = UserDefaults.standard.object(forKey: "lyrplay_backgrounded_at") as? Date {
+            return Date().timeIntervalSince(persistedBgTime)
+        }
+        return nil
     }
 
     /// Request server-side seek for transcoding pipeline fixes
@@ -1406,9 +1416,9 @@ extension SlimProtoCoordinator {
         // For PAUSE/other: Just send command normally (no need to disconnect)
 
         if command.lowercased() == "play" {
-            // Check background duration - only reconnect/recover if backgrounded > 45 seconds
-            if let bgTime = backgroundedTime {
-                let duration = Date().timeIntervalSince(bgTime)
+            // Check background duration - only reconnect/recover if backgrounded > 45 seconds.
+            // Reads in-memory bgTime, then falls back to UserDefaults if iOS killed the process.
+            if let duration = getBackgroundDuration() {
                 os_log(.info, log: logger, "🔒 Lock screen PLAY: Backgrounded for %.1f seconds", duration)
 
                 if duration > 45 {
