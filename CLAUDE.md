@@ -121,10 +121,13 @@ We're building a Swift squeezelite. Always consult these when implementing or de
 
 ## Deep Documentation
 
-Architecture docs, release history, and decision records live in the Obsidian wiki:
-`/Users/ericmiller/Library/Mobile Documents/iCloud~md~obsidian/Documents/Eric's personal/LyrPlay Dev/`
+**Read the matching `Architecture/*.md` BEFORE grepping Swift source for any debug or design task in an architecture-touching area.** It gives you the trigger taxonomy, gating logic, and flow diagrams without having to reconstruct them.
 
-Sections: `Architecture/` (Audio Pipeline, CarPlay, Gapless, Position Recovery, SlimProto, etc.), `Releases/` (v1.4–v1.7.7), `Decisions/`
+Path: `/Users/ericmiller/Library/Mobile Documents/iCloud~md~obsidian/Documents/Eric's personal/LyrPlay Dev/`
+
+Architecture topics: Audio Pipeline, CarPlay, Gapless Playback, Position Recovery, SlimProto Protocol, Material WebView Injection, Server Failover, Reconnection.
+
+Also: `Releases/` for shipped-feature changelogs, `Decisions/` for architectural decision records.
 
 ## Skill routing
 
