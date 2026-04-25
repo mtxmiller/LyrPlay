@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var hasHandledError = false
     @State private var hasShownError = false
     @State private var previousActiveServer: SettingsManager.ServerType?
+    @State private var coldLaunchRecoveryChecked = false
 
     /// Detect if running as iPad app on Mac (no status bar, so ignore top safe area)
     private var isRunningOnMac: Bool {
@@ -187,13 +188,31 @@ struct ContentView: View {
             
         }
         .onAppear {
+            // Cold-launch recovery: willEnterForegroundNotification doesn't fire on Not Running → Active,
+            // so the warm-resume handler below misses cold launches after a process kill. Set the trigger
+            // here on first appear when persisted state shows a long background + saved recovery data.
+            // Only set if no other path (e.g., racing lock-screen play) already set a trigger.
+            if !coldLaunchRecoveryChecked {
+                coldLaunchRecoveryChecked = true
+                if slimProtoCoordinator.pendingRecoveryTrigger == .none,
+                   let duration = slimProtoCoordinator.getBackgroundDuration(),
+                   duration > 45,
+                   settings.enableAppOpenRecovery,
+                   UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil {
+                    os_log(.info, log: logger, "❄️ Cold launch %.1fs + recovery data → setting appOpen trigger", duration)
+                    slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
+                    if slimProtoCoordinator.isConnected {
+                        slimProtoCoordinator.handlePendingRecovery()
+                    }
+                }
+            }
+
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
-            
-            // CRITICAL FIX: Removed duplicate app open recovery call
-            // App open recovery should only be triggered by willEnterForegroundNotification
-            // Having it in both onAppear and willEnterForeground caused double execution
+
+            // App open recovery for warm resume is handled by willEnterForegroundNotification below.
+            // Cold launches don't get that notification, so the block above handles them on first appear.
         }
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()

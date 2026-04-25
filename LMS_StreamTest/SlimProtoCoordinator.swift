@@ -460,6 +460,9 @@ class SlimProtoCoordinator: ObservableObject {
             if self.isRecoveryInProgress {
                 os_log(.error, log: self.logger, "⚠️ RECOVERY TIMEOUT - Clearing lock after 10s (callback likely failed)")
                 self.isRecoveryInProgress = false
+                // Don't leave audio muted if the jump callback never fires — handlePendingRecovery(.appOpen)
+                // sets the mute flags before this function runs, and only the success callback unmutes.
+                self.audioManager.disableSilentRecoveryMode()
             }
         }
 
@@ -469,6 +472,9 @@ class SlimProtoCoordinator: ObservableObject {
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            // handlePendingRecovery(.appOpen) mutes the audio engine before this function runs.
+            // Undo it here so a missing-data early-return doesn't leave the next stream silent.
+            audioManager.disableSilentRecoveryMode()
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -479,6 +485,8 @@ class SlimProtoCoordinator: ObservableObject {
 
         guard savedPosition > 0 else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            // Same mute-leak guard as the recovery_timestamp early-return above.
+            audioManager.disableSilentRecoveryMode()
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -557,6 +565,13 @@ class SlimProtoCoordinator: ObservableObject {
                 os_log(.info, log: logger, "🔇 App open recovery: disabled in settings - skipping")
                 return
             }
+            // Consume the persisted background timestamp so a stale value can't keep
+            // re-triggering app-open recovery on every future cold launch.
+            // Scoped to .appOpen only — .lockScreen and .networkRestored leave it alone
+            // so a subsequent cold launch can still gate on it.
+            UserDefaults.standard.removeObject(forKey: "lyrplay_backgrounded_at")
+            backgroundedTime = nil
+
             os_log(.info, log: logger, "🔇 App open recovery: muted + paused")
             audioManager.enableSilentRecoveryMode()  // Mute before server sends audio
 
