@@ -123,9 +123,7 @@ We're building a Swift squeezelite. Always consult these when implementing or de
 
 **Read the matching `Architecture/*.md` BEFORE grepping Swift source for any debug or design task in an architecture-touching area.** It gives you the trigger taxonomy, gating logic, and flow diagrams without having to reconstruct them.
 
-Path: `/Users/ericmiller/Library/Mobile Documents/iCloud~md~obsidian/Documents/Eric's personal/LyrPlay Dev/`
-
-Architecture topics: Audio Pipeline, CarPlay, Gapless Playback, Position Recovery, SlimProto Protocol, Material WebView Injection, Server Failover, Reconnection.
+The wiki lives in a local Obsidian vault outside the repo (path stored in user-local Claude memory, not committed). Architecture topics: Audio Pipeline, CarPlay, Gapless Playback, Position Recovery, SlimProto Protocol, Material WebView Injection, Server Failover, Reconnection.
 
 Also: `Releases/` for shipped-feature changelogs, `Decisions/` for architectural decision records.
 
