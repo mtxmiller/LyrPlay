@@ -25,9 +25,11 @@ class SettingsManager: ObservableObject {
     @Published var backupServerWebPort: Int = 9000
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
+    @Published var automaticFailoverEnabled: Bool = true
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = .compressed
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
+    @Published var keepScreenAwake: Bool = false  // Prevent screen sleep during playback
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -126,9 +128,11 @@ class SettingsManager: ObservableObject {
         static let backupServerWebPort = "BackupServerWebPort"
         static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
         static let isBackupServerEnabled = "IsBackupServerEnabled"
+        static let automaticFailoverEnabled = "AutomaticFailoverEnabled"
         static let currentActiveServer = "CurrentActiveServer"
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
+        static let keepScreenAwake = "KeepScreenAwake"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
@@ -200,11 +204,13 @@ class SettingsManager: ObservableObject {
         backupServerWebPort = UserDefaults.standard.object(forKey: Keys.backupServerWebPort) as? Int ?? 9000
         backupServerSlimProtoPort = UserDefaults.standard.object(forKey: Keys.backupServerSlimProtoPort) as? Int ?? 3483
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
+        automaticFailoverEnabled = UserDefaults.standard.object(forKey: Keys.automaticFailoverEnabled) as? Bool ?? true
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
         let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
         audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .flac
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
+        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? false
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
@@ -245,9 +251,11 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerWebPort, forKey: Keys.backupServerWebPort)
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
+        UserDefaults.standard.set(automaticFailoverEnabled, forKey: Keys.automaticFailoverEnabled)
         UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
+        UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
@@ -358,51 +366,52 @@ class SettingsManager: ObservableObject {
         case networkError(String)
     }
     
-    func testConnection() async -> ConnectionTestResult {
-        os_log(.info, log: logger, "Testing connection to %{public}s", serverHost)
-        
-        guard !serverHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    func testConnection(
+        host: String,
+        webPort: Int,
+        slimProtoPort: Int,
+        authHeader: String?
+    ) async -> ConnectionTestResult {
+        os_log(.info, log: logger, "Testing connection to %{public}s", host)
+
+        let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanHost.isEmpty else {
             return .invalidHost("Host address cannot be empty")
         }
-        
-        let cleanHost = serverHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         // Note: Local network permission is triggered by server discovery UDP broadcasts
-        
-        let webTestResult = await testHTTPConnection(host: cleanHost, port: serverWebPort)
+
+        let webTestResult = await testHTTPConnection(host: cleanHost, port: webPort, authHeader: authHeader)
         switch webTestResult {
+        case .offline(let msg):
+            return .networkError(msg)
         case .failure(let error):
-            // Enhanced error message for potential local network permission issues
-            if error.contains("offline") || error.contains("network") {
-                return .webPortFailure("Connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
-            }
             return .webPortFailure(error)
         case .success:
             break
         }
-        
-        let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: serverSlimProtoPort)
+
+        let slimProtoTestResult = await testTCPConnection(host: cleanHost, port: slimProtoPort)
         switch slimProtoTestResult {
+        case .offline(let msg):
+            return .networkError(msg)
         case .failure(let error):
-            // Enhanced error message for potential local network permission issues
-            if error.contains("offline") || error.contains("network") {
-                return .slimProtoPortFailure("Stream connection failed. If using a 10.x network, check Settings > Privacy & Security > Local Network and enable LyrPlay access.")
-            }
             return .slimProtoPortFailure(error)
         case .success:
             break
         }
-        
+
         os_log(.info, log: logger, "Connection test successful")
         return .success
     }
-    
+
     private enum PortTestResult {
         case success
         case failure(String)
+        case offline(String)
     }
-    
-    private func testHTTPConnection(host: String, port: Int) async -> PortTestResult {
+
+    private func testHTTPConnection(host: String, port: Int, authHeader: String?) async -> PortTestResult {
         guard let url = URL(string: "http://\(host):\(port)/") else {
             return .failure("Invalid URL format")
         }
@@ -411,17 +420,16 @@ class SettingsManager: ObservableObject {
         request.httpMethod = "HEAD"
         request.setValue(customUserAgent, forHTTPHeaderField: "User-Agent")
 
-        // Add HTTP Basic Authentication if configured
-        if let authHeader = generateAuthHeader() {
+        if let authHeader = authHeader {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
             os_log(.debug, log: logger, "🔐 Added auth to connection test")
         }
 
         request.timeoutInterval = connectionTimeout
-        
+
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            
+
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode < 400 {
                     os_log(.info, log: logger, "HTTP test successful - Status: %d", httpResponse.statusCode)
@@ -434,53 +442,67 @@ class SettingsManager: ObservableObject {
             }
         } catch {
             os_log(.error, log: logger, "HTTP test failed: %{public}s", error.localizedDescription)
-            return .failure("HTTP connection failed: \(error.localizedDescription)")
-        }
-    }
-    
-    private func testTCPConnection(host: String, port: Int) async -> PortTestResult {
-        return await withCheckedContinuation { continuation in
-            let queue = DispatchQueue(label: "com.lmsstream.connectiontest")
-            
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host),
-                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
-                using: .tcp
-            )
-            
-            var hasResumed = false
-            
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if !hasResumed {
-                        hasResumed = true
-                        os_log(.info, log: self.logger, "TCP connection test successful")
-                        connection.cancel()
-                        continuation.resume(returning: .success)
-                    }
-                case .failed(let error):
-                    if !hasResumed {
-                        hasResumed = true
-                        os_log(.error, log: self.logger, "TCP connection test failed: %{public}s", error.localizedDescription)
-                        continuation.resume(returning: .failure("TCP connection failed: \(error.localizedDescription)"))
-                    }
-                case .cancelled:
-                    break
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .notConnectedToInternet, .dataNotAllowed, .networkConnectionLost:
+                    return .offline("iPhone is offline. Reconnect to Wi-Fi or cellular to test.")
                 default:
                     break
                 }
             }
-            
-            connection.start(queue: queue)
-            
-            queue.asyncAfter(deadline: .now() + connectionTimeout) {
-                if !hasResumed {
-                    hasResumed = true
-                    connection.cancel()
-                    continuation.resume(returning: .failure("Connection timeout"))
+            return .failure("HTTP connection failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func testTCPConnection(host: String, port: Int) async -> PortTestResult {
+        let queue = DispatchQueue(label: "com.lmsstream.connectiontest")
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+            using: .tcp
+        )
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var hasResumed = false
+
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if !hasResumed {
+                            hasResumed = true
+                            os_log(.info, log: self.logger, "TCP connection test successful")
+                            connection.cancel()
+                            continuation.resume(returning: .success)
+                        }
+                    case .failed(let error):
+                        if !hasResumed {
+                            hasResumed = true
+                            os_log(.error, log: self.logger, "TCP connection test failed: %{public}s", error.localizedDescription)
+                            continuation.resume(returning: .failure("TCP connection failed: \(error.localizedDescription)"))
+                        }
+                    case .cancelled:
+                        if !hasResumed {
+                            hasResumed = true
+                            continuation.resume(returning: .failure("Connection cancelled"))
+                        }
+                    default:
+                        break
+                    }
+                }
+
+                connection.start(queue: queue)
+
+                queue.asyncAfter(deadline: .now() + connectionTimeout) {
+                    if !hasResumed {
+                        hasResumed = true
+                        connection.cancel()
+                        continuation.resume(returning: .failure("Connection timeout"))
+                    }
                 }
             }
+        } onCancel: {
+            connection.cancel()
         }
     }
     
@@ -507,6 +529,7 @@ class SettingsManager: ObservableObject {
         backupServerWebPort = 9000
         backupServerSlimProtoPort = 3483
         isBackupServerEnabled = false
+        automaticFailoverEnabled = true
         currentActiveServer = .primary  // Reset to primary server
 
         // Reset CBass buffer settings to conservative defaults
@@ -515,33 +538,6 @@ class SettingsManager: ObservableObject {
 
         os_log(.info, log: logger, "✅ Reset complete: All server settings cleared, active server reset to primary")
         saveSettings()
-    }
-    
-    // MARK: - Validation
-    func validateConfiguration() -> [String] {
-        var errors: [String] = []
-        
-        if serverHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append("Server host is required")
-        }
-        
-        if playerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append("Player name is required")
-        }
-        
-        if serverWebPort < 1 || serverWebPort > 65535 {
-            errors.append("Web port must be between 1 and 65535")
-        }
-        
-        if serverSlimProtoPort < 1 || serverSlimProtoPort > 65535 {
-            errors.append("SlimProto port must be between 1 and 65535")
-        }
-        
-        if connectionTimeout < 1 || connectionTimeout > 60 {
-            errors.append("Connection timeout must be between 1 and 60 seconds")
-        }
-        
-        return errors
     }
     
     // MARK: - Computed Properties
@@ -604,6 +600,15 @@ class SettingsManager: ObservableObject {
 
     var hasBackupServerAuthentication: Bool {
         return !backupServerUsername.isEmpty
+    }
+
+    // MARK: - Backup Server Test Helpers
+    var shouldTestBackup: Bool {
+        isBackupServerEnabled && !backupServerHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isBackupConfiguredButEmpty: Bool {
+        isBackupServerEnabled && backupServerHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - HTTP Basic Authentication

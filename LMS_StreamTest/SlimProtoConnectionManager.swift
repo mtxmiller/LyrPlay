@@ -41,17 +41,15 @@ class SlimProtoConnectionManager {
     private var backgroundStartTime: Date?
     
     // MARK: - Reconnection Logic
-    private var reconnectionTimer: Timer?
+    private var reconnectionWorkItem: DispatchWorkItem?
     private var reconnectionAttempts: Int = 0  // Per-server counter (resets on server switch)
     private var totalConsecutiveFailures: Int = 0  // TOTAL failures across all servers (never resets until success)
     private let maxReconnectionAttempts: Int = 8  // Increased for better persistence
     private let maxTotalFailuresBeforeError: Int = 12  // After 12 total failures (both servers tried), show error
-    private let baseReconnectionDelay: TimeInterval = 2.0
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
 
     private var wasConnectedBeforeTimeout: Bool = false
-    private var disconnectionDuration: TimeInterval = 0
     
     
     // MARK: - Health Monitoring
@@ -431,7 +429,7 @@ class SlimProtoConnectionManager {
         lastSuccessfulConnection = Date()
         reconnectionAttempts = 0
         totalConsecutiveFailures = 0  // CRITICAL: Reset total failures on successful connection
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
 
         // Start health monitoring
         let interval = isInBackground ? 30.0 : 15.0
@@ -473,8 +471,11 @@ class SlimProtoConnectionManager {
             lastDisconnectionReason = .unknown
             os_log(.info, log: logger, "🔌 Disconnected gracefully")
         }
-        
 
+        // Auto-reconnect: schedule retry if disconnection reason allows it
+        if lastDisconnectionReason.shouldAutoReconnect && isNetworkAvailable {
+            scheduleReconnection()
+        }
     }
     
     // Add this method to detect timeout scenarios
@@ -568,29 +569,31 @@ class SlimProtoConnectionManager {
         return true
     }
     
-    private func calculateReconnectionDelay() -> TimeInterval {
-        // Base delay increases with attempts
-        let exponentialDelay = baseReconnectionDelay * pow(2.0, Double(reconnectionAttempts))
-        
-        // Cap the delay based on context
-        let maxDelay: TimeInterval = isInBackground ? 60.0 : 30.0
-        let delay = min(exponentialDelay, maxDelay)
-        
-        // Add jitter to avoid thundering herd
-        let jitter = Double.random(in: 0.8...1.2)
-        return delay * jitter
+    private func scheduleReconnection() {
+        cancelScheduledReconnection()
+
+        let delay: TimeInterval = 2.0  // Fast retry for responsive failover to backup server
+
+        os_log(.info, log: logger, "🔄 Scheduling reconnection in %.0f seconds", delay)
+
+        // Use DispatchQueue instead of Timer — didDisconnect() can be called from
+        // the socket's background queue, which has no RunLoop for Timer to fire on.
+        reconnectionWorkItem = DispatchWorkItem { [weak self] in
+            self?.attemptReconnection()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: reconnectionWorkItem!)
     }
-    
-    private func stopReconnectionTimer() {
-        reconnectionTimer?.invalidate()
-        reconnectionTimer = nil
+
+    private func cancelScheduledReconnection() {
+        reconnectionWorkItem?.cancel()
+        reconnectionWorkItem = nil
     }
 
     // MARK: - Manual Control
     func userInitiatedDisconnection() {
         os_log(.info, log: logger, "🔄 User initiated disconnection")
         lastDisconnectionReason = .userInitiated
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
         stopHealthMonitoring()
     }
 
@@ -636,7 +639,7 @@ class SlimProtoConnectionManager {
     // MARK: - Cleanup
     deinit {
         NotificationCenter.default.removeObserver(self)
-        stopReconnectionTimer()
+        cancelScheduledReconnection()
         stopHealthMonitoring()
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()

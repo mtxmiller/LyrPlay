@@ -238,6 +238,11 @@ final class PlaybackSessionController {
             coordinator.sendLockScreenCommand(command.slimCommand)
         }
 
+        // Update idle timer after a short delay to let playback state settle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.updateIdleTimerState()
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             self?.endBackgroundTask()
         }
@@ -280,10 +285,47 @@ final class PlaybackSessionController {
                            selector: #selector(handleMediaServicesReset(_:)),
                            name: AVAudioSession.mediaServicesWereResetNotification,
                            object: nil)
+
+        center.addObserver(self,
+                           selector: #selector(handleAppDidEnterBackground),
+                           name: UIApplication.didEnterBackgroundNotification,
+                           object: nil)
+
+        center.addObserver(self,
+                           selector: #selector(handleAppWillEnterForeground),
+                           name: UIApplication.willEnterForegroundNotification,
+                           object: nil)
     }
 
     deinit {
         center.removeObserver(self)
+    }
+
+    // MARK: - Idle Timer (Keep Screen Awake)
+
+    /// Update idle timer based on current playback state and user setting.
+    /// Call this whenever playback state changes or the app enters/leaves foreground.
+    private func updateIdleTimerState() {
+        let shouldDisable = SettingsManager.shared.keepScreenAwake && (playbackController?.isPlaying ?? false)
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = shouldDisable
+            os_log(.debug, log: self.logger, "💡 Idle timer disabled: %{public}s", shouldDisable ? "YES" : "NO")
+        }
+    }
+
+    /// Called from SettingsView when the user toggles the Keep Screen Awake setting.
+    func applyIdleTimerSetting() {
+        updateIdleTimerState()
+    }
+
+    @objc private func handleAppDidEnterBackground() {
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    @objc private func handleAppWillEnterForeground() {
+        updateIdleTimerState()
     }
 
     @objc private func handleInterruption(_ notification: Notification) {
@@ -312,6 +354,7 @@ final class PlaybackSessionController {
                 // Send server pause command instead of local CBass pause
                 slimProtoProvider?()?.sendLockScreenCommand("pause")
                 os_log(.info, log: logger, "📡 Sent server pause command for interruption")
+                updateIdleTimerState()
             }
         case .ended:
             let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -339,6 +382,9 @@ final class PlaybackSessionController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 self?.slimProtoProvider?()?.sendLockScreenCommand("play")
                 os_log(.info, log: self?.logger ?? OSLog.default, "📡 Sent server play command for interruption resume")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.updateIdleTimerState()
             }
         @unknown default:
             break

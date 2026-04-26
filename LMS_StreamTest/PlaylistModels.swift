@@ -205,54 +205,6 @@ class UpNextQueue: ObservableObject {
         return count > 0 ? "\(count) upcoming" : "No upcoming tracks"
     }
     
-    func updateWith(status: [String: Any]) {
-        // Parse current track information
-        if let playlistLoop = status["playlist_loop"] as? [[String: Any]],
-           !playlistLoop.isEmpty {
-            let currentTrackData = playlistLoop[0]
-            currentTrack = parseTrack(from: currentTrackData)
-        }
-        
-        // Parse queue information
-        currentIndex = status["playlist_cur_index"] as? Int ?? 0
-        totalCount = status["playlist_tracks"] as? Int ?? 0
-        playlistName = status["playlist_name"] as? String
-        
-        // Parse playback state
-        let mode = status["mode"] as? String ?? "stop"
-        isPlaying = mode == "play"
-        currentTime = status["time"] as? Double ?? 0.0
-        currentDuration = status["duration"] as? Double ?? 0.0
-        
-        // Note: upcomingTracks would need to be populated via separate API call
-        // for full playlist content, as status typically only includes current track
-    }
-    
-    private func parseTrack(from data: [String: Any]) -> PlaylistTrack {
-        let id = data["id"] as? String ?? UUID().uuidString
-        let title = data["title"] as? String ?? "Unknown Track"
-        let artist = data["artist"] as? String
-        let album = data["album"] as? String
-        let duration = data["duration"] as? Double
-        let trackNumber = data["tracknum"] as? Int
-        let artworkURL = data["coverid"] as? String
-        let albumID = data["album_id"] as? String
-        let artistID = data["artist_id"] as? String
-        let playlistIndex = data["playlist index"] as? Int
-
-        return PlaylistTrack(
-            id: id,
-            title: title,
-            artist: artist,
-            album: album,
-            duration: duration,
-            trackNumber: trackNumber,
-            artworkURL: artworkURL,
-            albumID: albumID,
-            artistID: artistID,
-            playlistIndex: playlistIndex
-        )
-    }
 }
 
 // MARK: - Artist Data Model
@@ -263,49 +215,3 @@ struct Artist: Identifiable {
     let albumCount: Int?
 }
 
-// MARK: - LMS API Response Models
-
-struct LMSPlaylistResponse: Codable {
-    let playlistsLoop: [Playlist]
-    let totalCount: Int?
-    
-    enum CodingKeys: String, CodingKey {
-        case playlistsLoop = "playlists_loop"
-        case totalCount = "count"
-    }
-}
-
-struct LMSTracksResponse: Codable {
-    let tracksLoop: [PlaylistTrack]
-    let totalCount: Int?
-    
-    enum CodingKeys: String, CodingKey {
-        case tracksLoop = "playlisttracks_loop"
-        case totalCount = "count"
-    }
-}
-
-// MARK: - Error Types
-
-enum LMSPlaylistError: LocalizedError {
-    case networkError(String)
-    case invalidResponse
-    case playlistNotFound(String)
-    case serverError(String)
-    case parsingError(String)
-    
-    var errorDescription: String? {
-        switch self {
-        case .networkError(let message):
-            return "Network error: \(message)"
-        case .invalidResponse:
-            return "Invalid server response"
-        case .playlistNotFound(let id):
-            return "Playlist not found: \(id)"
-        case .serverError(let message):
-            return "Server error: \(message)"
-        case .parsingError(let message):
-            return "Data parsing error: \(message)"
-        }
-    }
-}

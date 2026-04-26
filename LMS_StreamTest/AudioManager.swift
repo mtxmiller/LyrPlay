@@ -33,10 +33,6 @@ class AudioManager: NSObject, ObservableObject {
     var onTrackEnded: (() -> Void)?
     var slimClient: SlimProtoCoordinator?  // Changed from weak to strong reference
     
-    private var wasPlayingBeforeInterruption: Bool = false
-    private var interruptionPosition: Double = 0.0
-    
-    
     // MARK: - Initialization
     private override init() {
         self.audioPlayer = AudioPlayer()
@@ -124,7 +120,17 @@ class AudioManager: NSObject, ObservableObject {
             os_log(.info, log: logger, "📊 Creating new push stream (first track)")
             streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
 
-            // Start playback
+            // CRITICAL: Apply ReplayGain BEFORE starting playback
+            // Without this, BASS_ChannelPlay initializes the DSP chain with VOLDSP=1.0 (unity),
+            // and the first audio frames play without ReplayGain until startDecodingFromURL sets it.
+            // This matches AudioPlayer's URL stream path which sets gain before BASS_ChannelPlay.
+            let effectiveGain = (replayGain > 0.0) ? replayGain : 1.0
+            if effectiveGain != 1.0 {
+                streamDecoder.setReplayGain(effectiveGain)
+                os_log(.info, log: logger, "🎚️ Pre-applied ReplayGain %.4f before first playback start", effectiveGain)
+            }
+
+            // Start playback (DSP chain now has correct VOLDSP from the start)
             if streamDecoder.startPlayback() {
                 os_log(.info, log: logger, "✅ Push stream playback started")
             } else {
@@ -300,18 +306,6 @@ class AudioManager: NSObject, ObservableObject {
 
     func hasPushStream() -> Bool {
         return streamDecoder.hasValidStream()  // Check for valid stream (playing OR paused)
-    }
-    
-    func checkIfTrackEnded() -> Bool {
-        // Delegate to player for consistency
-        let currentTime = audioPlayer.getCurrentTime()
-        let duration = audioPlayer.getDuration()
-        
-        if duration > 0 && currentTime >= duration - 0.5 {
-            return true
-        }
-        
-        return false
     }
     
     // MARK: - Volume Control
@@ -548,14 +542,11 @@ extension AudioManager: AudioSessionManagerDelegate {
     // AudioSessionManagerDelegate methods - PlaybackSessionController handles actual interruption logic
     func audioSessionWasInterrupted(shouldPause: Bool) {
         guard shouldPause else { return }
-        let currentState = getPlayerState()
-        wasPlayingBeforeInterruption = (currentState == "Playing")
         os_log(.info, log: logger, "🚫 Audio interrupted (PlaybackSessionController handles server commands)")
     }
 
     func audioSessionInterruptionEnded(shouldResume: Bool) {
         os_log(.info, log: logger, "✅ Interruption ended (PlaybackSessionController handles server commands)")
-        wasPlayingBeforeInterruption = false
     }
 
     func audioSessionRouteChanged(shouldPause: Bool) {
@@ -566,21 +557,7 @@ extension AudioManager: AudioSessionManagerDelegate {
 
 // MARK: - Debug and Utility Methods
 extension AudioManager {
-    
-    func logDetailedState() {
-        os_log(.info, log: logger, "🔍 AudioManager State:")
-        os_log(.info, log: logger, "  Player State: %{public}s", getPlayerState())
-        os_log(.info, log: logger, "  Current Time: %.2f", getAudioPlayerTimeForFallback())
-        os_log(.info, log: logger, "  Duration: %.2f", getDuration())
-        os_log(.info, log: logger, "  Position: %.2f", getPosition())
-        os_log(.info, log: logger, "  Track: %{public}s - %{public}s",
-               nowPlayingManager.getCurrentTrackTitle(),
-               nowPlayingManager.getCurrentArtist())
-        
-        // Log audio session state
-        audioSessionManager.logCurrentAudioSessionState()
-    }
-    
+
     func getCurrentAudioRoute() -> String {
         return audioSessionManager.getCurrentAudioRoute()
     }

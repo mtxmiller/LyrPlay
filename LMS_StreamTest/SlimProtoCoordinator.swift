@@ -143,6 +143,8 @@ class SlimProtoCoordinator: ObservableObject {
 
     @objc private func handleAppDidEnterBackground() {
         backgroundedTime = Date()
+        // Persist so recovery still fires after iOS kills the process during a long background
+        UserDefaults.standard.set(backgroundedTime, forKey: "lyrplay_backgrounded_at")
         os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
     }
 
@@ -201,8 +203,16 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     func getBackgroundDuration() -> TimeInterval? {
-        guard let bgTime = backgroundedTime else { return nil }
-        return Date().timeIntervalSince(bgTime)
+        if let bgTime = backgroundedTime {
+            return Date().timeIntervalSince(bgTime)
+        }
+        // In-memory value is lost when iOS terminates the process during long backgrounds.
+        // Fall back to the persisted timestamp so app-open and lock-screen-play recovery
+        // still fire on the relaunched process.
+        if let persistedBgTime = UserDefaults.standard.object(forKey: "lyrplay_backgrounded_at") as? Date {
+            return Date().timeIntervalSince(persistedBgTime)
+        }
+        return nil
     }
 
     /// Request server-side seek for transcoding pipeline fixes
@@ -450,6 +460,9 @@ class SlimProtoCoordinator: ObservableObject {
             if self.isRecoveryInProgress {
                 os_log(.error, log: self.logger, "⚠️ RECOVERY TIMEOUT - Clearing lock after 10s (callback likely failed)")
                 self.isRecoveryInProgress = false
+                // Don't leave audio muted if the jump callback never fires — handlePendingRecovery(.appOpen)
+                // sets the mute flags before this function runs, and only the success callback unmutes.
+                self.audioManager.disableSilentRecoveryMode()
             }
         }
 
@@ -459,6 +472,9 @@ class SlimProtoCoordinator: ObservableObject {
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            // handlePendingRecovery(.appOpen) mutes the audio engine before this function runs.
+            // Undo it here so a missing-data early-return doesn't leave the next stream silent.
+            audioManager.disableSilentRecoveryMode()
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -469,6 +485,8 @@ class SlimProtoCoordinator: ObservableObject {
 
         guard savedPosition > 0 else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
+            // Same mute-leak guard as the recovery_timestamp early-return above.
+            audioManager.disableSilentRecoveryMode()
             sendJSONRPCCommand(shouldPlay ? "play" : "pause")
             isRecoveryInProgress = false // Clear recovery flag
             return
@@ -547,6 +565,13 @@ class SlimProtoCoordinator: ObservableObject {
                 os_log(.info, log: logger, "🔇 App open recovery: disabled in settings - skipping")
                 return
             }
+            // Consume the persisted background timestamp so a stale value can't keep
+            // re-triggering app-open recovery on every future cold launch.
+            // Scoped to .appOpen only — .lockScreen and .networkRestored leave it alone
+            // so a subsequent cold launch can still gate on it.
+            UserDefaults.standard.removeObject(forKey: "lyrplay_backgrounded_at")
+            backgroundedTime = nil
+
             os_log(.info, log: logger, "🔇 App open recovery: muted + paused")
             audioManager.enableSilentRecoveryMode()  // Mute before server sends audio
 
@@ -621,7 +646,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         let position = getCurrentTimeForSaving()
         if position > 0 {
             UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
-            os_log(.info, log: logger, "💾 Saved position on disconnect: %.2f seconds (interpolated)", position)
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
+            os_log(.info, log: logger, "💾 Saved recovery state on disconnect: %.2f seconds (interpolated)", position)
         }
 
         // Track if we were disconnected while in background (for app open recovery)
@@ -672,9 +699,10 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // IMPROVED FAILOVER: Switch servers if current server keeps failing
         let reconnectionAttempts = connectionManager.getReconnectionAttempts()
 
-        // Try backup server if primary fails (first 3 attempts on primary)
-        if settings.currentActiveServer == .primary &&
-           reconnectionAttempts >= 3 &&
+        // Try backup server if primary fails once (fast failover, issue #76)
+        if settings.automaticFailoverEnabled &&
+           settings.currentActiveServer == .primary &&
+           reconnectionAttempts >= 1 &&
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
 
@@ -690,9 +718,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             // CRITICAL: Reset reconnection counter when switching servers
             connectionManager.resetReconnectionAttempts()
         }
-        // Try primary server if backup fails (after 3 attempts on backup)
-        else if settings.currentActiveServer == .backup &&
-                reconnectionAttempts >= 3 {
+        // Try primary server if backup fails once (fast failover)
+        // Guard on non-empty primary host (symmetric with forward branch) — prevents
+        // snapping to an empty/unreachable primary and reconnect-looping.
+        else if settings.automaticFailoverEnabled &&
+                settings.currentActiveServer == .backup &&
+                reconnectionAttempts >= 1 &&
+                !settings.serverHost.isEmpty {
 
             os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary", reconnectionAttempts)
             settings.switchToPrimaryServer()
@@ -1320,12 +1352,6 @@ extension SlimProtoCoordinator {
         return time
     }
     
-    /// Handle track end detection from server time (replaces unreliable BASS_SYNC_END)
-    func handleTrackEndFromServerTime() {
-        os_log(.info, log: logger, "🎵 Track end detected via server time - forwarding to command handler")
-        commandHandler.notifyTrackEnded()
-    }
-    
     /// Set WebView reference for Material UI refresh
     func setWebView(_ webView: WKWebView) {
         self.webView = webView
@@ -1377,6 +1403,14 @@ extension SlimProtoCoordinator {
 
         // Save position on pause commands (creates save point for future recovery)
         if command.lowercased() == "pause" {
+            // Local save first (instant, survives network transitions like CarPlay disconnect)
+            let position = getCurrentTimeForSaving()
+            if position > 0 {
+                UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+                UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
+            }
+            // Server roundtrip overwrites with authoritative data if reachable
             saveCurrentPositionForRecovery()
             os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
         }
@@ -1389,9 +1423,9 @@ extension SlimProtoCoordinator {
         // For PAUSE/other: Just send command normally (no need to disconnect)
 
         if command.lowercased() == "play" {
-            // Check background duration - only reconnect/recover if backgrounded > 45 seconds
-            if let bgTime = backgroundedTime {
-                let duration = Date().timeIntervalSince(bgTime)
+            // Check background duration - only reconnect/recover if backgrounded > 45 seconds.
+            // Reads in-memory bgTime, then falls back to UserDefaults if iOS killed the process.
+            if let duration = getBackgroundDuration() {
                 os_log(.info, log: logger, "🔒 Lock screen PLAY: Backgrounded for %.1f seconds", duration)
 
                 if duration > 45 {
@@ -1989,7 +2023,4 @@ extension SlimProtoCoordinator {
         audioManager.skipAhead(duration: duration)
     }
 
-    func getPlayerVolume() -> Float {
-        return audioManager.getVolume()
-    }
 }

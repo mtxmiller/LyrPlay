@@ -188,71 +188,6 @@ class NowPlayingManager: ObservableObject {
         return (time: fallbackTime, isPlaying: false, source: .lastKnown)
     }
     
-    // MARK : STORE POSITION
-    func storeLockScreenPosition() {
-        let (currentTime, isPlaying, source) = getCurrentPlaybackInfo()
-        
-        //os_log(.info, log: logger, "🔒 STORAGE CALL - Current: %.2f, Previously stored: %.2f",
-        //       currentTime, lockScreenStoredPosition)
-        
-        // Show what time sources are available
-        var serverTime: Double = 0.0
-        var serverValid: Bool = false
-        
-        // ServerTimeSynchronizer removed - use SlimProto time from coordinator
-        if let slimClient = slimClient {
-            let slimProtoInfo = slimClient.getCurrentInterpolatedTime()
-            serverTime = slimProtoInfo.time
-            serverValid = (slimProtoInfo.time > 0.0) // Valid if we have a time > 0
-            //os_log(.info, log: logger, "🔒 SLIMPROTO TIME: %.2f (valid: %{public}s)",
-            //       serverTime, serverValid ? "YES" : "NO")
-        }
-        
-        if let audioManager = audioManager {
-            let audioTime = audioManager.getAudioPlayerTimeForFallback()
-            //os_log(.info, log: logger, "🔒 AUDIO TIME: %.2f", audioTime)
-        }
-        
-        // IMPROVED LOGIC: Prefer last known good server time over audio time
-        var positionToStore: Double = 0.0
-        var sourceUsed: String = "none"
-        
-        // 1. Try current server time (if valid and reasonable)
-        if serverValid && serverTime > 0.1 {
-            positionToStore = serverTime
-            sourceUsed = "current server time"
-        }
-        // 2. Try last known good server time (if current server time is invalid)
-        else if !serverValid && lastKnownServerTime > 0.1 {
-            positionToStore = lastKnownServerTime
-            sourceUsed = "last known server time"
-            //os_log(.info, log: logger, "🔒 Using last known server time: %.2f (current server invalid)", lastKnownServerTime)
-        }
-        // 3. Fall back to audio manager time
-        else if let audioManager = audioManager {
-            let audioTime = audioManager.getAudioPlayerTimeForFallback()
-            if audioTime > 0.1 {
-                positionToStore = audioTime
-                sourceUsed = "audio manager time"
-                //os_log(.info, log: logger, "🔒 Falling back to audio time: %.2f (no good server time)", audioTime)
-            }
-        }
-        
-        // Only store if we got a valid position
-        if positionToStore > 0.1 {
-            lockScreenStoredPosition = positionToStore
-            lockScreenStoredTimestamp = Date()
-            lockScreenWasPlaying = isPlaying
-            connectionLostTime = Date()
-            
-            //os_log(.info, log: logger, "🔒 STORED NEW POSITION: %.2f (source: %{public}s)",
-            //       positionToStore, sourceUsed)
-        } else {
-            //os_log(.error, log: logger, "🔒 STORAGE REJECTED - No valid position found (server: %.2f, audio: %.2f)",
-            //       serverTime, currentTime)
-        }
-    }
-
     // Add this method to get stored position with time adjustment
     func getStoredPositionWithTimeOffset() -> (position: Double, wasPlaying: Bool, isValid: Bool) {
         os_log(.info, log: logger, "🔒 RECOVERY REQUEST STARTED")
@@ -285,15 +220,6 @@ class NowPlayingManager: ObservableObject {
         return (lockScreenStoredPosition, lockScreenWasPlaying, true)
     }
 
-    // Add this method to clear stored position
-    func clearStoredPosition() {
-        lockScreenStoredPosition = 0.0
-        lockScreenStoredTimestamp = nil
-        lockScreenWasPlaying = false
-        connectionLostTime = nil
-        os_log(.info, log: logger, "🔒 Cleared stored lock screen position")
-    }
-    
     // MARK: - Now Playing Info Setup
     private func setupNowPlayingInfo() {
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
@@ -538,30 +464,6 @@ class NowPlayingManager: ObservableObject {
         }
     }
 
-    /// Queries current shuffle state from LMS server
-    func queryAndUpdateShuffleState() {
-        guard let coordinator = slimClient else {
-            os_log(.debug, log: logger, "⚠️ Cannot query shuffle state - no coordinator")
-            return
-        }
-
-        let playerID = SettingsManager.shared.playerMACAddress
-        let statusCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["status", "-", 1, "tags:"]]
-        ]
-
-        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
-            guard let self = self,
-                  let result = response["result"] as? [String: Any],
-                  let shuffleMode = result["playlist shuffle"] as? Int else {
-                return
-            }
-
-            self.updateShuffleState(shuffleMode: shuffleMode)
-        }
-    }
     
     // MARK: - Track End Detection
     // REMOVED: Server-time based track end detection (was causing duplicate STMd signals)

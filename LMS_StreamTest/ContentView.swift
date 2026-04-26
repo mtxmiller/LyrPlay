@@ -21,10 +21,18 @@ struct ContentView: View {
     @State private var hasHandledError = false
     @State private var hasShownError = false
     @State private var previousActiveServer: SettingsManager.ServerType?
+    @State private var coldLaunchRecoveryChecked = false
 
     /// Detect if running as iPad app on Mac (no status bar, so ignore top safe area)
     private var isRunningOnMac: Bool {
         ProcessInfo.processInfo.isiOSAppOnMac
+    }
+
+    /// Get the device's top safe area inset (status bar / notch / Dynamic Island height)
+    private var topSafeAreaInset: CGFloat {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first else { return 0 }
+        return window.safeAreaInsets.top
     }
 
     init() {
@@ -145,9 +153,22 @@ struct ContentView: View {
                         showingSettings = true
                     }
                 )
-                // On Mac (iPad app), ignore all safe areas since there's no status bar/notch
-                // On iOS, respect top safe area for status bar but ignore bottom
-                .ignoresSafeArea(.container, edges: isRunningOnMac ? [.top, .bottom] : .bottom)
+                // WebView fills edge-to-edge; Material's topPad query param handles status bar spacing
+                .ignoresSafeArea(.container, edges: [.top, .bottom])
+                // Update Material topPad on rotation — portrait has ~59px (Dynamic Island),
+                // landscape has 0px. GeometryReader fires after layout commits with correct insets.
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onChange(of: geometry.safeAreaInsets.top) { newTop in
+                                let inset = Int(newTop)
+                                webView?.evaluateJavaScript(
+                                    "(function(){document.documentElement.style.setProperty('--top-pad','\(inset)px');if(typeof queryParams!=='undefined'){queryParams.topPad=\(inset);}console.log('LyrPlay: topPad updated to \(inset)px after rotation');})()",
+                                    completionHandler: nil
+                                )
+                            }
+                    }
+                )
                 .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
                 .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
@@ -167,13 +188,37 @@ struct ContentView: View {
             
         }
         .onAppear {
+            // Cold-launch recovery: willEnterForegroundNotification doesn't fire on Not Running → Active,
+            // so the warm-resume handler below misses cold launches after a process kill. Set the trigger
+            // here on first appear when persisted state shows a long background + saved recovery data.
+            // Only set if no other path (e.g., racing lock-screen play) already set a trigger.
+            if !coldLaunchRecoveryChecked {
+                coldLaunchRecoveryChecked = true
+                if slimProtoCoordinator.pendingRecoveryTrigger == .none,
+                   let duration = slimProtoCoordinator.getBackgroundDuration(),
+                   duration > 45,
+                   settings.enableAppOpenRecovery,
+                   UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil {
+                    os_log(.info, log: logger, "❄️ Cold launch %.1fs + recovery data → setting appOpen trigger", duration)
+                    slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
+                    if slimProtoCoordinator.isConnected {
+                        slimProtoCoordinator.handlePendingRecovery()
+                    }
+                }
+            }
+
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
-            
-            // CRITICAL FIX: Removed duplicate app open recovery call
-            // App open recovery should only be triggered by willEnterForegroundNotification
-            // Having it in both onAppear and willEnterForeground caused double execution
+
+            // App open recovery for warm resume is handled by willEnterForegroundNotification below.
+            // Cold launches don't get that notification, so the block above handles them on first appear.
+        }
+        .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
+            pushStreamInfoToWebView()
+        }
+        .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
+            pushStreamInfoToWebView()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             isAppInBackground = true
@@ -241,6 +286,27 @@ struct ContentView: View {
                         os_log(.error, log: self.logger, "❌ Material layout recalculation failed: %{public}s", error.localizedDescription)
                     } else {
                         os_log(.info, log: self.logger, "✅ Material layout recalculation triggered")
+                    }
+                }
+
+                // Check if Material's Cometd connection is still alive after backgrounding.
+                // If dead, trigger reconnect via Material's own bus event (same path as
+                // Material's built-in visibilitychange handler in server.js).
+                let cometdHealthCheck = """
+                (function() {
+                    if (typeof lmsIsConnected !== 'undefined' && !lmsIsConnected) {
+                        console.log('LyrPlay: Cometd disconnected after background - reconnecting');
+                        if (typeof bus !== 'undefined' && bus.$emit) {
+                            bus.$emit('reconnect');
+                        }
+                        return 'reconnecting';
+                    }
+                    return 'connected';
+                })();
+                """
+                webView.evaluateJavaScript(cometdHealthCheck) { result, error in
+                    if let status = result as? String {
+                        os_log(.info, log: self.logger, "Cometd health check: %{public}s", status)
                     }
                 }
             }
@@ -360,6 +426,68 @@ struct ContentView: View {
         return settings.effectivePlayerName
     }
 
+    // MARK: - Stream Info WebView Bridge
+    private func pushStreamInfoToWebView() {
+        guard let webView = webView else { return }
+
+        // Clear stream text when no info available (between tracks, disconnected)
+        guard let streamInfo = audioManager.audioPlayer.currentStreamInfo else {
+            webView.evaluateJavaScript("window.lyrplayStreamText = null;", completionHandler: nil)
+            return
+        }
+
+        // Sanitize format string for safe JS interpolation
+        let safeFormat = streamInfo.format
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+
+        // Use output device sample rate (actual hardware output) if available,
+        // otherwise fall back to stream info sample rate
+        let outputSampleRate = audioManager.audioPlayer.currentOutputInfo?.outputSampleRate ?? streamInfo.sampleRate
+        // Guard against NaN/infinity from BASS — neither is a valid JS numeric literal
+        let safeBitrate = streamInfo.bitrate.isNaN || streamInfo.bitrate.isInfinite ? 0.0 : streamInfo.bitrate
+
+        let js = """
+        (function() {
+            var parts = [];
+            parts.push('\(safeFormat)');
+            parts.push('\(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz');
+            parts.push('\(streamInfo.bitDepth)bit');
+            if (\(safeBitrate) > 0) parts.push(Math.round(\(safeBitrate)) + 'kbps');
+            window.lyrplayStreamText = parts.join(', ');
+
+            // Start polling replacer if not already running
+            if (!window.lyrplayTechReplacer) {
+                window.lyrplayTechReplacer = setInterval(function() {
+                    if (!window.lyrplayStreamText) return;
+                    // Mobile/full now playing view
+                    var npTech = document.querySelector('.np-tech');
+                    if (npTech) {
+                        var text = npTech.textContent;
+                        // Preserve track count (" · 11 of 16") if present
+                        var trackCount = '';
+                        var sepIdx = text.indexOf(' \\u2022 ');
+                        
+                        if (sepIdx >= 0) trackCount = text.substring(sepIdx);
+                        var target = window.lyrplayStreamText + trackCount;
+                        if (npTech.textContent !== target) {
+                            npTech.textContent = target;
+                        }
+                    }
+                    // Desktop bar view
+                    var npBar = document.querySelector('.np-bar-tech');
+                    if (npBar && npBar.textContent.length > 0) {
+                        if (npBar.textContent !== window.lyrplayStreamText) {
+                            npBar.textContent = window.lyrplayStreamText;
+                        }
+                    }
+                }, 1000);
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     // MARK: - Material Integration URL
     private var materialWebURL: String {
         let baseURL = settings.webURL
@@ -375,15 +503,21 @@ struct ContentView: View {
         // REMOVED: Cache busting timestamp - let browser cache Material skin static assets
         // Material skin handles data freshness via its own API calls
 
+        // Material topPad: tells Material to extend toolbar background into the status bar area
+        // while keeping interactive elements below it (toolbar icons, nav drawer items, etc.)
+        let topPad = Int(topSafeAreaInset)
+        let topPadParam = topPad > 0 ? "&topPad=\(topPad)" : ""
+
         // Add Material skin query parameters:
         // - hide=mediaControls: Hides lock screen/notification settings (prevents Material web player from interfering with native iOS lock screen)
         //   NOTE: Material code checks for 'mediaControls' not 'notif' (ui-settings.js:506)
         // - appSettings: Custom iOS app settings integration
         // - player: Show only specified player when iOS Player Focus is enabled
+        // - topPad: Extends Material toolbar background behind iOS status bar
         if settings.iOSPlayerFocus {
-            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         } else {
-            return "\(baseURL)?hide=mediaControls&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
 
@@ -743,10 +877,29 @@ struct WebView: UIViewRepresentable {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
             }
+
+            // Inject topPad early — on slow connections, didFinish may be minutes away.
+            // The DOM exists at didCommit so we can set the CSS variable before Material's
+            // Vue created() reads it. This prevents overlapping icons in the status bar area.
+            let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+            let topPadScript = """
+            (function() {
+                document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
+                if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
+                console.log('LyrPlay: Set topPad to \(topInset)px via didCommit (early injection)');
+            })();
+            """
+            webView.evaluateJavaScript(topPadScript, completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             os_log(.info, log: logger, "Finished loading Material interface")
+
+            // Skip injection for about:blank and non-Material pages
+            guard let url = webView.url, url.absoluteString != "about:blank" else {
+                os_log(.debug, log: logger, "⏭️ Skipping JS injection for non-Material page")
+                return
+            }
 
             // First, check if this is an error page (401 auth error, etc.)
             webView.evaluateJavaScript("document.title") { title, error in
@@ -768,6 +921,45 @@ struct WebView: UIViewRepresentable {
                 }
 
                 // If no error detected, proceed with normal Material setup
+
+                // Inject topPad for status bar spacing — the URL param may be 0 on first
+                // launch (safe area not yet available), so we always set it here where
+                // the webView is in the view hierarchy and the window insets are known.
+                // Always inject (even when 0) to correct stale values from URL param or prior orientation.
+                let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+                let topPadScript = """
+                (function() {
+                    document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
+                    if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
+                    console.log('LyrPlay: Set topPad to \(topInset)px via didFinish injection');
+                })();
+                """
+                webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+
+                // Verify topPad took effect after a short delay — Material's Vue may
+                // overwrite it during its own initialization. Retry once if mismatched.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    let expectedInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+                    let verifyScript = """
+                    (function() {
+                        var current = getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();
+                        var expected = '\(expectedInset)px';
+                        if (current !== expected) {
+                            document.documentElement.style.setProperty('--top-pad', expected);
+                            if (typeof queryParams !== 'undefined') { queryParams.topPad = \(expectedInset); }
+                            console.log('LyrPlay: topPad verification FIXED: was ' + current + ', set to ' + expected);
+                            return 'fixed:' + current + '->' + expected;
+                        }
+                        return 'ok:' + current;
+                    })();
+                    """
+                    webView.evaluateJavaScript(verifyScript) { result, _ in
+                        if let result = result as? String {
+                            os_log(.info, log: self.logger, "topPad verify: %{public}s", result)
+                        }
+                    }
+                }
+
                 // CRITICAL: Inject JavaScript to handle Material's appSettings integration
                 let settingsHandlerScript = """
                 (function() {
@@ -794,23 +986,35 @@ struct WebView: UIViewRepresentable {
                         return originalOpen.call(this, url, name, specs);
                     };
 
-                    // Also handle direct location changes
-                    const originalLocation = window.location;
-                    Object.defineProperty(window, 'location', {
-                        get: function() {
-                            return originalLocation;
-                        },
-                        set: function(url) {
-                            if (typeof url === 'string' && url.startsWith('lmsstream://')) {
-                                console.log('LyrPlay: Handling location change to:', url);
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmsStreamHandler) {
-                                    window.webkit.messageHandlers.lmsStreamHandler.postMessage(url);
-                                }
-                                return;
-                            }
-                            originalLocation.href = url;
+                    // Note: Direct location changes to lmsstream:// are handled by
+                    // the native WKNavigationDelegate (decidePolicyFor) which intercepts
+                    // the URL at the navigation level. No JS override needed.
+
+                    // Rename "Application" to "LyrPlay Settings" in sidebar menu.
+                    // Material renders the sidebar once into DOM (v-show, not v-if),
+                    // so we poll until the text node exists and replace it directly.
+                    if (typeof TB_APP_SETTINGS !== 'undefined') {
+                        TB_APP_SETTINGS.stitle = 'LyrPlay Settings';
+                        TB_APP_SETTINGS.title = 'LyrPlay Settings';
+                    }
+                    var renameChecks = 0;
+                    var renameTimer = setInterval(function() {
+                        renameChecks++;
+                        // Also keep the global updated in case Vue re-reads it
+                        if (typeof TB_APP_SETTINGS !== 'undefined') {
+                            TB_APP_SETTINGS.stitle = 'LyrPlay Settings';
+                            TB_APP_SETTINGS.title = 'LyrPlay Settings';
                         }
-                    });
+                        // Find and replace in DOM - check all potential text containers
+                        var els = document.querySelectorAll('.v-list-tile__title, .v-list-tile-title');
+                        for (var i = 0; i < els.length; i++) {
+                            if (els[i].textContent.trim() === 'Application') {
+                                els[i].textContent = 'LyrPlay Settings';
+                                console.log('LyrPlay: Renamed Application -> LyrPlay Settings in DOM');
+                            }
+                        }
+                        if (renameChecks > 30) clearInterval(renameTimer);
+                    }, 500);
 
                     console.log('LyrPlay: Material settings handler injected successfully');
                 })();
@@ -842,6 +1046,14 @@ struct WebView: UIViewRepresentable {
 
         }
         
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            os_log(.error, log: logger, "WebView content process terminated by iOS - reloading Material interface")
+            DispatchQueue.main.async {
+                self.parent.isLoading = true
+            }
+            webView.reload()
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed to load Material interface: %{public}s", error.localizedDescription)
             DispatchQueue.main.async {

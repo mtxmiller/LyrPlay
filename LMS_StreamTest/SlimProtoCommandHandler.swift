@@ -668,37 +668,32 @@ class SlimProtoCommandHandler: ObservableObject {
     
     
     // MARK: - Volume Command Processing
+    // AUDG packet layout (slimserver Squeezebox2.pm pack 'NNCCNN'):
+    //   [0..3]  old_gainL (u32, legacy 0-128 — unused)
+    //   [4..7]  old_gainR (u32, legacy — unused)
+    //   [8]     dvc       (u8, digitalVolumeControl: 1=variable, 0=fixed)
+    //   [9]     preamp    (u8, unused)
+    //   [10..13] new_gainL (u32, 16.16 fixed point; 65536 = unity)
+    //   [14..17] new_gainR (u32, 16.16 fixed point)
+    // Mirrors squeezelite's process_audg (slimproto.c): when dvc=0, apply unity gain.
     private func processVolumeCommand(_ payload: Data) {
         guard payload.count >= 18 else {
             os_log(.error, log: logger, "Volume command payload too short: %d bytes", payload.count)
             return
         }
-        
-        // Parse as old format first (more common for squeezelite players)
-        // Old format: 0-128 range in first 4 bytes each for L/R
-        let leftGainBytes = payload.subdata(in: 0..<4)
-        let rightGainBytes = payload.subdata(in: 4..<8)
-        
-        let leftGain = leftGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let rightGain = rightGainBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        
-        let normalizedVolume: Float
-        
-        // Detect format: if values are <= 128, it's old format (0-128)
-        // If values are much larger (like 65536), it's new format (16.16 fixed point)
-        if leftGain <= 128 && rightGain <= 128 {
-            // Old format: 0-128 range
-            normalizedVolume = Float(leftGain) / 128.0
-            // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Received audg (OLD format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
-        } else {
-            // New format: 16.16 fixed point where 65536 = 100%
-            normalizedVolume = Float(leftGain) / 65536.0
-            // REMOVED: Noisy volume logs - os_log(.debug, log: logger, "🔊 Received audg (NEW format): L=%d R=%d (%.3f)", leftGain, rightGain, normalizedVolume)
+
+        let dvc = payload[8]
+        let newGainL = payload.subdata(in: 10..<14).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
         }
-        
+
+        let normalizedVolume: Float = (dvc == 0) ? 1.0 : Float(newGainL) / 65536.0
         let clampedVolume = max(0.0, min(1.0, normalizedVolume))
-        
-        // Apply volume through coordinator
+
+        #if DEBUG
+        os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u → volume=%.3f", dvc, newGainL, clampedVolume)
+        #endif
+
         if let coordinator = delegate as? SlimProtoCoordinator {
             coordinator.setPlayerVolume(clampedVolume)
         }

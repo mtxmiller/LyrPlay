@@ -20,6 +20,14 @@ protocol AudioPlayerDelegate: AnyObject {
 
 class AudioPlayer: NSObject, ObservableObject {
 
+    /// 44100 → "44.1", 48000 → "48", 88200 → "88.2". Avoids Int truncation that drops the decimal.
+    static func formatSampleRateKHz(_ hz: Int) -> String {
+        let khz = Double(hz) / 1000.0
+        return khz.truncatingRemainder(dividingBy: 1) == 0
+            ? "\(Int(khz))"
+            : String(format: "%.1f", khz)
+    }
+
     // MARK: - Stream Info
     struct StreamInfo {
         let format: String
@@ -31,7 +39,7 @@ class AudioPlayer: NSObject, ObservableObject {
         var displayString: String {
             let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
             let bitrateStr = bitrate > 0 ? " @ \(Int(bitrate)) kbps" : ""
-            return "\(format) • \(sampleRate/1000)kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
+            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
         }
     }
 
@@ -44,7 +52,7 @@ class AudioPlayer: NSObject, ObservableObject {
         let latency: Int  // milliseconds
 
         var displayString: String {
-            return "\(deviceName) • \(outputSampleRate/1000)kHz • \(latency)ms latency"
+            return "\(deviceName) • \(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz • \(latency)ms latency"
         }
     }
 
@@ -91,6 +99,7 @@ class AudioPlayer: NSObject, ObservableObject {
     private var currentStreamURL: String = ""
     private var currentStreamFormat: String = "UNKNOWN"
     private var pendingReplayGain: Float = 0.0  // ReplayGain to apply after stream creation
+    private var currentReplayGain: Float = 1.0  // Active ReplayGain value (for restore after muting)
 
     // MARK: - Silent Recovery Support
     /// Flag to mute the next stream creation (for silent app foreground recovery)
@@ -306,7 +315,13 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: logger, "✅ CBass playback started - Handle: %d (muted: %{public}s)", currentStream, muteNextStream ? "YES" : "NO")
 
             // Update stream info for UI display (also updates output device info)
-            updateStreamInfo()
+            // Only use push stream info if decoder hasn't already set the real source info
+            if currentStreamInfo == nil {
+                updateStreamInfo()
+            } else {
+                // Decoder already set stream info — just update output device info
+                updateOutputDeviceInfo()
+            }
 
             commandHandler?.handleStreamConnected()
             delegate?.audioPlayerDidStartPlaying()
@@ -346,8 +361,16 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: logger, "⚠️ PLAY command with no active stream - stream may have ended or failed")
             return
         }
-        
+
         isIntentionallyPaused = false
+
+        // After AVAudioSession interruption or route change, BASS may leave the output
+        // device paused (BASS_ACTIVE_PAUSED_DEVICE). BASS_ChannelPlay would then succeed
+        // but produce no audio. Force-resume the device per BASS docs.
+        let wasStarted = BASS_IsStarted()
+        BASS_Start()
+        os_log(.info, log: logger, "🔊 BASS_Start before play (was started: %{public}s)", wasStarted != 0 ? "YES" : "NO")
+
         let result = BASS_ChannelPlay(currentStream, 0)
         
         if result != 0 {
@@ -584,12 +607,12 @@ class AudioPlayer: NSObject, ObservableObject {
         return volume
     }
 
-    /// Restore DSP gain to 1.0 after silent recovery
+    /// Restore DSP gain after silent recovery (respects active ReplayGain)
     func restoreDSPGain() {
         guard currentStream != 0 else { return }
 
-        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 1.0)
-        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to 1.0")
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), currentReplayGain)
+        os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to %.4f (ReplayGain-aware)", currentReplayGain)
     }
 
     // MARK: - ReplayGain Support
@@ -608,8 +631,10 @@ class AudioPlayer: NSObject, ObservableObject {
         // - BASS_ATTRIB_VOL controls playback volume and would interfere with user volume
         // - VOLDSP works on decoding channels and is present in the DSP chain
 
-        // Clamp to reasonable range to prevent distortion
-        let clampedGain = min(replayGain, 2.0)  // Max 2x gain (~6dB boost)
+        // Clamp to safe range — squeezelite doesn't clamp at this stage,
+        // but we cap at 4.0 (~+12dB) to prevent extreme amplification
+        let clampedGain = min(max(replayGain, 0.0), 4.0)
+        currentReplayGain = clampedGain  // Store for restore after silent recovery
 
         let success = BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), clampedGain)
 
