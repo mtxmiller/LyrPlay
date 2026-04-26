@@ -19,7 +19,6 @@ struct SettingsView: View {
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
     @State private var isReconnecting = false
-    @State private var gaplessLogCopied = false
 
     // App Icon state
     @ObservedObject private var purchaseManager = PurchaseManager.shared
@@ -415,22 +414,6 @@ struct SettingsView: View {
                         )
                     }
                     .foregroundColor(.red)
-
-                    Button(action: {
-                        UIPasteboard.general.string = GaplessDiagnostics.shared.formattedLog()
-                        gaplessLogCopied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                            gaplessLogCopied = false
-                        }
-                    }) {
-                        SettingsRow(
-                            icon: "waveform.path",
-                            title: "Copy Gapless Log",
-                            value: gaplessLogCopied ? "Copied!" : "Tap to copy",
-                            valueColor: gaplessLogCopied ? .green : .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
 
                     SettingsRow(
                         icon: "info.circle",

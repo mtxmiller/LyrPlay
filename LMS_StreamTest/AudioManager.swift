@@ -572,11 +572,6 @@ extension AudioManager {
     func getTimeSourceInfo() -> String {
         return nowPlayingManager.getTimeSourceInfo()
     }
-
-    /// Get diagnostic buffer snapshot for gapless transition logging
-    func getDiagnosticSnapshot() -> GaplessDiagnostics.BufferSnapshot {
-        return streamDecoder.getDiagnosticSnapshot()
-    }
 }
 
 // MARK: - AudioStreamDecoder Delegate (NEW - Gapless Playback)

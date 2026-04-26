@@ -1268,20 +1268,6 @@ class AudioStreamDecoder {
         let secondsUntilBoundary = Double(bytesUntilBoundary) / Double(bytesPerSec)
         os_log(.error, log: logger, "[BOUNDARY] 📊 ETA: %.2fs (%lld bytes ahead of playback)", secondsUntilBoundary, bytesUntilBoundary)
 
-        // Gapless diagnostics: record buffer breakdown at boundary mark
-        let rawRenderPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE | BASS_POS_DECODE))
-        let renderPos = rawRenderPos == UInt64.max ? playbackPos : rawRenderPos
-        let snapshot = GaplessDiagnostics.BufferSnapshot(
-            playbackBuffer: Int(playbackBuffered), queueSize: queuedAmount,
-            playbackPosition: playbackPos, renderPosition: renderPos,
-            sampleRate: sampleRate, channels: channels
-        )
-        GaplessDiagnostics.shared.recordBoundaryMarked(
-            buffer: snapshot,
-            boundaryPosition: trackBoundaryPosition!,
-            secondsUntilBoundary: secondsUntilBoundary
-        )
-
         // Set sync callback for this boundary
         // CRITICAL: Use BASS_SYNC_POS without MIXTIME so callback fires when audio is HEARD, not when mixed!
         // MIXTIME would fire ~0.5s early (when audio reaches mix buffer, ahead of playback)
@@ -1606,27 +1592,6 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Called when buffer reaches ready threshold (PHASE 7.7)
     /// This allows coordinator to send STMl notification to server for sync readiness
     func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder)
-}
-
-/// Detailed buffer snapshot for gapless diagnostics
-extension AudioStreamDecoder {
-    func getDiagnosticSnapshot() -> GaplessDiagnostics.BufferSnapshot {
-        guard pushStream != 0 else {
-            return GaplessDiagnostics.BufferSnapshot(
-                playbackBuffer: 0, queueSize: 0, playbackPosition: 0,
-                renderPosition: 0, sampleRate: sampleRate, channels: channels
-            )
-        }
-        let pb = Int(BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE)))
-        let q = Int(BASS_StreamPutData(pushStream, nil, 0))
-        let pos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
-        let rawRpos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE | BASS_POS_DECODE))
-        let rpos = rawRpos == UInt64.max ? pos : rawRpos  // Fallback if BASS_POS_DECODE unsupported
-        return GaplessDiagnostics.BufferSnapshot(
-            playbackBuffer: pb, queueSize: q, playbackPosition: pos,
-            renderPosition: rpos, sampleRate: sampleRate, channels: channels
-        )
-    }
 }
 
 /// Track metadata for boundary updates
