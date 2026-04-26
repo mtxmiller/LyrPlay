@@ -4,7 +4,7 @@
 
 **LyrPlay** is an iOS SwiftUI app that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). It's essentially a **Swift version of squeezelite** — a Squeezebox player replacement with native FLAC support, CarPlay, Siri, and gapless playback.
 
-- **App Store**: v1.7.6 live, v1.7.7 in development (build 14)
+- **Version state**: build/version live in `LMS_StreamTest.xcodeproj/project.pbxproj` (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`). Per-release status (in dev / submitted / live) tracked in the Obsidian wiki under `Releases/`.
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for App Store continuity — never change this)
 - **Display Name**: LyrPlay
 - **Local Folder**: `LMS_StreamTest` (intentional — don't rename)
@@ -21,19 +21,7 @@ xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 
 **Always use `LMS_StreamTest.xcworkspace`**, never `.xcodeproj` (CocoaPods requirement). Testing is manual.
 
-### Build, install, and launch on iPhone 12 (CLI)
-
-```bash
-# xcodebuild destination ID (from `xcodebuild -showdestinations`)
-IPHONE_BUILD_ID=00008120-001E04AC2631A01E
-# devicectl device UDID (from `xcrun devicectl list devices`)
-IPHONE_DEVICE_ID=0F3E3809-0541-5422-BCAB-4BD08382A7B6
-APP_PATH=~/Library/Developer/Xcode/DerivedData/LMS_StreamTest-bxujpsmokoklsfgfzaaehtmkkweo/Build/Products/Debug-iphoneos/LMS_StreamTest.app
-
-xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest -configuration Debug -destination "id=$IPHONE_BUILD_ID" -allowProvisioningUpdates build \
-  && xcrun devicectl device install app --device "$IPHONE_DEVICE_ID" "$APP_PATH" \
-  && xcrun devicectl device process launch --device "$IPHONE_DEVICE_ID" elm.LMS-StreamTest
-```
+For the CLI build → install → launch loop on a connected iPhone, see the wiki at `Setup/iPhone Build Workflow.md`. Personal device IDs are kept in user-local Claude memory, not committed.
 
 ## Issue Tracking
 
@@ -113,11 +101,9 @@ We're building a Swift squeezelite. Always consult these when implementing or de
 | WebView JavaScript injection | `lms-material` JS APIs |
 | BASS API functions and configs | `./docs/bass_documentation/` (HTML reference) |
 
-## Current Work (v1.7.7)
+## Current Work
 
-1. **Gapless Playback Refinement** — Fixing premature CarPlay/server UI sync during transitions
-2. **Stream Info Overlay** — Hardware output rate display and decoder throttle improvements
-3. **Auto-Reconnect** — Automatic retry on server restart (5-second intervals)
+For open work and what's in flight: run `bd ready` for the issue queue and read the latest `Releases/v1.7.X.md` in the wiki for the in-progress release's scope and status. Don't rely on a hardcoded "current work" list here — it rots.
 
 ## Deep Documentation
 
