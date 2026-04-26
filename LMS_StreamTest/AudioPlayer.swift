@@ -20,6 +20,14 @@ protocol AudioPlayerDelegate: AnyObject {
 
 class AudioPlayer: NSObject, ObservableObject {
 
+    /// 44100 → "44.1", 48000 → "48", 88200 → "88.2". Avoids Int truncation that drops the decimal.
+    static func formatSampleRateKHz(_ hz: Int) -> String {
+        let khz = Double(hz) / 1000.0
+        return khz.truncatingRemainder(dividingBy: 1) == 0
+            ? "\(Int(khz))"
+            : String(format: "%.1f", khz)
+    }
+
     // MARK: - Stream Info
     struct StreamInfo {
         let format: String
@@ -31,7 +39,7 @@ class AudioPlayer: NSObject, ObservableObject {
         var displayString: String {
             let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
             let bitrateStr = bitrate > 0 ? " @ \(Int(bitrate)) kbps" : ""
-            return "\(format) • \(sampleRate/1000)kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
+            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
         }
     }
 
@@ -44,7 +52,7 @@ class AudioPlayer: NSObject, ObservableObject {
         let latency: Int  // milliseconds
 
         var displayString: String {
-            return "\(deviceName) • \(outputSampleRate/1000)kHz • \(latency)ms latency"
+            return "\(deviceName) • \(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz • \(latency)ms latency"
         }
     }
 

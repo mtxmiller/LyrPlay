@@ -197,7 +197,7 @@ struct SettingsView: View {
                                     .foregroundColor(.green)
                                     .frame(width: 20)
 
-                                Text("\(streamInfo.format) • \(streamInfo.sampleRate/1000)kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrate > 0 ? " • \(Int(streamInfo.bitrate)) kbps" : "")")
+                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrate > 0 ? " • \(Int(streamInfo.bitrate)) kbps" : "")")
                                     .font(.subheadline)
                                     .foregroundColor(.primary)
                             }
@@ -208,7 +208,7 @@ struct SettingsView: View {
                                     .foregroundColor(.blue)
                                     .frame(width: 20)
 
-                                Text("\(outputInfo.deviceName) → \(outputInfo.outputSampleRate/1000)kHz")
+                                Text("\(outputInfo.deviceName) → \(AudioPlayer.formatSampleRateKHz(outputInfo.outputSampleRate))kHz")
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                             }

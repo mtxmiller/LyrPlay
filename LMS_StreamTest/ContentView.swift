@@ -451,7 +451,7 @@ struct ContentView: View {
         (function() {
             var parts = [];
             parts.push('\(safeFormat)');
-            parts.push('\(outputSampleRate / 1000)kHz');
+            parts.push('\(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz');
             parts.push('\(streamInfo.bitDepth)bit');
             if (\(safeBitrate) > 0) parts.push(Math.round(\(safeBitrate)) + 'kbps');
             window.lyrplayStreamText = parts.join(', ');
