@@ -357,6 +357,7 @@ class AudioStreamDecoder {
 
         os_log(.info, log: logger, "🎵 Creating push stream: %d Hz, %d channels", sampleRate, channels)
 
+        #if os(iOS)
         // CRITICAL: Set iOS audio session rate to match content for bit-perfect playback
         // Per Ian @ un4seen (topic 20831): Use AVAudioSession.setPreferredSampleRate
         // "BASS will also detect when the output rate is changed" via this method
@@ -399,6 +400,7 @@ class AudioStreamDecoder {
                 os_log(.info, log: logger, "ℹ️ Continuing with BASS device at %dHz", Int(deviceInfo.freq))
             }
         }
+        #endif
 
         // Create push stream with STREAMPROC_PUSH
         // STREAMPROC_PUSH is defined as (STREAMPROC*)-1 in bass.h

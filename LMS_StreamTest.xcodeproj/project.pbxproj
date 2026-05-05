@@ -110,6 +110,9 @@
 		6B853A4C2FA97DE800A05440 /* Exceptions for "LMS_StreamTest" folder in "LMS_StreamTest-tvOS" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				AudioManager.swift,
+				AudioPlayer.swift,
+				AudioStreamDecoder.swift,
 				KeychainManager.swift,
 				PlaylistModels.swift,
 				PurchaseManager.swift,
@@ -119,6 +122,7 @@
 				SlimProtoClient.swift,
 				SlimProtoCommandHandler.swift,
 				SlimProtoConnectionManager.swift,
+				SlimProtoCoordinator.swift,
 			);
 			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;
 		};

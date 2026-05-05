@@ -3,6 +3,7 @@
 // BASS API exposed via bridging header (LMS_StreamTest-Bridging-Header.h)
 import Foundation
 import AVFoundation
+import Combine
 import MediaPlayer
 import os.log
 
@@ -116,12 +117,15 @@ class AudioPlayer: NSObject, ObservableObject {
     override init() {
         super.init()
         setupCBass()
+        #if os(iOS)
         setupRouteChangeObserver()
+        #endif
         #if DEBUG
         os_log(.info, log: logger, "AudioPlayer initialized with CBass")
         #endif
     }
 
+    #if os(iOS)
     private func setupRouteChangeObserver() {
         // Observe audio route changes to update output device info
         NotificationCenter.default.addObserver(
@@ -140,6 +144,7 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: self.logger, "🔀 Route changed - output device info updated")
         }
     }
+    #endif
     
     // MARK: - Core Setup (MINIMAL CBASS)
     private func setupCBass() {
@@ -177,6 +182,7 @@ class AudioPlayer: NSObject, ObservableObject {
                 os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
             }
 
+            #if os(iOS)
             // CRITICAL: Check for BASS vs iOS mismatch (LMS_StreamTest-yg4)
             // If BASS thinks 192kHz but iOS is at 48kHz, iOS will resample down
             let iosRate = AVAudioSession.sharedInstance().sampleRate
@@ -188,6 +194,7 @@ class AudioPlayer: NSObject, ObservableObject {
             } else {
                 os_log(.info, log: logger, "✅ BASS and iOS sample rates match - bit-perfect output")
             }
+            #endif
         } else {
             os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
         }
@@ -785,6 +792,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
+        #if os(iOS)
         // On iOS, BASS uses the default device (-1) and routing is managed by iOS
         // Query AVAudioSession for the actual device name and type
         let audioSession = AVAudioSession.sharedInstance()
@@ -813,8 +821,22 @@ class AudioPlayer: NSObject, ObservableObject {
         currentOutputInfo = outputInfo
         os_log(.info, log: logger, "🔊 Output device: %{public}s (port: %{public}s)",
                outputInfo.displayString, output.portType.rawValue)
+        #else
+        // tvOS: BASS info only — no AVAudioSession route querying. Apple TV outputs
+        // through HDMI/optical via the system; specific port names are not exposed.
+        let outputInfo = OutputDeviceInfo(
+            deviceName: "AppleTV/HDMI",
+            deviceType: "HDMI",
+            outputSampleRate: Int(info.freq),
+            outputChannels: Int(info.speakers),
+            latency: Int(info.latency)
+        )
+        currentOutputInfo = outputInfo
+        os_log(.info, log: logger, "🔊 Output device (tvOS): %{public}s", outputInfo.displayString)
+        #endif
     }
 
+    #if os(iOS)
     private func deviceTypeFromPortType(_ portType: AVAudioSession.Port) -> String {
         // Map iOS AVAudioSession port types to human-readable device types
         switch portType {
@@ -846,6 +868,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return "Audio Output"
         }
     }
+    #endif
     
     // MARK: - BASS Callbacks (MINIMAL)
     private func setupCallbacks() {

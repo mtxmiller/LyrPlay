@@ -1,9 +1,13 @@
 // File: SlimProtoCoordinator.swift
 // Enhanced with SimpleTimeTracker for accurate lock screen timing
 import Foundation
+import Combine
+import UIKit
 import os.log
+#if os(iOS)
 import WebKit
 import MediaPlayer
+#endif
 
 extension Notification.Name {
     static let slimProtoDidConnect = Notification.Name("SlimProtoDidConnect")
@@ -26,7 +30,9 @@ class SlimProtoCoordinator: ObservableObject {
     private let connectionManager: SlimProtoConnectionManager
     private let audioManager: AudioManager
     private let simpleTimeTracker: SimpleTimeTracker // NEW: Material-style time tracking
+    #if os(iOS)
     private weak var webView: WKWebView? // NEW: WebView for Material UI refresh
+    #endif
     
     // MARK: - Dependencies
     private let settings = SettingsManager.shared
@@ -79,7 +85,9 @@ class SlimProtoCoordinator: ObservableObject {
         setupDelegation()
         setupAudioCallbacks()
         setupAudioPlayerIntegration()
+        #if os(iOS)
         setupBackgroundObservers()
+        #endif
 
         #if DEBUG
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
@@ -121,12 +129,15 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Audio Manager Integration Enhancement
     func setupNowPlayingManagerIntegration() {
+        #if os(iOS)
         // Simple integration - just set the coordinator reference
         audioManager.getNowPlayingManager().setSlimClient(self)
 
         os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
+        #endif
     }
 
+    #if os(iOS)
     private func setupBackgroundObservers() {
         // Track app backgrounding for duration-based recovery
         NotificationCenter.default.addObserver(
@@ -147,6 +158,7 @@ class SlimProtoCoordinator: ObservableObject {
         UserDefaults.standard.set(backgroundedTime, forKey: "lyrplay_backgrounded_at")
         os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
     }
+    #endif
 
     // MARK: - Public Interface
     func connect() {
@@ -350,7 +362,11 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     var timeSourceInfo: String {
+        #if os(iOS)
         return audioManager.getTimeSourceInfo()
+        #else
+        return "tvOS (no NowPlayingManager)"
+        #endif
     }
     
     // REMOVED: Timer-based metadata refresh - replaced with BASS ICY metadata callbacks
@@ -974,7 +990,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
         simpleTimeTracker.updateFromServer(time: currentTime, playing: true)
 
+        #if os(iOS)
         audioManager.activateAudioSession(context: .serverResume)
+        #else
+        audioManager.activateAudioSession()
+        #endif
         audioManager.play()
 
         // Restart heartbeat when resumed
@@ -1211,12 +1231,14 @@ extension SlimProtoCoordinator {
         // SIMPLIFIED: Update SimpleTimeTracker with Material-style approach
         simpleTimeTracker.updateFromServer(time: position, duration: duration, playing: isPlaying)
         
+        #if os(iOS)
         // Update NowPlayingManager with fresh server time
         audioManager.getNowPlayingManager().updateFromSlimProto(
             currentTime: position,
             duration: duration > 0 ? duration : simpleTimeTracker.getTrackDuration(),
             isPlaying: isPlaying
         )
+        #endif
         
         // Too spammy - uncomment only for debugging server time sync
         // os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]",
@@ -1352,11 +1374,13 @@ extension SlimProtoCoordinator {
         return time
     }
     
+    #if os(iOS)
     /// Set WebView reference for Material UI refresh
     func setWebView(_ webView: WKWebView) {
         self.webView = webView
         os_log(.info, log: logger, "✅ WebView reference set for Material UI refresh")
     }
+    #endif
     
     /// Public method to refresh Material UI (can be called externally)
     /// Start periodic server time fetching
@@ -1415,9 +1439,13 @@ extension SlimProtoCoordinator {
             os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
         }
 
+        #if os(iOS)
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
         let context: PlaybackSessionController.ActivationContext = command.lowercased() == "play" ? .userInitiatedPlay : .backgroundRefresh
         audioManager.activateAudioSession(context: context)
+        #else
+        audioManager.activateAudioSession()
+        #endif
 
         // Lock screen PLAY: Use duration-based recovery (only reconnect if long background)
         // For PAUSE/other: Just send command normally (no need to disconnect)
@@ -1718,6 +1746,7 @@ extension SlimProtoCoordinator {
                 if !shuffleResponse.isEmpty {
                     os_log(.info, log: self.logger, "✅ Shuffle mode set to %d", newMode)
 
+                    #if os(iOS)
                     // Update MPRemoteCommandCenter for lock screen/Control Center
                     DispatchQueue.main.async {
                         let shuffleType: MPShuffleType = newMode == 1 ? .items : (newMode == 2 ? .collections : .off)
@@ -1725,6 +1754,7 @@ extension SlimProtoCoordinator {
                         os_log(.info, log: self.logger, "🔀 Remote command center updated: %{public}s",
                                shuffleType == .off ? "off" : (shuffleType == .items ? "songs" : "albums"))
                     }
+                    #endif
 
                     // Notify CarPlay to update button icon
                     completion?(newMode)
