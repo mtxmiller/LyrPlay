@@ -9,9 +9,11 @@ struct ContentView: View {
                 .foregroundStyle(.tint)
             Text("LyrPlay tvOS")
                 .font(.largeTitle)
-            Text("Hello, tvOS — SlimProto target compiles.")
+            Text("Scaffolding ready. BASS + SlimProto verified.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
         }
         .padding()
     }

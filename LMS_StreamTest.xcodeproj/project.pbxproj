@@ -8,6 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		0335667CFD9EF672F2A59657 /* Pods_LMS_StreamTestTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */; };
+		6B853AED2FA981A400A05440 /* bass.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AEC2FA981A400A05440 /* bass.xcframework */; };
+		6B853AEE2FA981A400A05440 /* bass.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AEC2FA981A400A05440 /* bass.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		6B853AF12FA981AD00A05440 /* bassflac.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AF02FA981AD00A05440 /* bassflac.xcframework */; };
+		6B853AF22FA981AD00A05440 /* bassflac.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AF02FA981AD00A05440 /* bassflac.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		6B853AF42FA981CE00A05440 /* bassopus.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AF32FA981CE00A05440 /* bassopus.xcframework */; };
+		6B853AF52FA981CE00A05440 /* bassopus.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 6B853AF32FA981CE00A05440 /* bassopus.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		6BB0C1EC2E34559500D673F7 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6BB0C1EB2E34559500D673F7 /* PrivacyInfo.xcprivacy */; };
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
@@ -49,6 +55,22 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		6B853AEF2FA981A400A05440 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				6B853AF22FA981AD00A05440 /* bassflac.xcframework in Embed Frameworks */,
+				6B853AEE2FA981A400A05440 /* bass.xcframework in Embed Frameworks */,
+				6B853AF52FA981CE00A05440 /* bassopus.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		059B1B011C47FB365C25FCE2 /* Pods-LMS_StreamTest-tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOS.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS.debug.xcconfig"; sourceTree = "<group>"; };
@@ -65,6 +87,9 @@
 		6B85398C2FA9414C00A05440 /* LMS_StreamTest-tvOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "LMS_StreamTest-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B8539982FA9414D00A05440 /* LMS_StreamTest-tvOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "LMS_StreamTest-tvOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B8539A22FA9414D00A05440 /* LMS_StreamTest-tvOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "LMS_StreamTest-tvOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		6B853AEC2FA981A400A05440 /* bass.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = bass.xcframework; path = Frameworks/bass.xcframework; sourceTree = "<group>"; };
+		6B853AF02FA981AD00A05440 /* bassflac.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = bassflac.xcframework; path = Frameworks/bassflac.xcframework; sourceTree = "<group>"; };
+		6B853AF32FA981CE00A05440 /* bassopus.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = bassopus.xcframework; path = Frameworks/bassopus.xcframework; sourceTree = "<group>"; };
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -153,7 +178,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6B853AF12FA981AD00A05440 /* bassflac.xcframework in Frameworks */,
+				6B853AED2FA981A400A05440 /* bass.xcframework in Frameworks */,
 				FCDC5ABFF1B3339BF610D8BD /* Pods_LMS_StreamTest_tvOS.framework in Frameworks */,
+				6B853AF42FA981CE00A05440 /* bassopus.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -254,6 +282,9 @@
 		6BF845792DEB86CA00C2BB2A /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				6B853AF32FA981CE00A05440 /* bassopus.xcframework */,
+				6B853AF02FA981AD00A05440 /* bassflac.xcframework */,
+				6B853AEC2FA981A400A05440 /* bass.xcframework */,
 				6BD675C52EC8044700904C17 /* CarKey.framework */,
 				6BF8457C2DEB86D000C2BB2A /* WebKit.framework */,
 				6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */,
@@ -279,6 +310,7 @@
 				6B8539892FA9414C00A05440 /* Frameworks */,
 				6B85398A2FA9414C00A05440 /* Resources */,
 				38929F3B01B4B38D56DE0DC6 /* [CP] Embed Pods Frameworks */,
+				6B853AEF2FA981A400A05440 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -779,6 +811,11 @@
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/BASS_Headers",
+					"$(PROJECT_DIR)",
+				);
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
@@ -794,6 +831,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "LMS_StreamTest/LMS_StreamTest-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -812,6 +850,11 @@
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/BASS_Headers",
+					"$(PROJECT_DIR)",
+				);
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
@@ -827,6 +870,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "LMS_StreamTest/LMS_StreamTest-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
