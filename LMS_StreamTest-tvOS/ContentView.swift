@@ -27,6 +27,7 @@ struct ContentView: View {
                 .padding(.top, 16)
 
             Button(role: .destructive) {
+                AudioManager.shared.slimClient?.disconnect()
                 AudioManager.shared.slimClient = nil
                 settings.resetConfiguration()
             } label: {
@@ -50,7 +51,6 @@ struct ContentView: View {
         } else {
             os_log(.info, log: logger, "🆕 Creating SlimProtoCoordinator for tvOS")
             coordinator = SlimProtoCoordinator(audioManager: audioMgr)
-            audioMgr.slimClient = coordinator
         }
 
         audioMgr.setSlimClient(coordinator)
