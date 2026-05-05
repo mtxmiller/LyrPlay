@@ -2,6 +2,7 @@
 // Data models for CarPlay playlist and Up Next functionality
 import Foundation
 import Combine
+import os.log
 
 // MARK: - Playlist Data Models
 
@@ -171,6 +172,24 @@ struct PlaylistTrack: Identifiable, Codable {
             return album
         }
         return ""
+    }
+}
+
+extension PlaylistTrack {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "PlaylistTrack")
+
+    /// Parses a playlist_loop / playlisttracks_loop JSON array from LMS into PlaylistTrack instances.
+    /// Malformed entries are logged and skipped; the remainder are returned in input order.
+    static func parseLoop(_ data: [[String: Any]]) -> [PlaylistTrack] {
+        return data.compactMap { trackData in
+            do {
+                let jsonData = try JSONSerialization.data(withJSONObject: trackData)
+                return try JSONDecoder().decode(PlaylistTrack.self, from: jsonData)
+            } catch {
+                os_log(.error, log: parseLogger, "❌ Failed to parse track: %{public}s", error.localizedDescription)
+                return nil
+            }
+        }
     }
 }
 

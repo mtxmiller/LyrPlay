@@ -693,18 +693,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    private func parsePlaylistTracks(_ data: [[String: Any]]) -> [PlaylistTrack] {
-        return data.compactMap { trackData in
-            do {
-                let jsonData = try JSONSerialization.data(withJSONObject: trackData)
-                return try JSONDecoder().decode(PlaylistTrack.self, from: jsonData)
-            } catch {
-                os_log(.error, log: logger, "❌ Failed to parse track: %{public}s", error.localizedDescription)
-                return nil
-            }
-        }
-    }
-
     // MARK: - LMS Data Fetching Helpers
 
     private func fetchPlaylists(completion: @escaping ([Playlist]) -> Void) {
@@ -781,7 +769,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     return
                 }
 
-                let tracks = self.parsePlaylistTracks(tracksLoop)
+                let tracks = PlaylistTrack.parseLoop(tracksLoop)
                 os_log(.info, log: self.logger, "✅ Fetched %d tracks for playlist", tracks.count)
                 completion(tracks)
             }

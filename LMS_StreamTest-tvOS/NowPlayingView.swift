@@ -259,8 +259,33 @@ struct NowPlayingView: View {
                 accessibilityLabel: "Next Track",
                 action: { sendCommand("next") }
             )
+            if nowPlaying.hasTrackLoaded {
+                Spacer()
+                queueNavigationLink
+            }
         }
         .padding(.horizontal, 24)
+    }
+
+    private var queueNavigationLink: some View {
+        NavigationLink {
+            QueueView(
+                nowPlaying: nowPlaying,
+                coordinator: coordinator,
+                settings: settings,
+                accentColor: accentColor
+            )
+        } label: {
+            ZStack {
+                Circle().fill(.ultraThinMaterial)
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.primary)
+            }
+            .frame(width: 72, height: 72)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Queue")
     }
 
     @ViewBuilder

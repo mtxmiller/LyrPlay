@@ -16,11 +16,13 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let coordinator, isConnected {
-                NowPlayingView(
-                    nowPlaying: AudioManager.shared.getNowPlayingManager(),
-                    coordinator: coordinator,
-                    settings: settings
-                )
+                NavigationStack {
+                    NowPlayingView(
+                        nowPlaying: AudioManager.shared.getNowPlayingManager(),
+                        coordinator: coordinator,
+                        settings: settings
+                    )
+                }
             } else {
                 connectingView
             }
