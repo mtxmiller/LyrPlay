@@ -13,8 +13,8 @@ class AudioManager: NSObject, ObservableObject {
     let audioPlayer: AudioPlayer  // Made public for SettingsView access
     #if os(iOS)
     private let audioSessionManager: AudioSessionManager
-    private let nowPlayingManager: NowPlayingManager
     #endif
+    private let nowPlayingManager: NowPlayingManager
     private let streamDecoder: AudioStreamDecoder  // NEW: For gapless playback
 
     // MARK: - Time Update Throttling (ADD THIS LINE)
@@ -24,12 +24,10 @@ class AudioManager: NSObject, ObservableObject {
     weak var commandHandler: SlimProtoCommandHandler?
 
 
-    #if os(iOS)
     // NEW: Expose NowPlayingManager for coordinator access
     func getNowPlayingManager() -> NowPlayingManager {
         return nowPlayingManager
     }
-    #endif
     
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
@@ -43,18 +41,18 @@ class AudioManager: NSObject, ObservableObject {
         self.audioPlayer = AudioPlayer()
         #if os(iOS)
         self.audioSessionManager = AudioSessionManager()
-        self.nowPlayingManager = NowPlayingManager()
         #endif
+        self.nowPlayingManager = NowPlayingManager()
         self.streamDecoder = AudioStreamDecoder()  // NEW: Initialize decoder
 
         super.init()
 
         setupDelegation()
 
-        #if os(iOS)
         // CRITICAL: Ensure NowPlayingManager gets AudioManager reference for fallback timing
         nowPlayingManager.setAudioManager(self)
 
+        #if os(iOS)
         PlaybackSessionController.shared.configure(audioManager: self) { [weak self] in
             self?.slimClient
         }
@@ -384,7 +382,6 @@ class AudioManager: NSObject, ObservableObject {
             os_log(.info, log: logger, "🎵 Updated track metadata: %{public}s - %{public}s", title, artist)
         }
 
-        #if os(iOS)
         // Update now playing manager
         nowPlayingManager.updateTrackMetadata(
             title: title,
@@ -393,14 +390,11 @@ class AudioManager: NSObject, ObservableObject {
             artworkURL: artworkURL,
             duration: duration  // Pass through optional duration
         )
-        #endif
     }
 
     // Update playlist position for CarPlay button states
     func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
-        #if os(iOS)
         nowPlayingManager.updatePlaylistPosition(currentIndex: currentIndex, totalTracks: totalTracks)
-        #endif
     }
 
     // MARK: - Private Audio Session Configuration
@@ -429,9 +423,7 @@ class AudioManager: NSObject, ObservableObject {
     func setSlimClient(_ slimClient: SlimProtoCoordinator) {
         os_log(.info, log: logger, "🔗 AudioManager.setSlimClient called")
         self.slimClient = slimClient
-        #if os(iOS)
         nowPlayingManager.setSlimClient(slimClient)
-        #endif
         os_log(.info, log: logger, "✅ SlimClient reference set for AudioManager and NowPlayingManager")
     }
 
@@ -471,19 +463,15 @@ extension AudioManager: AudioPlayerDelegate {
         let audioTime = audioPlayer.getCurrentTime()
         os_log(.info, log: logger, "🔒 Audio player reports pause time: %.2f (NOT using - server is master)", audioTime)
 
-        #if os(iOS)
         // Update playing state only, let server time synchronizer provide the position
         nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
-        #endif
     }
 
     func audioPlayerDidStop() {
         os_log(.debug, log: logger, "⏹️ Audio player stopped")
 
-        #if os(iOS)
         // Update now playing info
         nowPlayingManager.updatePlaybackState(isPlaying: false, currentTime: 0.0)
-        #endif
     }
 
     func audioPlayerDidReachEnd() {
@@ -497,11 +485,9 @@ extension AudioManager: AudioPlayerDelegate {
         // REMOVED: All time update reporting and throttling
         // The server is the master - don't spam it with position updates
 
-        #if os(iOS)
         // Only update now playing info locally, don't send to server
         let isPlaying = audioPlayer.getPlayerState() == "Playing"
         nowPlayingManager.updatePlaybackState(isPlaying: isPlaying, currentTime: time)
-        #endif
 
         // REMOVED: All the complicated throttling and server communication
         os_log(.debug, log: logger, "📍 Local time update only: %.2f", time)
@@ -598,14 +584,15 @@ extension AudioManager {
         return audioSessionManager.isOtherAudioPlaying()
     }
 }
-// MARK: - Server Time Integration
+#endif
+
+// MARK: - Server Time Integration (cross-platform)
 extension AudioManager {
     /// Gets time source information for debugging
     func getTimeSourceInfo() -> String {
         return nowPlayingManager.getTimeSourceInfo()
     }
 }
-#endif
 
 // MARK: - AudioStreamDecoder Delegate (NEW - Gapless Playback)
 extension AudioManager: AudioStreamDecoderDelegate {

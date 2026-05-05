@@ -114,6 +114,7 @@
 				AudioPlayer.swift,
 				AudioStreamDecoder.swift,
 				KeychainManager.swift,
+				NowPlayingManager.swift,
 				PlaylistModels.swift,
 				PurchaseManager.swift,
 				ServerDiscoveryManager.swift,

@@ -129,12 +129,10 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Audio Manager Integration Enhancement
     func setupNowPlayingManagerIntegration() {
-        #if os(iOS)
         // Simple integration - just set the coordinator reference
         audioManager.getNowPlayingManager().setSlimClient(self)
 
         os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
-        #endif
     }
 
     #if os(iOS)
@@ -362,11 +360,7 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     var timeSourceInfo: String {
-        #if os(iOS)
         return audioManager.getTimeSourceInfo()
-        #else
-        return "tvOS (no NowPlayingManager)"
-        #endif
     }
     
     // REMOVED: Timer-based metadata refresh - replaced with BASS ICY metadata callbacks
@@ -1230,16 +1224,14 @@ extension SlimProtoCoordinator {
     func updateServerTime(position: Double, duration: Double = 0.0, isPlaying: Bool) {
         // SIMPLIFIED: Update SimpleTimeTracker with Material-style approach
         simpleTimeTracker.updateFromServer(time: position, duration: duration, playing: isPlaying)
-        
-        #if os(iOS)
+
         // Update NowPlayingManager with fresh server time
         audioManager.getNowPlayingManager().updateFromSlimProto(
             currentTime: position,
             duration: duration > 0 ? duration : simpleTimeTracker.getTrackDuration(),
             isPlaying: isPlaying
         )
-        #endif
-        
+
         // Too spammy - uncomment only for debugging server time sync
         // os_log(.debug, log: logger, "📍 Updated server time: %.2f (playing: %{public}s) [Material-style]",
         //        position, isPlaying ? "YES" : "NO")
@@ -1778,6 +1770,19 @@ extension SlimProtoCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.verifyServerPaused(retriesRemaining: maxRetries, completion: completion)
         }
+    }
+
+    /// Seeks to an absolute position within the current track via LMS `playlist time` JSON-RPC.
+    /// Server-side seek; works across all formats including FLAC (via MobileTranscode plugin).
+    public func seek(toSeconds seconds: Double) {
+        let clamped = max(0.0, seconds)
+        let seekCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["time", String(format: "%.2f", clamped)]]
+        ]
+        os_log(.info, log: logger, "⏩ Seek to %.2f seconds", clamped)
+        sendJSONRPCCommandDirect(seekCommand) { _ in }
     }
 
     /// Verifies server is in paused state, retries pause command if not

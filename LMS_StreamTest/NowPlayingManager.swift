@@ -1,21 +1,23 @@
 // File: NowPlayingManager.swift
 // Enhanced to use server time as primary source for lock screen accuracy
 import Foundation
+import Combine
 import MediaPlayer
 import UIKit
 import os.log
 
 class NowPlayingManager: ObservableObject {
-    
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "NowPlayingManager")
-    
+
     // MARK: - Track Metadata
-    private var currentTrackTitle: String = "LyrPlay"
-    private var currentArtist: String = "Unknown Artist"
-    private var currentAlbum: String = "Lyrion Music Server"
-    private var currentArtwork: UIImage?
-    private var metadataDuration: TimeInterval = 0.0
+    @Published private(set) var currentTrackTitle: String = "LyrPlay"
+    @Published private(set) var currentArtist: String = "Unknown Artist"
+    @Published private(set) var currentAlbum: String = "Lyrion Music Server"
+    @Published private(set) var currentArtwork: UIImage?
+    @Published private(set) var metadataDuration: TimeInterval = 0.0
+    @Published private(set) var hasTrackLoaded: Bool = false
 
     // MARK: - Time Sources
     private weak var audioManager: AudioManager?
@@ -253,6 +255,7 @@ class NowPlayingManager: ObservableObject {
         currentTrackTitle = title
         currentArtist = artist
         currentAlbum = album
+        hasTrackLoaded = true
 
         // Reset deduplication state so next update goes through immediately
         lastUpdatedTime = -1.0
@@ -404,6 +407,7 @@ class NowPlayingManager: ObservableObject {
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
         metadataDuration = 0.0
+        hasTrackLoaded = false
         lastKnownServerTime = 0.0
         lastKnownAudioTime = 0.0
         
