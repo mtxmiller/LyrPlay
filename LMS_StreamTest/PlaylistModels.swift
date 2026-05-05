@@ -1,6 +1,7 @@
 // File: PlaylistModels.swift
 // Data models for CarPlay playlist and Up Next functionality
 import Foundation
+import Combine
 
 // MARK: - Playlist Data Models
 

@@ -1,0 +1,6 @@
+framework module Pods_LMS_StreamTest_tvOSUITests {
+  umbrella header "Pods-LMS_StreamTest-tvOSUITests-umbrella.h"
+
+  export *
+  module * { export * }
+}

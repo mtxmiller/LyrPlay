@@ -12,10 +12,27 @@
 		6BF8457B2DEB86CA00C2BB2A /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457A2DEB86CA00C2BB2A /* AVFoundation.framework */; };
 		6BF8457D2DEB86D000C2BB2A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6BF8457C2DEB86D000C2BB2A /* WebKit.framework */; };
 		78063D0096341377996B2F3F /* Pods_LMS_StreamTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */; };
+		90C844DFCA5DE7F84AD27903 /* Pods_LMS_StreamTest_tvOSTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1CBD3121696811B1EF654EE7 /* Pods_LMS_StreamTest_tvOSTests.framework */; };
+		9437C13E8914D1F85BDB55DB /* Pods_LMS_StreamTest_tvOSUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EE4F1DED5962E3967DD4F758 /* Pods_LMS_StreamTest_tvOSUITests.framework */; };
 		B32290575451A047EBC5FB56 /* Pods_LMS_StreamTestUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */; };
+		FCDC5ABFF1B3339BF610D8BD /* Pods_LMS_StreamTest_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0269EBEB577DB336C6BDDE0 /* Pods_LMS_StreamTest_tvOS.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		6B8539992FA9414D00A05440 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 6B85398B2FA9414C00A05440;
+			remoteInfo = "LMS_StreamTest-tvOS";
+		};
+		6B8539A32FA9414D00A05440 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 6B85398B2FA9414C00A05440;
+			remoteInfo = "LMS_StreamTest-tvOS";
+		};
 		6B9C4D5F2DEB81F600D22FD6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 6B9C4D462DEB81F500D22FD6 /* Project object */;
@@ -34,11 +51,20 @@
 
 /* Begin PBXFileReference section */
 		016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		059B1B011C47FB365C25FCE2 /* Pods-LMS_StreamTest-tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOS.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		073519E6407F6C79CA0220C3 /* Pods-LMS_StreamTestTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.debug.xcconfig"; sourceTree = "<group>"; };
+		0AC6547B17F9841A2E7616F4 /* Pods-LMS_StreamTest-tvOSTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOSTests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOSTests/Pods-LMS_StreamTest-tvOSTests.debug.xcconfig"; sourceTree = "<group>"; };
+		0BAB692AED4E574F81BEFC4C /* Pods-LMS_StreamTest-tvOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOS.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS.release.xcconfig"; sourceTree = "<group>"; };
+		1CBD3121696811B1EF654EE7 /* Pods_LMS_StreamTest_tvOSTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest_tvOSTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		2AA69221EF2C1AE703C555D2 /* Pods-LMS_StreamTest-tvOSUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOSUITests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOSUITests/Pods-LMS_StreamTest-tvOSUITests.release.xcconfig"; sourceTree = "<group>"; };
 		323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTestUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		4152630DEBAE3C89657B1757 /* Pods-LMS_StreamTest.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.debug.xcconfig"; sourceTree = "<group>"; };
 		479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.release.xcconfig"; sourceTree = "<group>"; };
+		60A60DDE37BA7724C2B8DBBA /* Pods-LMS_StreamTest-tvOSUITests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOSUITests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOSUITests/Pods-LMS_StreamTest-tvOSUITests.debug.xcconfig"; sourceTree = "<group>"; };
 		6B149E012EC746BE0057B9C1 /* LMS_StreamTest.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LMS_StreamTest.entitlements; sourceTree = "<group>"; };
+		6B85398C2FA9414C00A05440 /* LMS_StreamTest-tvOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "LMS_StreamTest-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		6B8539982FA9414D00A05440 /* LMS_StreamTest-tvOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "LMS_StreamTest-tvOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		6B8539A22FA9414D00A05440 /* LMS_StreamTest-tvOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "LMS_StreamTest-tvOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LMS_StreamTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LMS_StreamTestUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -48,13 +74,65 @@
 		6BF8457C2DEB86D000C2BB2A /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		874333B1449148BC67AF774C /* Pods-LMS_StreamTest.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest/Pods-LMS_StreamTest.release.xcconfig"; sourceTree = "<group>"; };
 		9C6738F5DE86726D912883A7 /* Pods-LMS_StreamTestUITests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestUITests.debug.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestUITests/Pods-LMS_StreamTestUITests.debug.xcconfig"; sourceTree = "<group>"; };
+		C0030164416B258945F0AC72 /* Pods-LMS_StreamTest-tvOSTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTest-tvOSTests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTest-tvOSTests/Pods-LMS_StreamTest-tvOSTests.release.xcconfig"; sourceTree = "<group>"; };
+		C0269EBEB577DB336C6BDDE0 /* Pods_LMS_StreamTest_tvOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest_tvOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTestTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		EE4F1DED5962E3967DD4F758 /* Pods_LMS_StreamTest_tvOSUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_LMS_StreamTest_tvOSUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LMS_StreamTestTests.release.xcconfig"; path = "Target Support Files/Pods-LMS_StreamTestTests/Pods-LMS_StreamTestTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		6B853A4C2FA97DE800A05440 /* Exceptions for "LMS_StreamTest" folder in "LMS_StreamTest-tvOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				KeychainManager.swift,
+				PlaylistModels.swift,
+				PurchaseManager.swift,
+				ServerDiscoveryManager.swift,
+				SettingsManager.swift,
+				SimpleTimeTracker.swift,
+				SlimProtoClient.swift,
+				SlimProtoCommandHandler.swift,
+				SlimProtoConnectionManager.swift,
+			);
+			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		6B853A512FA97EAD00A05440 /* Exceptions for "LMS_StreamTest-tvOS" folder in "Compile Sources" phase from "LMS_StreamTest-tvOS" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 6B8539882FA9414C00A05440 /* Sources */;
+			membershipExceptions = (
+				Assets.xcassets,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		6B85398D2FA9414C00A05440 /* LMS_StreamTest-tvOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				6B853A512FA97EAD00A05440 /* Exceptions for "LMS_StreamTest-tvOS" folder in "Compile Sources" phase from "LMS_StreamTest-tvOS" target */,
+			);
+			path = "LMS_StreamTest-tvOS";
+			sourceTree = "<group>";
+		};
+		6B85399B2FA9414D00A05440 /* LMS_StreamTest-tvOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "LMS_StreamTest-tvOSTests";
+			sourceTree = "<group>";
+		};
+		6B8539A52FA9414D00A05440 /* LMS_StreamTest-tvOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "LMS_StreamTest-tvOSUITests";
+			sourceTree = "<group>";
+		};
 		6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				6B853A4C2FA97DE800A05440 /* Exceptions for "LMS_StreamTest" folder in "LMS_StreamTest-tvOS" target */,
+			);
 			path = LMS_StreamTest;
 			sourceTree = "<group>";
 		};
@@ -71,6 +149,30 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		6B8539892FA9414C00A05440 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FCDC5ABFF1B3339BF610D8BD /* Pods_LMS_StreamTest_tvOS.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B8539952FA9414D00A05440 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				90C844DFCA5DE7F84AD27903 /* Pods_LMS_StreamTest_tvOSTests.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B85399F2FA9414D00A05440 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9437C13E8914D1F85BDB55DB /* Pods_LMS_StreamTest_tvOSUITests.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		6B9C4D4B2DEB81F500D22FD6 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -109,6 +211,12 @@
 				EED8EBF0CB1DA517264CBD32 /* Pods-LMS_StreamTestTests.release.xcconfig */,
 				9C6738F5DE86726D912883A7 /* Pods-LMS_StreamTestUITests.debug.xcconfig */,
 				479F424492FF3E773B26BFC0 /* Pods-LMS_StreamTestUITests.release.xcconfig */,
+				059B1B011C47FB365C25FCE2 /* Pods-LMS_StreamTest-tvOS.debug.xcconfig */,
+				0BAB692AED4E574F81BEFC4C /* Pods-LMS_StreamTest-tvOS.release.xcconfig */,
+				0AC6547B17F9841A2E7616F4 /* Pods-LMS_StreamTest-tvOSTests.debug.xcconfig */,
+				C0030164416B258945F0AC72 /* Pods-LMS_StreamTest-tvOSTests.release.xcconfig */,
+				60A60DDE37BA7724C2B8DBBA /* Pods-LMS_StreamTest-tvOSUITests.debug.xcconfig */,
+				2AA69221EF2C1AE703C555D2 /* Pods-LMS_StreamTest-tvOSUITests.release.xcconfig */,
 			);
 			path = Pods;
 			sourceTree = "<group>";
@@ -121,6 +229,9 @@
 				6B9C4D502DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D612DEB81F600D22FD6 /* LMS_StreamTestTests */,
 				6B9C4D6B2DEB81F600D22FD6 /* LMS_StreamTestUITests */,
+				6B85398D2FA9414C00A05440 /* LMS_StreamTest-tvOS */,
+				6B85399B2FA9414D00A05440 /* LMS_StreamTest-tvOSTests */,
+				6B8539A52FA9414D00A05440 /* LMS_StreamTest-tvOSUITests */,
 				6BF845792DEB86CA00C2BB2A /* Frameworks */,
 				6B9C4D4F2DEB81F500D22FD6 /* Products */,
 				320BF7DFBD3CADF66E446357 /* Pods */,
@@ -133,6 +244,9 @@
 				6B9C4D4E2DEB81F500D22FD6 /* LMS_StreamTest.app */,
 				6B9C4D5E2DEB81F600D22FD6 /* LMS_StreamTestTests.xctest */,
 				6B9C4D682DEB81F600D22FD6 /* LMS_StreamTestUITests.xctest */,
+				6B85398C2FA9414C00A05440 /* LMS_StreamTest-tvOS.app */,
+				6B8539982FA9414D00A05440 /* LMS_StreamTest-tvOSTests.xctest */,
+				6B8539A22FA9414D00A05440 /* LMS_StreamTest-tvOSUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -146,6 +260,9 @@
 				016BDB17CFF5E05AFC32D267 /* Pods_LMS_StreamTest.framework */,
 				EA59A03C3986F62ACA9C4685 /* Pods_LMS_StreamTestTests.framework */,
 				323375EA67DC5872EF852994 /* Pods_LMS_StreamTestUITests.framework */,
+				C0269EBEB577DB336C6BDDE0 /* Pods_LMS_StreamTest_tvOS.framework */,
+				1CBD3121696811B1EF654EE7 /* Pods_LMS_StreamTest_tvOSTests.framework */,
+				EE4F1DED5962E3967DD4F758 /* Pods_LMS_StreamTest_tvOSUITests.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -153,6 +270,72 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6B8539B02FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOS" */;
+			buildPhases = (
+				2FF8A3FA2C9AFE959D6CE88E /* [CP] Check Pods Manifest.lock */,
+				6B8539882FA9414C00A05440 /* Sources */,
+				6B8539892FA9414C00A05440 /* Frameworks */,
+				6B85398A2FA9414C00A05440 /* Resources */,
+				38929F3B01B4B38D56DE0DC6 /* [CP] Embed Pods Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				6B85398D2FA9414C00A05440 /* LMS_StreamTest-tvOS */,
+			);
+			name = "LMS_StreamTest-tvOS";
+			productName = "LMS_StreamTest-tvOS";
+			productReference = 6B85398C2FA9414C00A05440 /* LMS_StreamTest-tvOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		6B8539972FA9414D00A05440 /* LMS_StreamTest-tvOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6B8539B12FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOSTests" */;
+			buildPhases = (
+				91CB01848F9215311FB2F4F9 /* [CP] Check Pods Manifest.lock */,
+				6B8539942FA9414D00A05440 /* Sources */,
+				6B8539952FA9414D00A05440 /* Frameworks */,
+				6B8539962FA9414D00A05440 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6B85399A2FA9414D00A05440 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				6B85399B2FA9414D00A05440 /* LMS_StreamTest-tvOSTests */,
+			);
+			name = "LMS_StreamTest-tvOSTests";
+			productName = "LMS_StreamTest-tvOSTests";
+			productReference = 6B8539982FA9414D00A05440 /* LMS_StreamTest-tvOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		6B8539A12FA9414D00A05440 /* LMS_StreamTest-tvOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6B8539B22FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOSUITests" */;
+			buildPhases = (
+				F37F9B9ED7FDC926B4E10694 /* [CP] Check Pods Manifest.lock */,
+				6B85399E2FA9414D00A05440 /* Sources */,
+				6B85399F2FA9414D00A05440 /* Frameworks */,
+				6B8539A02FA9414D00A05440 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6B8539A42FA9414D00A05440 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				6B8539A52FA9414D00A05440 /* LMS_StreamTest-tvOSUITests */,
+			);
+			name = "LMS_StreamTest-tvOSUITests";
+			productName = "LMS_StreamTest-tvOSUITests";
+			productReference = 6B8539A22FA9414D00A05440 /* LMS_StreamTest-tvOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6B9C4D722DEB81F600D22FD6 /* Build configuration list for PBXNativeTarget "LMS_StreamTest" */;
@@ -227,9 +410,20 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 1620;
+				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 1620;
 				TargetAttributes = {
+					6B85398B2FA9414C00A05440 = {
+						CreatedOnToolsVersion = 26.0.1;
+					};
+					6B8539972FA9414D00A05440 = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 6B85398B2FA9414C00A05440;
+					};
+					6B8539A12FA9414D00A05440 = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 6B85398B2FA9414C00A05440;
+					};
 					6B9C4D4D2DEB81F500D22FD6 = {
 						CreatedOnToolsVersion = 16.2;
 					};
@@ -260,11 +454,35 @@
 				6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */,
 				6B9C4D5D2DEB81F600D22FD6 /* LMS_StreamTestTests */,
 				6B9C4D672DEB81F600D22FD6 /* LMS_StreamTestUITests */,
+				6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */,
+				6B8539972FA9414D00A05440 /* LMS_StreamTest-tvOSTests */,
+				6B8539A12FA9414D00A05440 /* LMS_StreamTest-tvOSUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		6B85398A2FA9414C00A05440 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B8539962FA9414D00A05440 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B8539A02FA9414D00A05440 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		6B9C4D4C2DEB81F500D22FD6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -290,6 +508,49 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		2FF8A3FA2C9AFE959D6CE88E /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTest-tvOS-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		38929F3B01B4B38D56DE0DC6 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-LMS_StreamTest-tvOS/Pods-LMS_StreamTest-tvOS-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
 		3E975533B7CD519DA634BDAA /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -356,6 +617,28 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
+		91CB01848F9215311FB2F4F9 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTest-tvOSTests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
 		9A1B2C3D4E5F6A7B8C9D0E1F /* Embed BASS Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -369,6 +652,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "# Embed BASS Frameworks into app bundle\nset -e\n\n# Determine which slice to use based on SDK\nif [[ \"$PLATFORM_NAME\" == \"iphonesimulator\" ]]; then\n  SLICE=\"ios-arm64_i386_x86_64-simulator\"\nelse\n  SLICE=\"ios-arm64_armv7_armv7s\"\nfi\n\necho \"Platform: $PLATFORM_NAME\"\necho \"Using slice: $SLICE\"\necho \"Code signing identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n\n# Create Frameworks directory in app bundle\nmkdir -p \"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n\n# Copy and sign each framework\nfor FRAMEWORK in bass bassflac bassopus; do\n  SOURCE=\"${PROJECT_DIR}/Frameworks/${FRAMEWORK}.xcframework/${SLICE}/${FRAMEWORK}.framework\"\n  DEST=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/${FRAMEWORK}.framework\"\n  \n  echo \"Copying ${FRAMEWORK}.framework from ${SLICE}\"\n  rm -rf \"${DEST}\"\n  cp -R \"${SOURCE}\" \"${DEST}\"\n  \n  # Remove extended attributes and resource forks (macOS metadata)\n  echo \"Cleaning macOS metadata from ${FRAMEWORK}.framework\"\n  xattr -cr \"${DEST}\"\n  \n  # Strip any existing signature\n  echo \"Stripping existing signature from ${FRAMEWORK}.framework\"\n  codesign --remove-signature \"${DEST}\" 2>/dev/null || true\n  \n  # Code sign the framework\n  echo \"Code signing ${FRAMEWORK}.framework with identity: ${EXPANDED_CODE_SIGN_IDENTITY}\"\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \\\n    --timestamp=none \\\n    --generate-entitlement-der \\\n    \"${DEST}\"\n  \n  # Verify signature\n  echo \"Verifying signature for ${FRAMEWORK}.framework\"\n  codesign --verify --verbose \"${DEST}\"\ndone\n\necho \"BASS frameworks embedded and signed successfully\"\n";
+			showEnvVarsInLog = 0;
+		};
+		F37F9B9ED7FDC926B4E10694 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LMS_StreamTest-tvOSUITests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
 		F3DEECFE8209C6B2C790175D /* [CP] Embed Pods Frameworks */ = {
@@ -395,6 +700,27 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		6B8539882FA9414C00A05440 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B8539942FA9414D00A05440 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B85399E2FA9414D00A05440 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		6B9C4D4A2DEB81F500D22FD6 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -419,6 +745,16 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		6B85399A2FA9414D00A05440 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;
+			targetProxy = 6B8539992FA9414D00A05440 /* PBXContainerItemProxy */;
+		};
+		6B8539A42FA9414D00A05440 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;
+			targetProxy = 6B8539A32FA9414D00A05440 /* PBXContainerItemProxy */;
+		};
 		6B9C4D602DEB81F600D22FD6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 6B9C4D4D2DEB81F500D22FD6 /* LMS_StreamTest */;
@@ -432,6 +768,166 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		6B8539AA2FA9414D00A05440 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 059B1B011C47FB365C25FCE2 /* Pods-LMS_StreamTest-tvOS.debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOS";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		6B8539AB2FA9414D00A05440 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0BAB692AED4E574F81BEFC4C /* Pods-LMS_StreamTest-tvOS.release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "LyrPlay needs to connect to your Lyrion Music Server on the local network to stream music and control playback.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOS";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		6B8539AC2FA9414D00A05440 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0AC6547B17F9841A2E7616F4 /* Pods-LMS_StreamTest-tvOSTests.debug.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LMS_StreamTest-tvOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/LMS_StreamTest-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		6B8539AD2FA9414D00A05440 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0030164416B258945F0AC72 /* Pods-LMS_StreamTest-tvOSTests.release.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LMS_StreamTest-tvOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/LMS_StreamTest-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		6B8539AE2FA9414D00A05440 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 60A60DDE37BA7724C2B8DBBA /* Pods-LMS_StreamTest-tvOSUITests.debug.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "LMS_StreamTest-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		6B8539AF2FA9414D00A05440 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 2AA69221EF2C1AE703C555D2 /* Pods-LMS_StreamTest-tvOSUITests.release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74BKX23N3K;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "LMS_StreamTest-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
 		6B9C4D702DEB81F600D22FD6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -469,7 +965,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -532,7 +1028,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -770,6 +1266,33 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		6B8539B02FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6B8539AA2FA9414D00A05440 /* Debug */,
+				6B8539AB2FA9414D00A05440 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		6B8539B12FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6B8539AC2FA9414D00A05440 /* Debug */,
+				6B8539AD2FA9414D00A05440 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		6B8539B22FA9414D00A05440 /* Build configuration list for PBXNativeTarget "LMS_StreamTest-tvOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6B8539AE2FA9414D00A05440 /* Debug */,
+				6B8539AF2FA9414D00A05440 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		6B9C4D492DEB81F500D22FD6 /* Build configuration list for PBXProject "LMS_StreamTest" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -196,17 +196,6 @@ struct FeatureRow: View {
     }
 }
 
-struct DiscoveredServer: Identifiable, Hashable {
-    let id = UUID()
-    let name: String
-    let host: String
-    let port: Int
-    
-    var displayName: String {
-        return "\(name) (\(host))"
-    }
-}
-
 // MARK: - Server Setup View
 struct ServerSetupView: View {
     @StateObject private var settings = SettingsManager.shared

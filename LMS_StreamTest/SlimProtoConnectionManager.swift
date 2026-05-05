@@ -36,7 +36,9 @@ class SlimProtoConnectionManager {
     private var isNetworkExpensive = false
     
     // MARK: - Background Task Management
+    #if os(iOS)
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    #endif
     private var backgroundTimer: Timer?
     private var backgroundStartTime: Date?
     
@@ -243,11 +245,13 @@ class SlimProtoConnectionManager {
         backgroundStartTime = Date()
         lastDisconnectionReason = .appBackgrounded
         
+        #if os(iOS)
         // Start enhanced background task
         startEnhancedBackgroundTask()
-        
+
         // Start background timer to track remaining time
         startBackgroundTimer()
+        #endif
         
         // Adjust health check frequency for background
         if connectionState.isConnected {
@@ -264,9 +268,11 @@ class SlimProtoConnectionManager {
         os_log(.info, log: logger, "📱 App entering foreground")
         isInBackground = false
         
+        #if os(iOS)
         // End background task and timer
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()
+        #endif
         
         // Resume normal health check frequency
         if connectionState.isConnected {
@@ -296,6 +302,7 @@ class SlimProtoConnectionManager {
         }
     }
     
+    #if os(iOS)
     // MARK: - Enhanced Background Task Management
     private func startEnhancedBackgroundTask() {
         guard backgroundTaskID == .invalid else {
@@ -359,14 +366,15 @@ class SlimProtoConnectionManager {
     
     private func prepareForBackgroundSuspension() {
         os_log(.info, log: logger, "📱 Background task expiring - preparing for suspension (keeping connection if audio playing)")
-        
+
         // DON'T force disconnect for audio apps - iOS gives extended background time for audio playback
         // Only stop health monitoring to reduce background activity
         stopHealthMonitoring()
-        
+
         os_log(.info, log: logger, "✅ Background suspension prepared - connection maintained for audio continuity")
     }
-    
+    #endif
+
     // MARK: - Health Monitoring
     private func startHealthMonitoring(interval: TimeInterval = 15.0) {
         stopHealthMonitoring()
@@ -641,8 +649,10 @@ class SlimProtoConnectionManager {
         NotificationCenter.default.removeObserver(self)
         cancelScheduledReconnection()
         stopHealthMonitoring()
+        #if os(iOS)
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()
+        #endif
         networkMonitor.cancel()
         os_log(.info, log: logger, "Enhanced SlimProtoConnectionManager deinitialized")
     }

@@ -1,6 +1,7 @@
 // File: SettingsManager.swift
 // UPDATED: Native FLAC support with StreamingKit
 import Foundation
+import Combine
 import Network
 import os.log
 import UIKit
@@ -279,9 +280,11 @@ class SettingsManager: ObservableObject {
 
         // Update BASS auth header when credentials change
         // Defer to next run loop to avoid initialization order issues
+        #if os(iOS)
         DispatchQueue.main.async {
             AudioManager.shared.audioPlayer.updateAuthHeader()
         }
+        #endif
 
         UserDefaults.standard.synchronize()
 
@@ -558,6 +561,7 @@ class SettingsManager: ObservableObject {
             return playerName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
+        #if os(iOS)
         let deviceName = UIDevice.current.name
         let cleanName = deviceName
             .replacingOccurrences(of: "'s iPhone", with: "")
@@ -565,8 +569,13 @@ class SettingsManager: ObservableObject {
             .replacingOccurrences(of: " iPhone", with: "")
             .replacingOccurrences(of: " iPad", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         return cleanName.isEmpty ? "iOS Player" : cleanName
+        #elseif os(tvOS)
+        return ProcessInfo.processInfo.hostName.isEmpty ? "Apple TV" : "Apple TV"
+        #else
+        return "LyrPlay Player"
+        #endif
     }
     
     // MARK: - Active Server Properties

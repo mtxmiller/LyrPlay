@@ -1,6 +1,7 @@
 // File: SlimProtoCommandHandler.swift
 // UPDATED: Native FLAC support enabled with StreamingKit
 import Foundation
+import Combine
 import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
@@ -434,6 +435,7 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "⏸️🔇 Timed pause - play silence for %.3f seconds (drift correction)", intervalSeconds)
 
             // Forward to coordinator which routes to AudioManager → AudioPlayer
+            #if os(iOS)
             if let coordinator = delegate as? SlimProtoCoordinator {
                 coordinator.playSilence(duration: intervalSeconds)
                 os_log(.debug, log: logger, "✅ Timed pause initiated")
@@ -442,6 +444,11 @@ class SlimProtoCommandHandler: ObservableObject {
                 isStreamPaused = true
                 delegate?.didPauseStream()
             }
+            #else
+            os_log(.error, log: logger, "❌ Timed pause not supported on this platform - falling back to regular pause")
+            isStreamPaused = true
+            delegate?.didPauseStream()
+            #endif
         }
     }
 
@@ -451,12 +458,14 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "⏩ Skip ahead - consume buffer for %.3f seconds (drift correction)", intervalSeconds)
 
         // Forward to coordinator which routes to AudioManager → AudioPlayer
+        #if os(iOS)
         if let coordinator = delegate as? SlimProtoCoordinator {
             coordinator.skipAhead(duration: intervalSeconds)
             os_log(.debug, log: logger, "✅ Skip ahead initiated")
         } else {
             os_log(.error, log: logger, "❌ Cannot access coordinator for skip ahead")
         }
+        #endif
 
         // Send acknowledgment
         slimProtoClient?.sendStatus("STMt")
@@ -464,10 +473,12 @@ class SlimProtoCommandHandler: ObservableObject {
     
     func getCurrentAudioTime() -> Double {
         // Access audio manager through the coordinator delegate
+        #if os(iOS)
         if let coordinator = delegate as? SlimProtoCoordinator {
             // We need to add a public method to get audio time from coordinator
             return coordinator.getCurrentAudioTime()
         }
+        #endif
         return lastKnownPosition
     }
 
@@ -477,6 +488,7 @@ class SlimProtoCommandHandler: ObservableObject {
 
         // CRITICAL FIX: Check if we have an active stream before unpausing
         // If no stream (e.g., after disconnect/reconnect), use playlist jump to recover position
+        #if os(iOS)
         if let coordinator = delegate as? SlimProtoCoordinator {
             if !coordinator.hasActiveStream() {
                 os_log(.info, log: logger, "🔄 No active stream after reconnect - using playlist jump for position recovery")
@@ -492,6 +504,7 @@ class SlimProtoCommandHandler: ObservableObject {
                 return
             }
         }
+        #endif
 
         // PHASE 2+3: Handle synchronized unpause with jiffies timestamp
         if jiffies == 0 {
@@ -508,6 +521,7 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "🎯 Synchronized unpause - start at jiffies %.3f seconds", startAtJiffies)
 
             // Call AudioPlayer.startAt() for synchronized multi-room playback
+            #if os(iOS)
             if let coordinator = delegate as? SlimProtoCoordinator {
                 // Forward to coordinator which routes to AudioManager → AudioPlayer
                 coordinator.startAtJiffies(startAtJiffies)
@@ -523,6 +537,12 @@ class SlimProtoCommandHandler: ObservableObject {
                 isPausedByLockScreen = false
                 delegate?.didResumeStream()
             }
+            #else
+            os_log(.error, log: logger, "❌ Synchronized start not supported on this platform - falling back to immediate resume")
+            isStreamPaused = false
+            isPausedByLockScreen = false
+            delegate?.didResumeStream()
+            #endif
         }
 
         // Send STMr (resume acknowledgment) to server
@@ -694,9 +714,11 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u → volume=%.3f", dvc, newGainL, clampedVolume)
         #endif
 
+        #if os(iOS)
         if let coordinator = delegate as? SlimProtoCoordinator {
             coordinator.setPlayerVolume(clampedVolume)
         }
+        #endif
     }
-    
+
 }
