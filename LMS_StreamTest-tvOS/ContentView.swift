@@ -1,19 +1,32 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var settings = SettingsManager.shared
+
     var body: some View {
         VStack(spacing: 24) {
-            Image(systemName: "tv.and.hifispeaker.fill")
+            Image(systemName: "checkmark.circle.fill")
                 .imageScale(.large)
                 .font(.system(size: 96))
-                .foregroundStyle(.tint)
-            Text("LyrPlay tvOS")
+                .foregroundStyle(.green)
+            Text("Connected to LMS")
                 .font(.largeTitle)
-            Text("Scaffolding ready. BASS + SlimProto verified.")
-                .font(.title3)
+            Text(verbatim: "\(settings.serverHost):\(settings.serverWebPort)")
+                .font(.title2)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+            Text("Player UI lands in 98q.5.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .padding(.top, 16)
+
+            Button(role: .destructive) {
+                settings.resetConfiguration()
+            } label: {
+                Text("Reset configuration")
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 8)
+            }
+            .padding(.top, 32)
         }
         .padding()
     }

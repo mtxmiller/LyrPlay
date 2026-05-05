@@ -11,7 +11,7 @@ import SwiftUI
 struct LMS_StreamTest_tvOSApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
     }
 }
