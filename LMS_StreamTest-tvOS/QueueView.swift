@@ -231,7 +231,7 @@ private struct QueueRow: View {
             Spacer(minLength: 16)
 
             trailing
-                .frame(width: 88, alignment: .trailing)
+                .frame(width: 110, alignment: .trailing)
         }
         .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
@@ -282,7 +282,8 @@ private struct QueueRow: View {
                 .foregroundStyle(accentColor)
         } else if let dur = track.duration, dur > 0 {
             Text(formatTime(dur))
-                .font(.system(size: 18, weight: .medium, design: .monospaced))
+                .font(.system(size: 26, weight: .medium))
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
         } else {
             EmptyView()

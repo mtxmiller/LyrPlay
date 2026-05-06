@@ -7,6 +7,7 @@ struct NowPlayingView: View {
     @ObservedObject var nowPlaying: NowPlayingManager
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
+    @ObservedObject var audioPlayer: AudioPlayer
 
     @State private var accentColor: Color = .accentColor
     @State private var elapsed: Double = 0
@@ -14,7 +15,6 @@ struct NowPlayingView: View {
     @State private var isConnected: Bool = true
     @State private var isScrubbing: Bool = false
     @State private var scrubElapsed: Double = 0
-    @State private var scrubCommitWorkItem: DispatchWorkItem?
     @FocusState private var playbackFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -126,11 +126,7 @@ struct NowPlayingView: View {
 
             Spacer(minLength: 24)
 
-            playbackPanel
-                .focusable(true)
-                .focused($playbackFocused)
-                .onMoveCommand { direction in handleMove(direction) }
-                .onPlayPauseCommand { sendCommand(isPlaying ? "pause" : "play") }
+            gesturedPanel
 
             transportRow
                 .padding(.top, 24)
@@ -158,6 +154,18 @@ struct NowPlayingView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .foregroundStyle(.tertiary)
+
+            // Mirrors the Material WebView "tech info" line: format / sample rate /
+            // bit depth / channels / bitrate from the BASS decoder (post-transcode).
+            if let stream = audioPlayer.currentStreamInfo {
+                Text(stream.displayString)
+                    .font(.callout)            // ~16pt — matches Material's subtle line
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
         }
         .padding(.horizontal, 24)
     }
@@ -193,27 +201,100 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Playback panel + focus styling + click/play-pause gestures (always attached).
+    private var styledPanel: some View {
+        playbackPanel
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .background {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(panelBackgroundColor)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16)
+                            .strokeBorder(isScrubbing ? accentColor.opacity(0.7) : Color.clear, lineWidth: 2)
+                    }
+            }
+            .scaleEffect(playbackFocused ? 1.02 : 1.0)
+            .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: playbackFocused)
+            .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: isScrubbing)
+            .focusable(true)
+            .focused($playbackFocused)
+            .onTapGesture { handleTap() }
+            .onPlayPauseCommand { sendCommand(isPlaying ? "pause" : "play") }
+    }
+
+    /// `.onMoveCommand` is attached ONLY while scrubbing, so idle swipes pass through to
+    /// the focus engine (down-swipe moves focus to transport row). `.onExitCommand` is
+    /// likewise scrubbing-only so Menu-presses outside scrub mode reach system back-nav
+    /// when this view is ever pushed (today it's the NavigationStack root, so Menu is a
+    /// no-op anyway).
+    @ViewBuilder
+    private var gesturedPanel: some View {
+        if isScrubbing {
+            styledPanel
+                .onMoveCommand { direction in handleMove(direction) }
+                .onExitCommand { cancelScrub() }
+        } else {
+            styledPanel
+        }
+    }
+
+    private var panelBackgroundColor: Color {
+        if isScrubbing { return accentColor.opacity(0.18) }
+        if playbackFocused { return Color.white.opacity(0.10) }
+        return Color.clear
+    }
+
     private var progressRow: some View {
         let displayElapsed = isScrubbing ? scrubElapsed : elapsed
         let total = max(nowPlaying.metadataDuration, 1)
+        let progress = min(max(displayElapsed / total, 0), 1)
         return HStack(spacing: 16) {
             Text(formatTime(displayElapsed))
-                .font(.system(size: 22, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .trailing)
+                .font(.system(size: 28, weight: isScrubbing ? .bold : .medium))
+                .monospacedDigit()
+                .foregroundStyle(isScrubbing ? accentColor : .secondary)
+                .frame(width: 110, alignment: .trailing)
 
-            ProgressView(value: min(max(displayElapsed / total, 0), 1))
-                .tint(accentColor)
+            scrubBar(progress: progress)
 
             Text(formatTime(nowPlaying.metadataDuration))
-                .font(.system(size: 22, weight: .medium, design: .monospaced))
+                .font(.system(size: 28, weight: .medium))
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .leading)
+                .frame(width: 110, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Playback progress")
         .accessibilityValue("\(formatTime(displayElapsed)) of \(formatTime(nowPlaying.metadataDuration))")
-        .accessibilityHint("Swipe left or right to scrub")
+        .accessibilityHint(isScrubbing
+            ? "Swipe left or right to scrub, click to commit, Menu to cancel"
+            : "Click to scrub")
+    }
+
+    /// Custom timeline: capsule track + accent fill + thumb visible while scrubbing.
+    /// Standard tvOS scrubber pattern (AVPlayerViewController-style) — focus → click to
+    /// enter scrub mode → swipe to move thumb → click to commit → Menu to cancel.
+    private func scrubBar(progress: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(height: 8)
+                Capsule()
+                    .fill(accentColor)
+                    .frame(width: geo.size.width * progress, height: 8)
+                if isScrubbing {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 28, height: 28)
+                        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 2)
+                        .offset(x: max(-14, geo.size.width * progress - 14))
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+        }
+        .frame(height: 28)
     }
 
     private var liveRow: some View {
@@ -277,7 +358,7 @@ struct NowPlayingView: View {
             )
         } label: {
             ZStack {
-                Circle().fill(.ultraThinMaterial)
+                Circle().fill(.regularMaterial)
                 Image(systemName: "music.note.list")
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.primary)
@@ -298,7 +379,7 @@ struct NowPlayingView: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(.ultraThinMaterial)
+                    .fill(.regularMaterial)
                 Image(systemName: systemImage)
                     .font(.system(size: isPrimary ? 32 : 24, weight: .semibold))
                     .foregroundStyle(.primary)
@@ -338,41 +419,51 @@ struct NowPlayingView: View {
 
     // MARK: - Scrub gesture
 
-    private func handleMove(_ direction: MoveCommandDirection) {
-        guard nowPlaying.hasTrackLoaded, nowPlaying.metadataDuration > 0 else { return }
-
-        if !isScrubbing {
-            isScrubbing = true
-            scrubElapsed = elapsed
+    /// Touchpad click on the focused playback panel.
+    /// - Scrubbing: commit the current scrub position.
+    /// - Idle with a scrubbable timeline: enter scrub mode (thumb appears).
+    /// - Live stream / no track: fall through to play/pause (panel still focusable).
+    private func handleTap() {
+        if isScrubbing {
+            commitScrubNow()
+        } else if nowPlaying.hasTrackLoaded && nowPlaying.metadataDuration > 0 {
+            enterScrubMode()
+        } else {
+            sendCommand(isPlaying ? "pause" : "play")
         }
-
-        switch direction {
-        case .left:
-            scrubElapsed = max(0, scrubElapsed - scrubStepSeconds)
-        case .right:
-            scrubElapsed = min(nowPlaying.metadataDuration, scrubElapsed + scrubStepSeconds)
-        case .up, .down:
-            return  // Ignore vertical
-        @unknown default:
-            return
-        }
-
-        // Commit on a short debounce; if more swipes arrive, the commit re-arms
-        scheduleScrubCommit()
     }
 
-    private func scheduleScrubCommit() {
-        scrubCommitWorkItem?.cancel()
-        let target = scrubElapsed
-        let work = DispatchWorkItem { [scrubElapsed = target] in
-            coordinator.seek(toSeconds: scrubElapsed)
-            // Hold isScrubbing briefly so UI doesn't snap back before STAT confirms
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                isScrubbing = false
-            }
+    /// Only attached while isScrubbing. Vertical swipes are still ignored to avoid
+    /// surprise commits / cancels on touchpad drift.
+    private func handleMove(_ direction: MoveCommandDirection) {
+        let delta: Double
+        switch direction {
+        case .left:  delta = -scrubStepSeconds
+        case .right: delta = +scrubStepSeconds
+        case .up, .down: return
+        @unknown default: return
         }
-        scrubCommitWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        scrubElapsed = max(0, min(nowPlaying.metadataDuration, scrubElapsed + delta))
+    }
+
+    private func enterScrubMode() {
+        scrubElapsed = elapsed
+        isScrubbing = true
+        // Re-assert focus on the next runloop in case the conditional gesture rebuild
+        // dropped it during the view-tree change.
+        DispatchQueue.main.async { playbackFocused = true }
+    }
+
+    private func commitScrubNow() {
+        coordinator.seek(toSeconds: scrubElapsed)
+        isScrubbing = false
+        DispatchQueue.main.async { playbackFocused = true }
+    }
+
+    private func cancelScrub() {
+        scrubElapsed = elapsed
+        isScrubbing = false
+        DispatchQueue.main.async { playbackFocused = true }
     }
 
     // MARK: - Lock-screen-style command dispatch

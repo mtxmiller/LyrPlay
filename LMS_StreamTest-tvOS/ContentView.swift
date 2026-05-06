@@ -20,7 +20,8 @@ struct ContentView: View {
                     NowPlayingView(
                         nowPlaying: AudioManager.shared.getNowPlayingManager(),
                         coordinator: coordinator,
-                        settings: settings
+                        settings: settings,
+                        audioPlayer: AudioManager.shared.audioPlayer
                     )
                 }
             } else {
