@@ -54,8 +54,9 @@ struct PlaylistsView: View {
     }
 
     private var listView: some View {
+        // Identity by playlist.id: stable, no dupes possible (LMS playlist names are unique).
         List {
-            ForEach(Array(playlists.enumerated()), id: \.offset) { _, playlist in
+            ForEach(playlists, id: \.id) { playlist in
                 Button {
                     playPlaylist(playlist)
                 } label: {

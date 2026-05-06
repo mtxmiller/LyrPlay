@@ -63,14 +63,12 @@ struct LibraryView: View {
         case .recentlyPlayed:
             AlbumListView(
                 coordinator: coordinator,
-                nowPlaying: nowPlaying,
                 settings: settings,
                 sort: .recentlyPlayed
             )
         case .newMusic:
             AlbumListView(
                 coordinator: coordinator,
-                nowPlaying: nowPlaying,
                 settings: settings,
                 sort: .new
             )

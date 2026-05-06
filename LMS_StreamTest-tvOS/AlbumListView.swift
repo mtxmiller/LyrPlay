@@ -8,8 +8,10 @@ import os.log
 /// New Music: `["albums", 0, 50, "sort:new", "tags:ajly"]` (matches CarPlay's
 /// fetchNewMusicWithArtwork at CarPlaySceneDelegate.swift:2027).
 ///
-/// RP refreshes on `nowPlaying.currentTrackTitle` change (a new album playing changes the
-/// list server-side). New Music does not — recently-added is independent of playback.
+/// Both lists refresh on `.onAppear` only — re-entering the Library tab refetches.
+/// We do NOT live-refresh on track change because (a) the user is typically on Now Playing
+/// during play, not on RP, and (b) per-track refetch was wasteful (50 rows + AsyncImage
+/// cascade per song). Stale-while-on-tab is acceptable; tab re-entry shows fresh state.
 ///
 /// Tap loads + plays the whole album via `playlistcontrol cmd:load album_id:N` (CarPlay
 /// pattern at line 2434). User stays on Library per D6.
@@ -23,15 +25,6 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "sort:recentlyplayed"
             case .new: return "sort:new"
-            }
-        }
-
-        /// Whether this list refreshes when the currently playing track changes.
-        /// RP changes on every album-load broadcast; New Music doesn't.
-        var refreshesOnPlayback: Bool {
-            switch self {
-            case .recentlyPlayed: return true
-            case .new: return false
             }
         }
 
@@ -51,7 +44,6 @@ struct AlbumListView: View {
     }
 
     let coordinator: SlimProtoCoordinator
-    @ObservedObject var nowPlaying: NowPlayingManager
     @ObservedObject var settings: SettingsManager
     let sort: Sort
 
@@ -74,12 +66,6 @@ struct AlbumListView: View {
             }
         }
         .onAppear { if !hasFetched { fetch() } }
-        .onChange(of: nowPlaying.currentTrackTitle) { _, _ in
-            // Refresh RP when a new track plays — server-side ordering changes. New Music ignores.
-            if sort.refreshesOnPlayback && hasFetched {
-                fetch()
-            }
-        }
     }
 
     // MARK: - States
@@ -102,10 +88,10 @@ struct AlbumListView: View {
     }
 
     private var listView: some View {
-        // Identity by array offset: same album won't repeat in a single response, but enumerate
-        // for forward-compat parity with QueueView.
+        // Identity by album.id: stable across re-fetches so SwiftUI diffs rows correctly
+        // when the server reorders RP. Avoids row remount + AsyncImage refetch on every refresh.
         List {
-            ForEach(Array(albums.enumerated()), id: \.offset) { _, album in
+            ForEach(albums, id: \.id) { album in
                 Button {
                     playAlbum(album)
                 } label: {

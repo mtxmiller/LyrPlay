@@ -59,6 +59,18 @@ struct MediaRow<Trailing: View>: View {
                 .frame(width: 110, alignment: .trailing)
         }
         .padding(.vertical, 8)
+        // Default accessibility label so VoiceOver reads the full untruncated text.
+        // Callers may override with their own .accessibilityLabel() (QueueView does this
+        // to add "Now playing" + duration context).
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(defaultAccessibilityLabel)
+    }
+
+    private var defaultAccessibilityLabel: String {
+        if let secondary = secondary, !secondary.isEmpty {
+            return "\(primary), \(secondary)"
+        }
+        return primary
     }
 
     @ViewBuilder
