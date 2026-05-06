@@ -94,26 +94,7 @@ struct QueueView: View {
     // MARK: - Artwork URL
 
     private func artworkURL(for track: PlaylistTrack) -> URL? {
-        // Prefer coverid; fall back to track id (LMS serves /music/<id>/cover.jpg either way).
-        let artworkID: String
-        if let coverID = track.artworkURL, !coverID.isEmpty {
-            artworkID = coverID
-        } else if !track.id.isEmpty {
-            artworkID = track.id
-        } else {
-            return nil
-        }
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = settings.activeServerHost
-        components.port = settings.activeServerWebPort
-        components.path = "/music/\(artworkID)/cover_200x200_o.jpg"
-        let user = settings.activeServerUsername
-        if !user.isEmpty {
-            components.user = user
-            components.password = settings.activeServerPassword
-        }
-        return components.url
+        LMSArtworkURL.cover(coverID: track.artworkURL, fallbackID: track.id, settings: settings)
     }
 
     // MARK: - Auto-scroll
@@ -207,33 +188,14 @@ private struct QueueRow: View {
     let artworkURL: URL?
 
     var body: some View {
-        HStack(spacing: 24) {
-            artwork
-                .frame(width: 80, height: 80)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(track.title)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(isCurrent ? accentColor : Color.primary)
-
-                if let artist = track.artist, !artist.isEmpty {
-                    Text(artist)
-                        .font(.body)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Spacer(minLength: 16)
-
-            trailing
-                .frame(width: 110, alignment: .trailing)
-        }
-        .padding(.vertical, 8)
+        MediaRow(
+            primary: track.title,
+            secondary: track.artist,
+            artworkURL: artworkURL,
+            isHighlighted: isCurrent,
+            accentColor: accentColor,
+            trailing: { trailing }
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
     }
@@ -245,33 +207,6 @@ private struct QueueRow: View {
         if let artist = track.artist { parts.append(artist) }
         if let dur = track.duration, dur > 0 { parts.append(formatTime(dur)) }
         return parts.joined(separator: ", ")
-    }
-
-    @ViewBuilder
-    private var artwork: some View {
-        if let url = artworkURL {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .empty, .failure:
-                    placeholder
-                @unknown default:
-                    placeholder
-                }
-            }
-        } else {
-            placeholder
-        }
-    }
-
-    private var placeholder: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
-            Image(systemName: "music.note")
-                .font(.system(size: 28))
-                .foregroundStyle(.secondary)
-        }
     }
 
     @ViewBuilder
