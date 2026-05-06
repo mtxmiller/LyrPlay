@@ -200,6 +200,19 @@ private final class FakeSlimProtoCoordinator: SlimProtoControlling {
     func saveCurrentPositionForRecovery() {
         savedPosition = true
     }
+
+    func sendJSONRPCCommandDirect(_ command: [String: Any],
+                                  completion: @escaping ([String: Any]) -> Void) {
+        completion([:])
+    }
+
+    func toggleShuffleMode(completion: ((Int) -> Void)?) {
+        completion?(0)
+    }
+
+    func sendPauseWithConfirmation(maxRetries: Int, completion: ((Bool) -> Void)?) {
+        completion?(true)
+    }
 }
 
 private final class FakePlaybackController: AudioPlaybackControlling {
