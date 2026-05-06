@@ -85,7 +85,7 @@ Atomic track+position recovery via JSON-RPC `playlist jump` with `timeOffset`. U
 
 ## Known Limitations
 
-- **FLAC seeking** — Non-functional with BASS push stream architecture. MP3, AAC, Opus, OGG, WAV seeking works. Mitigation: [MobileTranscode](https://github.com/mtxmiller/MobileTranscode) LMS plugin provides server-side transcode rules for mobile clients — converts FLAC to seekable formats (AAC, MP3) and re-encodes FLAC with proper headers that enable seeking.
+- **FLAC seeking** — Was broken but now-functional with BASS push stream architecture. MP3, AAC, Opus, OGG, WAV seeking. Mitigation: [MobileTranscode](https://github.com/mtxmiller/MobileTranscode) LMS plugin provides server-side transcode rules for mobile clients — converts FLAC to seekable formats (AAC, MP3) and re-encodes FLAC with proper headers that enable seeking.
 - **FLAC push stream data** — BASSFLAC 2.4.17.1 fixed `max_framesize=0` early termination via dedicated threading, but edge cases may remain.
 
 ## Reference Sources
