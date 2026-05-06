@@ -2541,12 +2541,5 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
 }
 
-// MARK: - Supporting Models
-
-struct Album {
-    let id: String
-    let name: String
-    let artist: String
-    let artworkTrackId: String?  // LMS artwork_track_id field for cover art URLs
-    let artwork: UIImage?
-}
+// Album struct now lives in PlaylistModels.swift (shared with tvOS target). Existing CarPlay
+// `Album(id:name:artist:artworkTrackId:artwork:)` call sites resolve unchanged via target membership.

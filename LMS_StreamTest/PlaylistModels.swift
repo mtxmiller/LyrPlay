@@ -1,7 +1,8 @@
 // File: PlaylistModels.swift
-// Data models for CarPlay playlist and Up Next functionality
+// Data models for CarPlay + tvOS playlist, library, and Up Next functionality.
 import Foundation
 import Combine
+import UIKit
 import os.log
 
 // MARK: - Playlist Data Models
@@ -193,6 +194,24 @@ extension PlaylistTrack {
     }
 }
 
+extension Playlist {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Playlist")
+
+    /// Parses a playlists_loop JSON array from LMS into Playlist instances.
+    /// Malformed entries are logged and skipped; the remainder are returned in input order.
+    static func parseLoop(_ data: [[String: Any]]) -> [Playlist] {
+        return data.compactMap { playlistData in
+            do {
+                let jsonData = try JSONSerialization.data(withJSONObject: playlistData)
+                return try JSONDecoder().decode(Playlist.self, from: jsonData)
+            } catch {
+                os_log(.error, log: parseLogger, "❌ Failed to parse playlist: %{public}s", error.localizedDescription)
+                return nil
+            }
+        }
+    }
+}
+
 // MARK: - Up Next Queue Model
 
 @MainActor
@@ -233,5 +252,160 @@ struct Artist: Identifiable {
     let id: String
     let name: String
     let albumCount: Int?
+}
+
+// MARK: - Album Data Model
+
+/// Album list item from LMS `albums` JSON-RPC.
+/// CarPlay eagerly loads `artwork: UIImage` into the struct for offline display.
+/// tvOS callers leave `artwork == nil` and resolve via URL through `LMSArtworkURL` + AsyncImage.
+struct Album {
+    let id: String
+    let name: String
+    let artist: String
+    let artworkTrackId: String?  // LMS artwork_track_id field for cover art URLs
+    let artwork: UIImage?
+    let year: Int?
+
+    init(id: String, name: String, artist: String, artworkTrackId: String?, artwork: UIImage?, year: Int? = nil) {
+        self.id = id
+        self.name = name
+        self.artist = artist
+        self.artworkTrackId = artworkTrackId
+        self.artwork = artwork
+        self.year = year
+    }
+}
+
+extension Album {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Album")
+
+    /// Parses an albums_loop JSON array from LMS `["albums", ...]` into Album instances.
+    /// Mirrors CarPlaySceneDelegate's inline parser shape (tags:ajly returns id/album/artist/artwork_track_id/year).
+    /// `artwork` is always nil here; CarPlay populates it post-fetch, tvOS resolves via URL.
+    /// Malformed entries (missing id or album name) are skipped.
+    static func parseLoop(_ data: [[String: Any]]) -> [Album] {
+        return data.compactMap { albumData -> Album? in
+            // id arrives as String OR Int from LMS depending on backend.
+            let id: String
+            if let s = albumData["id"] as? String {
+                id = s
+            } else if let n = albumData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ Album missing id, skipping")
+                return nil
+            }
+
+            guard let name = albumData["album"] as? String else {
+                os_log(.error, log: parseLogger, "❌ Album %{public}s missing 'album' field, skipping", id)
+                return nil
+            }
+
+            let artist = albumData["artist"] as? String ?? ""
+            let artworkTrackId = albumData["artwork_track_id"] as? String
+
+            // year arrives as Int or numeric String depending on backend.
+            let year: Int?
+            if let n = albumData["year"] as? Int {
+                year = n
+            } else if let s = albumData["year"] as? String, let n = Int(s) {
+                year = n
+            } else {
+                year = nil
+            }
+
+            return Album(
+                id: id,
+                name: name,
+                artist: artist,
+                artworkTrackId: artworkTrackId,
+                artwork: nil,
+                year: year
+            )
+        }
+    }
+}
+
+// MARK: - Favorite Item Data Model
+
+/// Single item from LMS `["favorites", "items"]` JSON-RPC.
+/// Used by the tvOS Library tab's Favorites sub-view. v1 renders only items
+/// with playable URLs; folder items (`hasitems == 1`) are filtered out by `parseLoop`.
+/// See `LMS_StreamTest-5bs` for the v2 hierarchical-folder follow-up.
+struct FavoriteItem: Identifiable {
+    let id: String
+    let name: String
+    let url: String
+    let icon: String?     // image / cover / icon URL — may be relative server path or absolute
+    let type: String?     // "audio", "playlist", "link", etc.
+    let isAudio: Bool
+}
+
+extension FavoriteItem {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "FavoriteItem")
+
+    /// Parses a `loop_loop` array from `["favorites", "items"], ["want_url:1", "feedMode:1"]`.
+    /// Filters: keeps only items with a non-empty `url` AND `hasitems != 1`.
+    /// Folder items (radio aggregators, plugin sub-trees) are skipped in v1 — see `LMS_StreamTest-5bs`.
+    static func parseLoop(_ data: [[String: Any]]) -> [FavoriteItem] {
+        return data.compactMap { itemData -> FavoriteItem? in
+            // Skip folder items (LMS marks them with hasitems:1).
+            // Match both Int and String shapes — LMS is inconsistent across endpoints.
+            let hasItemsInt = itemData["hasitems"] as? Int
+            let hasItemsStr = itemData["hasitems"] as? String
+            if hasItemsInt == 1 || hasItemsStr == "1" {
+                return nil
+            }
+
+            // Require a non-empty playable URL.
+            guard let url = itemData["url"] as? String, !url.isEmpty else {
+                return nil
+            }
+
+            // id arrives as String OR Int from LMS depending on item source.
+            let id: String
+            if let s = itemData["id"] as? String {
+                id = s
+            } else if let n = itemData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ FavoriteItem missing id, skipping")
+                return nil
+            }
+
+            // LMS uses `name` for favorites items but `title` is a documented fallback.
+            let name = (itemData["name"] as? String)
+                ?? (itemData["title"] as? String)
+                ?? "Unknown"
+
+            // Artwork can arrive under any of these keys depending on item source.
+            // Material's lmsList similarly probes image / cover / icon.
+            let icon = (itemData["image"] as? String)
+                ?? (itemData["cover"] as? String)
+                ?? (itemData["icon"] as? String)
+
+            let type = itemData["type"] as? String
+
+            // isaudio is 0/1 Int (LMS pattern); accept String form too.
+            let isAudio: Bool
+            if let n = itemData["isaudio"] as? Int {
+                isAudio = (n == 1)
+            } else if let s = itemData["isaudio"] as? String {
+                isAudio = (s == "1")
+            } else {
+                isAudio = false
+            }
+
+            return FavoriteItem(
+                id: id,
+                name: name,
+                url: url,
+                icon: icon,
+                type: type,
+                isAudio: isAudio
+            )
+        }
+    }
 }
 
