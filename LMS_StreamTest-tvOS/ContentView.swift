@@ -30,8 +30,14 @@ struct ContentView: View {
                     NavigationStack { SearchPlaceholderView() }
                         .tabItem { Label("Search", systemImage: "magnifyingglass") }
 
-                    NavigationStack { LibraryPlaceholderView() }
-                        .tabItem { Label("Library", systemImage: "music.note.house.fill") }
+                    NavigationStack {
+                        LibraryView(
+                            coordinator: coordinator,
+                            nowPlaying: AudioManager.shared.getNowPlayingManager(),
+                            settings: settings
+                        )
+                    }
+                    .tabItem { Label("Library", systemImage: "music.note.house.fill") }
                 }
             } else {
                 connectingView
@@ -198,7 +204,7 @@ struct ContentView: View {
     ContentView()
 }
 
-// MARK: - Tab placeholders (98q.8 / 98q.9 will replace these)
+// MARK: - Tab placeholders (98q.8 will replace SearchPlaceholderView)
 
 struct SearchPlaceholderView: View {
     var body: some View {
@@ -207,22 +213,6 @@ struct SearchPlaceholderView: View {
                 .font(.system(size: 96))
                 .foregroundStyle(.secondary)
             Text("Search")
-                .font(.largeTitle)
-            Text("Coming soon")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct LibraryPlaceholderView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "music.note.house")
-                .font(.system(size: 96))
-                .foregroundStyle(.secondary)
-            Text("Library")
                 .font(.largeTitle)
             Text("Coming soon")
                 .font(.title3)
