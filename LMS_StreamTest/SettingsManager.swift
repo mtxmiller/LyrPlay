@@ -28,7 +28,7 @@ class SettingsManager: ObservableObject {
     @Published var isBackupServerEnabled: Bool = false
     @Published var automaticFailoverEnabled: Bool = true
     @Published var currentActiveServer: ServerType = .primary
-    @Published var audioFormat: AudioFormat = .compressed
+    @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
     @Published var keepScreenAwake: Bool = false  // Prevent screen sleep during playback
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
@@ -141,7 +141,42 @@ class SettingsManager: ObservableObject {
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
-    
+
+    // MARK: - Platform-specific defaults
+
+    /// Default player name shown to LMS when the user hasn't set one. Differentiates
+    /// the iOS and tvOS apps so users with both can tell them apart in Material UI.
+    private static let defaultPlayerName: String = {
+        #if os(tvOS)
+        return "tvOS Player"
+        #else
+        return "iOS Player"
+        #endif
+    }()
+
+    /// Firmware token in the SlimProto HELO capabilities string. Tells LMS which
+    /// LyrPlay platform variant is connecting (useful in server logs / per-player
+    /// diagnostics). Same major.minor.patch on both platforms.
+    private var firmwareToken: String {
+        #if os(tvOS)
+        return "v1.0.0-tvOS"
+        #else
+        return "v1.0.0-iOS"
+        #endif
+    }
+
+    /// Default audio format for first-run users. tvOS gets lossless-first (FLAC →
+    /// flc,ops,ogg,alc,aac,mp3) since Apple TV is wired ethernet and typically
+    /// connected to high-end audio gear. iOS stays on `.compressed` (mp3,aac) as
+    /// the bandwidth-conservative default for mobile.
+    private static let defaultAudioFormat: AudioFormat = {
+        #if os(tvOS)
+        return .flac
+        #else
+        return .compressed
+        #endif
+    }()
+
     // MARK: - Singleton
     static let shared = SettingsManager()
 
@@ -151,7 +186,7 @@ class SettingsManager: ObservableObject {
             generateMACAddress()
         }
         if playerName.isEmpty {
-            playerName = "iOS Player"
+            playerName = Self.defaultPlayerName
         }
 
         // UPDATED: Set FLAC-first priority order with StreamingKit
@@ -168,7 +203,7 @@ class SettingsManager: ObservableObject {
 
     /// The base capabilities (everything except format codes)
     private var baseCapabilities: String {
-        return "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=\(maxSampleRate)"
+        return "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=\(firmwareToken),ModelName=LyrPlay,MaxSampleRate=\(maxSampleRate)"
     }
 
     /// The format codes portion of capabilities (e.g., "flc,wav,mp3")
@@ -208,8 +243,14 @@ class SettingsManager: ObservableObject {
         automaticFailoverEnabled = UserDefaults.standard.object(forKey: Keys.automaticFailoverEnabled) as? Bool ?? true
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
-        let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
-        audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .flac
+        // First-run users get the platform default (tvOS: .flac lossless,
+        // iOS: .compressed). Existing users keep whatever they had stored.
+        if let storedRaw = UserDefaults.standard.object(forKey: Keys.audioFormat) as? Int,
+           let stored = AudioFormat(rawValue: storedRaw) {
+            audioFormat = stored
+        } else {
+            audioFormat = Self.defaultAudioFormat
+        }
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? false
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
@@ -521,7 +562,7 @@ class SettingsManager: ObservableObject {
 
         // Reset primary server
         serverHost = ""
-        playerName = "iOS Player"
+        playerName = Self.defaultPlayerName
         isConfigured = false
         serverWebPort = 9000
         serverSlimProtoPort = 3483

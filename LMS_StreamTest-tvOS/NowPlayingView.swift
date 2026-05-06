@@ -10,12 +10,15 @@ struct NowPlayingView: View {
     @ObservedObject var audioPlayer: AudioPlayer
 
     @State private var accentColor: Color = .accentColor
+    @State private var accentRGB: SIMD3<Float> = SIMD3<Float>(0.5, 0.6, 1.0)
     @State private var elapsed: Double = 0
     @State private var isPlaying: Bool = false
     @State private var isConnected: Bool = true
     @State private var isScrubbing: Bool = false
     @State private var scrubElapsed: Double = 0
+    @State private var showVisualizer: Bool = false
     @FocusState private var playbackFocused: Bool
+    @FocusState private var artworkFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -51,6 +54,11 @@ struct NowPlayingView: View {
         }
         .onChange(of: nowPlaying.currentArtwork) { _, _ in updateAccent() }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in tick() }
+        .fullScreenCover(isPresented: $showVisualizer) {
+            VisualizerView(accentColor: accentRGB, isPlaying: isPlaying)
+                .ignoresSafeArea()
+                .onExitCommand { showVisualizer = false }
+        }
     }
 
     // MARK: - Background
@@ -105,11 +113,31 @@ struct NowPlayingView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            // Visible focus border so users can see the artwork is interactive.
+            // Click → enter visualizer overlay (Apple Music TV pattern, D2 from
+            // plan-eng-review).
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(artworkFocused ? accentColor.opacity(0.85) : Color.clear,
+                              lineWidth: 4)
+        }
+        .scaleEffect(artworkFocused ? 1.03 : 1.0)
         .shadow(color: .black.opacity(0.4), radius: 24, x: 0, y: 12)
         .opacity(isPlaying ? 1.0 : 0.88)
         .animation(reduceMotion ? .none : .spring(response: 0.4, dampingFraction: 0.85),
                    value: nowPlaying.currentArtwork)
         .animation(reduceMotion ? .none : .easeInOut(duration: 0.3), value: isPlaying)
+        .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: artworkFocused)
+        .focusable(nowPlaying.hasTrackLoaded)
+        .focused($artworkFocused)
+        .onTapGesture {
+            // Only enter visualizer when a track is loaded — silent or pre-first-track
+            // state has no FFT to react to.
+            if nowPlaying.hasTrackLoaded {
+                showVisualizer = true
+            }
+        }
+        .accessibilityLabel("Album artwork. Click to open visualizer.")
     }
 
     // MARK: - Metadata + transport (right half)
@@ -485,6 +513,7 @@ struct NowPlayingView: View {
     private func updateAccent() {
         guard let image = nowPlaying.currentArtwork else {
             withAnimation { accentColor = .accentColor }
+            accentRGB = SIMD3<Float>(0.5, 0.6, 1.0)
             return
         }
         // CIAreaAverage on large artwork (1200-2048px) can hitch the main thread;
@@ -494,6 +523,13 @@ struct NowPlayingView: View {
             DispatchQueue.main.async {
                 withAnimation {
                     accentColor = extracted.map(Color.init) ?? .accentColor
+                }
+                if let uiColor = extracted {
+                    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                    uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+                    accentRGB = SIMD3<Float>(Float(r), Float(g), Float(b))
+                } else {
+                    accentRGB = SIMD3<Float>(0.5, 0.6, 1.0)
                 }
             }
         }

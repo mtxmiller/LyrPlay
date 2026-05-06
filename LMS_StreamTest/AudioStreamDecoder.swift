@@ -45,6 +45,10 @@ class AudioStreamDecoder {
     /// BASS push stream handle (single instance for gapless)
     private var pushStream: HSTREAM = 0
 
+    /// Read-only handle for FFT sampling (visualizer). Returns 0 when no push
+    /// stream is active.
+    var activePushStream: HSTREAM { pushStream }
+
     /// BASS decoder stream handle (decodes HTTP URL without playing)
     private var decoderStream: HSTREAM = 0
 

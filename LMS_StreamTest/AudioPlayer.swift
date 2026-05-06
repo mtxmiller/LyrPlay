@@ -73,6 +73,10 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Core Components (MINIMAL CBASS)
     private var currentStream: HSTREAM = 0
 
+    /// Read-only handle for FFT sampling (visualizer). Returns 0 when no URL stream
+    /// is active; visualizer falls back to the push-stream path in that case.
+    var activeBASSStream: HSTREAM { currentStream }
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
     private let settings = SettingsManager.shared

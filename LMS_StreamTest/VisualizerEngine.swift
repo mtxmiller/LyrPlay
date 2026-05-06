@@ -25,6 +25,13 @@ final class VisualizerEngine {
     private let riseFactor: Float = 0.40   // weight of previous when rising — lower = faster rise
     private let fallFactor: Float = 0.85   // weight of previous when falling — higher = slower decay
 
+    /// Visual gain on A-weighted band values. BASS FFT magnitudes are typically 0.01–0.3
+    /// for music content; without amplification the visualizer barely moves. After gain
+    /// we apply sqrt compression so quiet content lifts into the visible range without
+    /// loud content saturating to a flat ceiling.
+    private let visualGain: Float = 12.0
+    private let visualCeiling: Float = 2.0   // pre-sqrt cap → output ≤ sqrt(2) ≈ 1.41
+
     private(set) var smoothedBins: [Float] = []
 
     init(sampleRate: Float = 44100) {
@@ -106,7 +113,11 @@ final class VisualizerEngine {
             let avg = sum / Float(iHi - iLo + 1)
 
             let fCenter = sqrt(fLo * fHi)
-            bands[b] = avg * VisualizerEngine.aWeighting(frequency: fCenter)
+            let weighted = avg * VisualizerEngine.aWeighting(frequency: fCenter)
+            // Visual gain + sqrt compression: amplifies typical music levels into the
+            // 0..1 range while preventing loud transients from saturating flat.
+            let amplified = min(weighted * visualGain, visualCeiling)
+            bands[b] = sqrt(amplified)
         }
 
         return bands

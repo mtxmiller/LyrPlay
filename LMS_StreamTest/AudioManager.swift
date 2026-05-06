@@ -28,6 +28,15 @@ class AudioManager: NSObject, ObservableObject {
     func getNowPlayingManager() -> NowPlayingManager {
         return nowPlayingManager
     }
+
+    /// Returns the currently-active BASS stream handle for FFT sampling, or 0 if none.
+    /// Push stream (gapless playback path) is preferred since it's the active source on tvOS;
+    /// falls back to the URL-stream handle for legacy direct-stream playback.
+    func currentFFTStream() -> HSTREAM {
+        let pushHandle = streamDecoder.activePushStream
+        if pushHandle != 0 { return pushHandle }
+        return audioPlayer.activeBASSStream
+    }
     
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
