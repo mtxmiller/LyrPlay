@@ -83,10 +83,15 @@ struct FavoritesView: View {
         isLoading = true
         // System-scoped query (player MAC not required for the LIST). Cap at 100 — favorites
         // rarely exceed that; if a user reports truncation, raise here and consider pagination.
+        //
+        // NOTE: do NOT pass "feedMode:1" here. With feedMode:1 the response uses OPML shape
+        // (`result.items`, NO `id` field per item) which breaks tap-to-play. Without it, LMS
+        // returns the standard list shape: `result.loop_loop` with proper `id` ("cc6ff5a5.0"-style
+        // tree positions) usable as `item_id:N` in `favorites playlist play`.
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["favorites", "items", 0, 100, "want_url:1", "feedMode:1"]]
+            "params": ["", ["favorites", "items", 0, 100, "want_url:1"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { response in
             DispatchQueue.main.async {
@@ -96,7 +101,7 @@ struct FavoritesView: View {
                     os_log(.error, log: logger, "❌ Favorites fetch: invalid response")
                     return
                 }
-                if let loop = result["item_loop"] as? [[String: Any]] {
+                if let loop = result["loop_loop"] as? [[String: Any]] {
                     items = FavoriteItem.parseLoop(loop)
                 } else {
                     items = []
