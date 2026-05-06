@@ -16,13 +16,22 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let coordinator, isConnected {
-                NavigationStack {
-                    NowPlayingView(
-                        nowPlaying: AudioManager.shared.getNowPlayingManager(),
-                        coordinator: coordinator,
-                        settings: settings,
-                        audioPlayer: AudioManager.shared.audioPlayer
-                    )
+                TabView {
+                    NavigationStack {
+                        NowPlayingView(
+                            nowPlaying: AudioManager.shared.getNowPlayingManager(),
+                            coordinator: coordinator,
+                            settings: settings,
+                            audioPlayer: AudioManager.shared.audioPlayer
+                        )
+                    }
+                    .tabItem { Label("Now Playing", systemImage: "play.circle.fill") }
+
+                    NavigationStack { SearchPlaceholderView() }
+                        .tabItem { Label("Search", systemImage: "magnifyingglass") }
+
+                    NavigationStack { LibraryPlaceholderView() }
+                        .tabItem { Label("Library", systemImage: "music.note.house.fill") }
                 }
             } else {
                 connectingView
@@ -116,7 +125,12 @@ struct ContentView: View {
     }
 
     // MARK: - MPRemoteCommandCenter (per design D2 — register once, outlive sub-screens)
-
+    //
+    // D2 INVARIANT (98q.5): targets MUST be registered at ContentView scope, ABOVE TabView,
+    // so Siri Remote hardware play/pause survives tab switching and sub-screen navigation.
+    // Do NOT move this wiring into a tab content view or NowPlayingView — leaf-view
+    // onAppear/onDisappear lifecycle silently breaks responsiveness when the user is on
+    // another tab. See learning `tvos-mp-remotecommand-location` (8/10).
     private func registerRemoteCommands(coordinator: SlimProtoCoordinator) {
         let center = MPRemoteCommandCenter.shared()
 
@@ -182,4 +196,38 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+
+// MARK: - Tab placeholders (98q.8 / 98q.9 will replace these)
+
+struct SearchPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 96))
+                .foregroundStyle(.secondary)
+            Text("Search")
+                .font(.largeTitle)
+            Text("Coming soon")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct LibraryPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "music.note.house")
+                .font(.system(size: 96))
+                .foregroundStyle(.secondary)
+            Text("Library")
+                .font(.largeTitle)
+            Text("Coming soon")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }

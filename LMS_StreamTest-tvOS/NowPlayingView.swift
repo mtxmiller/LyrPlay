@@ -17,6 +17,8 @@ struct NowPlayingView: View {
     @State private var isScrubbing: Bool = false
     @State private var scrubElapsed: Double = 0
     @State private var showVisualizer: Bool = false
+    @State private var showQueue: Bool = false
+    @State private var didInitialFocus: Bool = false
     @FocusState private var playbackFocused: Bool
     @FocusState private var artworkFocused: Bool
 
@@ -47,9 +49,14 @@ struct NowPlayingView: View {
         .onAppear {
             tick()
             updateAccent()                                  // initial sample if artwork already loaded
-            // Defer focus assignment so SwiftUI focus engine has time to register focusable views
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                playbackFocused = true
+            // Defer focus assignment so SwiftUI focus engine has time to register focusable views.
+            // Gate on didInitialFocus so re-appears (TabView tab switching) don't override
+            // the focus state SwiftUI preserved between tab switches.
+            if !didInitialFocus {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    playbackFocused = true
+                    didInitialFocus = true
+                }
             }
         }
         .onChange(of: nowPlaying.currentArtwork) { _, _ in updateAccent() }
@@ -58,6 +65,20 @@ struct NowPlayingView: View {
             VisualizerView(accentColor: accentRGB, isPlaying: isPlaying)
                 .ignoresSafeArea()
                 .onExitCommand { showVisualizer = false }
+        }
+        // Queue is presented as fullScreenCover (not NavigationStack push) so it doesn't
+        // interact with the TabView's tab-strip auto-hide-on-push behavior. Wrap in
+        // NavigationStack inside the cover so .navigationTitle("Up Next") still renders.
+        .fullScreenCover(isPresented: $showQueue) {
+            NavigationStack {
+                QueueView(
+                    nowPlaying: nowPlaying,
+                    coordinator: coordinator,
+                    settings: settings,
+                    accentColor: accentColor
+                )
+            }
+            .onExitCommand { showQueue = false }
         }
     }
 
@@ -377,13 +398,8 @@ struct NowPlayingView: View {
     }
 
     private var queueNavigationLink: some View {
-        NavigationLink {
-            QueueView(
-                nowPlaying: nowPlaying,
-                coordinator: coordinator,
-                settings: settings,
-                accentColor: accentColor
-            )
+        Button {
+            showQueue = true
         } label: {
             ZStack {
                 Circle().fill(.regularMaterial)
