@@ -44,6 +44,16 @@ struct ContentView: View {
                     }
                     .tabItem { Label("Library", systemImage: "music.note.house.fill") }
                 }
+                // tvOS HW play/pause is asymmetric (hardware-verified 2026-05-07):
+                // - press while PLAYING → tvOS routes to MPRC pauseCommand (registered below)
+                // - press while PAUSED → tvOS does NOT route to MPRC playCommand
+                //   (system demotes the app from Now Playing dispatch when no audio is
+                //   producing, even with .playback session active + UIBackgroundModes
+                //   audio + nowPlayingInfo playbackRate=0). The press falls through the
+                //   responder chain to this .onPlayPauseCommand instead.
+                // Attached at TabView level so it catches the press regardless of which
+                // tab/sub-view has focus. Both this and MPRC route to sendLockScreenCommand.
+                .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
             } else {
                 connectingView
             }

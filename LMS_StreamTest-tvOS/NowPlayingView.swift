@@ -269,7 +269,9 @@ struct NowPlayingView: View {
             .focusable(true)
             .focused($playbackFocused)
             .onTapGesture { handleTap() }
-            .onPlayPauseCommand { sendCommand(isPlaying ? "pause" : "play") }
+            // HW play/pause handlers live at ContentView root (TabView level) so
+            // resume-from-paused works from any tab. See ContentView for the
+            // tvOS-asymmetric-MPRC explanation.
     }
 
     /// `.onMoveCommand` is attached ONLY while scrubbing, so idle swipes pass through to

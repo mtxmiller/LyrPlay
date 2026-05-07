@@ -45,6 +45,12 @@ struct QueueView: View {
             .listStyle(.plain)
             .navigationTitle("Up Next")
             .background { background.ignoresSafeArea() }
+            // Queue is presented via .fullScreenCover from NowPlayingView, so its
+            // responder chain is rooted at the cover (NOT the TabView). ContentView's
+            // TabView-level .onPlayPauseCommand never sees presses from inside the
+            // cover. Local handler restores resume-from-paused here. See ContentView
+            // for the tvOS-asymmetric-MPRC explanation.
+            .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
             .onAppear {
                 fetchPlaylist {
                     scrollToCurrent(proxy: proxy, animated: false)

@@ -1359,6 +1359,22 @@ extension SlimProtoCoordinator {
         // SIMPLIFIED: Use only SimpleTimeTracker (Material-style approach)
         return simpleTimeTracker.getCurrentTime()
     }
+
+    /// Toggle play/pause for SwiftUI HW handlers (.onPlayPauseCommand on tvOS).
+    ///
+    /// Uses the synchronous `commandHandler.isPausedByLockScreen` flag rather than
+    /// `getCurrentInterpolatedTime().playing`. The latter is driven by server STAT
+    /// updates and lags the user's last action by one server roundtrip — fast HW
+    /// presses see stale state and send the wrong command, producing the
+    /// "press-twice-to-resume" bug on tvOS Search/Queue views (hardware-verified
+    /// 2026-05-07). The flag flips the moment we send pause/play locally.
+    func toggleLockScreenPlayPause() {
+        if commandHandler.isPausedByLockScreen {
+            sendLockScreenCommand("play")
+        } else {
+            sendLockScreenCommand("pause")
+        }
+    }
     
     /// Get current time for position saving
     func getCurrentTimeForSaving() -> Double {

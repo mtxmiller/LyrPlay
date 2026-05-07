@@ -68,6 +68,11 @@ struct SearchView: View {
             }
         }
         .searchable(text: $searchTerm, prompt: "Search music")
+        // .searchable on tvOS uses UISearchController which intercepts UIPress
+        // events, so HW play/pause press never bubbles up to ContentView's
+        // TabView-level handler. Local handler ensures resume-from-paused works
+        // here too. See ContentView for the asymmetric-MPRC explanation.
+        .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
         .onChange(of: searchTerm) { _, newValue in
             scheduleSearch(for: newValue)
         }
