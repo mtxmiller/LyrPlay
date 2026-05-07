@@ -160,28 +160,35 @@ struct ContentView: View {
         center.previousTrackCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
 
+        let mpccLogger = logger
         center.playCommand.addTarget { _ in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC playCommand fired")
             coordinator.sendLockScreenCommand("play")
             return .success
         }
         center.pauseCommand.addTarget { _ in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC pauseCommand fired")
             coordinator.sendLockScreenCommand("pause")
             return .success
         }
         center.togglePlayPauseCommand.addTarget { _ in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC togglePlayPauseCommand fired (HW play/pause button)")
             let (_, playing) = coordinator.getCurrentInterpolatedTime()
             coordinator.sendLockScreenCommand(playing ? "pause" : "play")
             return .success
         }
         center.nextTrackCommand.addTarget { _ in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC nextTrackCommand fired")
             coordinator.sendLockScreenCommand("next")
             return .success
         }
         center.previousTrackCommand.addTarget { _ in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC previousTrackCommand fired")
             coordinator.sendLockScreenCommand("previous")
             return .success
         }
         center.changePlaybackPositionCommand.addTarget { event in
+            os_log(.debug, log: mpccLogger, "🎛️ MPRC changePlaybackPositionCommand fired")
             guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }

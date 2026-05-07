@@ -65,6 +65,14 @@ class AudioManager: NSObject, ObservableObject {
         PlaybackSessionController.shared.configure(audioManager: self) { [weak self] in
             self?.slimClient
         }
+        #else
+        // tvOS: BASS_CONFIG_IOS_SESSION is iOS-only per BASS docs, so BASS does NOT
+        // auto-manage AVAudioSession on tvOS. Activate after BASS_Init has run (in
+        // AudioPlayer init above) so BASS sees a known-good init state, then mark
+        // the app as a Now Playing candidate (gates HW remote events + lets
+        // UIBackgroundModes audio keep playback alive on home screen).
+        // Lazy callers in sendLockScreenCommand re-call this for transient-failure retry.
+        activateAudioSession()
         #endif
 
         #if DEBUG
@@ -377,7 +385,16 @@ class AudioManager: NSObject, ObservableObject {
     }
     #else
     func activateAudioSession() {
-        // tvOS: BASS manages output; foreground-only audio per design — nothing to activate
+        // Idempotent: setCategory/setActive on already-active session is a no-op.
+        // Eager activation runs in init(); this exists for lazy callers
+        // (sendLockScreenCommand etc.) that act as retry on transient failure.
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true, options: [])
+        } catch {
+            os_log(.error, log: logger, "❌ tvOS AVAudioSession (re)activation failed: %{public}s", error.localizedDescription)
+        }
     }
     #endif
 
