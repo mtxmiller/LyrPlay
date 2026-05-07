@@ -254,6 +254,36 @@ struct Artist: Identifiable {
     let albumCount: Int?
 }
 
+extension Artist {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Artist")
+
+    /// Parses an `artists_loop` JSON array from LMS `["artists", ...]` into Artist instances.
+    /// Used by tvOS Search per-domain fan-out (98q.8) where each search fires
+    /// `["artists", 0, 25, "tags:s", "search:<term>"]`. The `tags:s` flag adds sortable_name
+    /// which we ignore. Entries missing id or name are skipped.
+    static func parseLoop(_ data: [[String: Any]]) -> [Artist] {
+        return data.compactMap { artistData -> Artist? in
+            // id arrives as String OR Int from LMS depending on backend.
+            let id: String
+            if let s = artistData["id"] as? String {
+                id = s
+            } else if let n = artistData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ Artist missing id, skipping")
+                return nil
+            }
+
+            guard let name = artistData["artist"] as? String, !name.isEmpty else {
+                os_log(.error, log: parseLogger, "❌ Artist %{public}s missing 'artist' field, skipping", id)
+                return nil
+            }
+
+            return Artist(id: id, name: name, albumCount: nil)
+        }
+    }
+}
+
 // MARK: - Album Data Model
 
 /// Album list item from LMS `albums` JSON-RPC.
