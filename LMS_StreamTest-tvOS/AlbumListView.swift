@@ -17,14 +17,26 @@ import os.log
 /// pattern at line 2434). User stays on Library per D6.
 struct AlbumListView: View {
 
-    enum Sort {
+    enum Sort: Equatable {
         case recentlyPlayed
         case new
+        case byArtist(id: String)  // 98q.8: ArtistDetailView drill-in target
 
+        /// LMS query param. RecentlyPlayed/New use a `sort:` filter; byArtist uses
+        /// the `artist_id:N` filter (default sort = album title).
         var paramValue: String {
             switch self {
             case .recentlyPlayed: return "sort:recentlyplayed"
             case .new: return "sort:new"
+            case .byArtist(let id): return "artist_id:\(id)"
+            }
+        }
+
+        var emptyIcon: String {
+            switch self {
+            case .recentlyPlayed: return "clock"
+            case .new: return "sparkles"
+            case .byArtist: return "music.note"
             }
         }
 
@@ -32,6 +44,7 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "Nothing played recently"
             case .new: return "No new music"
+            case .byArtist: return "No albums found"
             }
         }
 
@@ -39,6 +52,7 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "Albums you play will appear here."
             case .new: return "Add music to your LMS library to see it here."
+            case .byArtist: return "This artist has no albums in the LMS library."
             }
         }
     }
@@ -72,7 +86,7 @@ struct AlbumListView: View {
 
     private var emptyState: some View {
         VStack(spacing: 16) {
-            Image(systemName: sort == .recentlyPlayed ? "clock" : "sparkles")
+            Image(systemName: sort.emptyIcon)
                 .font(.system(size: 64))
                 .foregroundStyle(.secondary)
             Text(sort.emptyTitle)
