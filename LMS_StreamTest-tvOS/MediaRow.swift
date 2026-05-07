@@ -11,6 +11,7 @@ struct MediaRow<Trailing: View>: View {
     let primary: String
     let secondary: String?
     let artworkURL: URL?
+    let placeholderSymbol: String
     let isHighlighted: Bool
     let accentColor: Color
     @ViewBuilder let trailing: () -> Trailing
@@ -19,6 +20,7 @@ struct MediaRow<Trailing: View>: View {
         primary: String,
         secondary: String? = nil,
         artworkURL: URL?,
+        placeholderSymbol: String = "music.note",
         isHighlighted: Bool = false,
         accentColor: Color = .accentColor,
         @ViewBuilder trailing: @escaping () -> Trailing
@@ -26,6 +28,7 @@ struct MediaRow<Trailing: View>: View {
         self.primary = primary
         self.secondary = secondary
         self.artworkURL = artworkURL
+        self.placeholderSymbol = placeholderSymbol
         self.isHighlighted = isHighlighted
         self.accentColor = accentColor
         self.trailing = trailing
@@ -94,7 +97,7 @@ struct MediaRow<Trailing: View>: View {
     private var placeholder: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
-            Image(systemName: "music.note")
+            Image(systemName: placeholderSymbol)
                 .font(.system(size: 28))
                 .foregroundStyle(.secondary)
         }
@@ -107,6 +110,7 @@ extension MediaRow where Trailing == EmptyView {
         primary: String,
         secondary: String? = nil,
         artworkURL: URL?,
+        placeholderSymbol: String = "music.note",
         isHighlighted: Bool = false,
         accentColor: Color = .accentColor
     ) {
@@ -114,6 +118,7 @@ extension MediaRow where Trailing == EmptyView {
             primary: primary,
             secondary: secondary,
             artworkURL: artworkURL,
+            placeholderSymbol: placeholderSymbol,
             isHighlighted: isHighlighted,
             accentColor: accentColor
         ) {

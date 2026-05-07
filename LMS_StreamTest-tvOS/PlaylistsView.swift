@@ -63,7 +63,8 @@ struct PlaylistsView: View {
                     MediaRow(
                         primary: playlist.name,
                         secondary: secondaryText(for: playlist),
-                        artworkURL: nil  // LMS doesn't expose artwork for vanilla playlists; placeholder used
+                        artworkURL: LMSArtworkURL.materialPlaylist(name: playlist.name, settings: settings),
+                        placeholderSymbol: "music.note.list"
                     )
                 }
                 .buttonStyle(.plain)

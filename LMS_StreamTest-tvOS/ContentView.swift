@@ -27,8 +27,13 @@ struct ContentView: View {
                     }
                     .tabItem { Label("Now Playing", systemImage: "play.circle.fill") }
 
-                    NavigationStack { SearchPlaceholderView() }
-                        .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                    NavigationStack {
+                        SearchView(
+                            coordinator: coordinator,
+                            settings: settings
+                        )
+                    }
+                    .tabItem { Label("Search", systemImage: "magnifyingglass") }
 
                     NavigationStack {
                         LibraryView(
@@ -202,22 +207,4 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
-}
-
-// MARK: - Tab placeholders (98q.8 will replace SearchPlaceholderView)
-
-struct SearchPlaceholderView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 96))
-                .foregroundStyle(.secondary)
-            Text("Search")
-                .font(.largeTitle)
-            Text("Coming soon")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }

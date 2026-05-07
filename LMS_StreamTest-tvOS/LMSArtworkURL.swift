@@ -36,6 +36,49 @@ enum LMSArtworkURL {
         return components.url
     }
 
+    /// Material-Skin per-playlist composed artwork: `/material/playlists/<encoded name>`.
+    /// Material's browse-resp.js:2028 pattern. The Material Skin LMS plugin composes a
+    /// 4-up grid from the playlist's track artwork. Returns nil if name is empty.
+    /// Silently 404s if Material Skin is not installed — AsyncImage then falls back to
+    /// MediaRow's placeholder, which is the desired UX.
+    static func materialPlaylist(name: String?, settings: SettingsManager) -> URL? {
+        guard let name, !name.isEmpty else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = settings.activeServerHost
+        components.port = settings.activeServerWebPort
+        components.path = "/material/playlists/\(name)"
+
+        let user = settings.activeServerUsername
+        if !user.isEmpty {
+            components.user = user
+            components.password = settings.activeServerPassword
+        }
+        return components.url
+    }
+
+    /// MAI-plugin artist portrait URL: `/imageproxy/mai/artist/<id>/image_200x200_o.png`.
+    /// Material's queue-page.js:35 pattern. Returns nil if id is missing/empty. The
+    /// endpoint silently 404s if the MAI (Music Artwork Info) plugin is not installed
+    /// — AsyncImage then falls back to its placeholder, which is the desired UX.
+    static func maiArtist(id: String?, settings: SettingsManager) -> URL? {
+        guard let id, !id.isEmpty else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = settings.activeServerHost
+        components.port = settings.activeServerWebPort
+        components.path = "/imageproxy/mai/artist/\(id)/image_200x200_o.png"
+
+        let user = settings.activeServerUsername
+        if !user.isEmpty {
+            components.user = user
+            components.password = settings.activeServerPassword
+        }
+        return components.url
+    }
+
     /// Resolves a favorite item's `icon`/`image`/`cover` string into a URL.
     ///
     /// Favorites can carry artwork in three shapes:
