@@ -2,6 +2,12 @@ import SwiftUI
 import os.log
 
 struct ManualServerEntryView: View {
+    /// See `ServerConnectView.onComplete`. When non-nil, success commits the
+    /// host but skips `markAsConfigured()` and calls `onComplete()` so the
+    /// caller can rebuild the existing coordinator instead of triggering a
+    /// RootView swap.
+    var onComplete: (() -> Void)? = nil
+
     @StateObject private var settings = SettingsManager.shared
 
     @State private var octet1: String = ""
@@ -218,7 +224,11 @@ struct ManualServerEntryView: View {
             settings.serverWebPort = port
             settings.serverSlimProtoPort = 3483
             settings.saveSettings()
-            settings.markAsConfigured()
+            if let onComplete {
+                onComplete()
+            } else {
+                settings.markAsConfigured()
+            }
 
         case .webPortFailure:
             errorMessage = "\(host):\(port) answered, but it doesn't look like LMS (or it requires sign-in)."

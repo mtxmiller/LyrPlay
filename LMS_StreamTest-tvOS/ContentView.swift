@@ -22,7 +22,9 @@ struct ContentView: View {
                             nowPlaying: AudioManager.shared.getNowPlayingManager(),
                             coordinator: coordinator,
                             settings: settings,
-                            audioPlayer: AudioManager.shared.audioPlayer
+                            audioPlayer: AudioManager.shared.audioPlayer,
+                            onServerChanged: handleServerChanged,
+                            onAudioFormatChanged: { handleAudioFormatChanged(coordinator: coordinator) }
                         )
                     }
                     .tabItem { Label("Now Playing", systemImage: "play.circle.fill") }
@@ -143,6 +145,42 @@ struct ContentView: View {
         coordinator = nil
         unregisterRemoteCommands()
         settings.resetConfiguration()
+    }
+
+    // MARK: - Server change (Settings ▸ Change Server)
+
+    /// Tears down the current SlimProtoCoordinator and rebuilds against the
+    /// new host that ServerConnectView has already written to
+    /// `settings.serverHost`. SettingsView clears the 3 recovery keys before
+    /// invoking this closure (they point at the OLD server's playlist —
+    /// CLAUDE.md rule #4 atomicity).
+    ///
+    /// Differs from `resetConfiguration()` in two ways:
+    ///   1. Does NOT call `settings.resetConfiguration()` — that would zero
+    ///      `serverHost`, but ServerConnectView just wrote the NEW host there.
+    ///   2. Re-runs `startPlayerRegistration()` immediately so the user
+    ///      doesn't need to drop back to the onboarding flow.
+    // MARK: - Audio format change (Settings ▸ Audio Format)
+
+    /// Audio format change requires a fresh HELO so the server learns the new
+    /// capabilities. SlimProtoClient builds HELO from `settings.capabilitiesString`
+    /// at connect time, so a quick disconnect+reconnect is enough — no need to
+    /// tear down AudioManager.slimClient or clear recovery keys. Matches iOS
+    /// SettingsView.swift:1733-1745 behavior.
+    private func handleAudioFormatChanged(coordinator: SlimProtoCoordinator) {
+        os_log(.info, log: logger, "🎵 Audio format changed — restarting SlimProto connection")
+        Task {
+            await coordinator.restartConnection()
+        }
+    }
+
+    private func handleServerChanged() {
+        os_log(.info, log: logger, "🔄 Server change committed — rebuilding coordinator against new host")
+        coordinator?.disconnect()
+        AudioManager.shared.slimClient = nil
+        coordinator = nil
+        unregisterRemoteCommands()
+        startPlayerRegistration()
     }
 
     // MARK: - MPRemoteCommandCenter (per design D2 — register once, outlive sub-screens)

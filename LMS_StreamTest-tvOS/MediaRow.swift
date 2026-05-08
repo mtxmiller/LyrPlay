@@ -42,10 +42,17 @@ struct MediaRow<Trailing: View>: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(primary)
-                    .font(.title3.weight(.semibold))
+                    // Bold when highlighted; .primary in both states. Earlier
+                    // we tinted the highlighted title with the artwork-derived
+                    // accent color, but accents from low-saturation artwork
+                    // (washed-out skies, neutrals) read as "disabled" rather
+                    // than "playing" against the queue background. Keep the
+                    // accent color on the speaker icon — it does the work as
+                    // a visual indicator without sacrificing legibility.
+                    .font(.title3.weight(isHighlighted ? .bold : .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .foregroundStyle(isHighlighted ? accentColor : Color.primary)
+                    .foregroundStyle(.primary)
 
                 if let secondary = secondary, !secondary.isEmpty {
                     Text(secondary)

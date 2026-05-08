@@ -8,6 +8,16 @@ struct NowPlayingView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     @ObservedObject var audioPlayer: AudioPlayer
+    /// Called when the user successfully commits a NEW LMS server from
+    /// Settings ▸ Change Server. Forwarded to SettingsView →
+    /// ServerConnectView's onComplete. Caller (ContentView) tears down the
+    /// existing coordinator + rebuilds against the new host. (E1.)
+    var onServerChanged: () -> Void = {}
+    /// Called when the user picks a new Audio Format from Settings. Caller
+    /// (ContentView) restarts the SlimProto connection so the server gets a
+    /// fresh HELO with the new capabilities. Mirrors iOS SettingsView
+    /// behavior. Brief playback interruption is the cost of the change.
+    var onAudioFormatChanged: () -> Void = {}
 
     @State private var accentColor: Color = .accentColor
     @State private var accentRGB: SIMD3<Float> = SIMD3<Float>(0.5, 0.6, 1.0)
@@ -18,6 +28,7 @@ struct NowPlayingView: View {
     @State private var scrubElapsed: Double = 0
     @State private var showVisualizer: Bool = false
     @State private var showQueue: Bool = false
+    @State private var showSettings: Bool = false
     @State private var didInitialFocus: Bool = false
     @FocusState private var playbackFocused: Bool
     @FocusState private var artworkFocused: Bool
@@ -39,12 +50,19 @@ struct NowPlayingView: View {
         .padding(.vertical, 60)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background { background.ignoresSafeArea() }
+        // Top-right cluster: gear (always visible — reachable even when server
+        // is unreachable, which is exactly when the user most needs Settings)
+        // and reconnect badge below it when offline.
         .overlay(alignment: .topTrailing) {
-            if !isConnected {
-                reconnectBadge
-                    .padding(.top, 32)
-                    .padding(.trailing, 32)
+            VStack(alignment: .trailing, spacing: 16) {
+                gearButton
+                    .focusSection()
+                if !isConnected {
+                    reconnectBadge
+                }
             }
+            .padding(.top, 32)
+            .padding(.trailing, 32)
         }
         .onAppear {
             tick()
@@ -80,6 +98,44 @@ struct NowPlayingView: View {
             }
             .onExitCommand { showQueue = false }
         }
+        // Settings is the 3rd fullScreenCover on this view (visualizer + queue
+        // + settings). All three are mutually exclusive in practice — focus
+        // is single-button-press-driven so only one binding can transition to
+        // true at a time. Documented invariant per E5.
+        //
+        // Solid-black backdrop applied at the cover root so every pushed view
+        // inside SettingsView's NavigationStack (Change Server, Format Picker)
+        // inherits it. Without this the cover renders transparent over
+        // NowPlayingView and tvOS List's default tinting bleeds through.
+        .fullScreenCover(isPresented: $showSettings) {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                SettingsView(
+                    settings: settings,
+                    onServerChanged: {
+                        // Dismiss locally for safety — ContentView's coordinator
+                        // teardown will unmount this entire view tree, but
+                        // explicit dismiss avoids any state-transition surprises.
+                        showSettings = false
+                        onServerChanged()
+                    },
+                    onAudioFormatChanged: onAudioFormatChanged
+                )
+            }
+            .onExitCommand { showSettings = false }
+        }
+    }
+
+    // MARK: - Gear (Settings entry point)
+
+    private var gearButton: some View {
+        CircleFocusButton(
+            systemImage: "gearshape.fill",
+            accessibilityLabel: "Settings",
+            diameter: 72,
+            iconSize: 28,
+            action: { showSettings = true }
+        )
     }
 
     // MARK: - Background
@@ -400,19 +456,13 @@ struct NowPlayingView: View {
     }
 
     private var queueNavigationLink: some View {
-        Button {
-            showQueue = true
-        } label: {
-            ZStack {
-                Circle().fill(.regularMaterial)
-                Image(systemName: "music.note.list")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(.primary)
-            }
-            .frame(width: 72, height: 72)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Queue")
+        CircleFocusButton(
+            systemImage: "music.note.list",
+            accessibilityLabel: "Queue",
+            diameter: 72,
+            iconSize: 24,
+            action: { showQueue = true }
+        )
     }
 
     @ViewBuilder
@@ -422,18 +472,13 @@ struct NowPlayingView: View {
         isPrimary: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(.regularMaterial)
-                Image(systemName: systemImage)
-                    .font(.system(size: isPrimary ? 32 : 24, weight: .semibold))
-                    .foregroundStyle(.primary)
-            }
-            .frame(width: isPrimary ? 88 : 72, height: isPrimary ? 88 : 72)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(accessibilityLabel)
+        CircleFocusButton(
+            systemImage: systemImage,
+            accessibilityLabel: accessibilityLabel,
+            diameter: isPrimary ? 88 : 72,
+            iconSize: isPrimary ? 32 : 24,
+            action: action
+        )
     }
 
     // MARK: - Reconnect badge
@@ -554,6 +599,46 @@ struct NowPlayingView: View {
     }
 }
 
+
+// MARK: - Circular focus button
+//
+// Shared treatment for the transport row, queue link, and Settings gear.
+// `.buttonStyle(.plain)` on tvOS draws a wide pill-shaped halo behind the
+// button content on focus, which doesn't match a circular button. We
+// suppress the system halo with `.focusEffectDisabled()` (tvOS 17+) and
+// provide our own focus feedback: scale up slightly + soft white glow.
+
+private struct CircleFocusButton: View {
+    let systemImage: String
+    let accessibilityLabel: String
+    let diameter: CGFloat
+    let iconSize: CGFloat
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.regularMaterial)
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .semibold))
+                    .foregroundStyle(.primary)
+            }
+            .frame(width: diameter, height: diameter)
+            .scaleEffect(isFocused ? 1.10 : 1.0)
+            .shadow(color: .white.opacity(isFocused ? 0.35 : 0),
+                    radius: isFocused ? 14 : 0)
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .focusEffectDisabled()
+        .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: isFocused)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
 
 // MARK: - UIImage average color (Core Image CIAreaAverage)
 

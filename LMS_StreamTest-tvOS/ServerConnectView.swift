@@ -1,6 +1,15 @@
 import SwiftUI
 
 struct ServerConnectView: View {
+    /// Called on successful host commit when the user is changing servers
+    /// from inside the app (Settings ▸ Change Server). When nil, the view
+    /// behaves as the fresh-install / Reset path: writes the host and calls
+    /// `settings.markAsConfigured()` so RootView swaps to ContentView.
+    /// When non-nil, writes the host and calls `onComplete()` instead — the
+    /// caller is responsible for tearing down + rebuilding the existing
+    /// SlimProtoCoordinator. (E1 + E6 from /plan-eng-review 2026-05-07.)
+    var onComplete: (() -> Void)? = nil
+
     @StateObject private var discovery = ServerDiscoveryManager()
     @FocusState private var focusedField: FocusField?
 
@@ -145,7 +154,7 @@ struct ServerConnectView: View {
 
     private var manualEntryLink: some View {
         NavigationLink {
-            ManualServerEntryView()
+            ManualServerEntryView(onComplete: onComplete)
         } label: {
             Label("Enter server manually", systemImage: "keyboard")
                 .padding(.horizontal, 24)
@@ -161,7 +170,12 @@ struct ServerConnectView: View {
         settings.serverWebPort = server.port
         settings.serverSlimProtoPort = 3483
         settings.saveSettings()
-        settings.markAsConfigured()
+
+        if let onComplete {
+            onComplete()
+        } else {
+            settings.markAsConfigured()
+        }
     }
 }
 
