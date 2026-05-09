@@ -213,6 +213,23 @@ struct ContentView: View {
 
             // App open recovery for warm resume is handled by willEnterForegroundNotification below.
             // Cold launches don't get that notification, so the block above handles them on first appear.
+
+            #if DEBUG
+            // Phase 0 sync verification — auto-trigger DISABLED after the initial run
+            // confirmed: Test 1 BASS_POS_RELATIVE returns NOTAVAIL (not seekable on
+            // push streams), Test 2 BASS_ChannelPause works with ~16ms iOS HAL.
+            // The harness in Phase0SyncVerification.swift is still callable manually
+            // (e.g. via lldb: `e Phase0SyncVerification.runFullTest()`) if we need to
+            // re-verify after BASS or iOS changes.
+            //
+            // To re-enable auto-run, uncomment:
+            // if !Phase0Trigger.hasFired {
+            //     Phase0Trigger.hasFired = true
+            //     DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            //         Phase0SyncVerification.runFullTest()
+            //     }
+            // }
+            #endif
         }
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()

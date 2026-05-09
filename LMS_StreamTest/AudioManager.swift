@@ -202,6 +202,9 @@ class AudioManager: NSObject, ObservableObject {
     func play() {
         activateAudioSession()
 
+        // Cancel any in-flight sync-correction resume — user/server play overrides it.
+        cancelPendingResumeAll()
+
         // Control push stream or audio player depending on active mode
         if streamDecoder.hasValidStream() {
             streamDecoder.resumePlayback()
@@ -212,6 +215,9 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func pause() {
+        // Cancel any in-flight sync-correction resume — explicit pause overrides it.
+        cancelPendingResumeAll()
+
         // Control push stream or audio player depending on active mode
         if streamDecoder.hasValidStream() {
             streamDecoder.pausePlayback()
@@ -220,8 +226,11 @@ class AudioManager: NSObject, ObservableObject {
             audioPlayer.pause()
         }
     }
-    
+
     func stop() {
+        // Cancel any in-flight sync-correction resume — stream is going away.
+        cancelPendingResumeAll()
+
         // Stop traditional URL stream player
         audioPlayer.stop()
 
@@ -242,6 +251,9 @@ class AudioManager: NSObject, ObservableObject {
     /// Buffers audio but delays playback until target jiffies time is reached
     func startAtJiffies(_ targetJiffies: TimeInterval) {
         os_log(.info, log: logger, "🎯 AudioManager routing synchronized start")
+
+        // Cancel any in-flight sync-correction resume — synchronized start overrides it.
+        cancelPendingResumeAll()
 
         // Activate audio session for playback
         activateAudioSession()
@@ -278,6 +290,11 @@ class AudioManager: NSObject, ObservableObject {
     func skipAhead(duration: TimeInterval) {
         os_log(.info, log: logger, "⏩ AudioManager routing skip ahead")
 
+        // Defensive: if a pauseForInterval is in flight, cancel its pending resume
+        // before the skipAhead lands. Server is unlikely to send 'a' during 'p' window
+        // but cancellation is cheap and prevents a stale resume after the new state.
+        cancelPendingResumeAll()
+
         // Route to appropriate player based on stream type
         if streamDecoder.hasValidStream() {
             // PHASE 7.4: Push streams now support buffer skip ahead!
@@ -287,6 +304,15 @@ class AudioManager: NSObject, ObservableObject {
             // URL streams (legacy)
             audioPlayer.skipAhead(duration: duration)
         }
+    }
+
+    /// Cancel any pending sync-correction resume on both AudioPlayer (URL stream)
+    /// and AudioStreamDecoder (push stream). Called by stop/flush/skipAhead/unpause
+    /// paths so a stale BASS_ChannelStart doesn't fire after the stream has changed
+    /// state. See Fix 2 in sync drift plan.
+    func cancelPendingResumeAll() {
+        audioPlayer.cancelPendingResume()
+        streamDecoder.cancelPendingResume()
     }
 
     // State queries
@@ -299,13 +325,14 @@ class AudioManager: NSObject, ObservableObject {
     /// INTERNAL FALLBACK ONLY: Get AudioPlayer time when server time unavailable
     /// This should only be used by NowPlayingManager as last resort fallback
     /// UPDATED: For push streams, report decoded position (like squeezelite reports frames_played)
+    /// Uses hasValidStream() (PLAYING or PAUSED) so position is reported correctly during
+    /// sync-correction pauses (Fix 2 BASS_ChannelPause window) — isPlaying() alone returned
+    /// false for BASS_ACTIVE_PAUSED and fell through to audioPlayer.getCurrentTime() = 0,
+    /// corrupting STAT elapsed_ms during the pause.
     internal func getAudioPlayerTimeForFallback() -> Double {
-        // For push streams, report our decoded position (bytes pushed / bytes per second)
-        // This matches squeezelite reporting frames_played / sample_rate
-        if streamDecoder.isPlaying() {
+        if streamDecoder.hasValidStream() {
             return streamDecoder.getCurrentPosition()
         }
-        // For URL streams, use audio player position
         return audioPlayer.getCurrentTime()
     }
     

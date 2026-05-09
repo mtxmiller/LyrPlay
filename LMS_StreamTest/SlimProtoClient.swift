@@ -1,6 +1,7 @@
 // File: SlimProtoClient.swift
 // Fixed to properly identify as LyrPlay app instead of AppleCoreMedia
 import Foundation
+import AVFoundation
 import CocoaAsyncSocket
 import os.log
 
@@ -428,16 +429,22 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         
         // CRITICAL: Always include ALL remaining fields for consistent packet structure
 
-        // Get current audio position for timing
+        // Get current audio position for timing.
+        // Subtract iOS output latency (AVAudioSession.outputLatency = iOS Audio Queue +
+        // hardware latency, ~15ms typical, equivalent to squeezelite's device_frames /
+        // sample_rate). Without this, BASS_ChannelGetPosition reports samples consumed
+        // by the BASS mixer — the iOS HAL ring buffer that sits between BASS and the
+        // speaker is invisible, so STAT elapsed_ms is consistently ahead of where
+        // audio has actually been heard. Fixes Bug 4 in the sync drift plan.
         let position: Double
         if let commandHandler = commandHandler {
             position = commandHandler.getCurrentAudioTime()
         } else {
             position = 0.0
         }
-        
-        // Clamp position to reasonable bounds
-        let clampedPosition = max(0, min(position, 86400)) // Max 24 hours
+        let outputLatency = AVAudioSession.sharedInstance().outputLatency
+        let adjusted = max(0, position - outputLatency)
+        let clampedPosition = min(adjusted, 86400) // Max 24 hours
         
         // NOTE: Don't update coordinator with audio player time - that's wrong!
         // The coordinator should get server time from JSON-RPC responses, not audio player time

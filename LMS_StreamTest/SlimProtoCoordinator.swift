@@ -339,7 +339,14 @@ class SlimProtoCoordinator: ObservableObject {
         // Only during active playback, send STMt every second like squeezelite
         // NOTE: Position saving moved to NowPlayingManager.updateNowPlayingTime() (LMS_StreamTest-6lb)
         // NowPlayingManager's timer never stops, so position is saved even when disconnected
-        playbackHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        //
+        // Scheduled on RunLoop.main in .common mode (NOT Timer.scheduledTimer which uses
+        // .default) so it fires reliably during WebView scroll/animation, lock-screen
+        // transitions, and background-audio mode. With .default, multi-room sync would
+        // see 3-5s STMt gaps whenever the main thread entered tracking mode, causing
+        // the LMS server to bail on the sync group ("playPoint too old"). Same fix as
+        // the radio metadata refresh timer (commit 397beac).
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
 
             // Only process if actively playing (not paused/stopped)
@@ -349,6 +356,8 @@ class SlimProtoCoordinator: ObservableObject {
                 self.client.sendStatus("STMt")
             }
         }
+        playbackHeartbeatTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopPlaybackHeartbeat() {

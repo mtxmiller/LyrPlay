@@ -92,6 +92,10 @@ class AudioPlayer: NSObject, ObservableObject {
     // Synchronized playback state and monitoring
     private var playbackState: PlaybackState = .stopped
     private var startAtMonitorTimer: Timer?
+
+    // PauseForInterval for sync correction (Fix 2 in sync drift plan)
+    private var pendingResumeWorkItem: DispatchWorkItem?
+    private var pauseGeneration: Int = 0
     
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
@@ -503,33 +507,80 @@ class AudioPlayer: NSObject, ObservableObject {
 
     // MARK: - Sync Drift Corrections
 
-    /// Play silence for a duration (timed pause for sync drift correction)
-    /// Advances playback position without outputting audio
+    /// Pause the URL stream for `duration` seconds, then resume.
+    /// Server uses this (strm 'p' with non-zero interval) to slow down a player that's
+    /// ahead of the sync group. BASS_ChannelPause freezes BASS_POS_BYTE; after `duration`
+    /// wall time, BASS_ChannelStart resumes from the same music position.
+    ///
+    /// Replaces the previous BASS_ChannelSetPosition(currentPos + duration) approach
+    /// which was a forward seek (i.e. skipAhead) — the OPPOSITE of what the server
+    /// wanted, making drift compound instead of converge (Bug 2 in sync drift plan).
     func playSilence(duration: TimeInterval) {
         guard currentStream != 0 else {
             os_log(.error, log: logger, "❌ playSilence() called with no active stream")
             return
         }
+        guard duration > 0 else {
+            os_log(.info, log: logger, "🔇 Zero duration playSilence - skipping")
+            return
+        }
 
-        os_log(.info, log: logger, "⏸️🔇 Playing silence for %.3f seconds (drift correction)", duration)
+        // Supersede any existing pause window
+        pendingResumeWorkItem?.cancel()
 
-        // Get current position in bytes
-        let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+        // Treat PLAYING and PAUSED as both valid entry states for pauseForInterval:
+        // - PLAYING: pause now, schedule resume.
+        // - PAUSED: already paused (a prior pauseForInterval is still in window and
+        //   was just superseded by us cancelling its resume); skip the redundant
+        //   pause call but still schedule a new resume so the stream doesn't strand
+        //   paused forever. Without this branch, BASS_ChannelPause returns FALSE on
+        //   an already-paused stream and we'd bail without scheduling resume —
+        //   silent failure mode if the server rapid-fires sync corrections.
+        let state = BASS_ChannelIsActive(currentStream)
+        switch state {
+        case DWORD(BASS_ACTIVE_PLAYING):
+            BASS_ChannelPause(currentStream)
+            os_log(.info, log: logger, "⏸️🔇 BASS_ChannelPause for %.3f seconds (drift correction)", duration)
+        case DWORD(BASS_ACTIVE_PAUSED):
+            os_log(.info, log: logger, "⏸️🔇 Already paused — extending pause window for %.3f seconds (supersede)", duration)
+        default:
+            // STOPPED or STALLED — nothing to pause, nothing to schedule.
+            os_log(.info, log: logger, "playSilence: stream not playing/paused (state=%d), skipping", state)
+            return
+        }
 
-        // Convert duration to bytes
-        let durationBytes = BASS_ChannelSeconds2Bytes(currentStream, duration)
+        pauseGeneration += 1
+        let myGeneration = pauseGeneration
+        let myStream = currentStream
 
-        // Calculate new position
-        let newPosBytes = currentPosBytes + durationBytes
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Generation guard: cancellation invalidates the closure even if it already
+            // passed the cancel check (BASS handle reuse defense).
+            guard self.pauseGeneration == myGeneration else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — generation mismatch (cancelled)")
+                return
+            }
+            // Stream identity guard: handle may have been freed and reused.
+            guard self.currentStream != 0, self.currentStream == myStream else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — stream handle changed")
+                return
+            }
+            BASS_ChannelStart(self.currentStream)
+            os_log(.info, log: self.logger, "▶️ Resumed after pauseForInterval")
+        }
+        pendingResumeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
+    }
 
-        // Set new position (effectively skips ahead, "playing" silence)
-        let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
-
-        if result != 0 {
-            os_log(.info, log: logger, "✅ Silence played - advanced %.3f seconds", duration)
-        } else {
-            let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Failed to play silence: %d", errorCode)
+    /// Cancel any pending resume scheduled by playSilence().
+    /// Called by stop/flush/skipAhead/unpause/freeStream paths.
+    func cancelPendingResume() {
+        if pendingResumeWorkItem != nil {
+            pendingResumeWorkItem?.cancel()
+            pendingResumeWorkItem = nil
+            pauseGeneration += 1
+            os_log(.debug, log: logger, "🚫 Cancelled pending resume work item")
         }
     }
 
@@ -686,6 +737,10 @@ class AudioPlayer: NSObject, ObservableObject {
     
     private func cleanup() {
         if currentStream != 0 {
+            // Cancel any pending sync-correction resume before freeing.
+            // Generation counter inside cancelPendingResume defends against BASS
+            // handle reuse if the freed DWORD is allocated to a new stream.
+            cancelPendingResume()
             BASS_ChannelStop(currentStream)
             BASS_StreamFree(currentStream)
             currentStream = 0

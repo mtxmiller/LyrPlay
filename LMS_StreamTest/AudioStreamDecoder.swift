@@ -166,9 +166,24 @@ class AudioStreamDecoder {
 
     // MARK: - Buffer Skip Ahead for Multi-Room Audio
 
-    /// Number of bytes remaining to skip (for drift correction when player is behind)
-    /// Decoder loop checks this and discards data instead of pushing to BASS
+    /// Number of bytes remaining to skip (for drift correction when player is behind).
+    /// Decoder loop checks this and discards data instead of pushing to BASS.
+    /// Note: effect is delayed by the BASS push-queue depth (currently ~30s headroom
+    /// for cellular resilience). Server-side skipAhead corrections will be slow to
+    /// take effect — this is the trade-off documented in the sync drift plan.
     private var skipAheadBytesRemaining: Int = 0
+
+    // MARK: - PauseForInterval for sync correction (Fix 2 in sync drift plan)
+
+    /// Pending BASS_ChannelStart work item for sync-correction pauseForInterval.
+    /// Cancelled when superseded by stop/flush/another pause/unpause/skipAhead/free.
+    private var pendingResumeWorkItem: DispatchWorkItem?
+
+    /// Generation counter for pendingResumeWorkItem. Defends against BASS handle
+    /// reuse: after BASS_StreamFree, the same DWORD value may be allocated to a
+    /// new stream. Incrementing this counter on cancel/free invalidates any
+    /// in-flight closure even if it already passed the cancel check.
+    private var pauseGeneration: Int = 0
 
     // MARK: - Buffer Ready Signaling for Multi-Room Audio
 
@@ -255,53 +270,88 @@ class AudioStreamDecoder {
         syncStartMonitorTimer = nil
     }
 
-    // MARK: - Silence Injection for Multi-Room Audio
+    // MARK: - PauseForInterval for Multi-Room Audio (Fix 2 in sync drift plan)
 
-    /// Play silence for a specified duration (drift correction when player is ahead)
-    /// - Parameter duration: Duration of silence in seconds
+    /// Pause the push stream for `duration` seconds, then resume.
+    /// Server uses this (strm 'p' with non-zero interval) to slow down a player that's
+    /// ahead of the sync group. BASS_ChannelPause freezes BASS_POS_BYTE; the iOS HAL
+    /// ring drains for outputLatency (~16ms typical) then speaker silent. After
+    /// `duration` wall time, BASS_ChannelStart resumes from the same music position.
+    /// Apparent stream start time on the server shifts forward by `duration`,
+    /// matching reference player.
     ///
-    /// This injects zero bytes into the push stream to slow down playback and maintain sync.
-    /// Used when this player is ahead of the sync group and needs to pause momentarily.
+    /// Replaces the previous BASS_StreamPutData(silence) approach which appended silence
+    /// to the END of the queue (no effect on currently-playing music — Bug 3).
     func playSilence(duration: TimeInterval) {
         guard pushStream != 0 else {
-            os_log(.error, log: logger, "❌ Cannot play silence - no push stream")
+            os_log(.error, log: logger, "❌ Cannot pauseForInterval - no push stream")
             return
         }
-
         guard duration > 0 else {
-            os_log(.info, log: logger, "🔇 Zero duration silence - skipping")
+            os_log(.info, log: logger, "🔇 Zero duration pauseForInterval - skipping")
             return
         }
 
-        os_log(.info, log: logger, "🔇 Playing %.3f seconds of silence for drift correction", duration)
+        // Supersede any existing pause window
+        pendingResumeWorkItem?.cancel()
 
-        // Calculate how many bytes of silence to generate
-        // Float samples = 4 bytes per sample
-        let bytesPerSecond = sampleRate * channels * 4
-        let silenceBytes = Int(duration * Double(bytesPerSecond))
-
-        // Create buffer of zeros (silence in float PCM is 0.0)
-        let silenceBuffer = [Float](repeating: 0.0, count: silenceBytes / 4)
-
-        // Push silence to stream
-        let pushed = silenceBuffer.withUnsafeBytes { ptr in
-            BASS_StreamPutData(
-                pushStream,
-                UnsafeMutableRawPointer(mutating: ptr.baseAddress),
-                UInt32(silenceBytes)
-            )
+        // Treat PLAYING and PAUSED as both valid entry states for pauseForInterval:
+        // - PLAYING: pause now, schedule resume.
+        // - PAUSED: already paused (e.g. a prior pauseForInterval is still in window
+        //   and was just superseded by us cancelling its resume); skip the redundant
+        //   pause call but still schedule a new resume so the stream doesn't strand
+        //   paused forever. Without this branch, BASS_ChannelPause returns FALSE on
+        //   an already-paused stream (BASS_ERROR_NOPLAY) and we'd bail without
+        //   scheduling resume — silent failure mode if the server ever rapid-fires
+        //   sync corrections.
+        let state = BASS_ChannelIsActive(pushStream)
+        switch state {
+        case DWORD(BASS_ACTIVE_PLAYING):
+            BASS_ChannelPause(pushStream)
+            os_log(.info, log: logger, "⏸️🔇 BASS_ChannelPause for %.3f seconds (drift correction)", duration)
+        case DWORD(BASS_ACTIVE_PAUSED):
+            os_log(.info, log: logger, "⏸️🔇 Already paused — extending pause window for %.3f seconds (supersede)", duration)
+        default:
+            // STOPPED or STALLED — nothing to pause, nothing to schedule.
+            os_log(.info, log: logger, "playSilence: stream not playing/paused (state=%d), skipping", state)
+            return
         }
 
-        if pushed == DWORD.max {
-            let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Failed to inject silence: BASS error %d", error)
-        } else {
-            // Track the silence in our total bytes pushed
-            totalBytesPushed += UInt64(silenceBytes)
+        pauseGeneration += 1
+        let myGeneration = pauseGeneration
+        let myStream = pushStream
 
-            let queuedAmount = Int(pushed)
-            os_log(.info, log: logger, "✅ Injected %d bytes (%.3f seconds) of silence, queue now: %d KB",
-                   silenceBytes, duration, queuedAmount / 1024)
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Generation guard: if cancelPendingResume() ran (e.g., stop/flush/free),
+            // it incremented pauseGeneration. Bail if our generation is stale.
+            guard self.pauseGeneration == myGeneration else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — generation mismatch (cancelled)")
+                return
+            }
+            // Stream identity guard: BASS_StreamFree may have freed our handle and
+            // BASS may have reused the DWORD for a new stream. Don't start the wrong stream.
+            guard self.pushStream != 0, self.pushStream == myStream else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — stream handle changed")
+                return
+            }
+            BASS_ChannelStart(self.pushStream)
+            os_log(.info, log: self.logger, "▶️ Resumed after pauseForInterval")
+        }
+        pendingResumeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
+    }
+
+    /// Cancel any pending resume scheduled by playSilence().
+    /// Called by stop/flush/skipAhead/unpause/freeStream paths to prevent
+    /// a stale BASS_ChannelStart firing after the stream has changed state.
+    func cancelPendingResume() {
+        if pendingResumeWorkItem != nil {
+            pendingResumeWorkItem?.cancel()
+            pendingResumeWorkItem = nil
+            // Invalidate any in-flight closure that may have already passed the cancel check.
+            pauseGeneration += 1
+            os_log(.debug, log: logger, "🚫 Cancelled pending resume work item")
         }
     }
 
@@ -741,6 +791,7 @@ class AudioStreamDecoder {
 
             // Recreate push stream with correct format
             if pushStream != 0 {
+                cancelPendingResume()  // Stream identity changes; invalidate any pending resume.
                 BASS_StreamFree(pushStream)
             }
 
@@ -1232,6 +1283,11 @@ class AudioStreamDecoder {
         isDecoding = false
         stopDecoding()
 
+        // Cancel any pending sync-correction resume before freeing.
+        // Generation counter inside cancelPendingResume defends against BASS handle
+        // reuse if the freed DWORD is allocated to a new stream.
+        cancelPendingResume()
+
         // Free stream (automatically removes all syncs/DSP/FX per BASS documentation)
         if pushStream != 0 {
             BASS_StreamFree(pushStream)
@@ -1433,6 +1489,7 @@ class AudioStreamDecoder {
         // The buffer is now empty, so this is safe
         if pushStream != 0 {
             os_log(.error, log: logger, "[APP-RECOVERY] 🧹 Freeing old push stream before recreation")
+            cancelPendingResume()  // Stream identity changes; invalidate any pending resume.
             BASS_StreamFree(pushStream)
             pushStream = 0
         }
