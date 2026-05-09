@@ -43,7 +43,17 @@ class SlimProtoCoordinator: ObservableObject {
     private(set) var lastKnownHost: String = ""
     private(set) var lastKnownPort: UInt16 = 3483
     private var playbackHeartbeatTimer: Timer?
-    
+
+    // 15s polling timer for radio (duration=0) streams. Necessary because LMS
+    // typically transcodes radio source streams (Shoutcast/AAC with ICY) into
+    // FLAC for mobile clients, which strips ICY metadata before BASS sees it.
+    // BASS_SYNC_META therefore never fires for transcoded radio, leaving lock
+    // screen / Now Playing artwork stale on track changes. The timer polls
+    // fetchCurrentTrackMetadata() so LMS-side metadata (which Material WebView
+    // already sees via cometd) reaches NowPlayingManager. Self-disables when
+    // the stream turns out to have a known duration (file/podcast).
+    private var metadataRefreshTimer: Timer?
+
     // MARK: - Background State Tracking
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
@@ -345,7 +355,37 @@ class SlimProtoCoordinator: ObservableObject {
         playbackHeartbeatTimer?.invalidate()
         playbackHeartbeatTimer = nil
     }
-    
+
+    /// Polls fresh metadata every 15s for radio streams (duration=0). Mirrors
+    /// the lifecycle of startPlaybackHeartbeat — tied to active playback only.
+    /// First tick checks duration; if > 0 (track-based content) the timer
+    /// stops itself, so this is safe to call unconditionally on stream start.
+    private func startRadioMetadataRefreshTimer() {
+        stopRadioMetadataRefreshTimer()
+        metadataRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+
+            // Self-disable for track-based content; sendTrackStarted handles those refreshes.
+            let duration = self.audioManager.getDuration()
+            if duration > 0 {
+                self.stopRadioMetadataRefreshTimer()
+                return
+            }
+
+            // Skip while paused or lock-screen-paused; resume() restarts the timer.
+            let playerState = self.audioManager.getPlayerState()
+            guard playerState == "Playing", !self.commandHandler.isPausedByLockScreen else { return }
+
+            os_log(.debug, log: self.logger, "🔄 Radio metadata refresh tick")
+            self.fetchCurrentTrackMetadata()
+        }
+    }
+
+    private func stopRadioMetadataRefreshTimer() {
+        metadataRefreshTimer?.invalidate()
+        metadataRefreshTimer = nil
+    }
+
     // MARK: - Connection State (Enhanced)
     var connectionState: String {
         return connectionManager.connectionState.displayName
@@ -907,16 +947,18 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Start periodic server time fetching for lock screen updates
         startServerTimeFetching()
-        
+
         // Start the 1-second heartbeat timer (like squeezelite)
         startPlaybackHeartbeat()
-        
+
+        // Start radio metadata refresh poll (self-disables for non-radio streams).
+        startRadioMetadataRefreshTimer()
+
         // Get initial metadata for new stream
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.fetchCurrentTrackMetadata()
-            // Note: ICY metadata for radio streams will be handled automatically by BASS callbacks
         }
-        
+
         // Fetch server time after connection stabilizes
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.fetchServerTime()
@@ -962,6 +1004,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Start the 1-second heartbeat timer (like squeezelite)
         startPlaybackHeartbeat()
 
+        // Start radio metadata refresh poll (self-disables for non-radio streams).
+        startRadioMetadataRefreshTimer()
+
         // Get initial metadata for new stream
         // CRITICAL: For gapless transitions, defer metadata until track boundary!
         // sendTrackStarted() will call fetchCurrentTrackMetadata() at the right time.
@@ -992,7 +1037,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Normal foreground or background pause - let background handler deal with position saving
         audioManager.pause()
         stopPlaybackHeartbeat()
-        
+        stopRadioMetadataRefreshTimer()
+
         if !isAppInBackground {
             client.sendStatus("STMp")
         }
@@ -1014,12 +1060,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Restart heartbeat when resumed
         startPlaybackHeartbeat()
-        
+
+        // Restart radio metadata refresh poll when resumed
+        startRadioMetadataRefreshTimer()
+
         // Fetch initial metadata after resume
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.fetchCurrentTrackMetadata()
         }
-        
+
         client.sendStatus("STMr")
     }
 
@@ -1041,6 +1090,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Stop heartbeat when stopped
         stopPlaybackHeartbeat()
+
+        // Stop radio metadata refresh poll
+        stopRadioMetadataRefreshTimer()
 
         // Note: ICY metadata callbacks are handled automatically by BASS
 
