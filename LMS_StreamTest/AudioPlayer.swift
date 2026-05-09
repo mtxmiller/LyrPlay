@@ -14,7 +14,6 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerDidReachEnd()
     func audioPlayerTimeDidUpdate(_ time: Double)
     func audioPlayerDidStall()
-    func audioPlayerDidReceiveMetadataUpdate()
     func audioPlayerRequestsSeek(_ timeOffset: Double)  // For transcoding pipeline fixes
     func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?))  // ICY metadata from radio streams
 }

@@ -240,6 +240,16 @@ class SlimProtoCoordinator: ObservableObject {
         fetchCurrentTrackMetadata()
     }
 
+    /// Whether ICY metadata should be pushed back to LMS via the squeezelite META command.
+    /// Rule #11: ICY metadata for duration=0 (infinite radio) streams crashes LMS
+    /// XMLBrowser.pm line 1975 ("Can't call method 'duration' on an undefined value").
+    /// Only file/streamable content with a known duration can safely receive META.
+    /// Extracted as a pure predicate so the rule-#11 invariant is unit-testable
+    /// without constructing a full SlimProtoCoordinator.
+    internal static func shouldSendICYToLMS(streamDuration: TimeInterval) -> Bool {
+        return streamDuration > 0
+    }
+
     func handleICYMetadata(_ metadata: (title: String?, artist: String?)) {
         // Filter duplicate metadata to prevent spam
         let isDuplicate = (metadata.title == lastSentICYMetadata.title &&
@@ -256,16 +266,27 @@ class SlimProtoCoordinator: ObservableObject {
         // Store metadata to prevent future duplicates
         lastSentICYMetadata = metadata
 
-        // CRITICAL FIX: Only send ICY metadata if stream has duration
-        // Metadata-less HLS/playlist streams have no duration, causing LMS XMLBrowser.pm crash:
-        // "Can't call method 'duration' on an undefined value at XMLBrowser.pm line 1975"
-        // Check stream duration before sending to prevent server-side Perl crashes
+        // Conditionally push ICY back to LMS for file streams (squeezelite META).
+        // Skip for duration=0 (radio) per rule #11 — would crash LMS XMLBrowser.pm.
         let duration = audioManager.getDuration()
-        if duration > 0 {
+        if Self.shouldSendICYToLMS(streamDuration: duration) {
             os_log(.info, log: logger, "🎵 Stream has duration (%.2fs) - sending ICY metadata to LMS", duration)
             sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
         } else {
             os_log(.info, log: logger, "🎵 Stream has no duration (infinite stream) - skipping ICY metadata send (prevents server crash)")
+        }
+
+        // Always refresh OUR view of metadata regardless of duration. ICY arrival
+        // signals a track change; LMS-side metadata (artwork URL, album, etc.) is
+        // updated by the source plugin (Radio Paradise, etc.) on its own schedule.
+        // Hybrid timing: 0.5s catches plugins that update metadata before our BASS
+        // callback fires; 2.5s safety net catches plugins that poll their source
+        // slightly after us. Two cheap JSON-RPC calls per ~3-5 minute radio track.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.requestFreshMetadata()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.requestFreshMetadata()
         }
     }
 

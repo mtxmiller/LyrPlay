@@ -531,18 +531,6 @@ extension AudioManager: AudioPlayerDelegate {
         // Intentionally no-op: rely on larger BASS verification window instead of server seek
     }
     
-    func audioPlayerDidReceiveMetadataUpdate() {
-        os_log(.info, log: logger, "🎵 Audio player detected metadata update - requesting fresh metadata")
-
-        // Notify the coordinator to fetch fresh metadata
-        if let slimClient = slimClient {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                // Request fresh metadata from server
-                slimClient.requestFreshMetadata()
-            }
-        }
-    }
-
     func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?)) {
         // Forward ICY metadata to SlimProto coordinator (logging handled there)
         slimClient?.handleICYMetadata(metadata)
