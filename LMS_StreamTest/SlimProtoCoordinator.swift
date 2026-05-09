@@ -380,16 +380,9 @@ class SlimProtoCoordinator: ObservableObject {
 
             // Skip while paused or lock-screen-paused; resume() restarts the timer.
             let playerState = self.audioManager.getPlayerState()
-            if playerState != "Playing" {
-                os_log(.debug, log: self.logger, "🔄 Radio metadata tick skipped (state: %{public}s)", playerState)
-                return
-            }
-            if self.commandHandler.isPausedByLockScreen {
-                os_log(.debug, log: self.logger, "🔄 Radio metadata tick skipped (lock screen pause)")
-                return
-            }
+            guard playerState == "Playing", !self.commandHandler.isPausedByLockScreen else { return }
 
-            os_log(.info, log: self.logger, "🔄 Radio metadata refresh tick - fetching")
+            os_log(.debug, log: self.logger, "🔄 Radio metadata refresh tick")
             self.fetchCurrentTrackMetadata()
         }
         metadataRefreshTimer = timer
