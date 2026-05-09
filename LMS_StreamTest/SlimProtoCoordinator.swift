@@ -360,25 +360,40 @@ class SlimProtoCoordinator: ObservableObject {
     /// the lifecycle of startPlaybackHeartbeat — tied to active playback only.
     /// First tick checks duration; if > 0 (track-based content) the timer
     /// stops itself, so this is safe to call unconditionally on stream start.
+    /// Scheduled on RunLoop.main in .common mode so it fires reliably while
+    /// the app is backgrounded under UIBackgroundModes=audio (the default
+    /// .default mode can be paused for non-audio threads in background).
     private func startRadioMetadataRefreshTimer() {
         stopRadioMetadataRefreshTimer()
-        metadataRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+        os_log(.info, log: logger, "🔄 Starting radio metadata refresh timer (15s interval)")
+
+        let timer = Timer(timeInterval: 15.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
 
             // Self-disable for track-based content; sendTrackStarted handles those refreshes.
             let duration = self.audioManager.getDuration()
             if duration > 0 {
+                os_log(.info, log: self.logger, "🔄 Stream has duration %.2fs - stopping radio metadata refresh timer", duration)
                 self.stopRadioMetadataRefreshTimer()
                 return
             }
 
             // Skip while paused or lock-screen-paused; resume() restarts the timer.
             let playerState = self.audioManager.getPlayerState()
-            guard playerState == "Playing", !self.commandHandler.isPausedByLockScreen else { return }
+            if playerState != "Playing" {
+                os_log(.debug, log: self.logger, "🔄 Radio metadata tick skipped (state: %{public}s)", playerState)
+                return
+            }
+            if self.commandHandler.isPausedByLockScreen {
+                os_log(.debug, log: self.logger, "🔄 Radio metadata tick skipped (lock screen pause)")
+                return
+            }
 
-            os_log(.debug, log: self.logger, "🔄 Radio metadata refresh tick")
+            os_log(.info, log: self.logger, "🔄 Radio metadata refresh tick - fetching")
             self.fetchCurrentTrackMetadata()
         }
+        metadataRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopRadioMetadataRefreshTimer() {
