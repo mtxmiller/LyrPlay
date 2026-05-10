@@ -43,11 +43,21 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Update Timer
     private var updateTimer: Timer?
     private let updateInterval: TimeInterval = 1.0
-    
+
+    #if os(tvOS)
+    /// Most recently reported playback state — used by the tvOS idle-timer
+    /// hook so settings-toggle changes and lifecycle events can re-evaluate
+    /// the desired idle-timer state without re-deriving it from elsewhere.
+    private var lastReportedIsPlaying: Bool = false
+    #endif
+
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
         startUpdateTimer()
+        #if os(tvOS)
+        registerIdleTimerObservers()
+        #endif
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
     }
     
@@ -336,8 +346,12 @@ class NowPlayingManager: ObservableObject {
         }
         
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
+
+        #if os(tvOS)
+        reportPlaybackStateForIdleTimer(isPlaying)
+        #endif
     }
-    
+
     // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
         // SIMPLIFIED: Always update but with throttling
@@ -491,6 +505,63 @@ class NowPlayingManager: ObservableObject {
         stopUpdateTimer()
         clearNowPlayingInfo()
         enableRemoteCommands(false)
+        #if os(tvOS)
+        NotificationCenter.default.removeObserver(self)
+        #endif
         os_log(.info, log: logger, "Enhanced NowPlayingManager deinitialized")
     }
+
+    #if os(tvOS)
+    // MARK: - tvOS Idle Timer
+    //
+    // tvOS doesn't include PlaybackSessionController (iOS-only — CarPlay,
+    // MPRemoteCommandCenter, AVAudioSession interruption handling all live
+    // there). The Apple TV is a plugged-in living-room display where the
+    // 2-minute system screensaver is too aggressive for a music app, so we
+    // hook the idle timer here — at the single chokepoint that every play /
+    // pause transition routes through (`updateNowPlayingInfo`).
+
+    private func registerIdleTimerObservers() {
+        let center = NotificationCenter.default
+        center.addObserver(self,
+                           selector: #selector(handleAppDidEnterBackground),
+                           name: UIApplication.didEnterBackgroundNotification,
+                           object: nil)
+        center.addObserver(self,
+                           selector: #selector(handleAppWillEnterForeground),
+                           name: UIApplication.willEnterForegroundNotification,
+                           object: nil)
+    }
+
+    /// Called from `updateNowPlayingInfo` whenever the reported playback
+    /// state changes, and from the tvOS Settings toggle's `onChange`.
+    /// Mirrors the iOS gate (`keepScreenAwake && isPlaying`).
+    func applyIdleTimerSetting() {
+        let shouldDisable = SettingsManager.shared.keepScreenAwake && lastReportedIsPlaying
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = shouldDisable
+            os_log(.debug, log: self.logger, "💡 Idle timer disabled: %{public}s", shouldDisable ? "YES" : "NO")
+        }
+    }
+
+    @objc private func handleAppDidEnterBackground() {
+        // Always release the timer on background — Top Shelf / Home button
+        // shouldn't keep the screen awake even if playback is technically still
+        // running on the server side.
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    @objc private func handleAppWillEnterForeground() {
+        applyIdleTimerSetting()
+    }
+
+    fileprivate func reportPlaybackStateForIdleTimer(_ isPlaying: Bool) {
+        guard isPlaying != lastReportedIsPlaying else { return }
+        lastReportedIsPlaying = isPlaying
+        applyIdleTimerSetting()
+    }
+    #endif
 }
+

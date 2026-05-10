@@ -30,7 +30,7 @@ class SettingsManager: ObservableObject {
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
-    @Published var keepScreenAwake: Bool = false  // Prevent screen sleep during playback
+    @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -177,6 +177,19 @@ class SettingsManager: ObservableObject {
         #endif
     }()
 
+    /// Default for `keepScreenAwake`. tvOS defaults to ON because the Apple TV
+    /// is a plugged-in living-room display where users expect album art to stay
+    /// visible during playback (the 2-minute system screensaver is too aggressive
+    /// for a music app). iOS defaults to OFF — phones in pockets shouldn't burn
+    /// battery keeping the screen awake.
+    private static let keepScreenAwakeDefault: Bool = {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
     // MARK: - Singleton
     static let shared = SettingsManager()
 
@@ -252,7 +265,7 @@ class SettingsManager: ObservableObject {
             audioFormat = Self.defaultAudioFormat
         }
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
-        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? false
+        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? Self.keepScreenAwakeDefault
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false

@@ -91,6 +91,13 @@ struct SettingsView: View {
             TextField("Player name", text: $settings.playerName)
                 .accessibilityLabel("Player name")
                 .listRowBackground(Color.clear)
+
+            Toggle("Keep screen awake during playback", isOn: $settings.keepScreenAwake)
+                .listRowBackground(Color.clear)
+                .onChange(of: settings.keepScreenAwake) { _, _ in
+                    settings.saveSettings()
+                    AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
+                }
         }
     }
 
