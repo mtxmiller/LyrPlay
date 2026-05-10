@@ -281,12 +281,12 @@ struct NowPlayingView: View {
                 .font(.system(size: 56, weight: .bold))
                 .foregroundStyle(.primary)
 
-            Text("Start a track from LyrPlay on your phone or your Lyrion server's web interface.")
+            Text("Start a track from the Library or Search tab, from LyrPlay on your phone, or from your Lyrion server's web interface.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
 
-            Text("\(settings.activeServerHost):\(settings.activeServerWebPort)")
+            Text(verbatim: "\(settings.activeServerHost):\(settings.activeServerWebPort)")
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .padding(.top, 8)
