@@ -6,7 +6,7 @@ import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float)
-    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) // NEW: For gapless push streams
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) // NEW: For gapless push streams. autostart from SlimProto strm packet ('0'/'1' for direct, '0' = wait for u).
     func didPauseStream()
     func didResumeStream()
     func didStopStream()
@@ -381,7 +381,7 @@ class SlimProtoCommandHandler: ObservableObject {
         if isDirectStream {
             // Direct stream - use push stream for gapless (autostart 0 or 1)
             os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")
-            delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+            delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain, autostart: autostart)
         } else {
             // HTTP URL stream - use traditional pull stream (autostart 2 or 3)
             os_log(.info, log: logger, "🌐 Routing to HTTP stream (traditional URL stream)")

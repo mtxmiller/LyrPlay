@@ -72,6 +72,7 @@ class SlimProtoCoordinator: ObservableObject {
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
     private var jiffiesOffsetList: [TimeInterval] = []  // Track drift for corrections (max 8 entries)
     private var syncGroupID: Data?  // 10-byte sync group ID from serv packet (PHASE 5)
+    private let syncController: SyncController  // BASS_ATTRIB_FREQ rate matching for sub-100ms drift
 
     // MARK: - ICY Metadata Tracking
     private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
@@ -91,10 +92,12 @@ class SlimProtoCoordinator: ObservableObject {
         self.commandHandler = SlimProtoCommandHandler()
         self.connectionManager = SlimProtoConnectionManager()
         self.simpleTimeTracker = SimpleTimeTracker() // NEW: Initialize Material-style tracker
-        
+        self.syncController = SyncController(audioManager: audioManager)
+
         setupDelegation()
         setupAudioCallbacks()
         setupAudioPlayerIntegration()
+        setupSyncController()
         #if os(iOS)
         setupBackgroundObservers()
         #endif
@@ -354,6 +357,10 @@ class SlimProtoCoordinator: ObservableObject {
             if playerState == "Playing" && !self.commandHandler.isPausedByLockScreen {
                 // Send STMt to server (will fail silently if disconnected)
                 self.client.sendStatus("STMt")
+                // Drive SyncController on the same cadence as STMt — server measures
+                // drift from STMt timestamps, so our rate corrections decide right when
+                // the server sees fresh data.
+                self.tickSyncController()
             }
         }
         playbackHeartbeatTimer = timer
@@ -704,6 +711,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         connectionManager.didConnect()
+        syncControllerReset(reason: "slimProtoDidConnect")
 
         // Don't start any status timers here
         // Heartbeat only starts during playback
@@ -982,8 +990,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         }
     }
 
-    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) {
-        os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
+        // autostart byte from the SlimProto strm packet:
+        //   '0' (0x30) = direct stream, WAIT for unpause ('u') with synchronized jiffies
+        //   '1' (0x31) = direct stream, autoplay immediately
+        // For '0' we must defer BASS_ChannelPlay until the sync timer fires; otherwise
+        // BASS gets ~300ms of head start over squeezelite peers in the sync group.
+        let waitForSyncStart = (autostart == UInt8(ascii: "0"))
+        os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f (autostart='%c', waitForSync=%{public}s)",
+               format, startTime, replayGain, Int32(autostart), waitForSyncStart ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url)
 
         // Stop any existing playback and timers first
@@ -997,7 +1012,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Start push stream playback with AudioStreamDecoder
         // isGapless: true means DON'T flush buffer, let old audio finish
-        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime)
+        // waitForSyncStart: true means defer BASS_ChannelPlay until 'u' with sync jiffies arrives
+        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForSyncStart: waitForSyncStart)
 
         // Reset gapless flag after use
         expectingGaplessTransition = false
@@ -1046,7 +1062,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
-        
+        syncControllerReset(reason: "didPauseStream")
+
         // CRITICAL FIX: Update SimpleTimeTracker with pause state
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
         simpleTimeTracker.updateFromServer(time: currentTime, playing: false)
@@ -1152,6 +1169,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let timestamp = Date()
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
+        syncControllerReset(reason: "sendTrackStarted/STMs")
 
         // UNIFIED RECOVERY: Increment track index on boundary (LMS_StreamTest-6lb)
         // This works even when disconnected - ensures our local index tracks gapless transitions
@@ -2147,21 +2165,75 @@ extension SlimProtoCoordinator {
     /// Start playback at a specific jiffies time (for multi-room audio synchronization)
     func startAtJiffies(_ targetJiffies: TimeInterval) {
         os_log(.info, log: logger, "🎯 Coordinator forwarding synchronized start to AudioManager")
+        // SyncController reset: jiffies-synchronized start re-anchors playback to the
+        // server's clock. Any prior drift residual is meaningless across this point,
+        // and the wait window for the target jiffies would otherwise be attributed
+        // as phantom drift by tick()'s self-decay math.
+        syncControllerReset(reason: "startAtJiffies")
         audioManager.startAtJiffies(targetJiffies)
     }
 
     // MARK: - Sync Drift Corrections
 
-    /// Play silence for a duration (timed pause for sync drift correction)
+    /// Play silence for a duration (timed pause for sync drift correction).
+    /// Sub-100ms corrections route through SyncController's rate-match path
+    /// (inaudible); larger corrections fall through to the existing pause/resume.
     func playSilence(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏸️🔇 Coordinator forwarding play silence to AudioManager")
-        audioManager.playSilence(duration: duration)
+        let ms = duration * 1000.0
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.settings.experimentalRateMatching {
+                if self.syncController.ingestPlaySilence(durationMs: ms) {
+                    return  // absorbed by rate-match path
+                }
+            }
+            os_log(.info, log: self.logger, "⏸️🔇 Coordinator forwarding play silence (%.1fms) to AudioManager", ms)
+            self.audioManager.playSilence(duration: duration)
+        }
     }
 
-    /// Skip ahead by consuming buffer (sync drift correction)
+    /// Skip ahead by consuming buffer (sync drift correction).
+    /// Sub-100ms corrections route through SyncController's rate-match path;
+    /// larger corrections fall through to the existing byte-discard mechanism.
     func skipAhead(duration: TimeInterval) {
-        os_log(.info, log: logger, "⏩ Coordinator forwarding skip ahead to AudioManager")
-        audioManager.skipAhead(duration: duration)
+        let ms = duration * 1000.0
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.settings.experimentalRateMatching {
+                if self.syncController.ingestSkipAhead(durationMs: ms) {
+                    return  // absorbed by rate-match path
+                }
+            }
+            os_log(.info, log: self.logger, "⏩ Coordinator forwarding skip ahead (%.1fms) to AudioManager", ms)
+            self.audioManager.skipAhead(duration: duration)
+        }
     }
+
+    // MARK: - SyncController wiring
+
+    private func setupSyncController() {
+        syncController.positionBytesProvider = { [weak self] in
+            self?.audioManager.pushStreamPositionBytes() ?? 0
+        }
+        syncController.nominalBytesPerSecondProvider = { [weak self] in
+            self?.audioManager.nominalBytesPerSecond ?? 352800
+        }
+    }
+
+    /// Called from the 1Hz playbackHeartbeatTimer block.
+    fileprivate func tickSyncController() {
+        guard settings.experimentalRateMatching else { return }
+        syncController.tick()
+    }
+
+    /// Public reset hook for SyncController — called from lifecycle sites.
+    func syncControllerReset(reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.syncController.reset(reason: reason)
+        }
+    }
+
+    /// Debug snapshot for Phase 2 verification harness.
+    var debugSyncController: SyncController { syncController }
 
 }

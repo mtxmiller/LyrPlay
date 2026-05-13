@@ -421,6 +421,23 @@ struct SettingsView: View {
                         value: appVersionDisplay,
                         valueColor: .secondary
                     )
+
+                    #if DEBUG
+                    Button(action: {
+                        Phase2SyncControllerVerification.runFullTest(
+                            coordinator: coordinator,
+                            audioManager: AudioManager.shared
+                        )
+                    }) {
+                        SettingsRow(
+                            icon: "waveform.path.ecg",
+                            title: "Run Sync Controller Tests",
+                            value: "~35s, requires playing track",
+                            valueColor: .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    #endif
                 }
             }
             .navigationTitle("Settings")

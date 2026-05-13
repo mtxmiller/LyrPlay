@@ -49,6 +49,16 @@ class AudioStreamDecoder {
     /// stream is active.
     var activePushStream: HSTREAM { pushStream }
 
+    /// Current push stream playback position in bytes (for SyncController self-decay).
+    /// Returns 0 if no active stream.
+    func pushStreamPositionBytes() -> UInt64 {
+        guard pushStream != 0 else { return 0 }
+        return BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+    }
+
+    /// Nominal bytes per second (sampleRate × channels × 4 for float32). For SyncController.
+    var nominalBytesPerSecond: Int { sampleRate * channels * 4 }
+
     /// BASS decoder stream handle (decodes HTTP URL without playing)
     private var decoderStream: HSTREAM = 0
 
@@ -213,6 +223,16 @@ class AudioStreamDecoder {
         startSyncStartMonitoring(targetJiffies: targetJiffies)
     }
 
+    /// Pre-set the sync-waiting flag, called when the server's 'strm s' command has
+    /// autostart='0' or '2' (= "wait for unpause"). This prevents `flushBuffer()` and
+    /// `startPlayback()` from calling BASS_ChannelPlay before the matching 'u' command
+    /// arrives with synchronized jiffies. Without this, BASS plays ~300ms of audio
+    /// during the 's' → 'u' gap, putting us ahead of squeezelite peers at sync start.
+    func markSyncStartPending() {
+        isWaitingForSyncStart = true
+        os_log(.info, log: logger, "🎯 Sync start pending (autostart='0'/'2') — will wait for u command")
+    }
+
     /// Start monitoring timer for synchronized start
     private func startSyncStartMonitoring(targetJiffies: TimeInterval) {
         // Clean up any existing timer first
@@ -245,6 +265,28 @@ class AudioStreamDecoder {
                     return
                 }
 
+                // === [SYNC-DIAG] Pre-Start snapshot ===========================
+                let scheduleSkew = currentJiffies - targetJiffies
+                let posBytesBefore = BASS_ChannelGetPosition(self.pushStream, DWORD(BASS_POS_BYTE))
+                let posSecBefore = BASS_ChannelBytes2Seconds(self.pushStream, posBytesBefore)
+                let queueBytes = BASS_StreamPutData(self.pushStream, nil, 0)
+                let playbackBufBytes = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+                #if os(iOS)
+                let halLatency = AVAudioSession.sharedInstance().outputLatency
+                #else
+                let halLatency = 0.0
+                #endif
+                let bytesPerSec = Double(self.sampleRate * self.channels * 4)
+                let queueSec = Double(queueBytes) / bytesPerSec
+                let pbBufSec = (playbackBufBytes == DWORD.max) ? 0 : Double(playbackBufBytes) / bytesPerSec
+                os_log(.info, log: self.logger,
+                       "[SYNC-DIAG] pre-start: schedule_skew=%.3fms, pos=%.3fs (%llu B), push_queue=%.3fs (%u B), playback_buf=%.3fs (%u B), HAL=%.3fs, total_pipeline=%.3fs",
+                       scheduleSkew * 1000, posSecBefore, posBytesBefore,
+                       queueSec, queueBytes, pbBufSec, playbackBufBytes,
+                       halLatency, queueSec + pbBufSec + halLatency)
+                let wallAtStart = Date()
+                // ============================================================
+
                 let result = BASS_ChannelPlay(self.pushStream, 0)
 
                 if result != 0 {
@@ -255,6 +297,30 @@ class AudioStreamDecoder {
                     }
 
                     os_log(.info, log: self.logger, "✅ Synchronized playback started successfully (muted: %{public}s)", self.muteNextStream ? "YES" : "NO")
+
+                    // === [SYNC-DIAG] Post-Start +1s snapshot ===================
+                    // Re-read position 1s after BASS_ChannelPlay so we can compute
+                    // the effective playback rate during the first second of resumed
+                    // audio. If rate < nominal, there's a startup gap during which
+                    // BASS hadn't fully spun up but jiffies still advanced — which is
+                    // the cause we're hunting.
+                    let myStream = self.pushStream
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self = self else { return }
+                        guard self.pushStream != 0, self.pushStream == myStream else { return }
+                        let posBytesAfter = BASS_ChannelGetPosition(self.pushStream, DWORD(BASS_POS_BYTE))
+                        let wallElapsed = Date().timeIntervalSince(wallAtStart)
+                        let bytesAdvanced = (posBytesAfter >= posBytesBefore) ? (posBytesAfter - posBytesBefore) : 0
+                        let observedBps = Double(bytesAdvanced) / wallElapsed
+                        let effectiveRate = observedBps / bytesPerSec
+                        let queueAfter = BASS_StreamPutData(self.pushStream, nil, 0)
+                        let pbBufAfter = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+                        os_log(.info, log: self.logger,
+                               "[SYNC-DIAG] +%.3fs after start: bytes_advanced=%llu (expected %.0f), effective_rate=%.4fx, push_queue=%u B, playback_buf=%u B",
+                               wallElapsed, bytesAdvanced, bytesPerSec * wallElapsed,
+                               effectiveRate, queueAfter, pbBufAfter)
+                    }
+                    // ============================================================
                 } else {
                     let error = BASS_ErrorGetCode()
                     os_log(.error, log: self.logger, "❌ Synchronized play failed: %d", error)
@@ -353,6 +419,28 @@ class AudioStreamDecoder {
             pauseGeneration += 1
             os_log(.debug, log: logger, "🚫 Cancelled pending resume work item")
         }
+    }
+
+    // MARK: - Rate Matching for Multi-Room Audio Drift Correction
+
+    /// Slide BASS_ATTRIB_FREQ to apply a small playback-rate offset.
+    /// Used by SyncController for sub-100ms drift corrections — inaudible at ±0.5%.
+    /// - Parameter offsetPct: fraction (e.g. 0.005 = +0.5%, -0.005 = -0.5%). Pass 0 to return to nominal.
+    func setRateOffsetPct(_ offsetPct: Double) {
+        guard pushStream != 0 else { return }
+        let newFreq = Float(Double(sampleRate) * (1.0 + offsetPct))
+        let result = BASS_ChannelSlideAttribute(pushStream, DWORD(BASS_ATTRIB_FREQ), newFreq, DWORD(SyncControllerConstants.slideDurationMs))
+        if result == 0 {
+            os_log(.error, log: logger, "❌ SlideAttribute FREQ failed: %d", BASS_ErrorGetCode())
+        }
+    }
+
+    /// Snap BASS_ATTRIB_FREQ immediately (no slide). Used by SyncController.reset()
+    /// on stream recreate / reconnect where a smooth glissando would be the wrong shape.
+    func setRateOffsetPctImmediate(_ offsetPct: Double) {
+        guard pushStream != 0 else { return }
+        let newFreq = Float(Double(sampleRate) * (1.0 + offsetPct))
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_FREQ), newFreq)
     }
 
     // MARK: - Buffer Skip Ahead for Multi-Room Audio
@@ -489,6 +577,13 @@ class AudioStreamDecoder {
         }
 
         os_log(.info, log: logger, "✅ Push stream created: handle=%d", pushStream)
+
+        // SyncController hook (D4): fresh stream → reset rate offset & drift residual.
+        // Marshal to main so the controller's main-thread invariant holds.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.audioStreamDecoderDidRecreatePushStream(self)
+        }
     }
 
     /// Set up BASS sync callbacks for monitoring
@@ -893,6 +988,28 @@ class AudioStreamDecoder {
         // Method 1: Set position to 0 to reset stream (per BASS docs)
         // This resets both buffer contents AND position counter
         BASS_ChannelSetPosition(pushStream, 0, DWORD(BASS_POS_BYTE))
+
+        // Sync mode: don't restart playback here — the sync timer (after 'u' arrives)
+        // is responsible for the actual BASS_ChannelPlay. Calling it here would start
+        // BASS playing ~300ms before the synchronized start fires, putting us ahead
+        // of squeezelite peers in the sync group.
+        //
+        // CRITICAL: We must also explicitly PAUSE BASS. Coming from a previous track,
+        // the channel is in BASS_ACTIVE_PLAYING state — SetPosition(0) clears the queue
+        // contents but leaves the channel in PLAYING state, so as soon as the decoder
+        // pushes new data BASS consumes it. Pausing here gives a guaranteed STOPPED-or-
+        // PAUSED state until the sync timer's BASS_ChannelPlay() fires.
+        if isWaitingForSyncStart {
+            BASS_ChannelPause(pushStream)
+            trackStartPosition = 0
+            previousTrackStartPosition = 0
+            trackBoundaryPosition = nil
+            totalBytesPushed = 0
+            lastBufferDiagnosticBytes = 0
+            let stateAfter = BASS_ChannelIsActive(pushStream)
+            os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
+            return
+        }
 
         // Method 2: Restart to clear the buffer
         // BASS_ChannelPlay with restart=TRUE clears buffer contents
@@ -1620,7 +1737,14 @@ class AudioStreamDecoder {
     func hasValidStream() -> Bool {
         guard pushStream != 0 else { return false }
         let state = BASS_ChannelIsActive(pushStream)
-        return state == DWORD(BASS_ACTIVE_PLAYING) || state == DWORD(BASS_ACTIVE_PAUSED)
+        // PLAYING / PAUSED: actively in use.
+        // STOPPED + waiting for sync: fresh stream created via 's' command, queued for
+        //   synchronized start by the upcoming 'u'. Without this case, the 'u' command's
+        //   hasActiveStream check sees "STOPPED" and incorrectly routes to playlist-jump
+        //   recovery instead of letting the sync timer fire.
+        return state == DWORD(BASS_ACTIVE_PLAYING)
+            || state == DWORD(BASS_ACTIVE_PAUSED)
+            || (state == DWORD(BASS_ACTIVE_STOPPED) && isWaitingForSyncStart)
     }
 
     deinit {
@@ -1655,6 +1779,11 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Called when buffer reaches ready threshold (PHASE 7.7)
     /// This allows coordinator to send STMl notification to server for sync readiness
     func audioStreamDecoderBufferReady(_ decoder: AudioStreamDecoder)
+
+    /// Called immediately after a push stream is created or recreated.
+    /// Used by SyncController to clear drift residual and reset rate offset to nominal —
+    /// any prior offset is meaningless on a fresh stream.
+    func audioStreamDecoderDidRecreatePushStream(_ decoder: AudioStreamDecoder)
 }
 
 /// Track metadata for boundary updates

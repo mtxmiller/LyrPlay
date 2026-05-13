@@ -115,6 +115,7 @@
 				AudioStreamDecoder.swift,
 				KeychainManager.swift,
 				NowPlayingManager.swift,
+				Phase2SyncControllerVerification.swift,
 				PlaylistModels.swift,
 				PurchaseManager.swift,
 				ServerDiscoveryManager.swift,
@@ -124,6 +125,7 @@
 				SlimProtoCommandHandler.swift,
 				SlimProtoConnectionManager.swift,
 				SlimProtoCoordinator.swift,
+				SyncController.swift,
 				VisualizerEngine.swift,
 			);
 			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;

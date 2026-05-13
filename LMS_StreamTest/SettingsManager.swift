@@ -31,6 +31,7 @@ class SettingsManager: ObservableObject {
     @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
+    @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -138,6 +139,7 @@ class SettingsManager: ObservableObject {
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
         static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
+        static let experimentalRateMatching = "ExperimentalRateMatching"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -269,6 +271,7 @@ class SettingsManager: ObservableObject {
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
+        experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
 
         // Load credentials from Keychain
         if let primaryCreds = KeychainManager.shared.load(for: .primary) {
@@ -314,6 +317,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
+        UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
 
         // Save credentials to Keychain
         if !serverUsername.isEmpty {

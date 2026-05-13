@@ -37,6 +37,21 @@ class AudioManager: NSObject, ObservableObject {
         if pushHandle != 0 { return pushHandle }
         return audioPlayer.activeBASSStream
     }
+
+    // MARK: - Rate Matching (forwarders for SyncController)
+    func setRateOffsetPct(_ offsetPct: Double) {
+        streamDecoder.setRateOffsetPct(offsetPct)
+    }
+
+    func setRateOffsetPctImmediate(_ offsetPct: Double) {
+        streamDecoder.setRateOffsetPctImmediate(offsetPct)
+    }
+
+    func pushStreamPositionBytes() -> UInt64 {
+        streamDecoder.pushStreamPositionBytes()
+    }
+
+    var nominalBytesPerSecond: Int { streamDecoder.nominalBytesPerSecond }
     
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
@@ -130,8 +145,8 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
-    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0) {
-        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d)", format, sampleRate, isGapless)
+    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForSyncStart: Bool = false) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d, waitForSync: %{public}s)", format, sampleRate, isGapless, waitForSyncStart ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
         // Configure audio session
@@ -145,6 +160,14 @@ class AudioManager: NSObject, ObservableObject {
             // First time: Create push stream
             os_log(.info, log: logger, "📊 Creating new push stream (first track)")
             streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+
+            // Sync-wait must be set AFTER initializePushStream (its delegate callback
+            // may invoke SyncController.reset which doesn't touch the flag, but the
+            // ordering is clearest this way) and BEFORE startPlayback() so its existing
+            // isWaitingForSyncStart guard takes effect.
+            if waitForSyncStart {
+                streamDecoder.markSyncStartPending()
+            }
 
             // CRITICAL: Apply ReplayGain BEFORE starting playback
             // Without this, BASS_ChannelPlay initializes the DSP chain with VOLDSP=1.0 (unity),
@@ -174,6 +197,14 @@ class AudioManager: NSObject, ObservableObject {
             // Ensure output device is active before flushing buffer
             BASS_Start()
             os_log(.info, log: logger, "🔊 Ensured BASS output device active before buffer flush")
+
+            // Sync-wait must be set AFTER stopDecoding() because stopDecoding clears
+            // isWaitingForSyncStart (it treats waiting state as cancellable on manual
+            // stop). For track-change-during-sync we need the flag intact so flushBuffer
+            // and any subsequent startPlayback honor it.
+            if waitForSyncStart {
+                streamDecoder.markSyncStartPending()
+            }
 
             // Now safe to flush buffer - device is active and ready for new audio
             streamDecoder.flushBuffer()
@@ -674,5 +705,9 @@ extension AudioManager: AudioStreamDecoderDelegate {
         // Notify server that buffer is loaded and ready for synchronized start
         // This allows server to transition from WAITING_TO_SYNC to PLAYING
         slimClient?.sendBufferLoaded()
+    }
+
+    func audioStreamDecoderDidRecreatePushStream(_ decoder: AudioStreamDecoder) {
+        slimClient?.syncControllerReset(reason: "pushStreamRecreated")
     }
 }
