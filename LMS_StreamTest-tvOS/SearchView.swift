@@ -128,7 +128,7 @@ struct SearchView: View {
     }
 
     private var historyList: some View {
-        List {
+        TVList {
             Section("Recent searches") {
                 ForEach(history, id: \.self) { term in
                     Button {
@@ -143,11 +143,10 @@ struct SearchView: View {
                         .padding(.vertical, 8)
                     }
                     .buttonStyle(.plain)
-                    .listRowBackground(Color.clear)
+                    .tvListRow()
                 }
             }
         }
-        .listStyle(.plain)
     }
 
     private var noResultsView: some View {
@@ -167,7 +166,7 @@ struct SearchView: View {
     private var resultsView: some View {
         // D3=A: sectioned single screen. Empty sections suppressed.
         // ForEach identity by parsed item id (98q.9 /review hardening).
-        List {
+        TVList {
             if !artistResults.isEmpty {
                 Section("Artists") {
                     ForEach(artistResults) { artist in
@@ -179,7 +178,7 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
+                        .tvListRow()
                     }
                 }
             }
@@ -198,7 +197,7 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
+                        .tvListRow()
                     }
                 }
             }
@@ -217,7 +216,7 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
+                        .tvListRow()
                     }
                 }
             }
@@ -233,12 +232,11 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
+                        .tvListRow()
                     }
                 }
             }
         }
-        .listStyle(.plain)
     }
 
     private func playlistSecondary(_ playlist: Playlist) -> String? {

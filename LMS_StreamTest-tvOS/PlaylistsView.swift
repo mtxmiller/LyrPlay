@@ -55,7 +55,7 @@ struct PlaylistsView: View {
 
     private var listView: some View {
         // Identity by playlist.id: stable, no dupes possible (LMS playlist names are unique).
-        List {
+        TVList {
             ForEach(playlists, id: \.id) { playlist in
                 Button {
                     playPlaylist(playlist)
@@ -68,10 +68,9 @@ struct PlaylistsView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .listRowBackground(Color.clear)
+                .tvListRow()
             }
         }
-        .listStyle(.plain)
     }
 
     private func secondaryText(for playlist: Playlist) -> String? {

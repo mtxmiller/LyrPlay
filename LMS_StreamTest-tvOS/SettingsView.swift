@@ -16,7 +16,7 @@ import os.log
 ///     bleed through.)
 ///   - About: 4 non-focusable rows — version, build, host, player MAC.
 ///
-/// Row pattern: `Button + .buttonStyle(.plain) + .listRowBackground(Color.clear)`
+/// Row pattern: `Button + .buttonStyle(.plain) + .tvListRow()`
 /// matches the project convention (SearchView / AlbumListView / FavoritesView).
 /// `NavigationLink` gives tvOS Lists a wide white-pill focus halo that
 /// obscures the row text — Buttons + manual navigation via `.navigationDestination`
@@ -44,7 +44,7 @@ struct SettingsView: View {
     var body: some View {
         TVScreen {
             NavigationStack {
-                List {
+                TVList(.settings) {
                     serverSection
                     playerSection
                     audioSection
@@ -82,7 +82,7 @@ struct SettingsView: View {
                 Label("Change Server", systemImage: "arrow.triangle.2.circlepath")
             }
             .buttonStyle(.plain)
-            .listRowBackground(Color.clear)
+            .tvListRow()
         }
     }
 
@@ -92,10 +92,10 @@ struct SettingsView: View {
         Section("Player") {
             TextField("Player name", text: $settings.playerName)
                 .accessibilityLabel("Player name")
-                .listRowBackground(Color.clear)
+                .tvListRow()
 
             Toggle("Keep screen awake during playback", isOn: $settings.keepScreenAwake)
-                .listRowBackground(Color.clear)
+                .tvListRow()
                 .onChange(of: settings.keepScreenAwake) { _, _ in
                     settings.saveSettings()
                     AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
@@ -121,7 +121,7 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
-            .listRowBackground(Color.clear)
+            .tvListRow()
         }
     }
 
@@ -153,7 +153,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .focusable(false)
-        .listRowBackground(Color.clear)
+        .tvListRow()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label), \(value)")
     }
@@ -166,7 +166,7 @@ private struct FormatPickerView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        List {
+        TVList(.settings) {
             ForEach(SettingsManager.AudioFormat.allCases, id: \.self) { fmt in
                 Button {
                     selection = fmt
@@ -181,7 +181,7 @@ private struct FormatPickerView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .listRowBackground(Color.clear)
+                .tvListRow()
             }
         }
         .navigationTitle("Audio Format")

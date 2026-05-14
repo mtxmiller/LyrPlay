@@ -104,7 +104,7 @@ struct AlbumListView: View {
     private var listView: some View {
         // Identity by album.id: stable across re-fetches so SwiftUI diffs rows correctly
         // when the server reorders RP. Avoids row remount + AsyncImage refetch on every refresh.
-        List {
+        TVList {
             ForEach(albums, id: \.id) { album in
                 Button {
                     playAlbum(album)
@@ -120,10 +120,9 @@ struct AlbumListView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .listRowBackground(Color.clear)
+                .tvListRow()
             }
         }
-        .listStyle(.plain)
     }
 
     private func rowSecondary(for album: Album) -> String? {

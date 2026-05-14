@@ -17,10 +17,10 @@ struct QueueView: View {
     var body: some View {
         TVScreen(artwork: nowPlaying.currentArtwork) {
             ScrollViewReader { proxy in
-                List {
+                TVList {
                     if tracks.isEmpty && !isLoading {
                         emptyState
-                            .listRowBackground(Color.clear)
+                            .tvListRow()
                     } else {
                         // Identity by array offset (not track.id): LMS playlists may contain
                         // the same track at multiple positions, which would collide on .id.
@@ -39,11 +39,10 @@ struct QueueView: View {
                             }
                             .buttonStyle(.plain)
                             .id(index)
-                            .listRowBackground(Color.clear)
+                            .tvListRow()
                         }
                     }
                 }
-                .listStyle(.plain)
                 .navigationTitle("Up Next")
                 // Queue is presented via .fullScreenCover from NowPlayingView, so its
                 // responder chain is rooted at the cover (NOT the TabView). ContentView's

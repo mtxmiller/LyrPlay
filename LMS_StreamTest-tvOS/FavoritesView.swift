@@ -59,7 +59,7 @@ struct FavoritesView: View {
 
     private var listView: some View {
         // Identity by array offset: favorite ids can repeat in folder-flattened cases.
-        List {
+        TVList {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 Button {
                     playFavorite(item)
@@ -71,10 +71,9 @@ struct FavoritesView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .listRowBackground(Color.clear)
+                .tvListRow()
             }
         }
-        .listStyle(.plain)
     }
 
     // MARK: - Fetch
