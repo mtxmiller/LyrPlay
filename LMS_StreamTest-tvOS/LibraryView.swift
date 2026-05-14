@@ -51,7 +51,12 @@ struct LibraryView: View {
         .pickerStyle(.segmented)
         .padding(.horizontal, 80)
         .padding(.top, 24)
-        .padding(.bottom, 12)
+        // Clearance for the first list row's focus highlight: when the top row
+        // is focused, the tvOS focus engine scales it up ~10-15pt. With only a
+        // small gap the highlight collided with this picker bar (mherger beta
+        // feedback #2 — visible on real Apple TV hardware, where overscan
+        // tightens the layout; the simulator masked it). Tune here if needed.
+        .padding(.bottom, 36)
     }
 
     // MARK: - Content
