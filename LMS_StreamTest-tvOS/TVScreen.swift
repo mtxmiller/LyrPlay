@@ -46,6 +46,14 @@ struct TVScreen<Content: View>: View {
                 Image(uiImage: artwork)
                     .resizable()
                     .scaledToFill()
+                    // Intrinsic blur, not just the .ultraThinMaterial layer
+                    // below. The material is a backdrop filter that renders a
+                    // frame late on tab transitions, which flashed the sharp
+                    // image for an instant. Pre-blurring the image means the
+                    // backdrop is never sharp; the material still adds its
+                    // frost on top. `opaque: true` avoids transparent edge
+                    // fringing on the full-bleed image. Tune the radius here.
+                    .blur(radius: 20, opaque: true)
                 Rectangle().fill(.ultraThinMaterial)
                 LinearGradient(
                     colors: [Color.black.opacity(0.0), Color.black.opacity(0.35)],
