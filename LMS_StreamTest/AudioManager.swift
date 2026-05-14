@@ -52,18 +52,7 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     var nominalBytesPerSecond: Int { streamDecoder.nominalBytesPerSecond }
-
-    // MARK: - Stream Info
-
-    /// Re-reads the active stream's bitrate on both the push/decoder path and
-    /// the URL-stream path. Each is a no-op when its stream is inactive, so at
-    /// most one does work. Called from the 1Hz playback heartbeat — VBR bitrate
-    /// read at stream creation is unreliable and self-heals as frames decode.
-    func refreshStreamBitrate() {
-        streamDecoder.refreshStreamBitrate()
-        audioPlayer.refreshStreamBitrate()
-    }
-
+    
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
     

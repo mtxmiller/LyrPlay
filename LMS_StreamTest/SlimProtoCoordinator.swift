@@ -361,10 +361,6 @@ class SlimProtoCoordinator: ObservableObject {
                 // drift from STMt timestamps, so our rate corrections decide right when
                 // the server sees fresh data.
                 self.tickSyncController()
-                // Re-read the BASS bitrate: for VBR content the value captured at
-                // stream creation is unreliable (an early VBR MP3 can read ~32kbps);
-                // it self-heals as more frames decode.
-                self.audioManager.refreshStreamBitrate()
             }
         }
         playbackHeartbeatTimer = timer

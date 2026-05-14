@@ -789,17 +789,6 @@ class AudioPlayer: NSObject, ObservableObject {
         updateOutputDeviceInfo()
     }
 
-    /// Re-reads the current stream's bitrate and updates `currentStreamInfo` if
-    /// it changed. Called from the playback heartbeat — see
-    /// `StreamInfo.refreshingBitrate(from:)` for why VBR needs this.
-    func refreshStreamBitrate() {
-        guard let info = currentStreamInfo else { return }
-        let updated = info.refreshingBitrate(from: currentStream)
-        if updated.bitrate != info.bitrate {
-            currentStreamInfo = updated
-        }
-    }
-
     private func formatNameFromCType(_ ctype: DWORD) -> String {
         // BASS codec type constants
         let BASS_CTYPE_STREAM_MP3: DWORD = 0x10005
@@ -1154,32 +1143,5 @@ class AudioPlayer: NSObject, ObservableObject {
         cleanup()
         BASS_Free()
         os_log(.info, log: logger, "AudioPlayer deinitialized")
-    }
-}
-
-// MARK: - StreamInfo bitrate refresh
-
-extension AudioPlayer.StreamInfo {
-    /// Returns a copy with `bitrate` re-read from `stream`, or `self` unchanged
-    /// when the stream is invalid or the bitrate hasn't moved.
-    ///
-    /// BASS's `BASS_ATTRIB_BITRATE` for VBR content only converges after enough
-    /// frames decode — the value captured at stream creation is unreliable (an
-    /// early VBR MP3 can read ~32kbps). The playback heartbeat calls this via
-    /// `AudioPlayer.refreshStreamBitrate()` / `AudioStreamDecoder.refreshStreamBitrate()`
-    /// so the displayed bitrate self-heals. Shared by both the URL-stream and
-    /// the push/decoder-stream paths.
-    func refreshingBitrate(from stream: HSTREAM) -> AudioPlayer.StreamInfo {
-        guard stream != 0 else { return self }
-        var bitrate: Float = 0.0
-        BASS_ChannelGetAttribute(stream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
-        guard bitrate > 0, Int(bitrate) != Int(self.bitrate) else { return self }
-        return AudioPlayer.StreamInfo(
-            format: format,
-            sampleRate: sampleRate,
-            channels: channels,
-            bitDepth: bitDepth,
-            bitrate: bitrate
-        )
     }
 }
