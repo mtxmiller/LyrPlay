@@ -1330,6 +1330,17 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
     }
 
+    /// Re-reads the decoder stream's bitrate and updates the player's
+    /// `currentStreamInfo` if it changed. Called from the playback heartbeat —
+    /// see `AudioPlayer.StreamInfo.refreshingBitrate(from:)`.
+    func refreshStreamBitrate() {
+        guard let player = audioPlayer, let info = player.currentStreamInfo else { return }
+        let updated = info.refreshingBitrate(from: decoderStream)
+        if updated.bitrate != info.bitrate {
+            player.currentStreamInfo = updated
+        }
+    }
+
     private func formatNameFromCType(_ ctype: DWORD) -> String {
         // BASS codec type constants
         let BASS_CTYPE_STREAM_MP3: DWORD = 0x10005
