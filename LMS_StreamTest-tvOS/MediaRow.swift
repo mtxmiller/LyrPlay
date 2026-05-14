@@ -6,7 +6,8 @@ import SwiftUI
 /// (current-track speaker indicator, duration label, year badge, etc).
 ///
 /// Extracted from QueueView's QueueRow so all tvOS list views render identically and
-/// AsyncImage / URL handling has one update site (see LMS_StreamTest-ppz, -7e4 follow-ups).
+/// artwork / URL handling has one update site. Artwork loads via CachedAsyncImage
+/// (shared image cache — survives List row recycling, LMS_StreamTest-8uq).
 struct MediaRow<Trailing: View>: View {
     let primary: String
     let secondary: String?
@@ -83,20 +84,11 @@ struct MediaRow<Trailing: View>: View {
         return primary
     }
 
-    @ViewBuilder
     private var artwork: some View {
-        if let url = artworkURL {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .empty, .failure:
-                    placeholder
-                @unknown default:
-                    placeholder
-                }
-            }
-        } else {
+        // CachedAsyncImage handles a nil URL (shows the placeholder) and keeps
+        // decoded artwork in a shared cache, so scrolling a List and back
+        // doesn't drop already-loaded covers (LMS_StreamTest-8uq).
+        CachedAsyncImage(url: artworkURL) {
             placeholder
         }
     }
