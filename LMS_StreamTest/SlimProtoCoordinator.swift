@@ -2082,6 +2082,12 @@ extension SlimProtoCoordinator {
                 // CRITICAL FIX: Only update duration if server explicitly provides it (Material skin approach)
                 let serverDuration = firstTrack["duration"] as? Double
 
+                // LMS-reported bitrate (the `r` tag — a pretty string like
+                // "850kbps"). Authoritative; BASS's own bitrate is unreliable
+                // for these decoder streams. nil for sources LMS has no
+                // bitrate for (some remote streams).
+                let trackBitrate = (firstTrack["bitrate"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+
                 // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
                 if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
@@ -2103,6 +2109,9 @@ extension SlimProtoCoordinator {
                 os_log(.info, log: logger, "[BOUNDARY-DRIFT] 📊 METADATA UPDATE TIMESTAMP: %{public}s", metadataTimestamp.description)
 
                 DispatchQueue.main.async {
+                    // Apply LMS's authoritative bitrate to the stream-info display.
+                    self.audioManager.updateStreamBitrate(text: trackBitrate)
+
                     // Only update duration if server explicitly provides it (Material skin approach)
                     if let duration = serverDuration, duration > 0.0 {
                         self.audioManager.updateTrackMetadata(

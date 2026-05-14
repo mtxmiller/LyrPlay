@@ -444,8 +444,10 @@ struct ContentView: View {
         // Use output device sample rate (actual hardware output) if available,
         // otherwise fall back to stream info sample rate
         let outputSampleRate = audioManager.audioPlayer.currentOutputInfo?.outputSampleRate ?? streamInfo.sampleRate
-        // Guard against NaN/infinity from BASS — neither is a valid JS numeric literal
-        let safeBitrate = streamInfo.bitrate.isNaN || streamInfo.bitrate.isInfinite ? 0.0 : streamInfo.bitrate
+        // LMS-reported bitrate string (e.g. "850kbps"). Sanitize for JS interpolation.
+        let safeBitrate = (streamInfo.bitrateText ?? "")
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
 
         let js = """
         (function() {
@@ -453,7 +455,7 @@ struct ContentView: View {
             parts.push('\(safeFormat)');
             parts.push('\(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz');
             parts.push('\(streamInfo.bitDepth)bit');
-            if (\(safeBitrate) > 0) parts.push(Math.round(\(safeBitrate)) + 'kbps');
+            if ('\(safeBitrate)'.length > 0) parts.push('\(safeBitrate)');
             window.lyrplayStreamText = parts.join(', ');
 
             // Start polling replacer if not already running

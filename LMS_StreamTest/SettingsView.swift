@@ -196,7 +196,7 @@ struct SettingsView: View {
                                     .foregroundColor(.green)
                                     .frame(width: 20)
 
-                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrate > 0 ? " • \(Int(streamInfo.bitrate)) kbps" : "")")
+                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrateText.map { " • \($0)" } ?? "")")
                                     .font(.subheadline)
                                     .foregroundColor(.primary)
                             }

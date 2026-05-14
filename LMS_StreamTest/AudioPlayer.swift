@@ -34,11 +34,17 @@ class AudioPlayer: NSObject, ObservableObject {
         let sampleRate: Int
         let channels: Int
         let bitDepth: Int
-        let bitrate: Float
+        /// LMS-reported bitrate string (e.g. "850kbps", "320kbps VBR"). LMS
+        /// scans every file and reports this authoritatively; BASS's
+        /// BASS_ATTRIB_BITRATE for these decoder streams is unreliable — it
+        /// reads ~32kbps and never converges. Set via the JSON-RPC metadata
+        /// path, not BASS. nil until the first metadata poll lands, or for
+        /// sources LMS has no bitrate for.
+        let bitrateText: String?
 
         var displayString: String {
             let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
-            let bitrateStr = bitrate > 0 ? " @ \(Int(bitrate)) kbps" : ""
+            let bitrateStr = bitrateText.map { " @ \($0)" } ?? ""
             return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
         }
     }
@@ -750,6 +756,32 @@ class AudioPlayer: NSObject, ObservableObject {
         // Note: Keep output device info - it's still valid even without an active stream
     }
 
+    // MARK: - Server-reported bitrate
+
+    /// LMS-reported bitrate string for the current track. Held separately from
+    /// `currentStreamInfo` so it survives the BASS path rebuilding that struct,
+    /// and so a metadata poll that lands before BASS sets `currentStreamInfo`
+    /// isn't lost. See `StreamInfo.bitrateText`.
+    private var serverBitrateText: String?
+
+    /// Value the BASS stream-info paths seed `StreamInfo.bitrateText` with, so a
+    /// BASS rebuild doesn't wipe the LMS-reported bitrate.
+    var carryOverBitrateText: String? { serverBitrateText }
+
+    /// Applies an LMS-reported bitrate string. Called from the JSON-RPC
+    /// metadata path via `AudioManager.updateStreamBitrate(text:)`.
+    func applyServerBitrate(_ text: String?) {
+        serverBitrateText = text
+        guard let info = currentStreamInfo else { return }
+        currentStreamInfo = StreamInfo(
+            format: info.format,
+            sampleRate: info.sampleRate,
+            channels: info.channels,
+            bitDepth: info.bitDepth,
+            bitrateText: text
+        )
+    }
+
     // MARK: - Stream Info Retrieval
     private func updateStreamInfo() {
         guard currentStream != 0 else {
@@ -764,22 +796,19 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        // Get bitrate attribute
-        var bitrate: Float = 0.0
-        BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
-
         // Map ctype to human-readable format name
         let formatName = formatNameFromCType(info.ctype)
 
         // Extract bit depth from origres (LOWORD contains bits)
         let bitDepth = Int(info.origres & 0xFFFF)
 
+        // bitrate comes from LMS metadata, not BASS — see StreamInfo.bitrateText.
         let streamInfo = StreamInfo(
             format: formatName,
             sampleRate: Int(info.freq),
             channels: Int(info.chans),
             bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
-            bitrate: bitrate
+            bitrateText: carryOverBitrateText
         )
 
         currentStreamInfo = streamInfo

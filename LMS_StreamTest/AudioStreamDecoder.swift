@@ -1308,22 +1308,19 @@ class AudioStreamDecoder {
             return
         }
 
-        // Get bitrate attribute from decoder stream
-        var bitrate: Float = 0.0
-        BASS_ChannelGetAttribute(stream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
-
         // Map ctype to human-readable format name
         let formatName = formatNameFromCType(info.ctype)
 
         // Extract bit depth from origres (LOWORD contains bits)
         let bitDepth = Int(info.origres & 0xFFFF)
 
+        // bitrate comes from LMS metadata, not BASS — see StreamInfo.bitrateText.
         let streamInfo = AudioPlayer.StreamInfo(
             format: formatName,
             sampleRate: Int(info.freq),
             channels: Int(info.chans),
             bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
-            bitrate: bitrate
+            bitrateText: audioPlayer?.carryOverBitrateText
         )
 
         audioPlayer?.currentStreamInfo = streamInfo

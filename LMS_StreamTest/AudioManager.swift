@@ -52,7 +52,16 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     var nominalBytesPerSecond: Int { streamDecoder.nominalBytesPerSecond }
-    
+
+    // MARK: - Stream Info
+
+    /// Applies an LMS-reported bitrate string to the stream-info display.
+    /// Called from the JSON-RPC metadata path — BASS's own BASS_ATTRIB_BITRATE
+    /// is unreliable for these decoder streams (reads ~32kbps, never converges).
+    func updateStreamBitrate(text: String?) {
+        audioPlayer.applyServerBitrate(text)
+    }
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioManager")
     
