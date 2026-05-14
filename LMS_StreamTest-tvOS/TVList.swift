@@ -2,18 +2,14 @@ import SwiftUI
 
 /// `List` wrapper for tvOS browse and settings screens.
 ///
-/// Bakes in the correct list style per screen kind and pairs with the
-/// `.tvListRow()` row modifier, which gives every row an opaque fill. On tvOS
-/// the focus engine scales the focused row up slightly; with the previous
-/// `.listRowBackground(Color.clear)` the scaled row composited against its
-/// neighbors, producing the scroll "flicker"/overlap (mherger beta feedback
-/// #1). An opaque fill makes the scaled focused row cleanly cover instead of
-/// blend.
+/// Bakes in the correct list style per screen kind (`.plain` for media lists,
+/// `.automatic` for settings) so every tvOS list is consistent, and pairs with
+/// the `.tvListRow()` row modifier — the single named hook for row styling.
 ///
-/// Used inside a `TVScreen` — the screen root supplies the backdrop, `TVList`
-/// supplies opaque rows on top of it. Adopt across every tvOS `List`:
-/// FavoritesView, AlbumListView, SearchView, PlaylistsView, QueueView,
-/// SettingsView (+ its FormatPickerView).
+/// Used inside a `TVScreen`: the screen root supplies the opaque backdrop,
+/// `TVList` keeps the list itself consistent on top of it. Adopt across every
+/// tvOS `List`: FavoritesView, AlbumListView, SearchView, PlaylistsView,
+/// QueueView, SettingsView (+ its FormatPickerView).
 struct TVList<Content: View>: View {
     /// Which kind of list this is. Controls list style only — the opaque row
     /// fill from `.tvListRow()` is universal.
@@ -48,22 +44,24 @@ struct TVList<Content: View>: View {
 }
 
 extension View {
-    /// Opaque row treatment for rows inside a `TVList`. Replaces
-    /// `.listRowBackground(Color.clear)`.
-    ///
-    /// The fill must be opaque, not a translucent material — a material still
-    /// composites whatever is behind it, which is the exact failure mode the
-    /// focus-scaled row hits. `Color.tvListRowBackground` is the single tuning
-    /// point.
+    /// Row treatment for rows inside a `TVList`. The single, named hook for
+    /// list-row styling — replaces the scattered `.listRowBackground(Color.clear)`
+    /// calls so any future row tuning lives in one place.
     func tvListRow() -> some View {
         listRowBackground(Color.tvListRowBackground)
     }
 }
 
 extension Color {
-    /// Opaque fill for `TVList` rows. Near-solid dark so rows read as a surface
-    /// on top of the `TVScreen` backdrop while the focus-scaled row still
-    /// covers its neighbors cleanly. This is the one place to tune the row
-    /// look — soften the opacity here if the list reads too heavy on-device.
-    static let tvListRowBackground = Color.black.opacity(0.92)
+    /// Row fill for `TVList` rows. `.clear` — rows are transparent and the tvOS
+    /// focus engine's own (inset, rounded) highlight does the visual work,
+    /// matching the native tvOS list look.
+    ///
+    /// An opaque fill was tried first, to stop the focus-scaled row compositing
+    /// against its neighbors during scroll (mherger beta feedback #1). It read
+    /// as a heavy column of full-bleed boxes that fought the inset/rounded
+    /// focus highlight, so it was reverted. If scroll overlap resurfaces, fix
+    /// it with row spacing — not an opaque fill. This stays the single tuning
+    /// point either way.
+    static let tvListRowBackground = Color.clear
 }
