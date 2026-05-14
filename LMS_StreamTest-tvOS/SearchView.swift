@@ -54,17 +54,19 @@ struct SearchView: View {
     private let debounceMs: UInt64 = 500_000_000  // 500ms in ns
 
     var body: some View {
-        Group {
-            if searchTerm.isEmpty {
-                preSearchView
-            } else if inFlight > 0 && !hasFetched {
-                ProgressView()
-                    .scaleEffect(2.0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if allResultsEmpty && hasFetched {
-                noResultsView
-            } else {
-                resultsView
+        TVScreen {
+            Group {
+                if searchTerm.isEmpty {
+                    preSearchView
+                } else if inFlight > 0 && !hasFetched {
+                    ProgressView()
+                        .scaleEffect(2.0)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if allResultsEmpty && hasFetched {
+                    noResultsView
+                } else {
+                    resultsView
+                }
             }
         }
         .searchable(text: $searchTerm, prompt: "Search music")

@@ -39,17 +39,18 @@ struct NowPlayingView: View {
     private let scrubStepSeconds: Double = 10.0
 
     var body: some View {
-        HStack(alignment: .top, spacing: 64) {
-            artworkPanel
-                .frame(width: 720, height: 720)
+        TVScreen(artwork: nowPlaying.currentArtwork) {
+            HStack(alignment: .top, spacing: 64) {
+                artworkPanel
+                    .frame(width: 720, height: 720)
 
-            metadataPanel
-                .frame(maxWidth: .infinity, minHeight: 720, alignment: .topLeading)
+                metadataPanel
+                    .frame(maxWidth: .infinity, minHeight: 720, alignment: .topLeading)
+            }
+            .padding(.horizontal, 100)
+            .padding(.vertical, 60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(.horizontal, 100)
-        .padding(.vertical, 60)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background { background.ignoresSafeArea() }
         // Top-right cluster: gear (always visible — reachable even when server
         // is unreachable, which is exactly when the user most needs Settings)
         // and reconnect badge below it when offline.
@@ -103,25 +104,21 @@ struct NowPlayingView: View {
         // is single-button-press-driven so only one binding can transition to
         // true at a time. Documented invariant per E5.
         //
-        // Solid-black backdrop applied at the cover root so every pushed view
-        // inside SettingsView's NavigationStack (Change Server, Format Picker)
-        // inherits it. Without this the cover renders transparent over
-        // NowPlayingView and tvOS List's default tinting bleeds through.
+        // SettingsView wraps its own TVScreen, so the cover is opaque and every
+        // pushed view inside SettingsView's NavigationStack (Change Server,
+        // Format Picker) inherits the backdrop.
         .fullScreenCover(isPresented: $showSettings) {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                SettingsView(
-                    settings: settings,
-                    onServerChanged: {
-                        // Dismiss locally for safety — ContentView's coordinator
-                        // teardown will unmount this entire view tree, but
-                        // explicit dismiss avoids any state-transition surprises.
-                        showSettings = false
-                        onServerChanged()
-                    },
-                    onAudioFormatChanged: onAudioFormatChanged
-                )
-            }
+            SettingsView(
+                settings: settings,
+                onServerChanged: {
+                    // Dismiss locally for safety — ContentView's coordinator
+                    // teardown will unmount this entire view tree, but
+                    // explicit dismiss avoids any state-transition surprises.
+                    showSettings = false
+                    onServerChanged()
+                },
+                onAudioFormatChanged: onAudioFormatChanged
+            )
             .onExitCommand { showSettings = false }
         }
     }
@@ -136,26 +133,6 @@ struct NowPlayingView: View {
             iconSize: 28,
             action: { showSettings = true }
         )
-    }
-
-    // MARK: - Background
-
-    private var background: some View {
-        ZStack {
-            if let art = nowPlaying.currentArtwork {
-                Image(uiImage: art)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.black
-            }
-            Rectangle()
-                .fill(.ultraThinMaterial)
-            LinearGradient(
-                colors: [Color.black.opacity(0.0), Color.black.opacity(0.35)],
-                startPoint: .top, endPoint: .bottom
-            )
-        }
     }
 
     // MARK: - Foreground content

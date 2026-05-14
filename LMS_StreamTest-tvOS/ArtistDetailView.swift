@@ -15,11 +15,13 @@ struct ArtistDetailView: View {
     @ObservedObject var settings: SettingsManager
 
     var body: some View {
-        AlbumListView(
-            coordinator: coordinator,
-            settings: settings,
-            sort: .byArtist(id: artist.id)
-        )
+        TVScreen {
+            AlbumListView(
+                coordinator: coordinator,
+                settings: settings,
+                sort: .byArtist(id: artist.id)
+            )
+        }
         .navigationTitle(artist.name)
     }
 }

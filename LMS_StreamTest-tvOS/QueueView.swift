@@ -15,71 +15,53 @@ struct QueueView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "QueueView")
 
     var body: some View {
-        ScrollViewReader { proxy in
-            List {
-                if tracks.isEmpty && !isLoading {
-                    emptyState
-                        .listRowBackground(Color.clear)
-                } else {
-                    // Identity by array offset (not track.id): LMS playlists may contain
-                    // the same track at multiple positions, which would collide on .id.
-                    // Highlight by playlistIndex (server's absolute position): if parseLoop
-                    // skips a malformed entry, array offsets diverge from server indices.
-                    ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
-                        Button {
-                            jumpToTrack(track)
-                        } label: {
-                            QueueRow(
-                                track: track,
-                                isCurrent: track.playlistIndex == currentIndex,
-                                accentColor: accentColor,
-                                artworkURL: artworkURL(for: track)
-                            )
+        TVScreen(artwork: nowPlaying.currentArtwork) {
+            ScrollViewReader { proxy in
+                List {
+                    if tracks.isEmpty && !isLoading {
+                        emptyState
+                            .listRowBackground(Color.clear)
+                    } else {
+                        // Identity by array offset (not track.id): LMS playlists may contain
+                        // the same track at multiple positions, which would collide on .id.
+                        // Highlight by playlistIndex (server's absolute position): if parseLoop
+                        // skips a malformed entry, array offsets diverge from server indices.
+                        ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
+                            Button {
+                                jumpToTrack(track)
+                            } label: {
+                                QueueRow(
+                                    track: track,
+                                    isCurrent: track.playlistIndex == currentIndex,
+                                    accentColor: accentColor,
+                                    artworkURL: artworkURL(for: track)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .id(index)
+                            .listRowBackground(Color.clear)
                         }
-                        .buttonStyle(.plain)
-                        .id(index)
-                        .listRowBackground(Color.clear)
                     }
                 }
-            }
-            .listStyle(.plain)
-            .navigationTitle("Up Next")
-            .background { background.ignoresSafeArea() }
-            // Queue is presented via .fullScreenCover from NowPlayingView, so its
-            // responder chain is rooted at the cover (NOT the TabView). ContentView's
-            // TabView-level .onPlayPauseCommand never sees presses from inside the
-            // cover. Local handler restores resume-from-paused here. See ContentView
-            // for the tvOS-asymmetric-MPRC explanation.
-            .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
-            .onAppear {
-                fetchPlaylist {
-                    scrollToCurrent(proxy: proxy, animated: false)
+                .listStyle(.plain)
+                .navigationTitle("Up Next")
+                // Queue is presented via .fullScreenCover from NowPlayingView, so its
+                // responder chain is rooted at the cover (NOT the TabView). ContentView's
+                // TabView-level .onPlayPauseCommand never sees presses from inside the
+                // cover. Local handler restores resume-from-paused here. See ContentView
+                // for the tvOS-asymmetric-MPRC explanation.
+                .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
+                .onAppear {
+                    fetchPlaylist {
+                        scrollToCurrent(proxy: proxy, animated: false)
+                    }
+                }
+                .onChange(of: nowPlaying.currentTrackTitle) { _, _ in
+                    // Refresh contents + indicator on track change, but don't yank scroll
+                    // away from a user who is browsing past rows. Indicator moves on its own.
+                    fetchPlaylist(completion: nil)
                 }
             }
-            .onChange(of: nowPlaying.currentTrackTitle) { _, _ in
-                // Refresh contents + indicator on track change, but don't yank scroll
-                // away from a user who is browsing past rows. Indicator moves on its own.
-                fetchPlaylist(completion: nil)
-            }
-        }
-    }
-
-    // MARK: - Background
-
-    private var background: some View {
-        ZStack {
-            if let art = nowPlaying.currentArtwork {
-                Image(uiImage: art)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.black
-            }
-            Rectangle().fill(.ultraThinMaterial)
-            LinearGradient(
-                colors: [Color.black.opacity(0.0), Color.black.opacity(0.35)],
-                startPoint: .top, endPoint: .bottom
-            )
         }
     }
 

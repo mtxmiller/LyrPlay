@@ -31,12 +31,13 @@ struct LibraryView: View {
     @State private var selectedSection: Section = .favorites
 
     var body: some View {
-        VStack(spacing: 0) {
-            picker
+        TVScreen(artwork: nowPlaying.currentArtwork) {
+            VStack(spacing: 0) {
+                picker
 
-            content
+                content
+            }
         }
-        .background { background.ignoresSafeArea() }
     }
 
     // MARK: - Picker
@@ -77,18 +78,4 @@ struct LibraryView: View {
         }
     }
 
-    // MARK: - Background
-
-    private var background: some View {
-        ZStack {
-            if let art = nowPlaying.currentArtwork {
-                Image(uiImage: art)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.black
-            }
-            Rectangle().fill(.ultraThinMaterial)
-        }
-    }
 }

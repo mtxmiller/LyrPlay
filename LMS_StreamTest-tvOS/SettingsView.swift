@@ -42,28 +42,30 @@ struct SettingsView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
 
     var body: some View {
-        NavigationStack {
-            List {
-                serverSection
-                playerSection
-                audioSection
-                aboutSection
-            }
-            .navigationTitle("Settings")
-            .navigationDestination(isPresented: $showServerChange) {
-                ServerConnectView(onComplete: {
-                    os_log(.info, log: logger, "Server change committed — invoking onServerChanged")
-                    SettingsServerChange.clearRecoveryKeys()
-                    onServerChanged()
-                })
-            }
-            .navigationDestination(isPresented: $showFormatPicker) {
-                FormatPickerView(selection: $settings.audioFormat)
-            }
-            .onChange(of: settings.audioFormat) { _, _ in
-                os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
-                settings.saveSettings()
-                onAudioFormatChanged()
+        TVScreen {
+            NavigationStack {
+                List {
+                    serverSection
+                    playerSection
+                    audioSection
+                    aboutSection
+                }
+                .navigationTitle("Settings")
+                .navigationDestination(isPresented: $showServerChange) {
+                    ServerConnectView(onComplete: {
+                        os_log(.info, log: logger, "Server change committed — invoking onServerChanged")
+                        SettingsServerChange.clearRecoveryKeys()
+                        onServerChanged()
+                    })
+                }
+                .navigationDestination(isPresented: $showFormatPicker) {
+                    FormatPickerView(selection: $settings.audioFormat)
+                }
+                .onChange(of: settings.audioFormat) { _, _ in
+                    os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
+                    settings.saveSettings()
+                    onAudioFormatChanged()
+                }
             }
         }
     }
