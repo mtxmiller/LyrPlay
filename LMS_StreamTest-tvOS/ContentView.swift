@@ -22,9 +22,7 @@ struct ContentView: View {
                             nowPlaying: AudioManager.shared.getNowPlayingManager(),
                             coordinator: coordinator,
                             settings: settings,
-                            audioPlayer: AudioManager.shared.audioPlayer,
-                            onServerChanged: handleServerChanged,
-                            onAudioFormatChanged: { handleAudioFormatChanged(coordinator: coordinator) }
+                            audioPlayer: AudioManager.shared.audioPlayer
                         )
                     }
                     .tabItem { Label("Now Playing", systemImage: "play.circle.fill") }
@@ -45,6 +43,13 @@ struct ContentView: View {
                         )
                     }
                     .tabItem { Label("Library", systemImage: "music.note.house.fill") }
+
+                    SettingsView(
+                        settings: settings,
+                        onServerChanged: handleServerChanged,
+                        onAudioFormatChanged: { handleAudioFormatChanged(coordinator: coordinator) }
+                    )
+                    .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 }
                 // tvOS HW play/pause is asymmetric (hardware-verified 2026-05-07):
                 // - press while PLAYING → tvOS routes to MPRC pauseCommand (registered below)

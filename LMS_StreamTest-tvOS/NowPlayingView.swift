@@ -8,16 +8,6 @@ struct NowPlayingView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     @ObservedObject var audioPlayer: AudioPlayer
-    /// Called when the user successfully commits a NEW LMS server from
-    /// Settings ▸ Change Server. Forwarded to SettingsView →
-    /// ServerConnectView's onComplete. Caller (ContentView) tears down the
-    /// existing coordinator + rebuilds against the new host. (E1.)
-    var onServerChanged: () -> Void = {}
-    /// Called when the user picks a new Audio Format from Settings. Caller
-    /// (ContentView) restarts the SlimProto connection so the server gets a
-    /// fresh HELO with the new capabilities. Mirrors iOS SettingsView
-    /// behavior. Brief playback interruption is the cost of the change.
-    var onAudioFormatChanged: () -> Void = {}
 
     @State private var accentColor: Color = .accentColor
     @State private var accentRGB: SIMD3<Float> = SIMD3<Float>(0.5, 0.6, 1.0)
@@ -28,7 +18,6 @@ struct NowPlayingView: View {
     @State private var scrubElapsed: Double = 0
     @State private var showVisualizer: Bool = false
     @State private var showQueue: Bool = false
-    @State private var showSettings: Bool = false
     @State private var didInitialFocus: Bool = false
     @FocusState private var playbackFocused: Bool
     @FocusState private var artworkFocused: Bool
@@ -51,19 +40,15 @@ struct NowPlayingView: View {
             .padding(.vertical, 60)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        // Top-right cluster: gear (always visible — reachable even when server
-        // is unreachable, which is exactly when the user most needs Settings)
-        // and reconnect badge below it when offline.
+        // Top-right cluster: reconnect badge when offline. Settings used to
+        // live here (53n D5) but moved to a dedicated tab (Elissen #1 round 1
+        // — superseded design doc 20260515-053612).
         .overlay(alignment: .topTrailing) {
-            VStack(alignment: .trailing, spacing: 16) {
-                gearButton
-                    .focusSection()
-                if !isConnected {
-                    reconnectBadge
-                }
+            if !isConnected {
+                reconnectBadge
+                    .padding(.top, 32)
+                    .padding(.trailing, 32)
             }
-            .padding(.top, 32)
-            .padding(.trailing, 32)
         }
         .onAppear {
             tick()
@@ -99,40 +84,6 @@ struct NowPlayingView: View {
             }
             .onExitCommand { showQueue = false }
         }
-        // Settings is the 3rd fullScreenCover on this view (visualizer + queue
-        // + settings). All three are mutually exclusive in practice — focus
-        // is single-button-press-driven so only one binding can transition to
-        // true at a time. Documented invariant per E5.
-        //
-        // SettingsView wraps its own TVScreen, so the cover is opaque and every
-        // pushed view inside SettingsView's NavigationStack (Change Server,
-        // Format Picker) inherits the backdrop.
-        .fullScreenCover(isPresented: $showSettings) {
-            SettingsView(
-                settings: settings,
-                onServerChanged: {
-                    // Dismiss locally for safety — ContentView's coordinator
-                    // teardown will unmount this entire view tree, but
-                    // explicit dismiss avoids any state-transition surprises.
-                    showSettings = false
-                    onServerChanged()
-                },
-                onAudioFormatChanged: onAudioFormatChanged
-            )
-            .onExitCommand { showSettings = false }
-        }
-    }
-
-    // MARK: - Gear (Settings entry point)
-
-    private var gearButton: some View {
-        CircleFocusButton(
-            systemImage: "gearshape.fill",
-            accessibilityLabel: "Settings",
-            diameter: 72,
-            iconSize: 28,
-            action: { showSettings = true }
-        )
     }
 
     // MARK: - Foreground content
@@ -237,17 +188,9 @@ struct NowPlayingView: View {
                 .truncationMode(.tail)
                 .foregroundStyle(.tertiary)
 
-            // Mirrors the Material WebView "tech info" line: format / sample rate /
-            // bit depth / channels / bitrate from the BASS decoder (post-transcode).
-            if let stream = audioPlayer.currentStreamInfo {
-                Text(stream.displayString)
-                    .font(.callout)            // ~16pt — matches Material's subtle line
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
-            }
+            // Stream info (FLAC / kHz / bit / kbps) moved out of trackHeader and
+            // into playbackPanel — sits as a small caption directly above the
+            // timer bar, matching Material's layout (Elissen #2 round 1).
         }
         .padding(.horizontal, 24)
     }
@@ -275,19 +218,41 @@ struct NowPlayingView: View {
     @ViewBuilder
     private var playbackPanel: some View {
         if nowPlaying.hasTrackLoaded && nowPlaying.metadataDuration > 0 {
-            progressRow
+            VStack(spacing: 6) {
+                streamInfoLine
+                progressRow
+            }
         } else if nowPlaying.hasTrackLoaded {
-            liveRow
+            VStack(spacing: 6) {
+                streamInfoLine
+                liveRow
+            }
         } else {
             EmptyView().frame(height: 1)
+        }
+    }
+
+    /// Compact format / sample rate / bit / bitrate caption. Sits directly above
+    /// the timer bar inside `playbackPanel`. Material-style — tiny, subtle, the
+    /// timer is the visual focus of the playback panel, not this.
+    @ViewBuilder
+    private var streamInfoLine: some View {
+        if let stream = audioPlayer.currentStreamInfo {
+            Text(stream.displayString)
+                .font(.caption)
+                .monospacedDigit()
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
     /// Playback panel + focus styling + click/play-pause gestures (always attached).
     private var styledPanel: some View {
         playbackPanel
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             .background {
                 RoundedRectangle(cornerRadius: 16)
                     .fill(panelBackgroundColor)
@@ -335,18 +300,18 @@ struct NowPlayingView: View {
         let progress = min(max(displayElapsed / total, 0), 1)
         return HStack(spacing: 16) {
             Text(formatTime(displayElapsed))
-                .font(.system(size: 28, weight: isScrubbing ? .bold : .medium))
+                .font(.system(size: 20, weight: isScrubbing ? .bold : .medium))
                 .monospacedDigit()
                 .foregroundStyle(isScrubbing ? accentColor : .secondary)
-                .frame(width: 110, alignment: .trailing)
+                .frame(width: 80, alignment: .trailing)
 
             scrubBar(progress: progress)
 
             Text(formatTime(nowPlaying.metadataDuration))
-                .font(.system(size: 28, weight: .medium))
+                .font(.system(size: 20, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 110, alignment: .leading)
+                .frame(width: 80, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Playback progress")
@@ -362,11 +327,14 @@ struct NowPlayingView: View {
     private func scrubBar(progress: Double) -> some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
+                // Unplayed: dim white. Played: solid white (NOT accentColor —
+                // artwork-derived accents read as darker than the unplayed line
+                // on low-saturation albums per Elissen #4 + 53n E11 lesson).
                 Capsule()
-                    .fill(Color.white.opacity(0.18))
+                    .fill(Color.white.opacity(0.25))
                     .frame(height: 8)
                 Capsule()
-                    .fill(accentColor)
+                    .fill(Color.white)
                     .frame(width: geo.size.width * progress, height: 8)
                 if isScrubbing {
                     Circle()

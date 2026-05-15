@@ -42,6 +42,12 @@ struct TVScreen<Content: View>: View {
 
     private var backdrop: some View {
         ZStack {
+            // Always-on opaque base. Required as the safety net for the
+            // layout-cluster fix — nothing behind a TVScreen can bleed through
+            // even when artwork is loading or dimmed. Also lets the dimmed
+            // blurred artwork above it composite to a darker overall tone
+            // (Elissen #8 round 1 — backdrop was hiding metadata text).
+            Color.black
             if let artwork {
                 Image(uiImage: artwork)
                     .resizable()
@@ -54,14 +60,16 @@ struct TVScreen<Content: View>: View {
                     // frost on top. `opaque: true` avoids transparent edge
                     // fringing on the full-bleed image. Tune the radius here.
                     .blur(radius: 20, opaque: true)
+                    // Drop opacity so the Color.black underlayer takes the
+                    // edge off bright-album artwork. Per design doc Elissen
+                    // #8 — tune on device if 0.45 still washes text out.
+                    .opacity(0.45)
                 Rectangle().fill(.ultraThinMaterial)
                 LinearGradient(
                     colors: [Color.black.opacity(0.0), Color.black.opacity(0.35)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-            } else {
-                Color.black
             }
         }
     }

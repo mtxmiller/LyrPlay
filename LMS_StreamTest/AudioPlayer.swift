@@ -43,9 +43,17 @@ class AudioPlayer: NSObject, ObservableObject {
         let bitrateText: String?
 
         var displayString: String {
-            let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
-            let bitrateStr = bitrateText.map { " @ \($0)" } ?? ""
-            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
+            // Stereo is the common case — omit channel info to match iPhone
+            // Material's display (Elissen #2/#4 round 1). Mono and surround
+            // formats keep their channel callout.
+            let channelStr: String
+            switch channels {
+            case 1: channelStr = " • Mono"
+            case 2: channelStr = ""
+            default: channelStr = " • \(channels)ch"
+            }
+            let bitrateStr = bitrateText.map { " • \($0)" } ?? ""
+            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit\(channelStr)\(bitrateStr)"
         }
     }
 
