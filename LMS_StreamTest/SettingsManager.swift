@@ -31,6 +31,7 @@ class SettingsManager: ObservableObject {
     @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
+    @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
@@ -135,6 +136,7 @@ class SettingsManager: ObservableObject {
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
         static let keepScreenAwake = "KeepScreenAwake"
+        static let fixOutputAt100Percent = "FixOutputAt100Percent"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
@@ -185,6 +187,19 @@ class SettingsManager: ObservableObject {
     /// for a music app). iOS defaults to OFF — phones in pockets shouldn't burn
     /// battery keeping the screen awake.
     private static let keepScreenAwakeDefault: Bool = {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// Default for `fixOutputAt100Percent`. tvOS defaults to ON: the TV / AVR /
+    /// soundbar owns the volume axis, so the LMS player should run at fixed
+    /// 100% output (disables software volume attenuation via the
+    /// `digitalVolumeControl` per-client preference). iOS defaults to OFF —
+    /// phones expect software volume to match the hardware buttons.
+    private static let fixOutputAt100PercentDefault: Bool = {
         #if os(tvOS)
         return true
         #else
@@ -268,6 +283,7 @@ class SettingsManager: ObservableObject {
         }
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? Self.keepScreenAwakeDefault
+        fixOutputAt100Percent = UserDefaults.standard.object(forKey: Keys.fixOutputAt100Percent) as? Bool ?? Self.fixOutputAt100PercentDefault
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
@@ -314,6 +330,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
+        UserDefaults.standard.set(fixOutputAt100Percent, forKey: Keys.fixOutputAt100Percent)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)

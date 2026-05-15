@@ -719,6 +719,10 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         startServerTimeSync()
         setupNowPlayingManagerIntegration()
 
+        // Apply tvOS volume policy if user opted in (fixOutputAt100Percent).
+        // Disables LMS software volume attenuation and forces volume to 100%.
+        applyFixedOutputPolicyIfNeeded()
+
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
@@ -882,8 +886,68 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     
     
     
+    // MARK: - Fixed Output Volume Policy (tvOS — see Elissen #10 design doc)
+
+    /// Disables LMS software volume attenuation on the player and forces volume
+    /// to 100%. Maps to the same setting Material exposes as Player Settings →
+    /// Audio → "Output level is fixed at 100%". Used on tvOS so the TV / AVR /
+    /// soundbar owns the volume axis — the LMS player stays out of the chain.
+    ///
+    /// Called from `slimProtoDidConnect` when `settings.fixOutputAt100Percent` is
+    /// true, and from the tvOS Settings toggle handler when the user flips it ON.
+    func applyFixedOutputPolicy() {
+        let playerID = settings.playerMACAddress
+        guard !playerID.isEmpty else {
+            os_log(.info, log: logger, "🔇 Skipping fixed-output policy — no playerID yet")
+            return
+        }
+
+        let prefCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "digitalVolumeControl", 0]]
+        ]
+        let volumeCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["mixer", "volume", 100]]
+        ]
+
+        os_log(.info, log: logger, "🔊 Applying fixed-output policy (digitalVolumeControl=0, volume=100)")
+        sendJSONRPCCommandDirect(prefCommand) { _ in }
+        sendJSONRPCCommandDirect(volumeCommand) { _ in }
+    }
+
+    /// Restores LMS software volume control (`digitalVolumeControl=1`). Called
+    /// from the tvOS Settings toggle handler when the user flips
+    /// `fixOutputAt100Percent` OFF. Does NOT touch the current volume — leaves
+    /// it at whatever LMS has.
+    func restoreSoftwareVolumeControl() {
+        let playerID = settings.playerMACAddress
+        guard !playerID.isEmpty else { return }
+
+        let prefCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "digitalVolumeControl", 1]]
+        ]
+
+        os_log(.info, log: logger, "🔊 Restoring software volume control (digitalVolumeControl=1)")
+        sendJSONRPCCommandDirect(prefCommand) { _ in }
+    }
+
+    /// On-connect hook. Re-applies the fixed-output policy if the user has it
+    /// enabled. Behavior chosen for predictability: every successful tvOS
+    /// connect re-asserts the policy. A user who wants software volume on the
+    /// tvOS player toggles the Settings option OFF — that path doesn't call
+    /// this method.
+    private func applyFixedOutputPolicyIfNeeded() {
+        guard settings.fixOutputAt100Percent else { return }
+        applyFixedOutputPolicy()
+    }
+
     // MARK: - Custom Position Banking (Server Preferences)
-    
+
     private func savePositionToServerPreferences() {
         let (currentTime, _) = getCurrentInterpolatedTime()
         let playerState = audioManager.getPlayerState()

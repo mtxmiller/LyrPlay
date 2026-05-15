@@ -106,7 +106,18 @@ struct SettingsView: View {
     // MARK: - Audio Format
 
     private var audioSection: some View {
-        Section("Audio Format") {
+        Section("Audio") {
+            Toggle("Fix output level at 100%", isOn: $settings.fixOutputAt100Percent)
+                .tvListRow()
+                .onChange(of: settings.fixOutputAt100Percent) { _, newValue in
+                    settings.saveSettings()
+                    if newValue {
+                        AudioManager.shared.slimClient?.applyFixedOutputPolicy()
+                    } else {
+                        AudioManager.shared.slimClient?.restoreSoftwareVolumeControl()
+                    }
+                }
+
             Button {
                 showFormatPicker = true
             } label: {
