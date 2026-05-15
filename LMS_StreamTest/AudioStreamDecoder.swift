@@ -172,7 +172,112 @@ class AudioStreamDecoder {
     private var syncStartMonitorTimer: Timer?
 
     /// Flag to track if we're buffering for synchronized start
-    private var isWaitingForSyncStart: Bool = false
+    private var isWaitingForUnpause: Bool = false
+
+    // MARK: - Measured Bitrate (BASS_FILEPOS_DOWNLOAD-based)
+
+    /// Sample of HTTP-download progress on `decoderStream`. Used to compute
+    /// the actual on-the-wire bitrate over a moving window — codec-agnostic,
+    /// unlike `BASS_ATTRIB_BITRATE` which BASSFLAC and BASSOPUS don't report
+    /// usefully. The LMS `r` tag is also wrong for transcoded streams (it's
+    /// the source file's bitrate; e.g. "2830kbps" for a FLAC transcoded down
+    /// to Opus). See `Architecture/Stream Start Coordination.md`.
+    private struct BitrateSample {
+        let bytes: UInt64
+        let timestamp: TimeInterval
+    }
+    private var bitrateSamples: [BitrateSample] = []
+    private var bitrateMeasurementStart: TimeInterval?
+    /// Window over which we compute the average download rate. Long enough to
+    /// smooth VBR frame-to-frame variance; short enough to feel responsive on
+    /// bitrate changes (e.g., when the user re-selects audio format mid-stream).
+    private let bitrateMeasurementWindow: TimeInterval = 10.0
+    /// BASS pre-fills its HTTP buffer at network speed, so the first few
+    /// seconds of download rate is much higher than the encoded bitrate.
+    /// After the buffer is full, BASS throttles to match decoder consumption,
+    /// which equals the encoded bitrate.
+    private let bitrateInitialIgnore: TimeInterval = 3.0
+
+    /// Called by SlimProtoCoordinator's 1Hz heartbeat. Returns a measured
+    /// bitrate string formatted like LMS's `r` tag (e.g. "192kbps" or
+    /// "192kbps VBR"), or nil if a stable measurement isn't yet available.
+    /// Coordinator passes the result to AudioPlayer.applyMeasuredBitrate;
+    /// nil clears the measured override and the LMS server value (if any)
+    /// shows through as the fallback.
+    func sampleMeasuredBitrate() -> String? {
+        guard decoderStream != 0 else { return nil }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let bytes = BASS_StreamGetFilePosition(decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
+
+        // BASS returns -1 (= UInt64.max) when the file-position interface isn't
+        // implemented for this stream — e.g., some remote-stream protocols.
+        // Return nil so the LMS-reported value can show through.
+        guard bytes != UInt64.max else { return nil }
+
+        // First sample anchors the measurement window.
+        if bitrateMeasurementStart == nil {
+            bitrateMeasurementStart = now
+            bitrateSamples = [BitrateSample(bytes: bytes, timestamp: now)]
+            return nil
+        }
+
+        bitrateSamples.append(BitrateSample(bytes: bytes, timestamp: now))
+
+        // Trim to the moving window.
+        let cutoff = now - bitrateMeasurementWindow
+        bitrateSamples.removeAll { $0.timestamp < cutoff }
+
+        // Suppress during the initial prefetch burst — accumulate samples so
+        // we have history when we cross the threshold, but don't publish.
+        guard now - (bitrateMeasurementStart ?? now) > bitrateInitialIgnore else {
+            return nil
+        }
+
+        guard let first = bitrateSamples.first,
+              let last = bitrateSamples.last,
+              last.timestamp - first.timestamp > 1.0,
+              last.bytes > first.bytes else {
+            return nil
+        }
+
+        let deltaBytes = Double(last.bytes - first.bytes)
+        let deltaTime = last.timestamp - first.timestamp
+        let kbps = Int((deltaBytes * 8.0 / 1000.0) / deltaTime)
+
+        // Sanity bound — pathological values point at math/wraparound bugs,
+        // not a real bitrate.
+        guard kbps > 0, kbps < 100_000 else { return nil }
+
+        let isVBR = detectVBR(samples: bitrateSamples)
+        return isVBR ? "\(kbps)kbps VBR" : "\(kbps)kbps"
+    }
+
+    /// Estimate VBR via coefficient of variation across the per-sample
+    /// instantaneous rates. CBR streams hold a steady byte-per-second rate
+    /// (CV ~= 0); VBR streams vary 10-30% by content complexity.
+    private func detectVBR(samples: [BitrateSample]) -> Bool {
+        guard samples.count >= 4 else { return false }
+        var rates: [Double] = []
+        for i in 1..<samples.count {
+            let prev = samples[i - 1]
+            let curr = samples[i]
+            let dt = curr.timestamp - prev.timestamp
+            guard dt > 0.5, curr.bytes > prev.bytes else { continue }
+            rates.append(Double(curr.bytes - prev.bytes) / dt)
+        }
+        guard rates.count >= 3 else { return false }
+        let mean = rates.reduce(0, +) / Double(rates.count)
+        guard mean > 0 else { return false }
+        let variance = rates.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(rates.count)
+        let cv = variance.squareRoot() / mean
+        return cv > 0.10
+    }
+
+    private func resetBitrateMeasurement() {
+        bitrateSamples.removeAll()
+        bitrateMeasurementStart = nil
+    }
 
     // MARK: - Buffer Skip Ahead for Multi-Room Audio
 
@@ -217,7 +322,7 @@ class AudioStreamDecoder {
 
         // Store target jiffies and set waiting flag
         syncStartJiffies = targetJiffies
-        isWaitingForSyncStart = true
+        isWaitingForUnpause = true
 
         // Start monitoring timer (check every 100ms like AudioPlayer)
         startSyncStartMonitoring(targetJiffies: targetJiffies)
@@ -228,8 +333,8 @@ class AudioStreamDecoder {
     /// `startPlayback()` from calling BASS_ChannelPlay before the matching 'u' command
     /// arrives with synchronized jiffies. Without this, BASS plays ~300ms of audio
     /// during the 's' → 'u' gap, putting us ahead of squeezelite peers at sync start.
-    func markSyncStartPending() {
-        isWaitingForSyncStart = true
+    func markUnpausePending() {
+        isWaitingForUnpause = true
         os_log(.info, log: logger, "🎯 Sync start pending (autostart='0'/'2') — will wait for u command")
     }
 
@@ -255,7 +360,7 @@ class AudioStreamDecoder {
                 os_log(.info, log: self.logger, "▶️ Starting synchronized playback NOW")
 
                 // Clear waiting flag and start playback
-                self.isWaitingForSyncStart = false
+                self.isWaitingForUnpause = false
                 self.syncStartJiffies = nil
                 self.stopSyncStartMonitoring()
 
@@ -297,6 +402,7 @@ class AudioStreamDecoder {
                     }
 
                     os_log(.info, log: self.logger, "✅ Synchronized playback started successfully (muted: %{public}s)", self.muteNextStream ? "YES" : "NO")
+                    self.delegate?.audioStreamDecoderDidStartPlayback(self)
 
                     // === [SYNC-DIAG] Post-Start +1s snapshot ===================
                     // Re-read position 1s after BASS_ChannelPlay so we can compute
@@ -615,7 +721,7 @@ class AudioStreamDecoder {
         // If waiting for synchronized start, don't play immediately
         // Decoder loop will continue buffering data via BASS_StreamPutData
         // Timer will call BASS_ChannelPlay when target jiffies is reached
-        if isWaitingForSyncStart {
+        if isWaitingForUnpause {
             os_log(.debug, log: logger, "🎯 Buffering for synchronized start (target: %.3f) - NOT starting playback yet", syncStartJiffies ?? 0)
             os_log(.debug, log: logger, "📊 Decoder will continue pushing data, playback will start at target time")
             return true  // Return success - we're ready, just waiting for sync time
@@ -633,6 +739,7 @@ class AudioStreamDecoder {
             }
 
             os_log(.info, log: logger, "▶️ Push stream playback started (muted: %{public}s)", muteNextStream ? "YES" : "NO")
+            delegate?.audioStreamDecoderDidStartPlayback(self)
             return true
         } else {
             let error = BASS_ErrorGetCode()
@@ -676,6 +783,7 @@ class AudioStreamDecoder {
         let result = BASS_ChannelPlay(pushStream, 0)
         if result != 0 {
             os_log(.error, log: logger, "[APP-RECOVERY] ✅ Push stream resumed successfully (muted: %{public}s)", muteNextStream ? "YES" : "NO")
+            delegate?.audioStreamDecoderDidStartPlayback(self)
         } else {
             let error = BASS_ErrorGetCode()
             os_log(.error, log: logger, "[APP-RECOVERY] ❌ Push stream resume failed: BASS error %d", error)
@@ -782,6 +890,10 @@ class AudioStreamDecoder {
     ///   - replayGain: Linear gain multiplier from server (1.0 = no change)
     func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0, replayGain: Float = 1.0) {
         os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
+
+        // Reset measured-bitrate state — new track means a new decoder stream
+        // with a new BASS_FILEPOS_DOWNLOAD counter starting at 0.
+        resetBitrateMeasurement()
 
         // Reset STMl flag for new track
         sentSTMl = false
@@ -943,10 +1055,10 @@ class AudioStreamDecoder {
         isDecoding = false
 
         // Clean up sync start monitoring
-        if isWaitingForSyncStart {
+        if isWaitingForUnpause {
             os_log(.debug, log: logger, "🎯 Canceling synchronized start due to manual stop")
             stopSyncStartMonitoring()
-            isWaitingForSyncStart = false
+            isWaitingForUnpause = false
             syncStartJiffies = nil
         }
 
@@ -999,7 +1111,7 @@ class AudioStreamDecoder {
         // contents but leaves the channel in PLAYING state, so as soon as the decoder
         // pushes new data BASS consumes it. Pausing here gives a guaranteed STOPPED-or-
         // PAUSED state until the sync timer's BASS_ChannelPlay() fires.
-        if isWaitingForSyncStart {
+        if isWaitingForUnpause {
             BASS_ChannelPause(pushStream)
             trackStartPosition = 0
             previousTrackStartPosition = 0
@@ -1386,10 +1498,10 @@ class AudioStreamDecoder {
         audioPlayer?.currentStreamInfo = nil
 
         // Clean up sync start monitoring
-        if isWaitingForSyncStart {
+        if isWaitingForUnpause {
             os_log(.debug, log: logger, "🎯 Cleaning up synchronized start timer")
             stopSyncStartMonitoring()
-            isWaitingForSyncStart = false
+            isWaitingForUnpause = false
             syncStartJiffies = nil
         }
 
@@ -1581,9 +1693,9 @@ class AudioStreamDecoder {
 
         // CRITICAL FIX: Clear sync wait state - deferred tracks are NOT synchronized starts
         // If we had a previous sync command, those flags are stale and will block playback
-        if isWaitingForSyncStart {
+        if isWaitingForUnpause {
             os_log(.info, log: logger, "[APP-RECOVERY] 🔄 Clearing stale sync wait state for deferred track")
-            isWaitingForSyncStart = false
+            isWaitingForUnpause = false
             syncStartJiffies = nil
             stopSyncStartMonitoring()
         }
@@ -1741,7 +1853,7 @@ class AudioStreamDecoder {
         //   recovery instead of letting the sync timer fire.
         return state == DWORD(BASS_ACTIVE_PLAYING)
             || state == DWORD(BASS_ACTIVE_PAUSED)
-            || (state == DWORD(BASS_ACTIVE_STOPPED) && isWaitingForSyncStart)
+            || (state == DWORD(BASS_ACTIVE_STOPPED) && isWaitingForUnpause)
     }
 
     deinit {
@@ -1781,6 +1893,13 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Used by SyncController to clear drift residual and reset rate offset to nominal —
     /// any prior offset is meaningless on a fresh stream.
     func audioStreamDecoderDidRecreatePushStream(_ decoder: AudioStreamDecoder)
+
+    /// Called immediately after a successful BASS_ChannelPlay on the push stream.
+    /// Mirrors squeezelite's `output.track_started` — the precise moment audio
+    /// production transitions from 0 to >0. The coordinator uses this to send
+    /// STMs at the right moment (and only if BASS actually plays — guards
+    /// against the false-STMs case if BASS_ChannelPlay fails).
+    func audioStreamDecoderDidStartPlayback(_ decoder: AudioStreamDecoder)
 }
 
 /// Track metadata for boundary updates

@@ -56,10 +56,24 @@ class AudioManager: NSObject, ObservableObject {
     // MARK: - Stream Info
 
     /// Applies an LMS-reported bitrate string to the stream-info display.
-    /// Called from the JSON-RPC metadata path — BASS's own BASS_ATTRIB_BITRATE
-    /// is unreliable for these decoder streams (reads ~32kbps, never converges).
+    /// Called from the JSON-RPC metadata path. Used as initial display +
+    /// fallback for when the wire measurement isn't available (e.g. some
+    /// remote streams). Measured bitrate (from `sampleAndApplyMeasuredBitrate`)
+    /// takes precedence when available — LMS reports the *source* file's
+    /// bitrate which is wrong for transcoded streams.
     func updateStreamBitrate(text: String?) {
         audioPlayer.applyServerBitrate(text)
+    }
+
+    /// Samples the actual wire bitrate from AudioStreamDecoder and applies it
+    /// to the AudioPlayer's stream-info display. Called by SlimProtoCoordinator's
+    /// 1Hz heartbeat. Codec-agnostic — works for any format LMS may transcode
+    /// to. Returns the value applied (nil if measurement isn't yet stable).
+    @discardableResult
+    func sampleAndApplyMeasuredBitrate() -> String? {
+        let measured = streamDecoder.sampleMeasuredBitrate()
+        audioPlayer.applyMeasuredBitrate(measured)
+        return measured
     }
 
     // MARK: - Configuration
@@ -154,8 +168,8 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
-    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForSyncStart: Bool = false) {
-        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d, waitForSync: %{public}s)", format, sampleRate, isGapless, waitForSyncStart ? "YES" : "NO")
+    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d, waitForSync: %{public}s)", format, sampleRate, isGapless, waitForUnpause ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
         // Configure audio session
@@ -173,9 +187,9 @@ class AudioManager: NSObject, ObservableObject {
             // Sync-wait must be set AFTER initializePushStream (its delegate callback
             // may invoke SyncController.reset which doesn't touch the flag, but the
             // ordering is clearest this way) and BEFORE startPlayback() so its existing
-            // isWaitingForSyncStart guard takes effect.
-            if waitForSyncStart {
-                streamDecoder.markSyncStartPending()
+            // isWaitingForUnpause guard takes effect.
+            if waitForUnpause {
+                streamDecoder.markUnpausePending()
             }
 
             // CRITICAL: Apply ReplayGain BEFORE starting playback
@@ -208,11 +222,11 @@ class AudioManager: NSObject, ObservableObject {
             os_log(.info, log: logger, "🔊 Ensured BASS output device active before buffer flush")
 
             // Sync-wait must be set AFTER stopDecoding() because stopDecoding clears
-            // isWaitingForSyncStart (it treats waiting state as cancellable on manual
+            // isWaitingForUnpause (it treats waiting state as cancellable on manual
             // stop). For track-change-during-sync we need the flag intact so flushBuffer
             // and any subsequent startPlayback honor it.
-            if waitForSyncStart {
-                streamDecoder.markSyncStartPending()
+            if waitForUnpause {
+                streamDecoder.markUnpausePending()
             }
 
             // Now safe to flush buffer - device is active and ready for new audio
@@ -718,5 +732,11 @@ extension AudioManager: AudioStreamDecoderDelegate {
 
     func audioStreamDecoderDidRecreatePushStream(_ decoder: AudioStreamDecoder) {
         slimClient?.syncControllerReset(reason: "pushStreamRecreated")
+    }
+
+    func audioStreamDecoderDidStartPlayback(_ decoder: AudioStreamDecoder) {
+        // Forward to coordinator so STMs can be flushed at the precise moment
+        // audio production starts. Mirrors squeezelite's output.track_started.
+        slimClient?.handleDecoderDidStartPlayback()
     }
 }

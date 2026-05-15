@@ -80,6 +80,13 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Gapless Playback Tracking
     private var expectingGaplessTransition: Bool = false  // Set to true after sending STMd, false when STRM received
 
+    /// Set in `didStartDirectStream` when the server's `strm 's'` arrives with
+    /// `autostart='0'` (waitForSync). STMs send is deferred to `didResumeStream`
+    /// (when the server's 'u' unpause lands). Sending STMs at strm-receipt time
+    /// in this case prematurely jumps the server's controller state machine to
+    /// PLAYING, which then drops the subsequent STMl and never issues 'u'.
+    private var pendingUnpauseSTMs: Bool = false
+
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
     private var lastServerTimeFetchLog: Date?
@@ -361,6 +368,12 @@ class SlimProtoCoordinator: ObservableObject {
                 // drift from STMt timestamps, so our rate corrections decide right when
                 // the server sees fresh data.
                 self.tickSyncController()
+                // Sample wire bitrate from BASS_FILEPOS_DOWNLOAD and apply to
+                // AudioPlayer.StreamInfo. Replaces LMS's source-file bitrate
+                // with the *actual* stream bitrate — correct for transcoded
+                // streams. nil during the initial ~3s prefetch burst, then
+                // stabilizes over the measurement window.
+                self.audioManager.sampleAndApplyMeasuredBitrate()
             }
         }
         playbackHeartbeatTimer = timer
@@ -1055,14 +1068,21 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
-        // autostart byte from the SlimProto strm packet:
-        //   '0' (0x30) = direct stream, WAIT for unpause ('u') with synchronized jiffies
-        //   '1' (0x31) = direct stream, autoplay immediately
-        // For '0' we must defer BASS_ChannelPlay until the sync timer fires; otherwise
-        // BASS gets ~300ms of head start over squeezelite peers in the sync group.
-        let waitForSyncStart = (autostart == UInt8(ascii: "0"))
+        // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
+        //   '0' (0x30) = WAIT for unpause ('u')                           — used for sync groups + fade-in transitions
+        //   '1' (0x31) = autoplay immediately
+        //   '2' (0x32) = direct streaming variant of '0' — also WAIT      — sent when LMS adds +2 for direct-streaming handlers
+        //   '3' (0x33) = direct streaming variant of '1' — autoplay
+        // For '0' or '2' we must defer BASS_ChannelPlay until 'u' arrives; otherwise
+        // BASS gets ~300ms of head start over squeezelite peers in a sync group, OR
+        // races with the server's fade-in volume ramp. Either is audible.
+        let waitForUnpause = (autostart == UInt8(ascii: "0") || autostart == UInt8(ascii: "2"))
+        // Reset the deferred-STMs flag at the start of every track. This guards
+        // against the flag leaking if a sync-wait track is interrupted before its
+        // 'u' arrives (e.g., user hits next, server sends strm 'q' then a new 's').
+        pendingUnpauseSTMs = false
         os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f (autostart='%c', waitForSync=%{public}s)",
-               format, startTime, replayGain, Int32(autostart), waitForSyncStart ? "YES" : "NO")
+               format, startTime, replayGain, Int32(autostart), waitForUnpause ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url)
 
         // Stop any existing playback and timers first
@@ -1076,8 +1096,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Start push stream playback with AudioStreamDecoder
         // isGapless: true means DON'T flush buffer, let old audio finish
-        // waitForSyncStart: true means defer BASS_ChannelPlay until 'u' with sync jiffies arrives
-        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForSyncStart: waitForSyncStart)
+        // waitForUnpause: true means defer BASS_ChannelPlay until 'u' with sync jiffies arrives
+        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForUnpause: waitForUnpause)
 
         // Reset gapless flag after use
         expectingGaplessTransition = false
@@ -1086,11 +1106,26 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "🔗 Push stream connected - sending STMc")
         client.sendStatus("STMc")
 
-        // Send STMs for first track / manual skip (no gapless transition)
-        // For gapless: STMs is sent when track boundary is reached (keeps Material in sync)
+        // Send STMs only when BASS actually starts producing audio — mirrors
+        // squeezelite's output.track_started. The decoder fires the
+        // audioStreamDecoderDidStartPlayback delegate callback after every
+        // successful BASS_ChannelPlay; that path flushes the pending flag.
+        //
+        // - autostart='1'/'3' (immediate play): BASS_ChannelPlay fires inside
+        //   startPlayback (via startPushStreamPlayback below) → callback → flush.
+        // - autostart='0'/'2' (wait-for-unpause): startPlayback early-returns,
+        //   no callback yet; BASS_ChannelPlay fires later in resumePlayback or
+        //   in the sync-start timer (when 'u' arrives) → callback → flush.
+        //
+        // Sending STMs synchronously here was wrong for both: it told the server
+        // "track started" before BASS had played a single frame, which jumped
+        // the controller state machine to PLAYING and broke the autostart='0'
+        // unpause handshake (BUFFERING+Started → _Playing; subsequent STMl
+        // dropped as _Invalid; server never issued 'u'). Sit-and-defer fixes
+        // it and also closes the false-STMs hole if BASS_ChannelPlay fails.
         if !isGapless {
-            os_log(.info, log: logger, "🎵 First track/manual skip - sending STMs immediately")
-            client.sendStatus("STMs")
+            pendingUnpauseSTMs = true
+            os_log(.info, log: logger, "🎵 STMs deferred — will fire on actual BASS playback start (wait=%{public}s)", waitForUnpause ? "YES" : "NO")
         } else {
             os_log(.info, log: logger, "🎵 Gapless track - STMs will be sent at track boundary")
         }
@@ -1144,6 +1179,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
+
+        // STMs flush for sync-wait tracks now happens in
+        // handleDecoderDidStartPlayback (fired by the decoder when BASS_ChannelPlay
+        // actually succeeds). The audioManager.play() below routes to
+        // resumePlayback which triggers that callback.
 
         // CRITICAL FIX: Update SimpleTimeTracker with resume state
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
@@ -2238,12 +2278,30 @@ extension SlimProtoCoordinator {
     /// Start playback at a specific jiffies time (for multi-room audio synchronization)
     func startAtJiffies(_ targetJiffies: TimeInterval) {
         os_log(.info, log: logger, "🎯 Coordinator forwarding synchronized start to AudioManager")
+        // STMs flush for sync-wait tracks now happens in
+        // handleDecoderDidStartPlayback (fired by the decoder's sync-start timer
+        // after BASS_ChannelPlay succeeds at the target jiffies).
+        //
         // SyncController reset: jiffies-synchronized start re-anchors playback to the
         // server's clock. Any prior drift residual is meaningless across this point,
         // and the wait window for the target jiffies would otherwise be attributed
         // as phantom drift by tick()'s self-decay math.
         syncControllerReset(reason: "startAtJiffies")
         audioManager.startAtJiffies(targetJiffies)
+    }
+
+    /// Called by AudioManager when AudioStreamDecoder's BASS_ChannelPlay succeeds.
+    /// Single source of truth for STMs timing on the push-stream path — matches
+    /// squeezelite's `output.track_started` signal. Fires for autostart='1'
+    /// (immediate, after startPlayback), autostart='0'/'2' jiffies=0 (after
+    /// resumePlayback runs via didResumeStream), and autostart='0'/'2' jiffies>0
+    /// (after sync-start timer fires BASS_ChannelPlay at the target time).
+    func handleDecoderDidStartPlayback() {
+        if pendingUnpauseSTMs {
+            os_log(.info, log: logger, "🎵 Flushing deferred STMs (BASS playback started)")
+            client.sendStatus("STMs")
+            pendingUnpauseSTMs = false
+        }
     }
 
     // MARK: - Sync Drift Corrections

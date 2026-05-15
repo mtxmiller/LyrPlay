@@ -764,29 +764,57 @@ class AudioPlayer: NSObject, ObservableObject {
         // Note: Keep output device info - it's still valid even without an active stream
     }
 
-    // MARK: - Server-reported bitrate
+    // MARK: - Bitrate (server-reported vs measured)
 
-    /// LMS-reported bitrate string for the current track. Held separately from
-    /// `currentStreamInfo` so it survives the BASS path rebuilding that struct,
-    /// and so a metadata poll that lands before BASS sets `currentStreamInfo`
-    /// isn't lost. See `StreamInfo.bitrateText`.
+    /// LMS-reported bitrate string for the current track (the `r` tag, e.g.
+    /// "850kbps"). Authoritative for non-transcoded streams; **wrong** for
+    /// transcoded streams because LMS reports the source file's bitrate, not
+    /// the actual stream rate (e.g. "2830kbps" for a FLAC transcoded down to
+    /// Opus). Used as the initial display and as a fallback.
     private var serverBitrateText: String?
 
+    /// Wire-bitrate measured from `BASS_FILEPOS_DOWNLOAD` over a ~10s window
+    /// by AudioStreamDecoder. Codec-agnostic (works for FLAC, Opus, MP3,
+    /// AAC, etc) and reflects the *actual* stream — so it's correct even
+    /// when MobileTranscode is re-encoding on the server. Takes precedence
+    /// over `serverBitrateText` once stable (~3s after track start).
+    private var measuredBitrateText: String?
+
+    /// Effective bitrate text for display — prefer measured (real), fall back
+    /// to server (LMS's source-file value).
+    private var effectiveBitrateText: String? {
+        return measuredBitrateText ?? serverBitrateText
+    }
+
     /// Value the BASS stream-info paths seed `StreamInfo.bitrateText` with, so a
-    /// BASS rebuild doesn't wipe the LMS-reported bitrate.
-    var carryOverBitrateText: String? { serverBitrateText }
+    /// BASS rebuild doesn't wipe the bitrate display.
+    var carryOverBitrateText: String? { effectiveBitrateText }
 
     /// Applies an LMS-reported bitrate string. Called from the JSON-RPC
     /// metadata path via `AudioManager.updateStreamBitrate(text:)`.
     func applyServerBitrate(_ text: String?) {
+        if serverBitrateText == text { return }
         serverBitrateText = text
+        rebuildStreamInfoWithCurrentBitrate()
+    }
+
+    /// Applies a measured wire-bitrate string. Called by SlimProtoCoordinator's
+    /// 1Hz heartbeat with the result of AudioStreamDecoder.sampleMeasuredBitrate.
+    /// Nil clears the measured override and `serverBitrateText` shows through.
+    func applyMeasuredBitrate(_ text: String?) {
+        if measuredBitrateText == text { return }
+        measuredBitrateText = text
+        rebuildStreamInfoWithCurrentBitrate()
+    }
+
+    private func rebuildStreamInfoWithCurrentBitrate() {
         guard let info = currentStreamInfo else { return }
         currentStreamInfo = StreamInfo(
             format: info.format,
             sampleRate: info.sampleRate,
             channels: info.channels,
             bitDepth: info.bitDepth,
-            bitrateText: text
+            bitrateText: effectiveBitrateText
         )
     }
 
