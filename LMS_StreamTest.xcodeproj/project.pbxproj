@@ -115,6 +115,7 @@
 				AudioStreamDecoder.swift,
 				KeychainManager.swift,
 				NowPlayingManager.swift,
+				PeakTracker.swift,
 				Phase2SyncControllerVerification.swift,
 				PlaylistModels.swift,
 				PurchaseManager.swift,
