@@ -566,20 +566,41 @@ private struct CircleFocusButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
+                // Base material — gives the dark translucent fill consistent
+                // with the rest of the Now Playing surface.
                 Circle()
                     .fill(.regularMaterial)
+                // Focused brightening tint — lifts the focused button to a
+                // lighter shade, matching the tab bar's selected-pill look
+                // where the active tab brightens against the capsule.
+                Circle()
+                    .fill(.white.opacity(isFocused ? 0.18 : 0))
+                // Focused edge stroke — same crisp white edge highlight the
+                // tab bar pill uses. Defines the focused button as a
+                // selected "pill" instead of just a scaled-up neighbor.
+                Circle()
+                    .strokeBorder(.white.opacity(isFocused ? 0.40 : 0), lineWidth: 2)
                 Image(systemName: systemImage)
                     .font(.system(size: iconSize, weight: .semibold))
                     .foregroundStyle(.primary)
             }
             .frame(width: diameter, height: diameter)
-            .scaleEffect(isFocused ? 1.10 : 1.0)
-            .shadow(color: .white.opacity(isFocused ? 0.35 : 0),
-                    radius: isFocused ? 14 : 0)
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            // Soft drop shadow — kept smaller now that the tint+edge carry
+            // most of the focus signal. Subtle lift cue, not the dominant
+            // indicator.
+            .shadow(color: .white.opacity(isFocused ? 0.20 : 0),
+                    radius: isFocused ? 10 : 0,
+                    y: isFocused ? 3 : 0)
         }
-        .buttonStyle(.plain)
+        // ChromelessButtonStyle: tvOS 26's `.plain` style still painted a
+        // capsule focus pill around these circle buttons even with
+        // `.focusEffectDisabled()` applied (verified on simulator
+        // 2026-05-15 — the pill is the .plain style's own renderer, not
+        // the focus-effect machinery). Custom style emits no chrome, the
+        // scale + shadow above is the entire focused look.
+        .buttonStyle(ChromelessButtonStyle())
         .focused($isFocused)
-        .focusEffectDisabled()
         .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: isFocused)
         .accessibilityLabel(accessibilityLabel)
     }

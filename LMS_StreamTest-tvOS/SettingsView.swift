@@ -38,6 +38,7 @@ struct SettingsView: View {
 
     @State private var showServerChange = false
     @State private var showFormatPicker = false
+    @State private var showLibraryShelves = false
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
 
@@ -48,6 +49,7 @@ struct SettingsView: View {
                     serverSection
                     playerSection
                     audioSection
+                    librarySection
                     aboutSection
                 }
                 .navigationTitle("Settings")
@@ -60,6 +62,9 @@ struct SettingsView: View {
                 }
                 .navigationDestination(isPresented: $showFormatPicker) {
                     FormatPickerView(selection: $settings.audioFormat)
+                }
+                .navigationDestination(isPresented: $showLibraryShelves) {
+                    LibraryShelvesPickerView(settings: settings)
                 }
                 .onChange(of: settings.audioFormat) { _, _ in
                     os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
@@ -125,6 +130,28 @@ struct SettingsView: View {
                     Text("Format")
                     Spacer()
                     Text(settings.audioFormat.displayName)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.secondary)
+                        .font(.body)
+                }
+            }
+            .buttonStyle(.plain)
+            .tvListRow()
+        }
+    }
+
+    // MARK: - Library
+
+    private var librarySection: some View {
+        Section("Library") {
+            Button {
+                showLibraryShelves = true
+            } label: {
+                HStack {
+                    Label("Shelves", systemImage: "rectangle.stack.fill")
+                    Spacer()
+                    Text("\(settings.enabledLibraryShelves.count) on")
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.right")
                         .foregroundStyle(.secondary)

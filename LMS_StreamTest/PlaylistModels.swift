@@ -248,7 +248,7 @@ class UpNextQueue: ObservableObject {
 
 // MARK: - Artist Data Model
 
-struct Artist: Identifiable {
+struct Artist: Identifiable, Hashable {
     let id: String
     let name: String
     let albumCount: Int?
@@ -435,6 +435,296 @@ extension FavoriteItem {
                 type: type,
                 isAudio: isAudio
             )
+        }
+    }
+}
+
+// MARK: - Home Extra (Material Skin) Response
+
+/// One row of Material's `home-extra` response — a labeled category whose items
+/// are all the same kind. `items` carries strongly-typed payload so callers can
+/// dispatch per kind without re-classifying strings.
+struct HomeExtraSection: Identifiable {
+    enum Items {
+        case albums([Album])
+        case artists([Artist])
+        case favorites([FavoriteItem])
+        case playlists([Playlist])
+    }
+
+    let id: String        // sort key, e.g. "new" / "recentlyplayed" / "artists_new" / "favorites"
+    let title: String     // human-readable header for the shelf
+    let items: Items
+
+    var isEmpty: Bool {
+        switch items {
+        case .albums(let a):    return a.isEmpty
+        case .artists(let a):   return a.isEmpty
+        case .favorites(let f): return f.isEmpty
+        case .playlists(let p): return p.isEmpty
+        }
+    }
+}
+
+/// Parsed `["material-skin", "home-extra", ...]` response.
+///
+/// `materialInstalled` is the routing signal for tvOS's LibraryView: a missing
+/// `material_home` flag in the wire response means Material Skin is not loaded
+/// on this LMS server and the caller should switch to BrowseLibraryView.
+///
+/// `sections` only contains non-empty shelves; empty `material_home_*_loop`
+/// arrays are filtered out so SwiftUI renders no empty headers.
+struct HomeExtraResponse {
+    let materialInstalled: Bool
+    let sections: [HomeExtraSection]
+}
+
+extension HomeExtraResponse {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "HomeExtraResponse")
+
+    /// Album sort keys + display titles, in render order. Add/remove here to
+    /// retune the v1 sort selection — keep the order, it's the on-screen order.
+    private static let albumSorts: [(key: String, title: String)] = [
+        ("new",            "New Music"),
+        ("recentlyplayed", "Recently Played"),
+        ("random",         "Random Albums"),
+        ("popular",        "Popular"),
+        ("playcount",      "Most Played"),
+        ("changed",        "Recently Updated"),
+    ]
+
+    /// Artist sort keys + display titles, in render order.
+    private static let artistSorts: [(key: String, title: String)] = [
+        ("artists_new",            "New Artists"),
+        ("artists_recentlyplayed", "Recently Heard Artists"),
+        ("artists_popular",        "Popular Artists"),
+        ("artists_playcount",      "Most Played Artists"),
+    ]
+
+    /// Parse the `result` dict from a `slim.request` envelope wrapping
+    /// `["material-skin", "home-extra", ...]`. Pass the value of the `result`
+    /// key, not the full JSON-RPC envelope.
+    ///
+    /// Empty shelves are filtered out. The `material_home` flag is the only
+    /// signal we use for "is Material installed" — no separate detection probe.
+    static func parse(_ result: [String: Any]) -> HomeExtraResponse {
+        let materialInstalled = parseMaterialHomeFlag(result["material_home"])
+        guard materialInstalled else {
+            return HomeExtraResponse(materialInstalled: false, sections: [])
+        }
+
+        var sections: [HomeExtraSection] = []
+
+        // Album shelves — strip `@idxN` from each item's id before parsing
+        // (Plugin.pm:2295 rewrites ids when an album appears in multiple sorts).
+        for sort in albumSorts {
+            let loopKey = "material_home_\(sort.key)_loop"
+            guard let loop = result[loopKey] as? [[String: Any]], !loop.isEmpty else { continue }
+            let albums = Album.parseLoop(stripIdxSuffix(loop))
+            guard !albums.isEmpty else { continue }
+            sections.append(HomeExtraSection(id: sort.key, title: sort.title, items: .albums(albums)))
+        }
+
+        // Artist shelves — same `@idx` stripping (Plugin.pm:2203 also passes $idmod).
+        for sort in artistSorts {
+            let loopKey = "material_home_\(sort.key)_loop"
+            guard let loop = result[loopKey] as? [[String: Any]], !loop.isEmpty else { continue }
+            let artists = Artist.parseLoop(stripIdxSuffix(loop))
+            guard !artists.isEmpty else { continue }
+            sections.append(HomeExtraSection(id: sort.key, title: sort.title, items: .artists(artists)))
+        }
+
+        // Playlists — clean ids (Plugin.pm:2243 passes $idmod=undef).
+        if let loop = result["material_home_playlists_loop"] as? [[String: Any]], !loop.isEmpty {
+            let playlists = Playlist.parseLoop(loop)
+            if !playlists.isEmpty {
+                sections.append(HomeExtraSection(id: "playlists", title: "Playlists", items: .playlists(playlists)))
+            }
+        }
+
+        // Radios — favorites shape under a different key (Plugin.pm:2218
+        // passes $idmod=undef). Live testing (192.168.1.8) revealed the
+        // items lack a top-level `id` field — `material-skin-query radios`
+        // returns just {name,url,icon,ihe}. Synthesize id from url so
+        // FavoriteItem.parseLoop's id requirement is satisfied. The
+        // synthesized id then drives the tap dispatch in HomeExtraShelf,
+        // which special-cases `section.id == "radios"` to play via the
+        // raw URL instead of the favorites item_id command.
+        if let loop = result["material_home_radios_loop"] as? [[String: Any]], !loop.isEmpty {
+            let withIds = synthesizeIdFromUrl(loop)
+            let radios = FavoriteItem.parseLoop(withIds)
+            if !radios.isEmpty {
+                sections.append(HomeExtraSection(id: "radios", title: "Radios", items: .favorites(radios)))
+            }
+        }
+
+        // Favorites are NOT in this parser — they're fetched separately by
+        // LibraryView via `["favorites","items"]` and appended as a section.
+        // Reason: `material_home_favorites_obj` carries Jive-shape items
+        // (text/icon/actions, NOT FavoriteItem fields) verified against the
+        // 192.168.1.8 live server 2026-05-15, which would need a v2 Jive
+        // base+commonParams merge parser. The direct favorites query gives
+        // us the same content in a shape FavoriteItem.parseLoop already
+        // speaks fluently.
+
+        os_log(.info, log: parseLogger, "✅ home-extra parsed: %d non-empty shelves", sections.count)
+        return HomeExtraResponse(materialInstalled: true, sections: sections)
+    }
+
+    /// `material_home` arrives as either Int 1 or String "1" depending on LMS
+    /// serialization context; treat both as "installed."
+    private static func parseMaterialHomeFlag(_ raw: Any?) -> Bool {
+        if let n = raw as? Int { return n == 1 }
+        if let s = raw as? String { return s == "1" }
+        return false
+    }
+
+    /// Strip Plugin.pm:2295's `@idxN` suffix from each item's `id`. Safe to call
+    /// on items without the suffix (no-op). Only applies to String ids; Int ids
+    /// are passed through unchanged.
+    private static func stripIdxSuffix(_ items: [[String: Any]]) -> [[String: Any]] {
+        return items.map { item in
+            guard let idString = item["id"] as? String,
+                  let atRange = idString.range(of: "@idx") else {
+                return item
+            }
+            var mutable = item
+            mutable["id"] = String(idString[..<atRange.lowerBound])
+            return mutable
+        }
+    }
+
+    /// Synthesize `id` from `url` when missing. Used for the home-extra radios
+    /// loop, whose `material-skin-query radios` results lack top-level ids.
+    /// The synthesized id (the URL itself) doubles as the play-dispatch
+    /// payload in HomeExtraShelf's `radios` branch.
+    private static func synthesizeIdFromUrl(_ items: [[String: Any]]) -> [[String: Any]] {
+        return items.map { item in
+            if item["id"] != nil { return item }
+            guard let url = item["url"] as? String, !url.isEmpty else { return item }
+            var mutable = item
+            mutable["id"] = url
+            return mutable
+        }
+    }
+}
+
+// MARK: - Genre (BrowseLibraryView fallback)
+
+/// Genre list entry from `["genres", 0, N]`. Used by the tvOS Library tab's
+/// fallback view (when Material Skin is not installed) to render a list of
+/// genres that drill into albums-filtered-by-genre.
+struct Genre: Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
+// MARK: - Library Shelf Catalog (tvOS home-extra shelf selection)
+
+/// The catalog of home-extra shelves the tvOS Library tab can render. Single
+/// source of truth for: home-extra request params, Settings toggle labels,
+/// and persistence keys. `LibraryShelf.allCases` order defines on-screen
+/// shelf order — reorder by hand here.
+///
+/// User-configurable via tvOS Settings → Library Shelves (per `D7=B` decision
+/// 2026-05-15). Material stores its equivalent (`detailedHomeItems`) in
+/// browser localStorage, not on the LMS server, so tvOS keeps its own state.
+enum LibraryShelf: String, CaseIterable, Identifiable {
+    case new
+    case recentlyPlayed = "recentlyplayed"
+    case random
+    case popular
+    case playcount
+    case changed
+    case artistsNew = "artists_new"
+    case artistsRecentlyPlayed = "artists_recentlyplayed"
+    case artistsPopular = "artists_popular"
+    case artistsPlaycount = "artists_playcount"
+    case playlists
+    case radios
+    case favorites
+
+    var id: String { rawValue }
+
+    /// How LibraryView fetches the data for this shelf. Most shelves come
+    /// from the `home-extra` JSON-RPC; favorites is fetched separately
+    /// because its `material_home_favorites_obj` shape requires the v2
+    /// Jive base+commonParams merge parser we don't have yet.
+    var dataSource: DataSource {
+        switch self {
+        case .favorites: return .separateFetch
+        default:         return .homeExtra
+        }
+    }
+
+    enum DataSource {
+        /// Included as a `<rawValue>:1` param in the single home-extra request.
+        case homeExtra
+        /// Fetched via its own JSON-RPC request, results merged into the
+        /// shelf list (currently only used by favorites).
+        case separateFetch
+    }
+
+    /// Param appended to the `["material-skin", "home-extra", ...]` request
+    /// when this shelf is enabled. Only meaningful for `dataSource == .homeExtra`.
+    var requestParam: String { "\(rawValue):1" }
+
+    /// Title shown in the Settings toggle AND as the shelf header on Library.
+    var title: String {
+        switch self {
+        case .new:                   return "New Music"
+        case .recentlyPlayed:        return "Recently Played"
+        case .random:                return "Random Albums"
+        case .popular:               return "Popular"
+        case .playcount:             return "Most Played"
+        case .changed:               return "Recently Updated"
+        case .artistsNew:            return "New Artists"
+        case .artistsRecentlyPlayed: return "Recently Heard Artists"
+        case .artistsPopular:        return "Popular Artists"
+        case .artistsPlaycount:      return "Most Played Artists"
+        case .playlists:             return "Playlists"
+        case .radios:                return "Radios"
+        case .favorites:             return "Favorites"
+        }
+    }
+
+    /// Whether this shelf is ON by default for first-run users. Picked to
+    /// match a reasonable Material iPhone home — albums, artists, playlists,
+    /// favorites, radios on; the more obscure sorts off. Users can toggle
+    /// in Settings.
+    var defaultEnabled: Bool {
+        switch self {
+        case .new, .recentlyPlayed, .random, .popular, .artistsNew,
+             .playlists, .favorites, .radios:
+            return true
+        case .playcount, .changed, .artistsRecentlyPlayed,
+             .artistsPopular, .artistsPlaycount:
+            return false
+        }
+    }
+}
+
+extension Genre {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Genre")
+
+    /// Parses a `genres_loop` JSON array. id arrives as String OR Int; name
+    /// is the `genre` field. Skips entries missing either.
+    static func parseLoop(_ data: [[String: Any]]) -> [Genre] {
+        return data.compactMap { genreData -> Genre? in
+            let id: String
+            if let s = genreData["id"] as? String { id = s }
+            else if let n = genreData["id"] as? Int { id = String(n) }
+            else {
+                os_log(.error, log: parseLogger, "❌ Genre missing id, skipping")
+                return nil
+            }
+
+            guard let name = genreData["genre"] as? String, !name.isEmpty else {
+                os_log(.error, log: parseLogger, "❌ Genre %{public}s missing 'genre' field, skipping", id)
+                return nil
+            }
+
+            return Genre(id: id, name: name)
         }
     }
 }

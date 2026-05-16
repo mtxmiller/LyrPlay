@@ -33,6 +33,11 @@ class SettingsManager: ObservableObject {
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
+    /// tvOS Library tab: set of `LibraryShelf` rawValues that the user has
+    /// enabled. Defaults to `LibraryShelf.defaultEnabled` on first run.
+    /// Persisted as a sorted comma-separated rawValue list in UserDefaults
+    /// so the on-disk shape stays human-readable.
+    @Published var enabledLibraryShelves: Set<String> = SettingsManager.defaultEnabledLibraryShelves
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -142,6 +147,7 @@ class SettingsManager: ObservableObject {
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
         static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
         static let experimentalRateMatching = "ExperimentalRateMatching"
+        static let enabledLibraryShelves = "EnabledLibraryShelves"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -205,6 +211,14 @@ class SettingsManager: ObservableObject {
         #else
         return false
         #endif
+    }()
+
+    /// First-run default for `enabledLibraryShelves`. Pulled from the
+    /// `LibraryShelf.defaultEnabled` catalog so the catalog stays single-
+    /// source-of-truth. iOS reads this too but doesn't render shelves —
+    /// harmless.
+    private static let defaultEnabledLibraryShelves: Set<String> = {
+        Set(LibraryShelf.allCases.filter { $0.defaultEnabled }.map { $0.rawValue })
     }()
 
     // MARK: - Singleton
@@ -289,6 +303,15 @@ class SettingsManager: ObservableObject {
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
         experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
 
+        // Library shelves: stored as comma-separated rawValues so the on-disk
+        // value is greppable. Missing/empty → first-run defaults from the
+        // LibraryShelf catalog.
+        if let raw = UserDefaults.standard.string(forKey: Keys.enabledLibraryShelves), !raw.isEmpty {
+            enabledLibraryShelves = Set(raw.split(separator: ",").map(String.init))
+        } else {
+            enabledLibraryShelves = Self.defaultEnabledLibraryShelves
+        }
+
         // Load credentials from Keychain
         if let primaryCreds = KeychainManager.shared.load(for: .primary) {
             serverUsername = primaryCreds.username
@@ -335,6 +358,8 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
         UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
+        // Sorted to keep the on-disk value diff-stable when the set order changes.
+        UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
 
         // Save credentials to Keychain
         if !serverUsername.isEmpty {

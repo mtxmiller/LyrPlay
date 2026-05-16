@@ -20,15 +20,19 @@ struct AlbumListView: View {
     enum Sort: Equatable {
         case recentlyPlayed
         case new
-        case byArtist(id: String)  // 98q.8: ArtistDetailView drill-in target
+        case alphabetical                 // BrowseLibraryView fallback "Albums"
+        case byArtist(id: String)         // 98q.8: ArtistDetailView drill-in target
+        case byGenre(id: String, name: String)  // BrowseLibraryView fallback "Genres" drill-in
 
-        /// LMS query param. RecentlyPlayed/New use a `sort:` filter; byArtist uses
-        /// the `artist_id:N` filter (default sort = album title).
+        /// LMS query param. RecentlyPlayed/New/Alphabetical use a `sort:` filter;
+        /// byArtist/byGenre use the entity-id filter (default sort = album title).
         var paramValue: String {
             switch self {
             case .recentlyPlayed: return "sort:recentlyplayed"
             case .new: return "sort:new"
+            case .alphabetical: return "sort:album"
             case .byArtist(let id): return "artist_id:\(id)"
+            case .byGenre(let id, _): return "genre_id:\(id)"
             }
         }
 
@@ -36,7 +40,9 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "clock"
             case .new: return "sparkles"
+            case .alphabetical: return "music.note.list"
             case .byArtist: return "music.note"
+            case .byGenre: return "music.note"
             }
         }
 
@@ -44,7 +50,9 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "Nothing played recently"
             case .new: return "No new music"
+            case .alphabetical: return "No albums"
             case .byArtist: return "No albums found"
+            case .byGenre: return "No albums in this genre"
             }
         }
 
@@ -52,7 +60,9 @@ struct AlbumListView: View {
             switch self {
             case .recentlyPlayed: return "Albums you play will appear here."
             case .new: return "Add music to your LMS library to see it here."
+            case .alphabetical: return "Add music to your LMS library to see it here."
             case .byArtist: return "This artist has no albums in the LMS library."
+            case .byGenre: return "No albums tagged with this genre."
             }
         }
     }
