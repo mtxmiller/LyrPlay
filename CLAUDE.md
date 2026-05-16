@@ -23,6 +23,8 @@ xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 
 For the CLI build → install → launch loop on a connected iPhone, see the wiki at `Setup/iPhone Build Workflow.md`. Personal device IDs are kept in user-local Claude memory, not committed.
 
+**Test LMS server**: `192.168.1.8` (default ports — 9000 JSON-RPC, 3483 SlimProto) is available on-network for debugging and exercising new features.
+
 ## Issue Tracking
 
 This project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking. Use `bd` commands, not markdown TODOs. Run `bd ready --json` for available work, `bd create "title" -t bug|feature|task -p 0-4 --json` to file issues, `bd close <id>` to complete.
