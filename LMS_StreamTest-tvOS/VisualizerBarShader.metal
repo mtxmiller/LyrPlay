@@ -30,7 +30,9 @@ struct Uniforms {
     float  time;            // not used by bar shaders (animation drives via bins)
     float  aspect;          // not used by bar shaders (bars are axis-aligned)
     int    binCount;        // shared with bloom
-    int    preset;          // 0 = LED hi-fi, 1 = Winamp, 2 = iTunes-clean
+    int    preset;          // matches VisualizerPreset.rawValue: 0=bloom (never reaches
+                            // this shader, bloom has its own pipeline), 1=ledHiFi,
+                            // 2=winamp, 3=iTunesClean
 };
 
 struct VertexOut {
@@ -148,10 +150,15 @@ fragment float4 bar_fragment(VertexOut in [[stage_in]],
 
     // 4. Branch on preset — fully coherent across fragments (uniform-driven), so
     //    SIMD divergence is zero. Cost is one extra register and a branch.
+    //    Case numbers MUST match VisualizerPreset.rawValue exactly to avoid the
+    //    off-by-one bug where .ledHiFi (rawValue=1) was wrongly hitting Winamp.
+    //    Case 0 (bloom) is dead code here — bloom uses its own pipeline state and
+    //    never reaches bar_fragment — but listing it keeps the shader's switch
+    //    1:1 with the enum and resilient to future enum additions.
     switch (u.preset) {
-        case 0:  return ledHiFiColor(uv.y, barHeight);
-        case 1:  return winampColor(uv.y, barHeight, clamp(peaks[barIdx], 0.0, 1.0));
-        case 2:  return iTunesCleanColor(uv.y, barHeight, u.accentColor);
-        default: return float4(0.0, 0.0, 0.0, 1.0);  // unknown preset → black (defensive)
+        case 1:  return ledHiFiColor(uv.y, barHeight);
+        case 2:  return winampColor(uv.y, barHeight, clamp(peaks[barIdx], 0.0, 1.0));
+        case 3:  return iTunesCleanColor(uv.y, barHeight, u.accentColor);
+        default: return float4(0.0, 0.0, 0.0, 1.0);  // bloom (0) or unknown → black (defensive)
     }
 }
