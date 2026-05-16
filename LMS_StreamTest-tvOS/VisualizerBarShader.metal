@@ -54,11 +54,14 @@ constant float3 kLEDGreen  = float3(0.05, 0.95, 0.15);
 constant float3 kLEDAmber  = float3(0.95, 0.85, 0.05);
 constant float3 kLEDRed    = float3(0.95, 0.15, 0.05);
 
-// Winamp gradient stops + peak cap color
+// Winamp gradient stops + peak cap color. Authentic Winamp was green-dominated
+// (bars sat mostly in the green zone, hit yellow on louder transients, red only
+// on the very top). Gradient runs across the full screen so short bars stay
+// green and tall bars reach into yellow/red naturally.
+constant float3 kWAGreen   = float3(0.05, 0.95, 0.15);
 constant float3 kWAYellow  = float3(0.95, 0.85, 0.05);
-constant float3 kWAOrange  = float3(0.95, 0.45, 0.05);
 constant float3 kWARed     = float3(0.95, 0.05, 0.05);
-constant float3 kWAPeakCap = float3(0.95, 0.95, 0.85);  // whitish for contrast on red gradient
+constant float3 kWAPeakCap = float3(0.95, 0.95, 0.85);  // whitish for contrast on the gradient
 
 
 // Helper: which bar slot does this fragment live in?
@@ -101,16 +104,16 @@ inline float4 winampColor(float uvY, float barHeight, float peakHeight) {
     // Above bar amplitude → black
     if (uvY >= barHeight) return float4(0.0, 0.0, 0.0, 1.0);
 
-    // Vertical gradient: yellow (bottom) → orange (middle) → red (top of bar).
-    // Note: gradient runs over full uv.y range, not over barHeight, so a tall
-    // bar reaches red and a short bar shows only yellow. This matches the
-    // Winamp behavior where peaks fade through the warmer colors.
+    // Vertical gradient: green (bottom) → yellow (middle) → red (top of bar).
+    // Gradient runs over full uv.y range, not over barHeight, so a short bar
+    // stays in the green zone and only loud peaks reach yellow / red — matches
+    // the classic Winamp aesthetic where most music sat in green.
     float t = uvY;
     float3 color;
     if (t < 0.5) {
-        color = mix(kWAYellow, kWAOrange, t * 2.0);
+        color = mix(kWAGreen, kWAYellow, t * 2.0);
     } else {
-        color = mix(kWAOrange, kWARed, (t - 0.5) * 2.0);
+        color = mix(kWAYellow, kWARed, (t - 0.5) * 2.0);
     }
     return float4(color, 1.0);
 }
