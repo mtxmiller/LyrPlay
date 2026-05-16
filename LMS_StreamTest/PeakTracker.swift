@@ -9,7 +9,7 @@
 // can be unit-tested alongside VisualizerEngine. iOS imports but ignores.
 //
 // Decay rate is per-frame, not per-second — calibrated against a 60fps draw
-// loop. Default 0.015 → full decay (1.0 → 0.0) in ~67 frames ≈ 1.1s.
+// loop. Default 0.010 → full decay (1.0 → 0.0) in ~100 frames ≈ 1.6s.
 import Foundation
 
 struct PeakTracker {
@@ -18,10 +18,11 @@ struct PeakTracker {
     private(set) var peaks: [Float]
 
     /// How much each peak decays per call to update() when the incoming bin is lower.
-    /// Lower = slower fall (peaks linger), higher = faster fall.
+    /// Lower = slower fall (peaks linger), higher = faster fall. Default 0.010 →
+    /// full decay (1.0 → 0.0) in ~100 frames ≈ 1.6s at 60fps. Tunable via init.
     private let decayPerFrame: Float
 
-    init(bandCount: Int, decayPerFrame: Float = 0.015) {
+    init(bandCount: Int, decayPerFrame: Float = 0.010) {
         self.peaks = Array(repeating: 0, count: Swift.max(0, bandCount))
         self.decayPerFrame = decayPerFrame
     }

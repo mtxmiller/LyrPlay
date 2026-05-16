@@ -93,9 +93,15 @@ inline float4 ledHiFiColor(float uvY, float barHeight) {
 }
 
 inline float4 winampColor(float uvY, float barHeight, float peakHeight) {
-    // Peak cap takes priority — it floats ABOVE current bar amplitude, so without
-    // checking it first the "above bar → black" path would paint over it.
+    // Peak cap only renders when peak is MEANINGFULLY above bar — not when peak ==
+    // barHeight (rising frames). Without this guard, the cap is drawn over the top
+    // 12px of the bar, which visually reads as "white tip on bar" + later "floating
+    // cap above bar" alternating frame-to-frame, perceived as two white things.
+    // The kPeakVisibleGap hysteresis (~6px) avoids flicker at the boundary case
+    // where bar oscillates rapidly right at peak.
+    const float kPeakVisibleGap = kPeakCapHeight * 0.5;
     if (peakHeight > 0.0 &&
+        (peakHeight - barHeight) > kPeakVisibleGap &&
         uvY >= (peakHeight - kPeakCapHeight) &&
         uvY < peakHeight) {
         return float4(kWAPeakCap, 1.0);
