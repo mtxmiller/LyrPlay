@@ -25,6 +25,11 @@ struct VisualizerView: View {
     /// Pause cue — when false, the MTKView halts its draw cycle (zero GPU cost).
     let isPlaying: Bool
 
+    /// Source of track metadata for the top-leading track-info overlay. SwiftUI
+    /// re-renders on @Published changes (currentTrackTitle / currentArtist), so
+    /// the .onChange below auto-fires on track transitions.
+    @ObservedObject var nowPlaying: NowPlayingManager
+
     /// Persisted preset choice. Default = bloom (rawValue 0) so fresh installs +
     /// upgraders see the existing radial bloom on first visualizer entry.
     @AppStorage("lyrplay_visualizer_preset") private var presetRaw: Int = VisualizerPreset.bloom.rawValue
@@ -36,10 +41,18 @@ struct VisualizerView: View {
 
     @State private var showSwapOverlay: Bool = false
     @State private var showHintOverlay: Bool = false
+    @State private var showTrackOverlay: Bool = false
     @State private var swapFadeTask: Task<Void, Never>?
+    @State private var trackFadeTask: Task<Void, Never>?
 
     private var currentPreset: VisualizerPreset {
         VisualizerPreset(rawValue: presetRaw) ?? .bloom
+    }
+
+    /// Composite key used to detect track changes. Title + artist is enough for the
+    /// overlay's purpose (radio metadata updates also flow through these fields).
+    private var trackKey: String {
+        "\(nowPlaying.currentTrackTitle)|\(nowPlaying.currentArtist)"
     }
 
     var body: some View {
@@ -49,6 +62,37 @@ struct VisualizerView: View {
                 isPlaying: isPlaying,
                 currentPreset: currentPreset
             )
+
+            // Track-info overlay (top-leading capsule, title + artist). Fades in on
+            // viz entry AND on each track change. Auto-dismisses after ~5s. Uses
+            // Spacer pattern (same as bottom overlays) so it sits at top-leading
+            // without changing the ZStack's default alignment.
+            if showTrackOverlay && nowPlaying.hasTrackLoaded {
+                VStack {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(nowPlaying.currentTrackTitle)
+                                .font(.system(size: 36, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text(nowPlaying.currentArtist)
+                                .font(.system(size: 24, weight: .regular, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 16)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        Spacer()                                 // push capsule to leading
+                    }
+                    .padding(.top, 60)
+                    .padding(.leading, 80)
+                    Spacer()                                     // push to top
+                }
+                .transition(.opacity)
+            }
 
             // Swap-name overlay (small capsule at bottom-center, "Bloom" / "LED Hi-Fi" / etc.)
             if showSwapOverlay {
@@ -82,12 +126,16 @@ struct VisualizerView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: showSwapOverlay)
         .animation(.easeInOut(duration: 0.3), value: showHintOverlay)
+        .animation(.easeInOut(duration: 0.3), value: showTrackOverlay)
         // .focusable(true) is REQUIRED for .onMoveCommand to fire on Siri Remote gen 1
         // click-pad swipes. UIViewRepresentable (MTKView) is not in the focus chain
         // by default. Step 0 hardware test verified zero reliability without this.
         .focusable(true)
         .onMoveCommand(perform: handleMove)
         .onAppear(perform: handleAppear)
+        .onChange(of: trackKey) { _, _ in
+            triggerTrackOverlay()                                // fires on each track change
+        }
     }
 
     // MARK: - Gesture handling
@@ -111,6 +159,10 @@ struct VisualizerView: View {
     }
 
     private func handleAppear() {
+        // Show track-info overlay on viz entry so the user sees what's currently
+        // playing without having to wait for the next track change.
+        triggerTrackOverlay()
+
         guard !hasSeenSwapHint else { return }
 
         showHintOverlay = true
@@ -134,6 +186,25 @@ struct VisualizerView: View {
                 showSwapOverlay = false
             } catch {
                 // cancelled by next swipe — leave overlay visible; the new task takes over
+            }
+        }
+    }
+
+    /// Pop the track-info overlay for ~5 seconds. Called on viz entry and on each
+    /// track change (.onChange of trackKey). Rapid track changes cancel the prior
+    /// timer and restart so the most recent track is always visible for the full
+    /// duration. No-op if there's no loaded track (guard inside the conditional
+    /// view body also covers this).
+    private func triggerTrackOverlay() {
+        guard nowPlaying.hasTrackLoaded else { return }
+        trackFadeTask?.cancel()
+        showTrackOverlay = true
+        trackFadeTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                showTrackOverlay = false
+            } catch {
+                // cancelled by next track change — the new task takes over
             }
         }
     }

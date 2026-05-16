@@ -66,7 +66,9 @@ struct NowPlayingView: View {
         .onChange(of: nowPlaying.currentArtwork) { _, _ in updateAccent() }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in tick() }
         .fullScreenCover(isPresented: $showVisualizer) {
-            VisualizerView(accentColor: accentRGB, isPlaying: isPlaying)
+            VisualizerView(accentColor: accentRGB,
+                           isPlaying: isPlaying,
+                           nowPlaying: nowPlaying)
                 .ignoresSafeArea()
                 .onExitCommand { showVisualizer = false }
         }
