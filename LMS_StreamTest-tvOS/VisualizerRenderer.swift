@@ -55,10 +55,10 @@ final class VisualizerRenderer: NSObject, MTKViewDelegate {
     /// switching TO Winamp from any other preset starts from zero peaks (peaks
     /// accumulated while a non-Winamp preset was visible are not meaningful).
     ///
-    /// STEP-4-TEMP: defaults to .ledHiFi for the hardware sanity check of the bar
-    /// shader wire-up. Step 5 will revert to .bloom and add @AppStorage persistence
-    /// driven by the click-pad LEFT/RIGHT switcher in VisualizerView.
-    var currentPreset: VisualizerPreset = .ledHiFi {
+    /// Default is .bloom per design Premise 1 (upgraders see the existing radial
+    /// bloom on first visualizer entry). VisualizerView writes @AppStorage on
+    /// every click-pad LEFT/RIGHT swap and propagates here via updateUIView.
+    var currentPreset: VisualizerPreset = .bloom {
         didSet {
             if currentPreset != oldValue {
                 peakTracker.reset()
