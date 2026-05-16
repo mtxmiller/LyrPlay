@@ -44,8 +44,8 @@ struct VertexOut {
 constant float kBarGapRatio    = 0.15;   // % of bar slot that's gap on the right edge
 constant int   kLEDSegments    = 16;     // vertical LED segments per bar
 constant float kSegGapRatio    = 0.10;   // % of LED segment height that's gap at top
-constant int   kGreenMaxSeg    = 9;      // LED segs 0..9 are green
-constant int   kYellowMaxSeg   = 12;     // LED segs 10..12 are amber/yellow; 13..15 red
+constant int   kGreenMaxSeg    = 7;      // LED segs 0..7 are green (bottom 50%)
+constant int   kYellowMaxSeg   = 11;     // LED segs 8..11 amber (next 25%); 12..15 red (top 25%)
 constant float kPeakCapHeight  = 0.012;  // Winamp peak cap thickness in UV (≈13px @ 1080p)
 constant float kITunesTopSoft  = 0.025;  // iTunes rounded-top anti-alias band
 
