@@ -127,6 +127,7 @@
 				SlimProtoCoordinator.swift,
 				SyncController.swift,
 				VisualizerEngine.swift,
+				VisualizerPreset.swift,
 			);
 			target = 6B85398B2FA9414C00A05440 /* LMS_StreamTest-tvOS */;
 		};
