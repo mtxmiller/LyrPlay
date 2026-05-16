@@ -9,10 +9,16 @@
 // new presets at the END; never renumber.
 import Foundation
 
+// IMPORTANT: rawValue is sent as an `int preset` uniform to bar_fragment in
+// LMS_StreamTest-tvOS/VisualizerBarShader.metal. The shader's switch case
+// numbers MUST match these rawValues exactly. If you reorder or renumber any
+// case here, update the shader switch in lockstep — a mismatch produces
+// visually-wrong-preset bugs (e.g. swiping to LED actually renders Winamp).
+// Case 0 (bloom) uses a different pipeline state and never reaches bar_fragment.
 enum VisualizerPreset: Int, CaseIterable {
-    case bloom        = 0   // current radial-bloom polar shader (default for new installs + upgrades)
-    case ledHiFi      = 1   // green/yellow/red stacked LED segments (Step 0 feel-checked PASS on Apple TV 4K)
-    case winamp       = 2   // continuous bars with vertical gradient + falling peak caps
+    case bloom        = 0   // radial-bloom polar shader (default for new installs + upgrades)
+    case ledHiFi      = 1   // green/amber/red stacked LED segments (Step 0 feel-checked on Apple TV 4K)
+    case winamp       = 2   // continuous bars with yellow→orange→red gradient + falling peak caps
     case iTunesClean  = 3   // smooth rounded-top bars, single artwork-derived accent color
 
     /// User-facing name shown in the swap-name overlay (fades in for ~2s on cycle).
