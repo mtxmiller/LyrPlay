@@ -62,19 +62,33 @@ struct HomeExtraShelf: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 12) {
-            if let pluginIcon = section.pluginIcon {
-                CachedAsyncImage(url: settings.absoluteServerURL(pluginIcon)) {
-                    Image(systemName: "puzzlepiece.extension.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(width: 36, height: 36)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
+            headerIcon
             Text(section.title)
                 .font(.title2.weight(.bold))
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, Self.horizontalMargin)
+    }
+
+    /// Leading icon for the shelf header. Plugin shelves use the plugin's
+    /// server-provided artwork; built-in shelves use the same SF Symbol the
+    /// Settings shelf picker shows (`LibraryShelf.iconSystemName`) — a
+    /// built-in section's `id` is its `LibraryShelf` rawValue.
+    @ViewBuilder
+    private var headerIcon: some View {
+        if let pluginIcon = section.pluginIcon {
+            CachedAsyncImage(url: settings.absoluteServerURL(pluginIcon)) {
+                Image(systemName: "puzzlepiece.extension.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 36, height: 36)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        } else if let shelf = LibraryShelf(rawValue: section.id) {
+            Image(systemName: shelf.iconSystemName)
+                .font(.title2)
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+        }
     }
 
     // MARK: - Tiles per section kind
