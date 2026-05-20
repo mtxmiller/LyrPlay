@@ -61,7 +61,7 @@ struct HomeExtraShelf: View {
 
     @ViewBuilder
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 16) {
             headerIcon
             Text(section.title)
                 .font(.title2.weight(.bold))
@@ -84,9 +84,16 @@ struct HomeExtraShelf: View {
             .frame(width: 36, height: 36)
             .clipShape(RoundedRectangle(cornerRadius: 6))
         } else if let shelf = LibraryShelf(rawValue: section.id) {
+            // resizable + scaledToFit so wide symbols (radiowaves, the
+            // circular-arrows) are contained — a plain .font() symbol
+            // overflows its frame and crowds the title. Inner 26pt glyph
+            // in a 36pt slot keeps the title's start x aligned with the
+            // plugin-shelf rows above/below.
             Image(systemName: shelf.iconSystemName)
-                .font(.title2)
+                .resizable()
+                .scaledToFit()
                 .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
                 .frame(width: 36, height: 36)
         }
     }
