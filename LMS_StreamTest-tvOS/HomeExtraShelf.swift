@@ -7,17 +7,23 @@ import os.log
 /// of tile-buttons. Tap dispatch fans out by section kind: albums load via
 /// `playlistcontrol cmd:load`, artists drill into `ArtistDetailView`,
 /// favorites/radios play via `favorites playlist play`, playlists load via
-/// `playlistcontrol cmd:load playlist_id`.
+/// `playlistcontrol cmd:load playlist_id`, and plugin (`.jive`) items
+/// either drill into `JiveBrowseView` or play (see `JiveItem.dispatch`).
+///
+/// Plugin sections also show the contributing plugin's server-provided icon
+/// as a badge next to the section title — so a "Popular Artists" shelf from
+/// Spotty is visually distinct from one from TIDAL (mherger round 2).
 ///
 /// Lives inside `HomeExtraShelvesView`'s outer `LazyVStack` — the vertical
-/// scroll is the parent's responsibility. Artist drill-in is hoisted to the
-/// parent via `onArtistTap` so the `.fullScreenCover` state lives on the
-/// screen-root view (matches SearchView's pattern from 98q.8 D4=A).
+/// scroll is the parent's responsibility. Artist drill-in and plugin
+/// drill-in are hoisted to the parent via `onArtistTap` / `onJiveTap` so
+/// the `.fullScreenCover` state lives on the screen-root view.
 struct HomeExtraShelf: View {
     let section: HomeExtraSection
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     let onArtistTap: (Artist) -> Void
+    let onJiveTap: (JiveCommand) -> Void
 
     /// Spacing between tiles inside the horizontal scroll. 48pt — tuned on
     /// real Apple TV hardware after Elissen's first-look feedback that 32pt
@@ -39,10 +45,7 @@ struct HomeExtraShelf: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(section.title)
-                .font(.title2.weight(.bold))
-                .foregroundStyle(.primary)
-                .padding(.horizontal, Self.horizontalMargin)
+            header
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: Self.tileSpacing) {
@@ -52,6 +55,26 @@ struct HomeExtraShelf: View {
                 .padding(.vertical, Self.scrollVerticalPadding)
             }
         }
+    }
+
+    // MARK: - Header
+
+    @ViewBuilder
+    private var header: some View {
+        HStack(spacing: 12) {
+            if let pluginIcon = section.pluginIcon {
+                CachedAsyncImage(url: settings.absoluteServerURL(pluginIcon)) {
+                    Image(systemName: "puzzlepiece.extension.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 36, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            Text(section.title)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, Self.horizontalMargin)
     }
 
     // MARK: - Tiles per section kind
@@ -88,8 +111,6 @@ struct HomeExtraShelf: View {
         case .favorites(let favs):
             // Favorites and radios both arrive in this case — identical wire
             // shape, dispatch forks inside `playFavorite` on section.id.
-            // Identity by offset because favorite ids can repeat in flattened
-            // folder cases (matches FavoritesView's identity strategy).
             ForEach(Array(favs.enumerated()), id: \.offset) { _, fav in
                 MediaTile(
                     title: fav.name,
@@ -108,6 +129,17 @@ struct HomeExtraShelf: View {
                     artworkURL: LMSArtworkURL.materialPlaylist(name: playlist.name, settings: settings),
                     placeholderSymbol: "music.note.list",
                     action: { playPlaylist(playlist) }
+                )
+            }
+
+        case .jive(let base, let items):
+            ForEach(items) { item in
+                MediaTile(
+                    title: item.text,
+                    secondary: item.subtitle,
+                    artworkURL: item.iconURL(settings: settings),
+                    placeholderSymbol: "puzzlepiece.extension.fill",
+                    action: { tapJive(item, base: base) }
                 )
             }
         }
@@ -129,11 +161,6 @@ struct HomeExtraShelf: View {
     private func playFavorite(_ fav: FavoriteItem) {
         os_log(.info, log: logger, "▶️ Play favorite/radio from shelf '%{public}s': %{public}s",
                section.id, fav.name)
-        // Radios shelf items have a synthesized URL-as-id (live server's
-        // `material-skin-query radios` returns no top-level id field, so
-        // HomeExtraResponse.parse uses url as id). Dispatch via `playlist
-        // play <url>` instead of `favorites playlist play item_id:N` which
-        // expects an item_id tree position.
         let cliArgs: [String]
         if section.id == "radios" {
             cliArgs = ["playlist", "play", fav.id]   // fav.id IS the URL
@@ -157,5 +184,26 @@ struct HomeExtraShelf: View {
             "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "playlist_id:\(playlist.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    /// Plugin (`.jive`) tile tap — drill into a `JiveBrowseView` or play,
+    /// per `JiveItem.dispatch`.
+    private func tapJive(_ item: JiveItem, base: [String: JiveItemAction]) {
+        switch item.dispatch(base: base) {
+        case .drill(let cmd, let params):
+            os_log(.info, log: logger, "📂 Drill plugin shelf '%{public}s' → %{public}s",
+                   section.title, item.text)
+            onJiveTap(JiveCommand(title: item.text, cmd: cmd, params: params))
+        case .play(let cmd, let params):
+            os_log(.info, log: logger, "▶️ Play plugin item '%{public}s'", item.text)
+            let request: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [settings.playerMACAddress, cmd + JiveBrowseView.cliParams(params)]
+            ]
+            coordinator.sendJSONRPCCommandDirect(request) { _ in }
+        case .none:
+            os_log(.error, log: logger, "⚠️ Plugin item '%{public}s' has no usable action", item.text)
+        }
     }
 }

@@ -50,6 +50,24 @@ extension View {
     func tvListRow() -> some View {
         listRowBackground(Color.tvListRowBackground)
     }
+
+    /// Section-header treatment for `Section { } header:` blocks inside a
+    /// `TVList`. Adds bottom clearance so the tvOS focus engine's scale +
+    /// glow on the section's first row doesn't ride up into the header text.
+    ///
+    /// Hardware-only bug: Apple TV overscan tightens the layout enough that
+    /// the focused first row overlaps the header above it; the simulator
+    /// masks it. Same class of issue as the build-7 `7247206` Library-picker
+    /// fix. Applied to every `Section` header that sits above focusable rows
+    /// (SearchView's result sections at minimum).
+    func tvSectionHeader() -> some View {
+        self.padding(.bottom, Self.tvSectionHeaderClearance)
+    }
+
+    /// Bottom clearance for `tvSectionHeader()`. 16pt covers the focused
+    /// row's ~1.10x scale lift plus the focus-glow shadow radius at the
+    /// MediaRow heights used in tvOS lists.
+    private static var tvSectionHeaderClearance: CGFloat { 16 }
 }
 
 extension Color {

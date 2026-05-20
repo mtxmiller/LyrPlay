@@ -38,6 +38,23 @@ class SettingsManager: ObservableObject {
     /// Persisted as a sorted comma-separated rawValue list in UserDefaults
     /// so the on-disk shape stays human-readable.
     @Published var enabledLibraryShelves: Set<String> = SettingsManager.defaultEnabledLibraryShelves
+    /// tvOS Library tab: plugin-contributed shelf registry from the LMS
+    /// server's `home-extra-3rdparty` call. In-memory only — re-fetched per
+    /// server. `pluginExtraRegistryToken` records which server-token it
+    /// belongs to so a server change invalidates it without an explicit clear.
+    @Published var pluginExtraRegistry: [PluginExtraRegistration] = []
+    /// Server-token the current `pluginExtraRegistry` was fetched under.
+    /// nil = never fetched. Mismatch with `serverToken` = stale, refetch.
+    var pluginExtraRegistryToken: String? = nil
+    /// tvOS Library tab: last `serverstatus.lastscan` value observed per
+    /// server-token. Drives the refresh-on-rescan check — unchanged lastscan
+    /// means the library hasn't been rescanned, so the cached shelves stand.
+    /// In-memory only (app restart re-fetches once, same as today).
+    var lastSeenLastScan: [String: Int64] = [:]
+    /// Plugin shelf keys (`plugin:<id>`) the app has discovered before.
+    /// Used to apply first-run enable defaults only to genuinely-new plugin
+    /// shelves. Persisted alongside `enabledLibraryShelves`.
+    @Published var seenPluginShelfKeys: Set<String> = []
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -148,6 +165,7 @@ class SettingsManager: ObservableObject {
         static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
         static let experimentalRateMatching = "ExperimentalRateMatching"
         static let enabledLibraryShelves = "EnabledLibraryShelves"
+        static let seenPluginShelfKeys = "SeenPluginShelfKeys"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
@@ -311,6 +329,11 @@ class SettingsManager: ObservableObject {
         } else {
             enabledLibraryShelves = Self.defaultEnabledLibraryShelves
         }
+        if let raw = UserDefaults.standard.string(forKey: Keys.seenPluginShelfKeys), !raw.isEmpty {
+            seenPluginShelfKeys = Set(raw.split(separator: ",").map(String.init))
+        } else {
+            seenPluginShelfKeys = []
+        }
 
         // Load credentials from Keychain
         if let primaryCreds = KeychainManager.shared.load(for: .primary) {
@@ -360,6 +383,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
         // Sorted to keep the on-disk value diff-stable when the set order changes.
         UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
+        UserDefaults.standard.set(seenPluginShelfKeys.sorted().joined(separator: ","), forKey: Keys.seenPluginShelfKeys)
 
         // Save credentials to Keychain
         if !serverUsername.isEmpty {
@@ -693,6 +717,59 @@ class SettingsManager: ObservableObject {
 
     var activeServerUsername: String {
         return currentActiveServer == .primary ? serverUsername : backupServerUsername
+    }
+
+    // MARK: - tvOS Library Shelf Registry
+
+    /// Identity of the currently-active server. tvOS keys the plugin-shelf
+    /// registry and per-server `lastscan` cache by this so a server change
+    /// (or failover) invalidates them without an explicit clear — a token
+    /// mismatch is simply a cache miss.
+    var serverToken: String {
+        "\(activeServerHost):\(activeServerWebPort):\(activeServerUsername)"
+    }
+
+    /// Resolve a server-relative path (plugin icon, artwork proxy URL, …)
+    /// into an absolute URL against the active LMS host. Already-absolute
+    /// http(s) URLs pass through unchanged. nil for empty/missing input or
+    /// when no server is configured.
+    func absoluteServerURL(_ path: String?) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+        if path.hasPrefix("http://") || path.hasPrefix("https://") {
+            return URL(string: path)
+        }
+        guard !activeServerHost.isEmpty else { return nil }
+        let p = path.hasPrefix("/") ? path : "/\(path)"
+        return URL(string: "http://\(activeServerHost):\(activeServerWebPort)\(p)")
+    }
+
+    /// Reconcile a freshly-fetched plugin-shelf registry against persisted
+    /// state: prune `plugin:` toggles for plugins no longer installed, then
+    /// enable newly-discovered shelves (default ON until 4 plugin shelves
+    /// are enabled, then OFF — so a heavy plugin install doesn't flood the
+    /// Library on first launch).
+    ///
+    /// Call ONLY after a successful registry fetch — an empty registry from
+    /// a network failure must not prune every plugin toggle.
+    func reconcilePluginRegistry(_ registry: [PluginExtraRegistration]) {
+        let liveKeys = Set(registry.map { $0.shelfKey })
+
+        // Orphan prune — drop plugin: entries no longer in the registry.
+        // Built-in keys (no "plugin:" prefix) are always kept.
+        enabledLibraryShelves = enabledLibraryShelves.filter {
+            !$0.hasPrefix("plugin:") || liveKeys.contains($0)
+        }
+        seenPluginShelfKeys.formIntersection(liveKeys)
+
+        // First-run defaults for newly-discovered plugin shelves.
+        for plugin in registry where !seenPluginShelfKeys.contains(plugin.shelfKey) {
+            let enabledPluginCount = enabledLibraryShelves.filter { $0.hasPrefix("plugin:") }.count
+            if enabledPluginCount < 4 {
+                enabledLibraryShelves.insert(plugin.shelfKey)
+            }
+            seenPluginShelfKeys.insert(plugin.shelfKey)
+        }
+        saveSettings()
     }
 
     var activeServerPassword: String {

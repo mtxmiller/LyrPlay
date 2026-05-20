@@ -1,26 +1,37 @@
 import SwiftUI
 import os.log
 
-/// tvOS Library tab — fetches `["material-skin", "home-extra", ...]` on
-/// appear and routes to one of three content states based on the response's
+/// tvOS Library tab — fetches `["material-skin", "home-extra", ...]` and
+/// routes to one of three content states based on the response's
 /// `material_home` flag:
 ///
 /// - **Material installed + library populated** → `HomeExtraShelvesView`
-///   renders curated horizontal-scroll shelves of artwork tiles (primary UX,
-///   matches what mherger / Elissen see in Material on iPhone).
-/// - **Material installed + library empty** → "Library is empty" hint card
-///   pointing the user to add music in LMS.
-/// - **Material absent** (`material_home` flag missing from response) →
-///   `BrowseLibraryView` recursive skin-agnostic browse via core LMS
-///   `["browselibrary", "items"]`. Works on every LMS server regardless of
-///   skin installation.
+///   renders curated horizontal-scroll shelves. Built-in sorts plus any
+///   plugin-contributed (`home-extra-3rdparty`) shelves the user enabled.
+/// - **Material installed + library empty** → "Library is empty" hint.
+/// - **Material absent** → `BrowseLibraryView` skin-agnostic browse.
 ///
-/// The fetch is `.onAppear`-only — re-entering the Library tab refetches.
-/// Matches AlbumListView/FavoritesView's convention (stale-while-on-tab is
-/// acceptable; tab re-entry surfaces fresh state).
+/// ## Fetch sequence (plan-eng-review build 9)
 ///
-/// Background: tinted artwork blur via TVScreen for visual coherence with
-/// Now Playing and Queue (53n decisions stand).
+/// ```
+/// .onAppear ─→ probe serverstatus.lastscan
+///                │
+///                ├─ unchanged + already fetched ─→ reuse cached shelves
+///                │
+///                └─ changed / first run ─→ performFetch:
+///                      registry (if server-token stale)
+///                          │
+///                          ▼
+///                      home-extra ∥ favorites   (async let — parallel)
+///                          │
+///                          ▼
+///                      parse built-ins + plugin objs ─→ render
+/// ```
+///
+/// The `lastscan` probe makes a Library re-entry cheap when the server
+/// library has not been rescanned — only `serverstatus` fires, not the
+/// full `home-extra`. After an LMS rescan the lastscan changes and the
+/// shelves refetch (closes `LMS_StreamTest-3qn`).
 struct LibraryView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var nowPlaying: NowPlayingManager
@@ -37,28 +48,8 @@ struct LibraryView: View {
     @SwiftUI.State private var hasFetched: Bool = false
 
     /// Per-fetch `count` param. Material's `NUM_HOME_ITEMS` is the floor (10);
-    /// passing 15 gives slight headroom while keeping the response small.
-    /// Random sort fetches 300 internally regardless and returns up to count.
+    /// 15 gives slight headroom while keeping the response small.
     private static let homeExtraCount = 15
-
-    /// Build the home-extra request params from the user's shelf selection.
-    /// Only shelves with `dataSource == .homeExtra` participate; favorites
-    /// (the lone `.separateFetch` shelf) is fetched independently.
-    private func currentSortParams() -> [String] {
-        let enabled = LibraryShelf.allCases.filter {
-            $0.dataSource == .homeExtra
-                && settings.enabledLibraryShelves.contains($0.rawValue)
-        }
-        var params = enabled.map(\.requestParam)
-        params.append("count:\(Self.homeExtraCount)")
-        return params
-    }
-
-    /// True iff the user has the Favorites shelf enabled (the only shelf
-    /// fetched separately from home-extra).
-    private var wantsFavoritesShelf: Bool {
-        settings.enabledLibraryShelves.contains(LibraryShelf.favorites.rawValue)
-    }
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSLibraryView")
 
@@ -66,13 +57,15 @@ struct LibraryView: View {
         TVScreen(artwork: nowPlaying.currentArtwork) {
             content
         }
-        .onAppear { if !hasFetched { fetch() } }
+        .onAppear {
+            Task { await refresh() }
+        }
         .onChange(of: settings.enabledLibraryShelves) { _, _ in
-            // User toggled shelf selection in Settings — invalidate cached
-            // response and refetch so the new selection takes effect without
-            // requiring an app restart or tab cycle.
-            hasFetched = false
-            fetch()
+            // User toggled shelf selection in Settings — refetch so the new
+            // selection takes effect without an app restart or tab cycle.
+            // A toggle changes which shelves to request, not library content,
+            // so this bypasses the lastscan short-circuit.
+            Task { await forceRefetch() }
         }
     }
 
@@ -107,8 +100,8 @@ struct LibraryView: View {
 
     private var emptyLibraryHint: some View {
         // Material is installed (the flag came back) but every shelf was
-        // empty. This is the "I haven't added music yet" case, distinct from
-        // "no Material plugin." Different empty state, different remedy.
+        // empty. The "I haven't added music yet" case, distinct from "no
+        // Material plugin."
         VStack(spacing: 24) {
             Image(systemName: "music.note.house")
                 .font(.system(size: 96))
@@ -124,64 +117,102 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Fetch
+    // MARK: - Fetch orchestration
 
-    private func fetch() {
-        // Build the home-extra CLI request: ["material-skin", "home-extra",
-        // "<shelf-key>:1", ..., "count:15"]. Library reads use empty
-        // player_id — matches AlbumListView / FavoritesView convention.
-        var cliList: [Any] = ["material-skin", "home-extra"]
-        cliList.append(contentsOf: currentSortParams())
+    /// Library `.onAppear` entry point. Probes `serverstatus.lastscan`; if
+    /// the library has not been rescanned since the last successful fetch,
+    /// the cached shelves stand and no `home-extra` request fires.
+    @MainActor
+    private func refresh() async {
+        let token = settings.serverToken
+        let lastscan = await probeLastScan()
 
-        let request: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", cliList]
-        ]
+        if hasFetched, isSettledState,
+           let lastscan, settings.lastSeenLastScan[token] == lastscan {
+            os_log(.info, log: logger, "♻️ Library: lastscan unchanged (%lld) — reusing cached shelves", lastscan)
+            return
+        }
+        await performFetch(token: token, lastscan: lastscan)
+    }
 
-        coordinator.sendJSONRPCCommandDirect(request) { response in
-            DispatchQueue.main.async {
-                hasFetched = true
-                guard let result = response["result"] as? [String: Any] else {
-                    // Network failure or malformed response — treat as "no
-                    // Material" so the user still gets a working library via
-                    // the skin-agnostic fallback. Worst case is one extra
-                    // browselibrary request when the next .onAppear refetches.
-                    os_log(.error, log: logger, "❌ home-extra: invalid response, falling back to browselibrary")
-                    state = .browseLibraryFallback
-                    return
-                }
+    /// Shelf-toggle entry point — always refetches `home-extra` (the
+    /// selection changed), regardless of lastscan.
+    @MainActor
+    private func forceRefetch() async {
+        let token = settings.serverToken
+        let lastscan = await probeLastScan()
+        await performFetch(token: token, lastscan: lastscan)
+    }
 
-                let parsed = HomeExtraResponse.parse(result)
-
-                if !parsed.materialInstalled {
-                    os_log(.info, log: logger, "ℹ️ home-extra: no material_home flag → BrowseLibraryView fallback")
-                    state = .browseLibraryFallback
-                    return
-                }
-
-                // Material installed. If favorites shelf is enabled, chain a
-                // second fetch for it before settling state — Material's
-                // home-extra returns favorites in Jive shape we don't parse
-                // yet, so we hit `["favorites","items"]` directly for the
-                // wire shape FavoriteItem.parseLoop already speaks.
-                if wantsFavoritesShelf {
-                    fetchFavorites { favSection in
-                        DispatchQueue.main.async {
-                            let merged = parsed.sections + (favSection.map { [$0] } ?? [])
-                            applyShelfState(sections: merged)
-                        }
-                    }
-                } else {
-                    applyShelfState(sections: parsed.sections)
-                }
-            }
+    /// True when `state` holds a fetched result (not the initial spinner).
+    private var isSettledState: Bool {
+        switch state {
+        case .loading: return false
+        case .shelves, .emptyLibrary, .browseLibraryFallback: return true
         }
     }
 
-    /// Settle `state` after merging home-extra + favorites sections. Pulled
-    /// out so both the favorites-enabled and favorites-disabled branches
-    /// converge cleanly.
+    /// Run the full fetch: refresh the plugin registry if stale for this
+    /// server, then `home-extra` ∥ `favorites` in parallel, parse, render.
+    /// Every server-dependent step re-checks `token` against the live
+    /// `serverToken` and drops its result if the user changed servers
+    /// mid-flight (plan-eng-review 1.B / issue #3).
+    @MainActor
+    private func performFetch(token: String, lastscan: Int64?) async {
+        // 1. Plugin registry — refetch only when stale for this server.
+        if settings.pluginExtraRegistryToken != token {
+            if let registry = await fetchRegistry() {
+                guard token == settings.serverToken else {
+                    os_log(.info, log: logger, "🚫 Library: server changed during registry fetch — dropping")
+                    return
+                }
+                settings.pluginExtraRegistry = registry
+                settings.pluginExtraRegistryToken = token
+                settings.reconcilePluginRegistry(registry)
+            }
+            // Registry fetch failure (nil) — keep any prior registry, proceed.
+        }
+
+        // 2. home-extra ∥ favorites (independent — fire concurrently).
+        async let homeExtraResult = fetchHomeExtra()
+        async let favSection: HomeExtraSection? = wantsFavoritesShelf ? fetchFavorites() : nil
+        let result = await homeExtraResult
+        let favs = await favSection
+
+        guard token == settings.serverToken else {
+            os_log(.info, log: logger, "🚫 Library: server changed during home-extra fetch — dropping")
+            return
+        }
+
+        // 3. Route + render.
+        guard let result else {
+            os_log(.error, log: logger, "❌ home-extra: invalid response — BrowseLibraryView fallback")
+            state = .browseLibraryFallback
+            hasFetched = true
+            return
+        }
+
+        let parsed = HomeExtraResponse.parse(result)
+        guard parsed.materialInstalled else {
+            os_log(.info, log: logger, "ℹ️ home-extra: no material_home flag — BrowseLibraryView fallback")
+            state = .browseLibraryFallback
+            hasFetched = true
+            return
+        }
+
+        let pluginSections = HomeExtraResponse.parsePluginSections(
+            result, registry: settings.pluginExtraRegistry
+        )
+        let merged = parsed.sections + pluginSections + (favs.map { [$0] } ?? [])
+        applyShelfState(sections: merged)
+
+        if let lastscan {
+            settings.lastSeenLastScan[token] = lastscan
+        }
+        hasFetched = true
+    }
+
+    /// Settle `state` after merging all shelf sections.
     private func applyShelfState(sections: [HomeExtraSection]) {
         if sections.isEmpty {
             os_log(.info, log: logger, "ℹ️ Library empty (Material installed, all enabled shelves returned no items)")
@@ -192,33 +223,102 @@ struct LibraryView: View {
         }
     }
 
-    /// Fire `["favorites","items"]` directly. Uses the same wire shape
-    /// FavoritesView consumes (no `menu:1` — Jive shape avoided), so the
-    /// existing FavoriteItem.parseLoop handles the response unchanged.
-    /// Calls completion on a background callback queue with the section or
-    /// nil if the fetch failed / returned no playable items.
-    private func fetchFavorites(_ completion: @escaping (HomeExtraSection?) -> Void) {
+    // MARK: - Individual requests
+
+    /// Probe `serverstatus.lastscan` (epoch seconds). nil on failure or
+    /// when the server reports no scan yet — caller then always fetches.
+    @MainActor
+    private func probeLastScan() async -> Int64? {
+        let request: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["serverstatus", 0, 0]]
+        ]
+        let response = await coordinator.sendJSONRPCCommand(request)
+        guard let result = response["result"] as? [String: Any] else { return nil }
+        // lastscan arrives as a String (epoch) on most LMS builds, Int on some.
+        if let s = result["lastscan"] as? String, let v = Int64(s) { return v }
+        if let n = result["lastscan"] as? Int { return Int64(n) }
+        if let n = result["lastscan"] as? Int64 { return n }
+        return nil
+    }
+
+    /// Fetch the `home-extra-3rdparty` plugin registry. Returns nil on a
+    /// network failure (no `result` dict) so the caller can distinguish
+    /// failure from a genuinely-empty registry and skip orphan pruning.
+    @MainActor
+    private func fetchRegistry() async -> [PluginExtraRegistration]? {
+        let request: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["material-skin", "home-extra-3rdparty"]]
+        ]
+        let response = await coordinator.sendJSONRPCCommand(request)
+        guard let result = response["result"] as? [String: Any] else { return nil }
+        return HomeExtraResponse.parseRegistry(result)
+    }
+
+    /// Fetch `home-extra` with built-in sort keys + enabled plugin ids.
+    /// Returns the raw `result` dict, or nil on a network failure.
+    ///
+    /// Uses the connected player's id — plugin shelves with `needsPlayer`
+    /// return an empty obj for an empty player_id (verified live).
+    @MainActor
+    private func fetchHomeExtra() async -> [String: Any]? {
+        var cliList: [Any] = ["material-skin", "home-extra"]
+        cliList.append(contentsOf: currentSortParams())
+        let request: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, cliList]
+        ]
+        let response = await coordinator.sendJSONRPCCommand(request)
+        return response["result"] as? [String: Any]
+    }
+
+    /// Fire `["favorites","items"]` directly — the simple `loop_loop` shape
+    /// `FavoriteItem.parseLoop` already speaks (no `menu:1` Jive shape).
+    @MainActor
+    private func fetchFavorites() async -> HomeExtraSection? {
         let request: [String: Any] = [
             "id": 1,
             "method": "slim.request",
             "params": ["", ["favorites", "items", 0, Self.homeExtraCount, "want_url:1"]]
         ]
-        coordinator.sendJSONRPCCommandDirect(request) { response in
-            guard let result = response["result"] as? [String: Any],
-                  let loop = result["loop_loop"] as? [[String: Any]] else {
-                completion(nil)
-                return
-            }
-            let favs = FavoriteItem.parseLoop(loop)
-            if favs.isEmpty {
-                completion(nil)
-            } else {
-                completion(HomeExtraSection(
-                    id: "favorites",
-                    title: "Favorites",
-                    items: .favorites(favs)
-                ))
-            }
+        let response = await coordinator.sendJSONRPCCommand(request)
+        guard let result = response["result"] as? [String: Any],
+              let loop = result["loop_loop"] as? [[String: Any]] else {
+            return nil
         }
+        let favs = FavoriteItem.parseLoop(loop)
+        guard !favs.isEmpty else { return nil }
+        return HomeExtraSection(id: "favorites", title: "Favorites", items: .favorites(favs))
+    }
+
+    // MARK: - Request param assembly
+
+    /// Build the `home-extra` request params from the user's shelf
+    /// selection: built-in sort keys (`<key>:1`) plus enabled plugin
+    /// strippedIDs (`<id>:1`), then `count:N`.
+    private func currentSortParams() -> [String] {
+        let enabledBuiltins = LibraryShelf.allCases.filter {
+            $0.dataSource == .homeExtra
+                && settings.enabledLibraryShelves.contains($0.rawValue)
+        }
+        var params = enabledBuiltins.map(\.requestParam)
+
+        for plugin in settings.pluginExtraRegistry
+            where settings.enabledLibraryShelves.contains(plugin.shelfKey) {
+            params.append("\(plugin.strippedID):1")
+        }
+
+        params.append("count:\(Self.homeExtraCount)")
+        return params
+    }
+
+    /// True iff the user has the Favorites shelf enabled (the only built-in
+    /// shelf fetched separately from home-extra).
+    private var wantsFavoritesShelf: Bool {
+        settings.enabledLibraryShelves.contains(LibraryShelf.favorites.rawValue)
     }
 }

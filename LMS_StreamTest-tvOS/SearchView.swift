@@ -129,7 +129,7 @@ struct SearchView: View {
 
     private var historyList: some View {
         TVList {
-            Section("Recent searches") {
+            Section {
                 ForEach(history, id: \.self) { term in
                     Button {
                         searchTerm = term
@@ -145,6 +145,8 @@ struct SearchView: View {
                     .buttonStyle(.plain)
                     .tvListRow()
                 }
+            } header: {
+                Text("Recent searches").tvSectionHeader()
             }
         }
     }
@@ -168,7 +170,7 @@ struct SearchView: View {
         // ForEach identity by parsed item id (98q.9 /review hardening).
         TVList {
             if !artistResults.isEmpty {
-                Section("Artists") {
+                Section {
                     ForEach(artistResults) { artist in
                         Button { tapArtist(artist) } label: {
                             MediaRow(
@@ -180,10 +182,12 @@ struct SearchView: View {
                         .buttonStyle(.plain)
                         .tvListRow()
                     }
+                } header: {
+                    Text("Artists").tvSectionHeader()
                 }
             }
             if !albumResults.isEmpty {
-                Section("Albums") {
+                Section {
                     ForEach(albumResults, id: \.id) { album in
                         Button { tapAlbum(album) } label: {
                             MediaRow(
@@ -199,10 +203,12 @@ struct SearchView: View {
                         .buttonStyle(.plain)
                         .tvListRow()
                     }
+                } header: {
+                    Text("Albums").tvSectionHeader()
                 }
             }
             if !trackResults.isEmpty {
-                Section("Tracks") {
+                Section {
                     ForEach(trackResults, id: \.id) { track in
                         Button { tapTrack(track) } label: {
                             MediaRow(
@@ -218,10 +224,12 @@ struct SearchView: View {
                         .buttonStyle(.plain)
                         .tvListRow()
                     }
+                } header: {
+                    Text("Tracks").tvSectionHeader()
                 }
             }
             if !playlistResults.isEmpty {
-                Section("Playlists") {
+                Section {
                     ForEach(playlistResults, id: \.id) { playlist in
                         Button { tapPlaylist(playlist) } label: {
                             MediaRow(
@@ -234,6 +242,8 @@ struct SearchView: View {
                         .buttonStyle(.plain)
                         .tvListRow()
                     }
+                } header: {
+                    Text("Playlists").tvSectionHeader()
                 }
             }
         }

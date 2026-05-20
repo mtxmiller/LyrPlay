@@ -450,11 +450,20 @@ struct HomeExtraSection: Identifiable {
         case artists([Artist])
         case favorites([FavoriteItem])
         case playlists([Playlist])
+        /// Plugin-contributed shelf (`home-extra-3rdparty`). Carries the
+        /// section's `base.actions` template plus its Jive items — dispatch
+        /// resolves per item against the base. See JiveItem.parseObj.
+        case jive(base: [String: JiveItemAction], items: [JiveItem])
     }
 
     let id: String        // sort key, e.g. "new" / "recentlyplayed" / "artists_new" / "favorites"
     let title: String     // human-readable header for the shelf
     let items: Items
+
+    /// For plugin (`.jive`) sections: server-relative icon path from the
+    /// `home-extra-3rdparty` registry, rendered as a badge next to the
+    /// section title. nil for built-in sections (they use SF Symbols).
+    var pluginIcon: String? = nil
 
     var isEmpty: Bool {
         switch items {
@@ -462,6 +471,7 @@ struct HomeExtraSection: Identifiable {
         case .artists(let a):   return a.isEmpty
         case .favorites(let f): return f.isEmpty
         case .playlists(let p): return p.isEmpty
+        case .jive(_, let i):   return i.isEmpty
         }
     }
 }
@@ -571,6 +581,67 @@ extension HomeExtraResponse {
         return HomeExtraResponse(materialInstalled: true, sections: sections)
     }
 
+    /// Extract plugin-contributed shelf sections from a `home-extra`
+    /// response. For each registry entry whose `material_home_<id>_obj` key
+    /// is present and non-empty, parse it via `JiveItem.parseObj`.
+    ///
+    /// `<id>` is the registry's `strippedID` (no `3rdparty_` prefix) — the
+    /// same form passed as the request param. Returned sections carry the
+    /// plugin's `shelfKey` as id and its registry title + icon.
+    static func parsePluginSections(_ result: [String: Any],
+                                    registry: [PluginExtraRegistration]) -> [HomeExtraSection] {
+        var sections: [HomeExtraSection] = []
+        for plugin in registry {
+            let key = "material_home_\(plugin.strippedID)_obj"
+            guard let obj = result[key] as? [String: Any] else { continue }
+            let (base, items) = JiveItem.parseObj(obj)
+            guard !items.isEmpty else { continue }
+            sections.append(HomeExtraSection(
+                id: plugin.shelfKey,
+                title: plugin.title,
+                items: .jive(base: base, items: items),
+                pluginIcon: plugin.icon
+            ))
+        }
+        os_log(.info, log: parseLogger, "✅ home-extra: %d plugin shelf sections", sections.count)
+        return sections
+    }
+
+    /// Parse a `["material-skin", "home-extra-3rdparty"]` response into the
+    /// registry of plugin-contributed shelves.
+    ///
+    /// The registry call returns metadata only — `result.items` is a
+    /// **JSON-encoded string** (verified live on 192.168.1.8): an array of
+    /// `{id, title, subtitle, icon, needsPlayer}`. The shelf's actual items
+    /// come from a second `home-extra` call (see PluginExtraRegistration).
+    static func parseRegistry(_ result: [String: Any]) -> [PluginExtraRegistration] {
+        guard let itemsRaw = result["items"] as? String,
+              let data = itemsRaw.data(using: .utf8),
+              let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            os_log(.error, log: parseLogger, "❌ home-extra-3rdparty: result.items not a JSON-encoded array")
+            return []
+        }
+        let registry = array.compactMap { entry -> PluginExtraRegistration? in
+            guard let id = entry["id"] as? String, !id.isEmpty,
+                  let title = entry["title"] as? String, !title.isEmpty else {
+                return nil
+            }
+            let needsPlayer: Bool
+            if let n = entry["needsPlayer"] as? Int { needsPlayer = n == 1 }
+            else if let b = entry["needsPlayer"] as? Bool { needsPlayer = b }
+            else { needsPlayer = false }
+            return PluginExtraRegistration(
+                id: id,
+                title: title,
+                subtitle: entry["subtitle"] as? String,
+                icon: entry["icon"] as? String,
+                needsPlayer: needsPlayer
+            )
+        }
+        os_log(.info, log: parseLogger, "✅ home-extra-3rdparty: %d plugin shelves registered", registry.count)
+        return registry
+    }
+
     /// `material_home` arrives as either Int 1 or String "1" depending on LMS
     /// serialization context; treat both as "installed."
     private static func parseMaterialHomeFlag(_ raw: Any?) -> Bool {
@@ -606,6 +677,206 @@ extension HomeExtraResponse {
             mutable["id"] = url
             return mutable
         }
+    }
+}
+
+// MARK: - Plugin Extra Registration (home-extra-3rdparty)
+
+/// One entry in the `["material-skin", "home-extra-3rdparty"]` registry — a
+/// plugin-contributed home shelf the LMS server can render (Spotty, TIDAL,
+/// Bandcamp, etc.).
+///
+/// The registry call returns metadata only. The shelf's actual items come
+/// from a second `home-extra` call with `strippedID` passed as a param;
+/// the server resolves the plugin handler and returns the items under
+/// `material_home_<strippedID>_obj`. See HomeExtraResponse.parseRegistry.
+struct PluginExtraRegistration: Identifiable, Equatable {
+    /// Registry id, e.g. "3rdparty_Bandcampdaily" — carries the `3rdparty_`
+    /// prefix as the server returns it.
+    let id: String
+    let title: String
+    let subtitle: String?
+    /// Server-relative icon path, e.g. "plugins/Bandcamp/html/images/logo.png".
+    let icon: String?
+    /// Plugin requires a connected player to resolve its items. Verified
+    /// live: passing an empty player_id returns an empty obj for these.
+    let needsPlayer: Bool
+
+    /// Registry id with the `3rdparty_` prefix removed — the form passed
+    /// back as a `home-extra` param. Plugin.pm:551 re-adds the prefix when
+    /// looking the extra up, so passing the verbatim id returns nothing.
+    var strippedID: String {
+        let prefix = "3rdparty_"
+        return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id
+    }
+
+    /// Key used in `SettingsManager.enabledLibraryShelves`. Prefixed so it
+    /// can never collide with a built-in `LibraryShelf` rawValue.
+    var shelfKey: String { "plugin:\(strippedID)" }
+
+    /// Absolute icon URL, resolving a server-relative path against the
+    /// active LMS host.
+    func iconURL(settings: SettingsManager) -> URL? {
+        settings.absoluteServerURL(icon)
+    }
+}
+
+// MARK: - Jive Items (plugin shelves + SlimBrowse drill-in)
+
+/// A Jive action template — a SlimBrowse command + params. Lives on a
+/// `JiveItem` directly (fully resolved) or on a section's `base.actions`
+/// (a template, where `itemsParams` names the per-item field to merge in).
+struct JiveItemAction {
+    let cmd: [String]
+    let params: [String: Any]
+    /// When this is a base-level template, names the per-item field (e.g.
+    /// "params") whose contents merge into `params`. nil for item-level
+    /// actions, which are already fully resolved.
+    let itemsParams: String?
+}
+
+/// One item inside a `material_home_<id>_obj.item_loop` — a plugin shelf
+/// entry or a SlimBrowse drill-in row.
+///
+/// Two wire shapes coexist (both verified live on 192.168.1.8): items may
+/// carry their `actions` directly (Bandcamp level-1), or carry only
+/// `params` with the section's `base.actions` supplying the template
+/// (Bandcamp level-2 / canonical SlimBrowse). `resolvedAction` handles both.
+struct JiveItem: Identifiable {
+    /// SwiftUI list identity. The server `id` if present, else synthesized
+    /// from array position + text. Stable within one fetch only — Jive
+    /// items are intentionally ephemeral, never correlate across fetches.
+    let id: String
+    let text: String
+    let subtitle: String?
+    /// Server-relative or absolute icon path.
+    let icon: String?
+    /// Item-level actions keyed by name ("go", "play", "playControl", …).
+    let actions: [String: JiveItemAction]
+    /// The per-item params bag — merged into a base action's params when
+    /// dispatch resolves via the section's `base.actions` template.
+    let params: [String: Any]
+    /// Which action fires on tap. Verified live: Bandcamp items carry
+    /// `addAction: "go"`. nil → defaults to "go" (the SlimBrowse drill).
+    let addAction: String?
+    /// "playlist" / "audio" / etc. Hints whether a leaf plays vs drills.
+    let type: String?
+
+    /// The action name that fires on tap.
+    var tapActionName: String { addAction ?? "go" }
+
+    /// Absolute icon URL for this item, resolving a server-relative path
+    /// (e.g. `/imageproxy/...`) against the active LMS host.
+    func iconURL(settings: SettingsManager) -> URL? {
+        settings.absoluteServerURL(icon)
+    }
+
+    /// Resolve a named action into a concrete `(cmd, params)` ready to send
+    /// as a SlimBrowse JSON-RPC request. Returns nil when no usable action
+    /// exists for that name (the tap is then a no-op).
+    ///
+    /// The item's own action wins. Otherwise the section's `base` action is
+    /// the template and the per-item field named by its `itemsParams`
+    /// merges into the base params.
+    func resolvedAction(named name: String,
+                        base: [String: JiveItemAction]) -> (cmd: [String], params: [String: Any])? {
+        if let own = actions[name] {
+            return (own.cmd, own.params)
+        }
+        guard let template = base[name] else { return nil }
+        var merged = template.params
+        // Live data shows `itemsParams: "params"` for the `go` drill action.
+        // Other keys (e.g. "playControlParams") name sibling per-item bags
+        // we don't capture in v1 — base params still dispatch.
+        if template.itemsParams == "params" {
+            for (k, v) in params { merged[k] = v }
+        }
+        return (template.cmd, merged)
+    }
+}
+
+extension JiveItem {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "JiveItem")
+
+    /// Parse a `material_home_<id>_obj` dict into the section's base
+    /// actions plus its items. Defensive — drops items missing `text`,
+    /// logs, and never throws.
+    static func parseObj(_ obj: [String: Any]) -> (base: [String: JiveItemAction], items: [JiveItem]) {
+        let baseActionsRaw = (obj["base"] as? [String: Any])?["actions"] as? [String: Any]
+        let base = parseActions(baseActionsRaw)
+        let loop = obj["item_loop"] as? [[String: Any]] ?? []
+        let items = loop.enumerated().compactMap { index, raw in
+            parseItem(raw, arrayIndex: index)
+        }
+        return (base, items)
+    }
+
+    private static func parseItem(_ raw: [String: Any], arrayIndex: Int) -> JiveItem? {
+        guard let text = raw["text"] as? String, !text.isEmpty else {
+            os_log(.error, log: parseLogger, "❌ Jive item missing 'text', dropping")
+            return nil
+        }
+        let explicitID = raw["id"].map { "\($0)" }
+        return JiveItem(
+            id: explicitID ?? "\(arrayIndex)|\(text)",
+            text: text,
+            subtitle: raw["textArea"] as? String ?? raw["subtitle"] as? String,
+            icon: raw["icon"] as? String,
+            actions: parseActions(raw["actions"] as? [String: Any]),
+            params: raw["params"] as? [String: Any] ?? [:],
+            addAction: raw["addAction"] as? String,
+            type: raw["type"] as? String
+        )
+    }
+
+    private static func parseActions(_ raw: [String: Any]?) -> [String: JiveItemAction] {
+        guard let raw else { return [:] }
+        var out: [String: JiveItemAction] = [:]
+        for (name, value) in raw {
+            guard let dict = value as? [String: Any],
+                  let cmd = dict["cmd"] as? [String], !cmd.isEmpty else { continue }
+            out[name] = JiveItemAction(
+                cmd: cmd,
+                params: dict["params"] as? [String: Any] ?? [:],
+                itemsParams: dict["itemsParams"] as? String
+            )
+        }
+        return out
+    }
+}
+
+extension JiveItem {
+    /// How a tap on this item should be handled, given the section's base
+    /// actions. v1 supports drilling (`go`) and terminal playback
+    /// (`play` / `playControl`); `add` and `more` are deferred.
+    enum Dispatch {
+        case drill(cmd: [String], params: [String: Any])
+        case play(cmd: [String], params: [String: Any])
+        case none
+    }
+
+    /// Resolve the tap into a drill or a play. A terminal item (`type` of
+    /// "audio" / "track") prefers an explicit `play` action; everything
+    /// else drills via the item's `addAction` (default "go").
+    func dispatch(base: [String: JiveItemAction]) -> Dispatch {
+        let terminal = (type == "audio" || type == "track")
+
+        if terminal {
+            if let play = resolvedAction(named: "play", base: base) {
+                return .play(cmd: play.cmd, params: play.params)
+            }
+            if let pc = resolvedAction(named: "playControl", base: base) {
+                return .play(cmd: pc.cmd, params: pc.params)
+            }
+        }
+
+        if let action = resolvedAction(named: tapActionName, base: base)
+            ?? resolvedAction(named: "go", base: base) {
+            return terminal
+                ? .play(cmd: action.cmd, params: action.params)
+                : .drill(cmd: action.cmd, params: action.params)
+        }
+        return .none
     }
 }
 
@@ -685,6 +956,46 @@ enum LibraryShelf: String, CaseIterable, Identifiable {
         case .playlists:             return "Playlists"
         case .radios:                return "Radios"
         case .favorites:             return "Favorites"
+        }
+    }
+
+    /// One-line description shown under the title in the Settings shelf
+    /// picker. Disambiguates similar titles ("Popular" albums vs "Popular
+    /// Artists") at a glance.
+    var subtitle: String {
+        switch self {
+        case .new:                   return "Recently added albums"
+        case .recentlyPlayed:        return "Albums you've heard recently"
+        case .random:                return "A random selection of albums"
+        case .popular:               return "Most-played albums on this server"
+        case .playcount:             return "Albums by total play count"
+        case .changed:               return "Albums updated by recent scans"
+        case .artistsNew:            return "Recently added artists"
+        case .artistsRecentlyPlayed: return "Artists you've heard recently"
+        case .artistsPopular:        return "Most-played artists on this server"
+        case .artistsPlaycount:      return "Artists by total play count"
+        case .playlists:             return "Your saved playlists"
+        case .radios:                return "Saved radio stations"
+        case .favorites:             return "Your saved favorites"
+        }
+    }
+
+    /// SF Symbol shown leading the row in the Settings shelf picker.
+    var iconSystemName: String {
+        switch self {
+        case .new:                   return "sparkles"
+        case .recentlyPlayed:        return "clock"
+        case .random:                return "shuffle"
+        case .popular:               return "chart.bar.fill"
+        case .playcount:             return "chart.line.uptrend.xyaxis"
+        case .changed:               return "arrow.triangle.2.circlepath"
+        case .artistsNew:            return "music.mic"
+        case .artistsRecentlyPlayed: return "clock.arrow.circlepath"
+        case .artistsPopular:        return "person.2.fill"
+        case .artistsPlaycount:      return "person.2.crop.square.stack.fill"
+        case .playlists:             return "music.note.list"
+        case .radios:                return "dot.radiowaves.left.and.right"
+        case .favorites:             return "heart.fill"
         }
     }
 
