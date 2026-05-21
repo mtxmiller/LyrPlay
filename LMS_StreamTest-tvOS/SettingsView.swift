@@ -14,7 +14,7 @@ import os.log
 ///     format displayNames are readable. (`.pickerStyle(.navigationLink)`
 ///     was tried but pushed a transparent side-sheet that let NowPlayingView
 ///     bleed through.)
-///   - About: 4 non-focusable rows — version, build, host, player MAC.
+///   - About: 4 read-only rows — version, build, host, player MAC.
 ///
 /// Row pattern: `Button + .buttonStyle(.plain) + .tvListRow()`
 /// matches the project convention (SearchView / AlbumListView / FavoritesView).
@@ -78,7 +78,7 @@ struct SettingsView: View {
     // MARK: - Server
 
     private var serverSection: some View {
-        Section("Server") {
+        Section {
             row(label: "Current host", value: settings.serverHost.isEmpty ? "—" : settings.serverHost)
 
             Button {
@@ -88,13 +88,15 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .tvListRow()
+        } header: {
+            Text("Server").tvSectionHeader()
         }
     }
 
     // MARK: - Player
 
     private var playerSection: some View {
-        Section("Player") {
+        Section {
             TextField("Player name", text: $settings.playerName)
                 .accessibilityLabel("Player name")
                 .tvListRow()
@@ -105,13 +107,15 @@ struct SettingsView: View {
                     settings.saveSettings()
                     AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
                 }
+        } header: {
+            Text("Player").tvSectionHeader()
         }
     }
 
     // MARK: - Audio Format
 
     private var audioSection: some View {
-        Section("Audio") {
+        Section {
             Toggle("Fix output level at 100%", isOn: $settings.fixOutputAt100Percent)
                 .tvListRow()
                 .onChange(of: settings.fixOutputAt100Percent) { _, newValue in
@@ -138,13 +142,15 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .tvListRow()
+        } header: {
+            Text("Audio").tvSectionHeader()
         }
     }
 
     // MARK: - Library
 
     private var librarySection: some View {
-        Section("Library") {
+        Section {
             Button {
                 showLibraryShelves = true
             } label: {
@@ -160,6 +166,8 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .tvListRow()
+        } header: {
+            Text("Library").tvSectionHeader()
         }
     }
 
@@ -170,18 +178,23 @@ struct SettingsView: View {
             serverHost: settings.serverHost,
             playerMAC: settings.playerMACAddress
         )
-        return Section("About") {
+        return Section {
             row(label: "Version", value: info.version.isEmpty ? "—" : info.version)
             row(label: "Build", value: info.build.isEmpty ? "—" : info.build)
             row(label: "Server", value: info.host.isEmpty ? "—" : info.host)
             row(label: "Player MAC", value: info.playerMAC.isEmpty ? "—" : info.playerMAC)
+        } header: {
+            Text("About").tvSectionHeader()
         }
     }
 
     // MARK: - Helpers
 
-    /// Non-focusable label/value row. tvOS focus engine skips these so the
-    /// user can't land on About info — it's read-only by design.
+    /// Read-only label/value row. Stays focusable so the tvOS focus engine
+    /// can scroll the list down to the About section — the last section sits
+    /// below the fold and a non-focusable row gives DOWN nowhere to land, so
+    /// the list never scrolls to it. The row has no action; focusing it just
+    /// enables the scroll (standard tvOS, e.g. Apple's own Settings).
     @ViewBuilder
     private func row(label: String, value: String) -> some View {
         HStack {
@@ -190,7 +203,6 @@ struct SettingsView: View {
             Text(value)
                 .foregroundStyle(.secondary)
         }
-        .focusable(false)
         .tvListRow()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label), \(value)")

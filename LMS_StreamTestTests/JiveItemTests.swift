@@ -62,6 +62,25 @@ final class JiveItemTests: XCTestCase {
         XCTAssertEqual(reg.strippedID, "Bandcampdaily")
     }
 
+    // MARK: - Registry mojibake repair (LMS_StreamTest-51c)
+
+    func testParseRegistryRepairsMojibakeTitleAndSubtitle() {
+        // home-extra-3rdparty double-encodes: a German title arrives as UTF-8
+        // bytes read as Latin-1 — "Hauptmenü" → "HauptmenÃ¼".
+        let result: [String: Any] = [
+            "items": #"[{"id":"3rdparty_Tidal","title":"HauptmenÃ¼","subtitle":"FÃ¼r dich"}]"#
+        ]
+        let registry = HomeExtraResponse.parseRegistry(result)
+        XCTAssertEqual(registry[0].title, "Hauptmenü")
+        XCTAssertEqual(registry[0].subtitle, "Für dich")
+    }
+
+    func testRepairingMojibakeIsIdempotent() {
+        // Already-correct UTF-8 and pure ASCII must pass through unchanged.
+        XCTAssertEqual("Hauptmenü".repairingMojibake(), "Hauptmenü")
+        XCTAssertEqual("Bandcamp Daily".repairingMojibake(), "Bandcamp Daily")
+    }
+
     // MARK: - parseObj — level-1 shape (items carry their own actions)
 
     func testParseObjItemDirectActions() {

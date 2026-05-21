@@ -489,6 +489,29 @@ struct HomeExtraResponse {
     let sections: [HomeExtraSection]
 }
 
+extension String {
+    /// Repair UTF-8 bytes that were mistakenly decoded as Latin-1 — mojibake
+    /// like "HauptmenÃ¼" for "Hauptmenü" (UTF-8 `C3 BC` read as `Ã` + `¼`).
+    ///
+    /// `home-extra-3rdparty` is the only LMS endpoint that double-encodes its
+    /// payload (`result.items` is JSON-in-JSON); a Perl string with the utf8
+    /// flag off gets byte-corrupted on the second encode. See
+    /// `HomeExtraResponse.parseRegistry`.
+    ///
+    /// Idempotent and safe to apply unconditionally: re-encode each character
+    /// back to Latin-1 bytes, then strictly decode those as UTF-8. Pure ASCII
+    /// round-trips to itself; already-correct UTF-8 (a lone `ü` → byte `0xFC`)
+    /// fails the strict UTF-8 decode (`0xFC` is an invalid lead byte) and
+    /// falls back to the original.
+    func repairingMojibake() -> String {
+        guard let latin1 = data(using: .isoLatin1),
+              let repaired = String(data: latin1, encoding: .utf8) else {
+            return self
+        }
+        return repaired
+    }
+}
+
 extension HomeExtraResponse {
     private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "HomeExtraResponse")
 
@@ -632,8 +655,8 @@ extension HomeExtraResponse {
             else { needsPlayer = false }
             return PluginExtraRegistration(
                 id: id,
-                title: title,
-                subtitle: entry["subtitle"] as? String,
+                title: title.repairingMojibake(),
+                subtitle: (entry["subtitle"] as? String)?.repairingMojibake(),
                 icon: entry["icon"] as? String,
                 needsPlayer: needsPlayer
             )
