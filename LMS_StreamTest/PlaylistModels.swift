@@ -985,8 +985,14 @@ enum LibraryShelf: String, CaseIterable, Identifiable {
     /// when this shelf is enabled. Only meaningful for `dataSource == .homeExtra`.
     var requestParam: String { "\(rawValue):1" }
 
-    /// Title shown in the Settings toggle AND as the shelf header on Library.
-    var title: String {
+    /// Localized title shown in the Settings toggle AND as the shelf header on
+    /// Library. `titleEN` is the String Catalog key; on a build with no
+    /// matching catalog (the iOS target ships none) `String(localized:)`
+    /// returns the key unchanged — so this stays safe for shared callers.
+    var title: String { String(localized: String.LocalizationValue(titleEN)) }
+
+    /// English source string for `title` — the String Catalog lookup key.
+    private var titleEN: String {
         switch self {
         case .new:                   return "New Music"
         case .recentlyPlayed:        return "Recently Played"
@@ -1004,10 +1010,13 @@ enum LibraryShelf: String, CaseIterable, Identifiable {
         }
     }
 
-    /// One-line description shown under the title in the Settings shelf
-    /// picker. Disambiguates similar titles ("Popular" albums vs "Popular
-    /// Artists") at a glance.
-    var subtitle: String {
+    /// Localized one-line description shown under the title in the Settings
+    /// shelf picker. Disambiguates similar titles ("Popular" albums vs
+    /// "Popular Artists") at a glance. See `title` re: catalog safety.
+    var subtitle: String { String(localized: String.LocalizationValue(subtitleEN)) }
+
+    /// English source string for `subtitle` — the String Catalog lookup key.
+    private var subtitleEN: String {
         switch self {
         case .new:                   return "Recently added albums"
         case .recentlyPlayed:        return "Albums you've heard recently"
