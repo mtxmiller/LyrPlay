@@ -52,7 +52,10 @@ struct SettingsView: View {
                     librarySection
                     aboutSection
                 }
-                .navigationTitle("Settings")
+                // No root navigationTitle — on a tvOS list root it renders as
+                // a large title floating over the scrolled content. The tab
+                // bar already labels this screen "Settings"; the other tab
+                // roots (NowPlaying / Search / Library) set no title either.
                 .navigationDestination(isPresented: $showServerChange) {
                     ServerConnectView(onComplete: {
                         os_log(.info, log: logger, "Server change committed — invoking onServerChanged")
