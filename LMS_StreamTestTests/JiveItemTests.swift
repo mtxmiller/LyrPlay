@@ -172,42 +172,96 @@ final class JiveItemTests: XCTestCase {
         XCTAssertTrue(items.isEmpty)
     }
 
-    // MARK: - Dispatch (drill vs play)
+    // MARK: - goAction / nextWindow (7do — wire-verified against Bandcamp)
 
-    func testDispatchDrillForNonTerminalItem() {
-        let item = JiveItem(
-            id: "1", text: "Folder", subtitle: nil, icon: nil,
-            actions: ["go": JiveItemAction(cmd: ["x", "items"], params: [:], itemsParams: nil)],
-            params: [:], addAction: "go", type: nil
-        )
-        if case .drill(let cmd, _) = item.dispatch(base: [:]) {
-            XCTAssertEqual(cmd, ["x", "items"])
-        } else {
-            XCTFail("non-terminal item with a go action should drill")
-        }
+    func testParseItemReadsGoActionAndNextWindow() {
+        // Leaf-track wire shape: goAction:"play" + item-level nextWindow.
+        let obj: [String: Any] = [
+            "item_loop": [
+                ["text": "Title Screen", "goAction": "play", "nextWindow": "nowPlaying",
+                 "params": ["item_id": "0.0.1"]]
+            ]
+        ]
+        let (_, items) = JiveItem.parseObj(obj)
+        XCTAssertEqual(items[0].goAction, "play")
+        XCTAssertEqual(items[0].tapActionName, "play")   // goAction drives the tap
+        XCTAssertEqual(items[0].nextWindow, "nowPlaying")
     }
 
-    func testDispatchPlayForAudioItem() {
-        let item = JiveItem(
-            id: "1", text: "Track", subtitle: nil, icon: nil,
-            actions: ["play": JiveItemAction(cmd: ["x", "playlist", "play"], params: [:], itemsParams: nil)],
-            params: [:], addAction: nil, type: "audio"
-        )
-        if case .play(let cmd, _) = item.dispatch(base: [:]) {
-            XCTAssertEqual(cmd, ["x", "playlist", "play"])
-        } else {
-            XCTFail("audio item with a play action should play")
-        }
+    func testTapAndAddActionNamesDefault() {
+        let (_, items) = JiveItem.parseObj(["item_loop": [["text": "Folder"]]])
+        XCTAssertEqual(items[0].tapActionName, "go")     // no goAction → "go"
+        XCTAssertEqual(items[0].addActionName, "add")    // no addAction → "add"
     }
 
-    func testDispatchNoneWhenNoUsableAction() {
-        let item = JiveItem(
-            id: "1", text: "Dead", subtitle: nil, icon: nil,
-            actions: [:], params: [:], addAction: nil, type: nil
+    func testParseActionsReadsNextWindow() {
+        // Base `play` carries nextWindow (Bandcamp sends "nowPlaying").
+        let obj: [String: Any] = [
+            "base": ["actions": [
+                "play": ["cmd": ["Bandcampdaily", "playlist", "play"],
+                         "params": ["menu": "Bandcampdaily"],
+                         "itemsParams": "params",
+                         "nextWindow": "nowPlaying"]
+            ]],
+            "item_loop": [["text": "A track", "params": ["item_id": "0.0.0"]]]
+        ]
+        let (base, items) = JiveItem.parseObj(obj)
+        let resolved = items[0].resolvedAction(named: "play", base: base)
+        XCTAssertEqual(resolved?.cmd, ["Bandcampdaily", "playlist", "play"])
+        // play.itemsParams == "params" → per-item params merge (the design's
+        // load-bearing assumption — wire-confirmed).
+        XCTAssertEqual(resolved?.params["item_id"] as? String, "0.0.0")
+        XCTAssertEqual(resolved?.params["menu"] as? String, "Bandcampdaily")
+        XCTAssertEqual(resolved?.nextWindow, "nowplaying")   // lowercased
+    }
+
+    func testItemNextWindowWinsOverActionNextWindow() {
+        let obj: [String: Any] = [
+            "base": ["actions": ["go": ["cmd": ["x", "items"], "nextWindow": "parent"]]],
+            "item_loop": [["text": "A", "nextWindow": "Refresh"]]
+        ]
+        let (base, items) = JiveItem.parseObj(obj)
+        // Item-level nextWindow wins over the action's, lowercased.
+        XCTAssertEqual(items[0].resolvedAction(named: "go", base: base)?.nextWindow, "refresh")
+    }
+
+    // MARK: - ResolvedJiveAction.paramArgs (dispatch-helper request shape)
+
+    func testParamArgsScalarAndNonScalar() {
+        let action = ResolvedJiveAction(
+            cmd: ["x"],
+            params: ["item_id": "0.0", "menu": ["a", "b"]],
+            nextWindow: nil
         )
-        if case .none = item.dispatch(base: [:]) {} else {
-            XCTFail("item with no action should dispatch to .none")
-        }
+        let args = action.paramArgs
+        XCTAssertTrue(args.contains("item_id:0.0"))
+        // A non-scalar value is JSON-encoded, not interpolated to garbage.
+        XCTAssertTrue(args.contains { $0.hasPrefix("menu:[") })
+        XCTAssertEqual(action.cliArgs.first, "x")
+    }
+
+    // MARK: - Regression guard (7do — drill vs play resolution)
+
+    func testRegressionPlaylistItemResolvesGoAndPlay() {
+        // A playlist-shaped item (no item-level actions) must resolve BOTH the
+        // base `go` (drill) AND the base `play` — the build-9 dispatch bug
+        // left a `type:"playlist"` item with no path to `play`.
+        let obj: [String: Any] = [
+            "base": ["actions": [
+                "go":   ["cmd": ["P", "items"], "params": ["menu": "P"], "itemsParams": "params"],
+                "play": ["cmd": ["P", "playlist", "play"], "params": ["menu": "P"],
+                         "itemsParams": "params", "nextWindow": "nowPlaying"],
+                "add":  ["cmd": ["P", "playlist", "add"], "params": ["menu": "P"], "itemsParams": "params"]
+            ]],
+            "item_loop": [["text": "A playlist", "type": "playlist", "params": ["item_id": "0.0"]]]
+        ]
+        let (base, items) = JiveItem.parseObj(obj)
+        let item = items[0]
+        XCTAssertNotNil(item.resolvedAction(named: "go", base: base))
+        let play = item.resolvedAction(named: "play", base: base)
+        XCTAssertEqual(play?.cmd, ["P", "playlist", "play"])
+        XCTAssertEqual(play?.params["item_id"] as? String, "0.0")
+        XCTAssertNotNil(item.resolvedAction(named: item.addActionName, base: base))
     }
 
     // MARK: - parsePluginSections

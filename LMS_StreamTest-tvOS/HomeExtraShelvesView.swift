@@ -21,6 +21,9 @@ struct HomeExtraShelvesView: View {
 
     @State private var selectedArtist: Artist? = nil
     @State private var jiveDrill: JiveCommand? = nil
+    /// Drill path inside the plugin-browse cover. Owned here so `JiveBrowseView`
+    /// can push (drill) and pop (`nextWindow: parent`); reset on close.
+    @State private var jivePath: [JiveCommand] = []
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -53,21 +56,33 @@ struct HomeExtraShelvesView: View {
             .onExitCommand { selectedArtist = nil }
         }
         .fullScreenCover(item: $jiveDrill) { command in
-            NavigationStack {
+            NavigationStack(path: $jivePath) {
                 JiveBrowseView(
                     command: command,
                     coordinator: coordinator,
-                    settings: settings
+                    settings: settings,
+                    path: $jivePath,
+                    dismissBrowse: closeBrowse
                 )
                 .navigationDestination(for: JiveCommand.self) { next in
                     JiveBrowseView(
                         command: next,
                         coordinator: coordinator,
-                        settings: settings
+                        settings: settings,
+                        path: $jivePath,
+                        dismissBrowse: closeBrowse
                     )
                 }
             }
-            .onExitCommand { jiveDrill = nil }
+            .onExitCommand { closeBrowse() }
         }
+    }
+
+    /// Dismiss the plugin-browse cover and clear the drill path so the next
+    /// shelf tap starts fresh. Passed to `JiveBrowseView` as `dismissBrowse`
+    /// (`nextWindow: nowplaying` / `home`) and fired by the MENU button.
+    private func closeBrowse() {
+        jiveDrill = nil
+        jivePath = []
     }
 }

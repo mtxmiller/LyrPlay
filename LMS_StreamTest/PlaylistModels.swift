@@ -756,6 +756,38 @@ struct JiveItemAction {
     /// "params") whose contents merge into `params`. nil for item-level
     /// actions, which are already fully resolved.
     let itemsParams: String?
+    /// Post-action navigation hint from the server ("nowPlaying", "parent",
+    /// "grandparent", "refresh", "home", …). Sent in mixed case — lowercase
+    /// before matching. nil → no post-action navigation. Verified live: a
+    /// Bandcamp `play` action carries `nextWindow: "nowPlaying"`.
+    let nextWindow: String?
+}
+
+/// A `JiveItemAction` resolved against its section `base` into a concrete,
+/// ready-to-fire SlimBrowse command — what `JiveItem.resolvedAction` returns.
+struct ResolvedJiveAction {
+    let cmd: [String]
+    let params: [String: Any]
+    /// Lowercased post-action nav hint — the item's item-level `nextWindow`
+    /// when present, else the action's own. nil → stay put / drill.
+    let nextWindow: String?
+
+    /// The params bag as LMS CLI `key:value` strings. A non-scalar value
+    /// (dict/array — possible in plugin `play`/`more` params) is JSON-encoded;
+    /// a raw `Any` interpolation would yield `["a","b"]`-style garbage.
+    var paramArgs: [String] {
+        params.compactMap { key, value -> String? in
+            if value is [Any] || value is [String: Any] {
+                guard let data = try? JSONSerialization.data(withJSONObject: value),
+                      let json = String(data: data, encoding: .utf8) else { return nil }
+                return "\(key):\(json)"
+            }
+            return "\(key):\(value)"
+        }
+    }
+
+    /// Full CLI argument list — command verbs followed by `key:value` params.
+    var cliArgs: [String] { cmd + paramArgs }
 }
 
 /// One item inside a `material_home_<id>_obj.item_loop` — a plugin shelf
@@ -779,14 +811,24 @@ struct JiveItem: Identifiable {
     /// The per-item params bag — merged into a base action's params when
     /// dispatch resolves via the section's `base.actions` template.
     let params: [String: Any]
-    /// Which action fires on tap. Verified live: Bandcamp items carry
-    /// `addAction: "go"`. nil → defaults to "go" (the SlimBrowse drill).
+    /// SlimBrowse `goAction` — names the action fired on Select/OK ("go" or
+    /// "play"). Verified live: leaf track items carry `goAction: "play"`,
+    /// browsable items omit it. nil → defaults to "go" (the drill).
+    let goAction: String?
+    /// SlimBrowse `addAction` — names the action for the Add affordance.
+    /// nil → defaults to "add".
     let addAction: String?
-    /// "playlist" / "audio" / etc. Hints whether a leaf plays vs drills.
+    /// Item-level post-action nav hint. Wins over the resolved action's own
+    /// `nextWindow` (lms-material `browse-functions.js` reads it first).
+    let nextWindow: String?
+    /// "playlist" / "audio" / etc. A DISPLAY hint only (row icon) — never
+    /// gates control flow. The server's actions + `nextWindow` drive dispatch.
     let type: String?
 
-    /// The action name that fires on tap.
-    var tapActionName: String { addAction ?? "go" }
+    /// The action name fired on Select/OK — `goAction`, default "go".
+    var tapActionName: String { goAction ?? "go" }
+    /// The action name for the Add affordance — `addAction`, default "add".
+    var addActionName: String { addAction ?? "add" }
 
     /// Absolute icon URL for this item, resolving a server-relative path
     /// (e.g. `/imageproxy/...`) against the active LMS host.
@@ -794,27 +836,38 @@ struct JiveItem: Identifiable {
         settings.absoluteServerURL(icon)
     }
 
-    /// Resolve a named action into a concrete `(cmd, params)` ready to send
-    /// as a SlimBrowse JSON-RPC request. Returns nil when no usable action
-    /// exists for that name (the tap is then a no-op).
+    /// Resolve a named action into a `ResolvedJiveAction` ready to send as a
+    /// SlimBrowse JSON-RPC request. Returns nil when no usable action exists
+    /// for that name.
     ///
     /// The item's own action wins. Otherwise the section's `base` action is
-    /// the template and the per-item field named by its `itemsParams`
-    /// merges into the base params.
+    /// the template and the per-item field named by its `itemsParams` merges
+    /// into the base params. Verified live: Bandcamp's base `play` action uses
+    /// `itemsParams: "params"` — the same per-item bag as `go` — so `play`
+    /// resolves correctly through this path.
     func resolvedAction(named name: String,
-                        base: [String: JiveItemAction]) -> (cmd: [String], params: [String: Any])? {
+                        base: [String: JiveItemAction]) -> ResolvedJiveAction? {
+        let action: JiveItemAction
+        let resolvedParams: [String: Any]
         if let own = actions[name] {
-            return (own.cmd, own.params)
+            action = own
+            resolvedParams = own.params
+        } else if let template = base[name] {
+            action = template
+            var merged = template.params
+            // Live data shows `itemsParams: "params"` for `go`, `play`, and
+            // `add`. Other keys (e.g. "playControlParams") name sibling
+            // per-item bags we don't capture — base params still dispatch.
+            if template.itemsParams == "params" {
+                for (k, v) in params { merged[k] = v }
+            }
+            resolvedParams = merged
+        } else {
+            return nil
         }
-        guard let template = base[name] else { return nil }
-        var merged = template.params
-        // Live data shows `itemsParams: "params"` for the `go` drill action.
-        // Other keys (e.g. "playControlParams") name sibling per-item bags
-        // we don't capture in v1 — base params still dispatch.
-        if template.itemsParams == "params" {
-            for (k, v) in params { merged[k] = v }
-        }
-        return (template.cmd, merged)
+        // Item-level nextWindow wins over the action's own.
+        let nw = (nextWindow ?? action.nextWindow)?.lowercased()
+        return ResolvedJiveAction(cmd: action.cmd, params: resolvedParams, nextWindow: nw)
     }
 }
 
@@ -847,7 +900,9 @@ extension JiveItem {
             icon: raw["icon"] as? String,
             actions: parseActions(raw["actions"] as? [String: Any]),
             params: raw["params"] as? [String: Any] ?? [:],
+            goAction: raw["goAction"] as? String,
             addAction: raw["addAction"] as? String,
+            nextWindow: raw["nextWindow"] as? String,
             type: raw["type"] as? String
         )
     }
@@ -861,47 +916,14 @@ extension JiveItem {
             out[name] = JiveItemAction(
                 cmd: cmd,
                 params: dict["params"] as? [String: Any] ?? [:],
-                itemsParams: dict["itemsParams"] as? String
+                itemsParams: dict["itemsParams"] as? String,
+                nextWindow: dict["nextWindow"] as? String
             )
         }
         return out
     }
 }
 
-extension JiveItem {
-    /// How a tap on this item should be handled, given the section's base
-    /// actions. v1 supports drilling (`go`) and terminal playback
-    /// (`play` / `playControl`); `add` and `more` are deferred.
-    enum Dispatch {
-        case drill(cmd: [String], params: [String: Any])
-        case play(cmd: [String], params: [String: Any])
-        case none
-    }
-
-    /// Resolve the tap into a drill or a play. A terminal item (`type` of
-    /// "audio" / "track") prefers an explicit `play` action; everything
-    /// else drills via the item's `addAction` (default "go").
-    func dispatch(base: [String: JiveItemAction]) -> Dispatch {
-        let terminal = (type == "audio" || type == "track")
-
-        if terminal {
-            if let play = resolvedAction(named: "play", base: base) {
-                return .play(cmd: play.cmd, params: play.params)
-            }
-            if let pc = resolvedAction(named: "playControl", base: base) {
-                return .play(cmd: pc.cmd, params: pc.params)
-            }
-        }
-
-        if let action = resolvedAction(named: tapActionName, base: base)
-            ?? resolvedAction(named: "go", base: base) {
-            return terminal
-                ? .play(cmd: action.cmd, params: action.params)
-                : .drill(cmd: action.cmd, params: action.params)
-        }
-        return .none
-    }
-}
 
 // MARK: - Genre (BrowseLibraryView fallback)
 

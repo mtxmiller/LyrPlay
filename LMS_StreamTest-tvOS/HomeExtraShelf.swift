@@ -162,8 +162,13 @@ struct HomeExtraShelf: View {
                     placeholderSymbol: "puzzlepiece.extension.fill",
                     action: { tapJive(item, base: base) }
                 )
+                .contextMenu { jiveContextMenu(for: item, base: base) }
             }
         }
+    }
+
+    private var dispatcher: JiveDispatcher {
+        JiveDispatcher(coordinator: coordinator, playerID: settings.playerMACAddress)
     }
 
     // MARK: - Tap dispatch
@@ -207,24 +212,43 @@ struct HomeExtraShelf: View {
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
 
-    /// Plugin (`.jive`) tile tap — drill into a `JiveBrowseView` or play,
-    /// per `JiveItem.dispatch`.
+    /// Plugin (`.jive`) tile tap. Resolves the item's `goAction`: a resolved
+    /// action with a `nextWindow` is terminal — fire it directly (a shelf tile
+    /// has no nav stack to drill into). Otherwise open the browse cover.
     private func tapJive(_ item: JiveItem, base: [String: JiveItemAction]) {
-        switch item.dispatch(base: base) {
-        case .drill(let cmd, let params):
+        guard let action = item.resolvedAction(named: item.tapActionName, base: base)
+            ?? item.resolvedAction(named: "go", base: base) else {
+            os_log(.error, log: logger, "⚠️ Plugin item '%{public}s' has no usable action", item.text)
+            return
+        }
+        if action.nextWindow != nil {
+            os_log(.info, log: logger, "▶️ Play plugin item '%{public}s'", item.text)
+            dispatcher.fire(action, label: item.text)
+        } else {
             os_log(.info, log: logger, "📂 Drill plugin shelf '%{public}s' → %{public}s",
                    section.title, item.text)
-            onJiveTap(JiveCommand(title: item.text, cmd: cmd, params: params))
-        case .play(let cmd, let params):
-            os_log(.info, log: logger, "▶️ Play plugin item '%{public}s'", item.text)
-            let request: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [settings.playerMACAddress, cmd + JiveBrowseView.cliParams(params)]
-            ]
-            coordinator.sendJSONRPCCommandDirect(request) { _ in }
-        case .none:
-            os_log(.error, log: logger, "⚠️ Plugin item '%{public}s' has no usable action", item.text)
+            onJiveTap(JiveCommand(title: item.text, cmd: action.cmd, params: action.params))
+        }
+    }
+
+    /// Press-and-hold menu for a plugin tile — Play / Add. A shelf tile has no
+    /// nav stack, so `nextWindow` from these actions is not routed (the play
+    /// itself still happens server-side).
+    @ViewBuilder
+    private func jiveContextMenu(for item: JiveItem, base: [String: JiveItemAction]) -> some View {
+        if let play = item.resolvedAction(named: "play", base: base) {
+            Button {
+                dispatcher.fire(play, label: item.text)
+            } label: {
+                Label("Play", systemImage: "play.fill")
+            }
+        }
+        if let add = item.resolvedAction(named: item.addActionName, base: base) {
+            Button {
+                dispatcher.fire(add, label: item.text)
+            } label: {
+                Label("Add to Queue", systemImage: "text.append")
+            }
         }
     }
 }
