@@ -81,7 +81,16 @@ struct QueueView: View {
     // MARK: - Artwork URL
 
     private func artworkURL(for track: PlaylistTrack) -> URL? {
-        LMSArtworkURL.cover(coverID: track.artworkURL, fallbackID: track.id, settings: settings)
+        // Remote/plugin tracks (Bandcamp, radio) carry the real cover in
+        // `artwork_url`; their synthetic negative `coverid` only resolves to
+        // the LMS placeholder on /music/<id>/cover. `absoluteServerURL`
+        // resolves the (already percent-encoded) `/imageproxy/…` path via
+        // URL(string:) without re-encoding — the same resolver `JiveItem`
+        // uses, which is why Library shelves render plugin art correctly.
+        if let remote = track.remoteArtworkURL {
+            return settings.absoluteServerURL(remote)
+        }
+        return LMSArtworkURL.cover(coverID: track.artworkURL, fallbackID: track.id, settings: settings)
     }
 
     // MARK: - Auto-scroll
@@ -113,8 +122,9 @@ struct QueueView: View {
             "method": "slim.request",
             // start=0 returns the full playlist from index 0 so array index aligns with playlist_cur_index.
             // Using "-" as start returns tracks from the current track forward, which would offset all indices.
-            // tags: d=duration, a=artist, l=album, c=coverid (lowercase — uppercase C silently returns nothing).
-            "params": [settings.playerMACAddress, ["status", 0, 9999, "tags:dalc"]]
+            // tags: d=duration, a=artist, l=album, c=coverid (lowercase — uppercase C silently
+            // returns nothing), K=artwork_url (the real cover for remote/plugin tracks).
+            "params": [settings.playerMACAddress, ["status", 0, 9999, "tags:dalcK"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { response in
             DispatchQueue.main.async {

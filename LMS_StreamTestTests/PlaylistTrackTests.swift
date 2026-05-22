@@ -109,4 +109,31 @@ final class PlaylistTrackTests: XCTestCase {
         XCTAssertEqual(tracks.count, 1)
         XCTAssertEqual(tracks[0].duration, 180.5, "PlaylistTrack decoder accepts duration as both Double and String")
     }
+
+    // Regression: a remote/plugin track (Bandcamp, radio) carries its real
+    // cover in `artwork_url`, not a usable `coverid`. The decoder must surface
+    // it so QueueView can render artwork for queued plugin tracks.
+    func testParseLoopDecodesRemoteArtworkURL() {
+        let raw: [[String: Any]] = [
+            [   // remote Bandcamp track — synthetic coverid, real art in artwork_url
+                "id": "-93871034499080",
+                "title": "Stratosfæren",
+                "coverid": "-93871034499080",
+                "artwork_url": "/imageproxy/http%3A%2F%2Ff0.bcbits.com%2Fimg%2Fa3091004701_5.jpg/image.jpg",
+                "playlist index": 0
+            ],
+            [   // local library track — no artwork_url
+                "id": 42,
+                "title": "Local Track",
+                "coverid": "abc123",
+                "playlist index": 1
+            ]
+        ]
+
+        let tracks = PlaylistTrack.parseLoop(raw)
+
+        XCTAssertEqual(tracks[0].remoteArtworkURL,
+                       "/imageproxy/http%3A%2F%2Ff0.bcbits.com%2Fimg%2Fa3091004701_5.jpg/image.jpg")
+        XCTAssertNil(tracks[1].remoteArtworkURL, "a local track has no artwork_url")
+    }
 }

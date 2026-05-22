@@ -78,6 +78,12 @@ struct PlaylistTrack: Identifiable, Codable {
     let duration: Double?
     let trackNumber: Int?
     let artworkURL: String?
+    /// LMS `artwork_url` — the artwork for a remote/plugin track (Bandcamp,
+    /// radio, etc.), an absolute URL or a server-relative `/imageproxy/…` path.
+    /// Such tracks have only a synthetic negative `coverid` that resolves to
+    /// the LMS placeholder on `/music/<id>/cover`, so this is the real source.
+    /// Requires the `K` tag on the `status`/`titles` query.
+    let remoteArtworkURL: String?
     let albumID: String?
     let artistID: String?
     let playlistIndex: Int?  // LMS playlist index (important for playback)
@@ -91,6 +97,7 @@ struct PlaylistTrack: Identifiable, Codable {
         case duration
         case trackNumber = "tracknum"
         case artworkURL = "coverid"
+        case remoteArtworkURL = "artwork_url"
         case albumID = "album_id"
         case artistID = "artist_id"
         case playlistIndex = "playlist index"
@@ -132,6 +139,13 @@ struct PlaylistTrack: Identifiable, Codable {
             artworkURL = nil
         }
 
+        // Remote/plugin artwork — empty string treated as absent.
+        if let remoteArt = try? container.decodeIfPresent(String.self, forKey: .remoteArtworkURL) {
+            remoteArtworkURL = remoteArt.isEmpty ? nil : remoteArt
+        } else {
+            remoteArtworkURL = nil
+        }
+
         // Handle album_id and artist_id as both Int and String
         if let albumIDString = try? container.decode(String.self, forKey: .albumID) {
             albumID = albumIDString
@@ -150,7 +164,7 @@ struct PlaylistTrack: Identifiable, Codable {
         }
     }
     
-    init(id: String, title: String, artist: String? = nil, album: String? = nil, duration: Double? = nil, trackNumber: Int? = nil, artworkURL: String? = nil, albumID: String? = nil, artistID: String? = nil, playlistIndex: Int? = nil) {
+    init(id: String, title: String, artist: String? = nil, album: String? = nil, duration: Double? = nil, trackNumber: Int? = nil, artworkURL: String? = nil, remoteArtworkURL: String? = nil, albumID: String? = nil, artistID: String? = nil, playlistIndex: Int? = nil) {
         self.id = id
         self.title = title
         self.artist = artist
@@ -158,6 +172,7 @@ struct PlaylistTrack: Identifiable, Codable {
         self.duration = duration
         self.trackNumber = trackNumber
         self.artworkURL = artworkURL
+        self.remoteArtworkURL = remoteArtworkURL
         self.albumID = albumID
         self.artistID = artistID
         self.playlistIndex = playlistIndex
