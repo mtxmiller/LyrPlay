@@ -260,7 +260,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Genres"
+            "value": "Stilrichtungen"
           }
         }
       }
@@ -282,7 +282,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mediathek"
+            "value": "Musiksammlung"
           }
         }
       }
@@ -293,7 +293,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mediathek-Regale"
+            "value": "Musiksammlungs-Regale"
           }
         }
       }
@@ -304,7 +304,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mediathek ist leer"
+            "value": "Musiksammlung ist leer"
           }
         }
       }
@@ -348,7 +348,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Keine Genres"
+            "value": "Keine Stilrichtungen"
           }
         }
       }
@@ -469,7 +469,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Player-Name"
+            "value": "Playername"
           }
         }
       }
@@ -579,7 +579,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Musik suchen"
+            "value": "Musik durchsuchen"
           }
         }
       }
@@ -678,7 +678,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lege fest, welche Regale im Mediathek-Tab erscheinen. Die Reihenfolge entspricht der Bildschirmanzeige. Änderungen werden sofort wirksam."
+            "value": "Lege fest, welche Regale im Musiksammlungs-Tab erscheinen. Die Reihenfolge entspricht der Bildschirmanzeige. Änderungen werden sofort wirksam."
           }
         }
       }
