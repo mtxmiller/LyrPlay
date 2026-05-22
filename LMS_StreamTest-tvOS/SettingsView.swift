@@ -193,11 +193,12 @@ struct SettingsView: View {
 
     // MARK: - Helpers
 
-    /// Read-only label/value row. Stays focusable so the tvOS focus engine
-    /// can scroll the list down to the About section — the last section sits
-    /// below the fold and a non-focusable row gives DOWN nowhere to land, so
-    /// the list never scrolls to it. The row has no action; focusing it just
-    /// enables the scroll (standard tvOS, e.g. Apple's own Settings).
+    /// Read-only label/value row. Explicitly `.focusable()` — a plain `HStack`
+    /// of `Text` is NOT focusable by default on tvOS, so the focus engine
+    /// needs this to have a landing spot below the "Shelves" row. Without it,
+    /// pressing DOWN from Shelves has nowhere to go and the list never scrolls
+    /// to the About section. The row has no action; focusing it just enables
+    /// the scroll (standard tvOS, e.g. Apple's own Settings).
     @ViewBuilder
     private func row(label: String, value: String) -> some View {
         HStack {
@@ -206,6 +207,7 @@ struct SettingsView: View {
             Text(value)
                 .foregroundStyle(.secondary)
         }
+        .focusable()
         .tvListRow()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label), \(value)")
