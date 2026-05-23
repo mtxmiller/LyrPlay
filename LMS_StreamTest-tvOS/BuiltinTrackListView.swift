@@ -159,6 +159,11 @@ struct BuiltinTrackListView: View {
     @ViewBuilder
     private func trackContextMenu(for track: Track) -> some View {
         Button {
+            playSingleTrack(track: track)
+        } label: {
+            Label("Play This Track", systemImage: "play.fill")
+        }
+        Button {
             addToQueue(track: track)
         } label: {
             Label("Add to Queue", systemImage: "text.append")
@@ -264,6 +269,26 @@ struct BuiltinTrackListView: View {
             "params": [
                 settings.playerMACAddress,
                 ["playlistcontrol", "cmd:load", source.idParam, "play_index:\(index)"]
+            ]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    /// Replace the queue with just this one track. Distinct from the tap
+    /// behavior (which loads the whole album / playlist from this index).
+    /// The use case is plugins like "Don't Stop The Music" or LMS's Random
+    /// Mix — they auto-queue follow-on tracks only when the current queue
+    /// is short, so a single-track load lets the plugin take over. Without
+    /// this, tapping a track loads the whole album / playlist and DSTM has
+    /// no room to insert.
+    private func playSingleTrack(track: Track) {
+        os_log(.info, log: logger, "▶️ Play single track: %{public}s (id=%{public}s)", track.title, track.id)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [
+                settings.playerMACAddress,
+                ["playlistcontrol", "cmd:load", "track_id:\(track.id)"]
             ]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }

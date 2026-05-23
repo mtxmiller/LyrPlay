@@ -685,6 +685,17 @@
         }
       }
     },
+    "Play This Track" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nur diesen Titel wiedergeben"
+          }
+        }
+      }
+    },
     "Playback progress" : {
       "extractionState" : "manual",
       "localizations" : {
