@@ -803,6 +803,54 @@ struct ResolvedJiveAction {
 
     /// Full CLI argument list — command verbs followed by `key:value` params.
     var cliArgs: [String] { cmd + paramArgs }
+
+    /// True if this action's `cmd` is a known browse verb (`items`, `tracks`,
+    /// `albums`, …). Used by tvOS classification as the **false-positive
+    /// guard**: a browse cmd always classifies as drill, regardless of any
+    /// leaf hint the item may carry (e.g. `type:"audio"` on a folder item).
+    /// Without this guard, a container row that happens to carry leaf-ish
+    /// metadata would misclassify as a play.
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this.
+    var isBrowseVerb: Bool {
+        let browseVerbs: Set<String> = [
+            "items", "tracks", "albums", "artists", "playlists",
+            "browselibrary", "genres", "years",
+        ]
+        return cmd.contains(where: browseVerbs.contains)
+    }
+
+    /// True if this action is a play-class command (plays / queues audio),
+    /// false if it's a browse-class command (drills into a deeper level).
+    ///
+    /// Used by tvOS Select-vs-drill classification (see `JiveDispatcher.decide`).
+    /// Two forms must be recognized:
+    /// 1. **Plugin SlimBrowse form** — verb in the `cmd` array. Example:
+    ///    Bandcamp leaf play `["Bandcampdaily","playlist","play"]`. We match
+    ///    `play`/`insert`/`add` *anywhere* in the array (the URL/id form
+    ///    `["playlist","play","<url>"]` puts the verb at position [-2], so
+    ///    suffix-match would miss it). We also reject the known browse verbs
+    ///    so a browse cmd like `["...","items"]` does NOT classify as play.
+    /// 2. **Built-in `playlistcontrol` form** — verb in a `cmd:` param. The
+    ///    `cmd` array is `["playlistcontrol"]` and the verb (`cmd:load`,
+    ///    `cmd:add`, `cmd:insert`) lives in `cliArgs`. The `cmd:load` form is
+    ///    what built-in album / playlist play uses (verified live, CarPlay
+    ///    `CarPlaySceneDelegate.swift:2404`).
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this.
+    var isPlayVerb: Bool {
+        // Form 2: playlistcontrol cmd:load / cmd:add / cmd:insert
+        if cmd.first == "playlistcontrol" {
+            return cliArgs.contains { arg in
+                arg == "cmd:load" || arg == "cmd:add" || arg == "cmd:insert"
+            }
+        }
+        // Form 1: SlimBrowse verb in cmd array. Reject browse verbs first so
+        // a hypothetical `["albums","play"]` browse-then-play doesn't trip us.
+        if isBrowseVerb { return false }
+        let playVerbs: Set<String> = ["play", "insert", "add"]
+        return cmd.contains(where: playVerbs.contains)
+    }
 }
 
 /// One item inside a `material_home_<id>_obj.item_loop` — a plugin shelf
@@ -839,11 +887,48 @@ struct JiveItem: Identifiable {
     /// "playlist" / "audio" / etc. A DISPLAY hint only (row icon) — never
     /// gates control flow. The server's actions + `nextWindow` drive dispatch.
     let type: String?
+    /// Item-root `style` — "itemplay" on canonical SlimBrowse leaf tracks.
+    /// Used by `hasLeafHint` as a corroborating play signal.
+    let style: String?
+    /// Item-root `presetParams` — the server's "this item can be assigned to a
+    /// numeric preset" bag. Its presence (specifically `favorites_url` +
+    /// `favorites_type:audio`) is a strong leaf-playable signal: only items
+    /// the server considers streamable favorites carry it. Verified live on
+    /// Bandcamp Weekly tracks (goAction:"playControl") and Bandcamp Daily
+    /// tracks (goAction:"play"). Used by `hasLeafHint`.
+    let presetParams: [String: Any]?
 
     /// The action name fired on Select/OK — `goAction`, default "go".
     var tapActionName: String { goAction ?? "go" }
     /// The action name for the Add affordance — `addAction`, default "add".
     var addActionName: String { addAction ?? "add" }
+
+    /// True if this item carries server-provided leaf-playable hints — used
+    /// as a secondary signal by tvOS classification when the resolved action's
+    /// `cmd` doesn't decisively name itself as play (see `JiveDispatcher.decide`).
+    ///
+    /// Hints, in order of specificity:
+    /// - `style == "itemplay"` — explicit "this row plays on tap" flag.
+    ///   Verified live on Bandcamp leaf tracks.
+    /// - `params["touchToPlay"]` — Squeezebox-Touch carryover meaning the same.
+    ///   Verified live on Bandcamp leaf tracks.
+    /// - `type` in `{"audio", "track"}` — display hint that THIS time also
+    ///   carries control-flow signal (still subordinate to `cmd`-is-play).
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this. `type` is
+    /// otherwise documented as display-only; the leaf-hint use here is
+    /// corroborating evidence, never sole control flow.
+    var hasLeafHint: Bool {
+        if style == "itemplay" { return true }
+        if params["touchToPlay"] != nil { return true }
+        if let t = type, t == "audio" || t == "track" { return true }
+        // Bandcamp Weekly pattern: leaf tracks have goAction:"playControl"
+        // (which resolves to a browse cmd, no other leaf hints) but DO carry
+        // presetParams with a streamable favorites_url. That's the server's
+        // "this is a playable favorite" tell.
+        if let preset = presetParams, preset["favorites_url"] != nil { return true }
+        return false
+    }
 
     /// Absolute icon URL for this item, resolving a server-relative path
     /// (e.g. `/imageproxy/...`) against the active LMS host.
@@ -918,7 +1003,9 @@ extension JiveItem {
             goAction: raw["goAction"] as? String,
             addAction: raw["addAction"] as? String,
             nextWindow: raw["nextWindow"] as? String,
-            type: raw["type"] as? String
+            type: raw["type"] as? String,
+            style: raw["style"] as? String,
+            presetParams: raw["presetParams"] as? [String: Any]
         )
     }
 

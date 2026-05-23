@@ -74,6 +74,12 @@ struct AlbumListView: View {
     @State private var albums: [Album] = []
     @State private var isLoading: Bool = false
     @State private var hasFetched: Bool = false
+    /// Drives the drill-into-tracks push on the host's `NavigationStack`
+    /// (E1 revised: Select drills, not plays). The host doesn't need to
+    /// declare anything — this view owns its own `.navigationDestination(item:)`.
+    /// Stored as `BuiltinTrackListView.Source` (Hashable) — Album itself is
+    /// not Hashable (carries a UIImage), and the .playlist case is unused here.
+    @State private var selectedDrill: BuiltinTrackListView.Source? = nil
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AlbumListView")
 
@@ -90,6 +96,13 @@ struct AlbumListView: View {
             }
         }
         .onAppear { if !hasFetched { fetch() } }
+        .navigationDestination(item: $selectedDrill) { source in
+            BuiltinTrackListView(
+                source: source,
+                coordinator: coordinator,
+                settings: settings
+            )
+        }
     }
 
     // MARK: - States
@@ -117,7 +130,10 @@ struct AlbumListView: View {
         TVList {
             ForEach(albums, id: \.id) { album in
                 Button {
-                    playAlbum(album)
+                    // E1 revised: Select drills into the album's tracks so the
+                    // user can start from a song. "Play all" lives in the
+                    // press-and-hold context menu below.
+                    selectedDrill = .album(id: album.id, title: album.name)
                 } label: {
                     MediaRow(
                         primary: album.name,
@@ -130,8 +146,25 @@ struct AlbumListView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .contextMenu { albumContextMenu(for: album) }
                 .tvListRow()
             }
+        }
+    }
+
+    /// Press-and-hold menu — Play all / Add all. The default tap drills (above);
+    /// these stay as the explicit whole-album affordances.
+    @ViewBuilder
+    private func albumContextMenu(for album: Album) -> some View {
+        Button {
+            playAlbum(album)
+        } label: {
+            Label("Play All", systemImage: "play.fill")
+        }
+        Button {
+            addAlbum(album)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
         }
     }
 
@@ -176,17 +209,25 @@ struct AlbumListView: View {
         }
     }
 
-    // MARK: - Tap-to-play
+    // MARK: - Whole-album actions (press-and-hold menu only)
 
     private func playAlbum(_ album: Album) {
-        os_log(.info, log: logger, "▶️ Play album: %{public}s (id=%{public}s)", album.name, album.id)
-        // Player-targeted. `playlistcontrol cmd:load album_id:N` per CarPlay
-        // CarPlaySceneDelegate.swift:2434. Replaces queue + starts at track 1. User stays on
-        // Library per D6.
+        os_log(.info, log: logger, "▶️ Play album (Play All): %{public}s (id=%{public}s)", album.name, album.id)
+        // Replaces queue + starts at track 1. User stays on Library per D6.
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
             "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    private func addAlbum(_ album: Album) {
+        os_log(.info, log: logger, "➕ Add album: %{public}s (id=%{public}s)", album.name, album.id)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "album_id:\(album.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }

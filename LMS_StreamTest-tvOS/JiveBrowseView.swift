@@ -41,7 +41,7 @@ struct JiveBrowseView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     /// The enclosing `NavigationStack`'s path — drill appends, `parent` pops.
-    @Binding var path: [JiveCommand]
+    @Binding var path: [BrowseDestination]
     /// Dismiss the whole browse `.fullScreenCover` (`nowplaying` / `home`).
     let dismissBrowse: () -> Void
 
@@ -133,14 +133,23 @@ struct JiveBrowseView: View {
         .contextMenu { contextMenu(for: item) }
     }
 
-    /// Press-and-hold menu — the sole per-item Play/Add affordance. Each
-    /// button appears only when its action resolves against item + base.
+    /// Press-and-hold menu — secondary per-item affordances. Select now
+    /// handles per-track play directly (gi0 fix); the menu provides Play (for
+    /// containers — "Play all") and Add. Each button appears only when its
+    /// action resolves against item + base.
+    ///
+    /// Same post-play "stay in browse" rule as `handleSelect`: after fire,
+    /// honor in-stack routes (parent/grandparent/refresh) but DON'T dismiss
+    /// the cover on nowplaying or absent nextWindow.
     @ViewBuilder
     private func contextMenu(for item: JiveItem) -> some View {
         if let play = item.resolvedAction(named: "play", base: baseActions) {
             Button {
                 dispatcher.fire(play, label: item.text)
-                if let nw = play.nextWindow { route(nextWindow: nw) }
+                if let nw = play.nextWindow {
+                    route(nextWindow: nw)
+                }
+                // No cover-dismiss otherwise — stay in browse after play.
             } label: {
                 Label("Play", systemImage: "play.fill")
             }
@@ -168,32 +177,46 @@ struct JiveBrowseView: View {
 
     // MARK: - Select / dispatch
 
-    /// Select/OK: resolve the item's `goAction`. A resolved action with a
-    /// `nextWindow` is terminal — fire it and route. Otherwise it is a drill —
-    /// push a child level (the child's `.task` does the one and only fetch).
+    /// Select/OK: ask `JiveDispatcher.decide` to classify the row, then route.
+    /// The classifier is `cmd`-first (E2) with leaf hints + `nextWindow:nowplaying`
+    /// as secondary signals (E5).
+    ///
+    /// **Post-play UX (round-2 hardware feedback, supersedes E6's default-dismiss
+    /// rule):** after firing a play-class action, the user STAYS in the track
+    /// list. `nextWindow` is consulted only for in-stack routes (parent /
+    /// grandparent / refresh) and for the explicit `home` escape; `nowplaying`
+    /// is informational, no cover dismiss. Same reasoning as `c8q` was dropped:
+    /// mherger's stated mental model is "browse is where I live, play is
+    /// something I do while staying here."
     private func handleSelect(_ item: JiveItem) {
-        guard let action = item.resolvedAction(named: item.tapActionName, base: baseActions)
-            ?? item.resolvedAction(named: "go", base: baseActions) else {
-            os_log(.error, log: logger, "⚠️ '%{public}s' has no usable tap action", item.text)
-            return
-        }
-        if let nw = action.nextWindow {
-            // Terminal — fire directly, no push, no empty-spinner flash.
+        switch JiveDispatcher.decide(item: item, base: baseActions) {
+        case .terminal(let action):
             dispatcher.fire(action, label: item.text)
-            route(nextWindow: nw)
-        } else {
-            // Drill — push a child JiveBrowseView for this command.
-            path.append(JiveCommand(title: item.text, cmd: action.cmd, params: action.params))
+            if let nw = action.nextWindow {
+                route(nextWindow: nw)
+            }
+            // No cover-dismiss otherwise — stay on the track list after play.
+        case .drill(let cmd):
+            path.append(.plugin(cmd))
+        case .unresolved:
+            os_log(.error, log: logger, "⚠️ '%{public}s' has no usable tap action", item.text)
         }
     }
 
     /// Honour a `nextWindow` hint. `parent`/`grandparent`/`refresh` resolve
-    /// in-stack; `nowplaying`/`home` dismiss the whole browse cover. (The
-    /// `nowplaying` tab-switch is deferred — bd LMS_StreamTest-c8q.)
+    /// in-stack; `home` is the only escape that dismisses the cover.
+    /// `nowplaying` is **informational only** — round-2 hardware feedback
+    /// established that users want to stay in the track list after play
+    /// (mherger: "browse is where I live"). The server hint that "this goes
+    /// to Now Playing" is honored by the server-side play itself; the client
+    /// no longer yanks the user out of browse. The Now Playing tab is one
+    /// tap away when the user wants it.
     private func route(nextWindow nw: String) {
         switch nw {
-        case "nowplaying", "home":
+        case "home":
             dismissBrowse()
+        case "nowplaying":
+            break   // stay in browse (c8q reasoning, applied to dismiss too)
         case "parent":
             if path.isEmpty { dismissBrowse() } else { path.removeLast() }
         case "grandparent":
@@ -201,7 +224,7 @@ struct JiveBrowseView: View {
         case "refresh":
             reloadToken += 1
         default:
-            break   // unknown / "nowPlaying" already lowercased — no-op
+            break   // unknown / already lowercased
         }
     }
 

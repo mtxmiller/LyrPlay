@@ -48,6 +48,12 @@ struct SearchView: View {
 
     // D4=A drill-in. fullScreenCover(item:) auto-clears on dismiss.
     @State private var selectedArtist: Artist? = nil
+    /// Album / playlist drill-in (build 12 round-2 consistency fix). Same
+    /// drill destination as Library tab's AlbumListView / PlaylistsView, but
+    /// presented via fullScreenCover here (a NavigationStack push from a
+    /// search root would hide the tab bar — tvos-nav-push-hides-tabbar 9/10,
+    /// same constraint the artist drill above handles).
+    @State private var selectedDrill: BuiltinTrackListView.Source? = nil
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SearchView")
     private let resultLimit = 25
@@ -95,6 +101,16 @@ struct SearchView: View {
                 )
             }
             .onExitCommand { selectedArtist = nil }
+        }
+        .fullScreenCover(item: $selectedDrill) { source in
+            NavigationStack {
+                BuiltinTrackListView(
+                    source: source,
+                    coordinator: coordinator,
+                    settings: settings
+                )
+            }
+            .onExitCommand { selectedDrill = nil }
         }
     }
 
@@ -201,6 +217,7 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .contextMenu { albumContextMenu(for: album) }
                         .tvListRow()
                     }
                 } header: {
@@ -240,6 +257,7 @@ struct SearchView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .contextMenu { playlistContextMenu(for: playlist) }
                         .tvListRow()
                     }
                 } header: {
@@ -431,14 +449,12 @@ struct SearchView: View {
         selectedArtist = artist  // fullScreenCover(item:) presents on non-nil
     }
 
+    /// Build-12 round-2 consistency fix: Select on a search-result album now
+    /// drills into its track list (same as Library tab / Home shelf), so the
+    /// user can start from any song. "Play all" moves to press-and-hold.
     private func tapAlbum(_ album: Album) {
-        os_log(.info, log: logger, "💿 Album tapped: %{public}s (id=%{public}s)", album.name, album.id)
-        let cmd: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
-        ]
-        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+        os_log(.info, log: logger, "💿 Album tapped (drill): %{public}s (id=%{public}s)", album.name, album.id)
+        selectedDrill = .album(id: album.id, title: album.name)
     }
 
     private func tapTrack(_ track: PlaylistTrack) {
@@ -451,13 +467,82 @@ struct SearchView: View {
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
 
+    /// Select on a search-result playlist drills into its tracks. "Play all"
+    /// moves to press-and-hold.
     private func tapPlaylist(_ playlist: Playlist) {
         let playlistID = playlist.originalNumericId.map(String.init) ?? playlist.id
-        os_log(.info, log: logger, "📋 Playlist tapped: %{public}s (id=%{public}s)", playlist.name, playlistID)
+        os_log(.info, log: logger, "📋 Playlist tapped (drill): %{public}s (id=%{public}s)", playlist.name, playlistID)
+        selectedDrill = .playlist(id: playlistID, title: playlist.name)
+    }
+
+    // MARK: - Press-and-hold context menus (whole-collection actions)
+
+    @ViewBuilder
+    private func albumContextMenu(for album: Album) -> some View {
+        Button {
+            playAlbum(album)
+        } label: {
+            Label("Play All", systemImage: "play.fill")
+        }
+        Button {
+            addAlbum(album)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
+        }
+    }
+
+    @ViewBuilder
+    private func playlistContextMenu(for playlist: Playlist) -> some View {
+        Button {
+            playPlaylist(playlist)
+        } label: {
+            Label("Play All", systemImage: "play.fill")
+        }
+        Button {
+            addPlaylist(playlist)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
+        }
+    }
+
+    private func playAlbum(_ album: Album) {
+        os_log(.info, log: logger, "▶️ Play album (Play All): %{public}s (id=%{public}s)", album.name, album.id)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    private func addAlbum(_ album: Album) {
+        os_log(.info, log: logger, "➕ Add album: %{public}s (id=%{public}s)", album.name, album.id)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "album_id:\(album.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    private func playPlaylist(_ playlist: Playlist) {
+        let playlistID = playlist.originalNumericId.map(String.init) ?? playlist.id
+        os_log(.info, log: logger, "▶️ Play playlist (Play All): %{public}s (id=%{public}s)", playlist.name, playlistID)
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
             "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "playlist_id:\(playlistID)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    private func addPlaylist(_ playlist: Playlist) {
+        let playlistID = playlist.originalNumericId.map(String.init) ?? playlist.id
+        os_log(.info, log: logger, "➕ Add playlist: %{public}s (id=%{public}s)", playlist.name, playlistID)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "playlist_id:\(playlistID)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }

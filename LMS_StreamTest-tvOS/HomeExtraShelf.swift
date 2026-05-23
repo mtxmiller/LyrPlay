@@ -23,7 +23,11 @@ struct HomeExtraShelf: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     let onArtistTap: (Artist) -> Void
-    let onJiveTap: (JiveCommand) -> Void
+    /// Open the plugin-browse `.fullScreenCover` at this destination. Used by
+    /// plugin tiles (`.jive` drill), built-in album tiles (`.albumTracks`),
+    /// and built-in playlist tiles (`.playlistTracks`) so all three drill
+    /// paths share one stack (`HomeExtraShelvesView.jivePath`).
+    let onBrowseTap: (BrowseDestination) -> Void
 
     /// Spacing between tiles inside the horizontal scroll. 48pt — tuned on
     /// real Apple TV hardware after Elissen's first-look feedback that 32pt
@@ -114,8 +118,11 @@ struct HomeExtraShelf: View {
                         settings: settings
                     ),
                     placeholderSymbol: "opticaldisc",
-                    action: { playAlbum(album) }
+                    // ejc fix (E1 revised): Select on a built-in album drills
+                    // into its track list. "Play all" moves to press-and-hold.
+                    action: { onBrowseTap(.albumTracks(albumID: album.id, title: album.name)) }
                 )
+                .contextMenu { builtinAlbumContextMenu(for: album) }
             }
 
         case .artists(let artists):
@@ -132,6 +139,7 @@ struct HomeExtraShelf: View {
         case .favorites(let favs):
             // Favorites and radios both arrive in this case — identical wire
             // shape, dispatch forks inside `playFavorite` on section.id.
+            // Tap-to-play preserved (no track list to drill into).
             ForEach(Array(favs.enumerated()), id: \.offset) { _, fav in
                 MediaTile(
                     title: fav.name,
@@ -149,8 +157,11 @@ struct HomeExtraShelf: View {
                     secondary: playlist.trackCountDisplay.isEmpty ? nil : playlist.trackCountDisplay,
                     artworkURL: LMSArtworkURL.materialPlaylist(name: playlist.name, settings: settings),
                     placeholderSymbol: "music.note.list",
-                    action: { playPlaylist(playlist) }
+                    // ejc fix (E1 revised): Select on a built-in playlist
+                    // drills into its track list.
+                    action: { onBrowseTap(.playlistTracks(playlistID: playlistDrillID(playlist), title: playlist.name)) }
                 )
+                .contextMenu { builtinPlaylistContextMenu(for: playlist) }
             }
 
         case .jive(let base, let items):
@@ -165,6 +176,14 @@ struct HomeExtraShelf: View {
                 .contextMenu { jiveContextMenu(for: item, base: base) }
             }
         }
+    }
+
+    /// Numeric playlist_id when LMS gave one; falls back to id otherwise.
+    /// `BuiltinTrackListView` and `playlistcontrol` both need the numeric form
+    /// for database playlists; `PlaylistsView.playPlaylist` does the same
+    /// resolution (`PlaylistsView.swift:112`).
+    private func playlistDrillID(_ playlist: Playlist) -> String {
+        playlist.originalNumericId.map(String.init) ?? playlist.id
     }
 
     private var dispatcher: JiveDispatcher {
@@ -212,22 +231,24 @@ struct HomeExtraShelf: View {
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
 
-    /// Plugin (`.jive`) tile tap. Resolves the item's `goAction`: a resolved
-    /// action with a `nextWindow` is terminal — fire it directly (a shelf tile
-    /// has no nav stack to drill into). Otherwise open the browse cover.
+    /// Plugin (`.jive`) tile tap. Asks `JiveDispatcher.decide` to classify
+    /// the row, then either fires (terminal — typically a "play this single
+    /// item" tile) or opens the browse cover at the drill destination. A
+    /// shelf tile has no nav stack of its own, so a play-class fire stays on
+    /// Home (no cover to dismiss).
     private func tapJive(_ item: JiveItem, base: [String: JiveItemAction]) {
-        guard let action = item.resolvedAction(named: item.tapActionName, base: base)
-            ?? item.resolvedAction(named: "go", base: base) else {
-            os_log(.error, log: logger, "⚠️ Plugin item '%{public}s' has no usable action", item.text)
-            return
-        }
-        if action.nextWindow != nil {
+        switch JiveDispatcher.decide(item: item, base: base) {
+        case .terminal(let action):
             os_log(.info, log: logger, "▶️ Play plugin item '%{public}s'", item.text)
             dispatcher.fire(action, label: item.text)
-        } else {
+            // No cover to dismiss; the user stays on Home. Server-side play
+            // proceeds; if the user wants Now Playing they tap that tab.
+        case .drill(let cmd):
             os_log(.info, log: logger, "📂 Drill plugin shelf '%{public}s' → %{public}s",
                    section.title, item.text)
-            onJiveTap(JiveCommand(title: item.text, cmd: action.cmd, params: action.params))
+            onBrowseTap(.plugin(cmd))
+        case .unresolved:
+            os_log(.error, log: logger, "⚠️ Plugin item '%{public}s' has no usable action", item.text)
         }
     }
 
@@ -250,5 +271,59 @@ struct HomeExtraShelf: View {
                 Label("Add to Queue", systemImage: "text.append")
             }
         }
+    }
+
+    /// Press-and-hold menu for a built-in album tile — Play all / Add all.
+    /// Replaces the old tap-to-play affordance (E1 revised: Select now drills).
+    @ViewBuilder
+    private func builtinAlbumContextMenu(for album: Album) -> some View {
+        Button {
+            playAlbum(album)
+        } label: {
+            Label("Play All", systemImage: "play.fill")
+        }
+        Button {
+            addAlbum(album)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
+        }
+    }
+
+    /// Press-and-hold menu for a built-in playlist tile — Play all / Add all.
+    @ViewBuilder
+    private func builtinPlaylistContextMenu(for playlist: Playlist) -> some View {
+        Button {
+            playPlaylist(playlist)
+        } label: {
+            Label("Play All", systemImage: "play.fill")
+        }
+        Button {
+            addPlaylist(playlist)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
+        }
+    }
+
+    private func addAlbum(_ album: Album) {
+        os_log(.info, log: logger, "➕ Add album from shelf '%{public}s': %{public}s",
+               section.id, album.name)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "album_id:\(album.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
+    }
+
+    private func addPlaylist(_ playlist: Playlist) {
+        let playlistID = playlistDrillID(playlist)
+        os_log(.info, log: logger, "➕ Add playlist from shelf '%{public}s': %{public}s",
+               section.id, playlist.name)
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "playlist_id:\(playlistID)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
 }

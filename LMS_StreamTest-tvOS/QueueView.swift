@@ -43,7 +43,11 @@ struct QueueView: View {
                         }
                     }
                 }
-                .navigationTitle("Up Next")
+                // No navigationTitle — on a tvOS List root it renders as a large
+                // title floating over the scrolled content (same pattern that
+                // dropped the "Settings" title in 5cecb18). The user opened
+                // this view via the Up Next button on NowPlayingView and
+                // already knows where they are.
                 // Queue is presented via .fullScreenCover from NowPlayingView, so its
                 // responder chain is rooted at the cover (NOT the TabView). ContentView's
                 // TabView-level .onPlayPauseCommand never sees presses from inside the
