@@ -214,15 +214,32 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
                 } else if success {
                     os_log(.info, log: self.logger, "✅ Now Playing template displayed")
+                    // Refresh button state — shuffle mode / mixer availability can
+                    // have changed since connect (the only other sync point).
+                    self.resyncNowPlayingButtons()
                 }
             }
         }
+    }
+
+    /// Re-pull server-driven Now Playing button state (shuffle mode + mixer
+    /// availability). The connect-time sync in loadCarPlayData() runs once, so
+    /// without this the shuffle button goes stale whenever shuffle is changed
+    /// outside CarPlay or the user returns to Now Playing later. No-ops cleanly
+    /// when the coordinator isn't available yet.
+    private func resyncNowPlayingButtons() {
+        syncShuffleButtonWithServer()
+        syncMixerAvailability()
     }
 
     // MARK: - Scene Lifecycle
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         os_log(.info, log: logger, "🚗 CARPLAY SCENE BECAME ACTIVE")
+        // Catches the "tapped Now Playing from the CarPlay dashboard" path,
+        // which never goes through our pushNowPlayingTemplate(). Keeps the
+        // shuffle button in sync with the actual player state.
+        resyncNowPlayingButtons()
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
