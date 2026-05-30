@@ -17,6 +17,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private var connectionObserver: NSObjectProtocol?
     private var hasLoadedData = false
 
+    // Now Playing button row state. updateNowPlayingButtons() replaces the WHOLE
+    // array, so the row is rebuilt from this cached state in one place
+    // (rebuildNowPlayingButtons) — adding a button inline would be silently
+    // dropped on the next rebuild. See GH #85.
+    private var currentShuffleMode: Int = 0          // 0=off, 1=songs, 2=albums
+    private var mixerAvailable: Bool = false         // a DSTM/Bliss mix action exists
+
 
     // MARK: - Services
 
@@ -41,26 +48,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.isUpNextButtonEnabled = true
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
 
-        // Add custom shuffle button with distinct icons for off/songs/albums
-        // Start with off state - will update icon when server state is synced
-        let shuffleConfig = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
-        let shuffleImage = UIImage(systemName: "shuffle", withConfiguration: shuffleConfig)!
-        let shuffleButton = CPNowPlayingImageButton(image: shuffleImage) { [weak self] button in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
-
-            guard let coordinator = AudioManager.shared.slimClient else {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
-                return
-            }
-
-            // Toggle shuffle and update button icon
-            coordinator.toggleShuffleMode { newMode in
-                DispatchQueue.main.async {
-                    self?.updateShuffleButtonIcon(for: newMode)
-                }
-            }
-        }
-        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
+        // Build the Now Playing button row. Single source of truth — see
+        // rebuildNowPlayingButtons(). Starts with shuffle (off) and no Start Mix
+        // button; both are refreshed once server shuffle state + mixer
+        // availability are synced after connection.
+        rebuildNowPlayingButtons()
 
         // Set template immediately - user sees UI right away
         interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
@@ -143,6 +135,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         refreshHomeTemplateData()
         syncShuffleButtonWithServer()
+        syncMixerAvailability()
     }
 
     // MARK: - Browse Actions
@@ -2449,56 +2442,73 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    // MARK: - Shuffle Button Icon Updates
+    // MARK: - Now Playing Button Row
 
-    /// Updates shuffle button icon based on LMS shuffle mode
-    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
-    private func updateShuffleButtonIcon(for mode: Int) {
-        // Use CPNowPlayingTemplate.shared directly - don't require it to be the top template
-        // The button was added to .shared on connect, so update it there regardless of
-        // which template is currently visible
-        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+    /// Single source of truth for the Now Playing custom button row.
+    /// `updateNowPlayingButtons()` replaces the entire array, so EVERY change to
+    /// the row (shuffle icon update, mixer availability) must route through here
+    /// — otherwise a separately-set button is dropped on the next update. Builds
+    /// from cached `currentShuffleMode` + `mixerAvailable`. Must be called on the
+    /// main thread (CPNowPlayingTemplate is UI).
+    private func rebuildNowPlayingButtons() {
+        var buttons: [CPNowPlayingButton] = [makeShuffleButton(for: currentShuffleMode)]
+        if mixerAvailable {
+            buttons.append(makeStartMixButton())
+        }
+        CPNowPlayingTemplate.shared.updateNowPlayingButtons(buttons)
+        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, startMix %{public}s)",
+               currentShuffleMode, mixerAvailable ? "on" : "off")
+    }
 
-        // Choose SF Symbol based on shuffle mode
+    /// Shuffle button with a distinct icon per LMS shuffle mode (0=off, 1=songs, 2=albums).
+    private func makeShuffleButton(for mode: Int) -> CPNowPlayingImageButton {
         let iconName: String
         switch mode {
-        case 1:
-            // Songs/tracks shuffle - filled circle (pressed/active look)
-            iconName = "shuffle.circle.fill"
-        case 2:
-            // Albums shuffle - outline circle
-            iconName = "shuffle.circle"
-        default:
-            // Off - normal shuffle icon
-            iconName = "shuffle"
+        case 1: iconName = "shuffle.circle.fill"   // songs — active look
+        case 2: iconName = "shuffle.circle"        // albums
+        default: iconName = "shuffle"              // off
         }
-
-        // Use large configuration for better visibility on CarPlay display
         let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
-        guard let image = UIImage(systemName: iconName, withConfiguration: config) else {
-            os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
-            return
-        }
-
-        // Create new button with updated icon
-        let shuffleButton = CPNowPlayingImageButton(image: image) { [weak self] button in
+        let image = UIImage(systemName: iconName, withConfiguration: config)
+            ?? UIImage(systemName: "shuffle")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
             os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
-
             guard let coordinator = AudioManager.shared.slimClient else {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable")
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
                 return
             }
-
             coordinator.toggleShuffleMode { newMode in
-                DispatchQueue.main.async {
-                    self?.updateShuffleButtonIcon(for: newMode)
-                }
+                DispatchQueue.main.async { self?.updateShuffleMode(newMode) }
             }
         }
+    }
 
-        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
-        os_log(.info, log: logger, "🔀 Shuffle button icon updated: %{public}s (mode %d)",
-               iconName, mode)
+    /// "Start Mix" button — fires a DSTM/Bliss mix seeded from the current track.
+    /// Shown only when `mixerAvailable`. Non-destructive: if the server produces
+    /// no mix (e.g. Bliss with no analysis), current playback is untouched and
+    /// there is no driver-facing modal (CarPlay has no toast). See GH #85.
+    private func makeStartMixButton() -> CPNowPlayingImageButton {
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let image = UIImage(systemName: "infinity", withConfiguration: config)
+            ?? UIImage(systemName: "infinity")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🎚️ CarPlay Start Mix button tapped")
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for Start Mix")
+                return
+            }
+            coordinator.startMixFromCurrentTrack { fired in
+                os_log(.info, log: self?.logger ?? OSLog.default,
+                       "🎚️ Start Mix %{public}s", fired ? "started" : "produced no mix")
+            }
+        }
+    }
+
+    /// Cache the new shuffle mode and rebuild the button row.
+    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
+    private func updateShuffleMode(_ mode: Int) {
+        currentShuffleMode = mode
+        rebuildNowPlayingButtons()
     }
 
     /// Syncs shuffle button icon with current server state
@@ -2533,9 +2543,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 os_log(.info, log: self.logger, "⚠️ Could not read server shuffle state, defaulting to 0")
             }
 
-            // Update button icon on main thread
+            // Update button row on main thread
             DispatchQueue.main.async {
-                self.updateShuffleButtonIcon(for: shuffleMode)
+                self.updateShuffleMode(shuffleMode)
+            }
+        }
+    }
+
+    /// Probe whether the current track offers a DSTM/Bliss "start a mix" action
+    /// and gate the Start Mix button on it. Server-driven: the button only
+    /// appears for users whose LMS has a similarity-mixer plugin installed. See GH #85.
+    private func syncMixerAvailability() {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+        coordinator.probeMixAvailability { [weak self] available in
+            DispatchQueue.main.async {
+                guard let self = self, self.mixerAvailable != available else { return }
+                self.mixerAvailable = available
+                os_log(.info, log: self.logger, "🎚️ Mixer availability: %{public}s",
+                       available ? "available" : "none")
+                self.rebuildNowPlayingButtons()
             }
         }
     }

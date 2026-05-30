@@ -1027,6 +1027,47 @@ extension JiveItem {
 }
 
 
+// MARK: - Mix actions (CarPlay "Start Mix" — DSTM/Bliss from current track)
+
+extension JiveItem {
+    /// Mixer plugins that expose a per-track "build a mix seeded from THIS
+    /// track" action inside a `trackinfo items` menu. Mirrors lms-material's
+    /// `MIXER_APPS` (browse-resp.js). A recognition filter only — we do NOT
+    /// construct a `blissmixer://` command client-side; the action and its
+    /// params come verbatim from the server menu. Must be kept in sync with LMS.
+    ///
+    /// Verified live against 192.168.1.8 (Bliss installed) on 2026-05-30:
+    /// `trackinfo items track_id:N menu:1` returns a "Create bliss mix" item
+    /// whose `go` action is `["blissmixer","mix"]` with params
+    /// `{track_id:N, useContextMenu:1, menu:1}`.
+    static let mixerApps: Set<String> = ["blissmixer", "musicip", "musicsimilarity"]
+
+    /// Extract fireable "start a mix from this track" actions from a parsed
+    /// `trackinfo items` result dict (the JSON-RPC `result` object, carrying
+    /// `base` + `item_loop`).
+    ///
+    /// Recognizes items whose resolved tap action is a mixer **`mix`** command
+    /// (e.g. `["blissmixer","mix"]`) — the action that BUILDS AND PLAYS a mix.
+    /// The sibling `list` verb (e.g. `["blissmixer","list"]`, "Similar tracks")
+    /// is intentionally excluded: it browses similar tracks rather than starting
+    /// playback, which is not what the "Start Mix" button means.
+    ///
+    /// Returns the actions in menu order. Empty when no mixer plugin is present
+    /// (radio items, or a server without Bliss/MusicIP/MusicSimilarity).
+    static func mixActions(fromTrackInfoResult result: [String: Any]) -> [ResolvedJiveAction] {
+        let (base, items) = parseObj(result)
+        return items.compactMap { item -> ResolvedJiveAction? in
+            guard let action = item.resolvedAction(named: item.tapActionName, base: base),
+                  let verb = action.cmd.first,
+                  mixerApps.contains(verb),
+                  action.cmd.count > 1, action.cmd[1] == "mix"
+            else { return nil }
+            return action
+        }
+    }
+}
+
+
 // MARK: - Genre (BrowseLibraryView fallback)
 
 /// Genre list entry from `["genres", 0, N]`. Used by the tvOS Library tab's

@@ -1983,6 +1983,107 @@ extension SlimProtoCoordinator {
         }
     }
 
+    // MARK: - Start Mix (DSTM / Bliss from current track — GH #85)
+    //
+    // Flow (all JSON-RPC; completions fire on a URLSession background thread —
+    // CarPlay callers must marshal UI work to main):
+    //
+    //   status - 1 tags:        ──▶ current track_id  (TOCTOU-safe: read at call time)
+    //        │
+    //        ▼
+    //   trackinfo items track_id:N menu:1
+    //        │  JiveItem.parseObj → JiveItem.mixActions (filter blissmixer/musicip/… "mix")
+    //        ▼
+    //   fire action.cliArgs   ──▶ server builds + plays a mix seeded from the track
+    //
+    // The mixer action and its params come verbatim from the server menu — no
+    // `blissmixer://` is constructed client-side. Provider-agnostic across the
+    // installed similarity mixer. Verified live against 192.168.1.8 (Bliss) on
+    // 2026-05-30: the menu item is present; firing produces a mix once Bliss has
+    // analysed the seed track (a fresh install with no analysis returns empty,
+    // which is handled as "no mix available").
+
+    /// Read the currently-playing `track_id` (fresh, at call time) then return
+    /// the mixer "start a mix from this track" actions its `trackinfo` menu
+    /// offers. Empty when nothing is playing, the item is a radio stream, or no
+    /// similarity-mixer plugin (Bliss/MusicIP/MusicSimilarity) is installed.
+    private func fetchCurrentTrackMixActions(completion: @escaping ([ResolvedJiveAction]) -> Void) {
+        let playerID = settings.playerMACAddress
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { completion([]); return }
+            guard let result = response["result"] as? [String: Any],
+                  let loop = result["playlist_loop"] as? [[String: Any]],
+                  let current = loop.first,
+                  // track id may come back as Int or String depending on LMS build
+                  let trackID = (current["id"] as? Int).map(String.init)
+                                ?? (current["id"] as? String) else {
+                os_log(.info, log: self.logger, "🎚️ No current track for mix probe")
+                completion([])
+                return
+            }
+
+            let trackInfoCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["trackinfo", "items", "0", "100",
+                                      "track_id:\(trackID)", "menu:1"]]
+            ]
+            self.sendJSONRPCCommandDirect(trackInfoCommand) { [weak self] infoResponse in
+                let actions = JiveItem.mixActions(
+                    fromTrackInfoResult: infoResponse["result"] as? [String: Any] ?? [:])
+                if let self = self {
+                    os_log(.info, log: self.logger,
+                           "🎚️ Mix actions for current track: %d", actions.count)
+                }
+                completion(actions)
+            }
+        }
+    }
+
+    /// Whether the current track exposes a "start a mix" action — used to gate
+    /// the CarPlay Now Playing button so non-mixer users never see a dead button.
+    public func probeMixAvailability(completion: @escaping (Bool) -> Void) {
+        fetchCurrentTrackMixActions { completion(!$0.isEmpty) }
+    }
+
+    /// Start a mix seeded from the currently-playing track. v1 fires the single
+    /// `mix` action the server offers (multi-mixer disambiguation deferred).
+    /// `completion(true)` means an action was fired; it is NOT a guarantee the
+    /// server produced tracks (e.g. Bliss with no analysis for the seed returns
+    /// empty) — the action is a non-destructive bonus, current playback is never
+    /// touched on failure.
+    public func startMixFromCurrentTrack(completion: ((Bool) -> Void)? = nil) {
+        let playerID = settings.playerMACAddress
+        fetchCurrentTrackMixActions { [weak self] actions in
+            guard let self = self else { completion?(false); return }
+            guard let action = actions.first else {
+                os_log(.info, log: self.logger, "🎚️ No mix action available for current track")
+                completion?(false)
+                return
+            }
+            os_log(.info, log: self.logger, "🎚️ Firing mix action: %{public}s",
+                   action.cliArgs.joined(separator: " "))
+            let fireCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, action.cliArgs]
+            ]
+            self.sendJSONRPCCommandDirect(fireCommand) { [weak self] response in
+                let fired = !response.isEmpty
+                if let self = self {
+                    os_log(.info, log: self.logger, "🎚️ Mix action result: %{public}s",
+                           fired ? "fired" : "empty (no mix produced)")
+                }
+                completion?(fired)
+            }
+        }
+    }
+
     /// Sends pause command to server with confirmation and retry logic
     /// Used for critical pause operations (CarPlay disconnect) where we must ensure server received it
     /// - Parameters:
