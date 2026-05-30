@@ -1235,14 +1235,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let sections = buildHomeTemplateSections()
-        let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
-        self.browseTemplate = updatedTemplate
 
-        interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
-            if let error = error {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to update template: %{public}s", error.localizedDescription)
-            } else if success {
-                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template set as root")
+        // Update the EXISTING root template's content in place. Calling
+        // setRootTemplate here resets the navigation stack and pops whatever the
+        // user navigated to — when the async home refresh lands a few seconds
+        // after connect, it bounces the user out of Now Playing back to home.
+        // updateSections refreshes the home content without touching the stack.
+        if let browseTemplate = browseTemplate {
+            browseTemplate.updateSections(sections)
+            os_log(.info, log: logger, "✅ Home template sections updated in place (stack preserved)")
+        } else {
+            // No existing root (shouldn't happen — connect sets it): set it now.
+            let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
+            self.browseTemplate = updatedTemplate
+            interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
+                if let error = error {
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to set root template: %{public}s", error.localizedDescription)
+                } else if success {
+                    os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template set as root")
+                }
             }
         }
     }
