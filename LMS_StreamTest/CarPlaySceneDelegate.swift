@@ -22,7 +22,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     // (rebuildNowPlayingButtons) — adding a button inline would be silently
     // dropped on the next rebuild. See GH #85.
     private var currentShuffleMode: Int = 0          // 0=off, 1=songs, 2=albums
-    private var mixerAvailable: Bool = false         // a DSTM/Bliss mix action exists
+    private var dstmEnabled: Bool = false            // player has a DSTM provider set
 
 
     // MARK: - Services
@@ -49,8 +49,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
 
         // Build the Now Playing button row. Single source of truth — see
-        // rebuildNowPlayingButtons(). Starts with shuffle (off) and no Start Mix
-        // button; both are refreshed once server shuffle state + mixer
+        // rebuildNowPlayingButtons(). Starts with shuffle (off) and no Keep
+        // Playing button; both are refreshed once server shuffle state + DSTM
         // availability are synced after connection.
         rebuildNowPlayingButtons()
 
@@ -135,7 +135,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         refreshHomeTemplateData()
         syncShuffleButtonWithServer()
-        syncMixerAvailability()
+        syncDSTMAvailability()
     }
 
     // MARK: - Browse Actions
@@ -214,7 +214,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
                 } else if success {
                     os_log(.info, log: self.logger, "✅ Now Playing template displayed")
-                    // Refresh button state — shuffle mode / mixer availability can
+                    // Refresh button state — shuffle mode / DSTM availability can
                     // have changed since connect (the only other sync point).
                     self.resyncNowPlayingButtons()
                 }
@@ -222,14 +222,14 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Re-pull server-driven Now Playing button state (shuffle mode + mixer
+    /// Re-pull server-driven Now Playing button state (shuffle mode + DSTM
     /// availability). The connect-time sync in loadCarPlayData() runs once, so
     /// without this the shuffle button goes stale whenever shuffle is changed
     /// outside CarPlay or the user returns to Now Playing later. No-ops cleanly
     /// when the coordinator isn't available yet.
     private func resyncNowPlayingButtons() {
         syncShuffleButtonWithServer()
-        syncMixerAvailability()
+        syncDSTMAvailability()
     }
 
     // MARK: - Scene Lifecycle
@@ -2474,18 +2474,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     /// Single source of truth for the Now Playing custom button row.
     /// `updateNowPlayingButtons()` replaces the entire array, so EVERY change to
-    /// the row (shuffle icon update, mixer availability) must route through here
+    /// the row (shuffle icon update, DSTM availability) must route through here
     /// — otherwise a separately-set button is dropped on the next update. Builds
-    /// from cached `currentShuffleMode` + `mixerAvailable`. Must be called on the
+    /// from cached `currentShuffleMode` + `dstmEnabled`. Must be called on the
     /// main thread (CPNowPlayingTemplate is UI).
     private func rebuildNowPlayingButtons() {
         var buttons: [CPNowPlayingButton] = [makeShuffleButton(for: currentShuffleMode)]
-        if mixerAvailable {
-            buttons.append(makeStartMixButton())
+        if dstmEnabled {
+            buttons.append(makeKeepPlayingButton())
         }
         CPNowPlayingTemplate.shared.updateNowPlayingButtons(buttons)
-        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, startMix %{public}s)",
-               currentShuffleMode, mixerAvailable ? "on" : "off")
+        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, keepPlaying %{public}s)",
+               currentShuffleMode, dstmEnabled ? "on" : "off")
     }
 
     /// Shuffle button with a distinct icon per LMS shuffle mode (0=off, 1=songs, 2=albums).
@@ -2511,23 +2511,24 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// "Start Mix" button — fires a DSTM/Bliss mix seeded from the current track.
-    /// Shown only when `mixerAvailable`. Non-destructive: if the server produces
-    /// no mix (e.g. Bliss with no analysis), current playback is untouched and
-    /// there is no driver-facing modal (CarPlay has no toast). See GH #85.
-    private func makeStartMixButton() -> CPNowPlayingImageButton {
+    /// "Keep Playing" button — triggers Don't Stop The Music from the current
+    /// track by clearing the upcoming queue, so the player's configured DSTM
+    /// provider (LastMix, Bliss, RandomPlay, …) continues seeded from here.
+    /// Shown only when `dstmEnabled`. The current track keeps playing; similar
+    /// tracks are appended by the server within a few seconds. See GH #85.
+    private func makeKeepPlayingButton() -> CPNowPlayingImageButton {
         let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
         let image = UIImage(systemName: "infinity", withConfiguration: config)
             ?? UIImage(systemName: "infinity")!
         return CPNowPlayingImageButton(image: image) { [weak self] _ in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🎚️ CarPlay Start Mix button tapped")
+            os_log(.info, log: self?.logger ?? OSLog.default, "🎚️ CarPlay Keep Playing (DSTM) button tapped")
             guard let coordinator = AudioManager.shared.slimClient else {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for Start Mix")
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for Keep Playing")
                 return
             }
-            coordinator.startMixFromCurrentTrack { fired in
+            coordinator.startDSTMFromCurrentTrack { cleared in
                 os_log(.info, log: self?.logger ?? OSLog.default,
-                       "🎚️ Start Mix %{public}s", fired ? "started" : "produced no mix")
+                       "🎚️ Keep Playing %{public}s", cleared ? "— tail cleared, DSTM will continue" : "failed")
             }
         }
     }
@@ -2578,17 +2579,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Probe whether the current track offers a DSTM/Bliss "start a mix" action
-    /// and gate the Start Mix button on it. Server-driven: the button only
-    /// appears for users whose LMS has a similarity-mixer plugin installed. See GH #85.
-    private func syncMixerAvailability() {
+    /// Probe whether DSTM is enabled for this player and gate the Keep Playing
+    /// button on it. Server-driven: the button only appears when the user has a
+    /// DSTM provider configured, so it never strands them with a queue that just
+    /// stops. See GH #85.
+    private func syncDSTMAvailability() {
         guard let coordinator = AudioManager.shared.slimClient else { return }
-        coordinator.probeMixAvailability { [weak self] available in
+        coordinator.probeDSTMEnabled { [weak self] enabled in
             DispatchQueue.main.async {
-                guard let self = self, self.mixerAvailable != available else { return }
-                self.mixerAvailable = available
-                os_log(.info, log: self.logger, "🎚️ Mixer availability: %{public}s",
-                       available ? "available" : "none")
+                guard let self = self, self.dstmEnabled != enabled else { return }
+                self.dstmEnabled = enabled
+                os_log(.info, log: self.logger, "🎚️ DSTM availability: %{public}s",
+                       enabled ? "enabled" : "disabled")
                 self.rebuildNowPlayingButtons()
             }
         }

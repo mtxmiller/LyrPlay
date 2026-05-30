@@ -1983,31 +1983,62 @@ extension SlimProtoCoordinator {
         }
     }
 
-    // MARK: - Start Mix (DSTM / Bliss from current track — GH #85)
+    // MARK: - Start DSTM from current track (GH #85)
+    //
+    // Provider-agnostic "Don't Stop The Music" trigger. CarPlay queues whole
+    // albums, so the queue never gets short enough for DSTM (MIN_TRACKS_LEFT=2)
+    // to fire. This clears the upcoming tracks so the CURRENT track becomes the
+    // queue tail; the player's configured DSTM provider (LastMix, Bliss,
+    // RandomPlay, RatingsLight, …) then auto-appends similar tracks seeded from
+    // where you are. Works for ANY provider, unlike a Bliss-specific trackinfo
+    // mix (most DSTM providers expose no per-track "create mix" action).
     //
     // Flow (all JSON-RPC; completions fire on a URLSession background thread —
     // CarPlay callers must marshal UI work to main):
     //
-    //   status - 1 tags:        ──▶ current track_id  (TOCTOU-safe: read at call time)
+    //   status - 1 tags:  ──▶ playlist_cur_index + playlist_tracks
     //        │
     //        ▼
-    //   trackinfo items track_id:N menu:1
-    //        │  JiveItem.parseObj → JiveItem.mixActions (filter blissmixer/musicip/… "mix")
+    //   playlist delete <i>  for i = last … cur+1   (high→low; index-stable)
+    //        │
     //        ▼
-    //   fire action.cliArgs   ──▶ server builds + plays a mix seeded from the track
+    //   DSTM provider auto-appends within ~10s
     //
-    // The mixer action and its params come verbatim from the server menu — no
-    // `blissmixer://` is constructed client-side. Provider-agnostic across the
-    // installed similarity mixer. Verified live against 192.168.1.8 (Bliss) on
-    // 2026-05-30: the menu item is present; firing produces a mix once Bliss has
-    // analysed the seed track (a fresh install with no analysis returns empty,
-    // which is handled as "no mix available").
+    // Verified live against 192.168.1.8 on 2026-05-30: deleting the tail of a
+    // 13-track album left the playing track intact (mode=play), and with a
+    // provider set the short queue auto-grew 1→10 tracks in ~10s.
+    //
+    // DSTM_PROVIDER_PREF is "0"/"Disabled" when DSTM is off — clearing the tail
+    // then would just end playback, so the button is gated on this.
+    private static let dstmProviderPref = "plugin.dontstopthemusic:provider"
 
-    /// Read the currently-playing `track_id` (fresh, at call time) then return
-    /// the mixer "start a mix from this track" actions its `trackinfo` menu
-    /// offers. Empty when nothing is playing, the item is a radio stream, or no
-    /// similarity-mixer plugin (Bliss/MusicIP/MusicSimilarity) is installed.
-    private func fetchCurrentTrackMixActions(completion: @escaping ([ResolvedJiveAction]) -> Void) {
+    /// Whether DSTM is enabled for this player (a provider other than Disabled).
+    /// Gates the CarPlay "Keep Playing" button so it never strands the user with
+    /// a queue that just stops.
+    public func probeDSTMEnabled(completion: @escaping (Bool) -> Void) {
+        let cmd: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress,
+                       ["playerpref", Self.dstmProviderPref, "?"]]
+        ]
+        sendJSONRPCCommandDirect(cmd) { [weak self] response in
+            let provider = (response["result"] as? [String: Any])?["_p2"]
+            let value = (provider as? String) ?? (provider as? Int).map(String.init)
+            let enabled = value != nil && value != "0" && value != ""
+            if let self = self {
+                os_log(.info, log: self.logger, "🎚️ DSTM provider: %{public}s (enabled=%{public}s)",
+                       value ?? "nil", enabled ? "yes" : "no")
+            }
+            completion(enabled)
+        }
+    }
+
+    /// Trigger DSTM from the currently-playing track by clearing every queued
+    /// track after it. The player's DSTM provider then continues seeded from the
+    /// current track. `completion(true)` once the tail is cleared (or there was
+    /// nothing to clear); `false` if the current state couldn't be read.
+    public func startDSTMFromCurrentTrack(completion: ((Bool) -> Void)? = nil) {
         let playerID = settings.playerMACAddress
         let statusCommand: [String: Any] = [
             "id": 1,
@@ -2015,72 +2046,45 @@ extension SlimProtoCoordinator {
             "params": [playerID, ["status", "-", 1, "tags:"]]
         ]
         sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
-            guard let self = self else { completion([]); return }
-            guard let result = response["result"] as? [String: Any],
-                  let loop = result["playlist_loop"] as? [[String: Any]],
-                  let current = loop.first,
-                  // track id may come back as Int or String depending on LMS build
-                  let trackID = (current["id"] as? Int).map(String.init)
-                                ?? (current["id"] as? String) else {
-                os_log(.info, log: self.logger, "🎚️ No current track for mix probe")
-                completion([])
-                return
-            }
-
-            let trackInfoCommand: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [playerID, ["trackinfo", "items", "0", "100",
-                                      "track_id:\(trackID)", "menu:1"]]
-            ]
-            self.sendJSONRPCCommandDirect(trackInfoCommand) { [weak self] infoResponse in
-                let actions = JiveItem.mixActions(
-                    fromTrackInfoResult: infoResponse["result"] as? [String: Any] ?? [:])
-                if let self = self {
-                    os_log(.info, log: self.logger,
-                           "🎚️ Mix actions for current track: %d", actions.count)
-                }
-                completion(actions)
-            }
-        }
-    }
-
-    /// Whether the current track exposes a "start a mix" action — used to gate
-    /// the CarPlay Now Playing button so non-mixer users never see a dead button.
-    public func probeMixAvailability(completion: @escaping (Bool) -> Void) {
-        fetchCurrentTrackMixActions { completion(!$0.isEmpty) }
-    }
-
-    /// Start a mix seeded from the currently-playing track. v1 fires the single
-    /// `mix` action the server offers (multi-mixer disambiguation deferred).
-    /// `completion(true)` means an action was fired; it is NOT a guarantee the
-    /// server produced tracks (e.g. Bliss with no analysis for the seed returns
-    /// empty) — the action is a non-destructive bonus, current playback is never
-    /// touched on failure.
-    public func startMixFromCurrentTrack(completion: ((Bool) -> Void)? = nil) {
-        let playerID = settings.playerMACAddress
-        fetchCurrentTrackMixActions { [weak self] actions in
             guard let self = self else { completion?(false); return }
-            guard let action = actions.first else {
-                os_log(.info, log: self.logger, "🎚️ No mix action available for current track")
+            // both fields can arrive as Int or String depending on LMS build
+            func intVal(_ any: Any?) -> Int? {
+                (any as? Int) ?? (any as? String).flatMap(Int.init)
+            }
+            guard let result = response["result"] as? [String: Any],
+                  let total = intVal(result["playlist_tracks"]),
+                  let current = intVal(result["playlist_cur_index"]) else {
+                os_log(.info, log: self.logger, "🎚️ DSTM: could not read queue state")
                 completion?(false)
                 return
             }
-            os_log(.info, log: self.logger, "🎚️ Firing mix action: %{public}s",
-                   action.cliArgs.joined(separator: " "))
-            let fireCommand: [String: Any] = [
-                "id": 1,
-                "method": "slim.request",
-                "params": [playerID, action.cliArgs]
-            ]
-            self.sendJSONRPCCommandDirect(fireCommand) { [weak self] response in
-                let fired = !response.isEmpty
-                if let self = self {
-                    os_log(.info, log: self.logger, "🎚️ Mix action result: %{public}s",
-                           fired ? "fired" : "empty (no mix produced)")
-                }
-                completion?(fired)
+            let lastIndex = total - 1
+            if lastIndex <= current {
+                os_log(.info, log: self.logger, "🎚️ DSTM: queue already at tail (cur=%d, total=%d) — provider will continue", current, total)
+                completion?(true)
+                return
             }
+            os_log(.info, log: self.logger, "🎚️ DSTM: clearing tail, deleting indices %d…%d (cur=%d)", current + 1, lastIndex, current)
+            // Delete high→low so each index stays valid as lower ones don't shift.
+            self.deletePlaylistTail(playerID: playerID, index: lastIndex, stopAt: current, completion: completion)
+        }
+    }
+
+    /// Recursively delete one queue index at a time, high→low, down to `stopAt`
+    /// (exclusive). Sequential because each `playlist delete` is its own request
+    /// and the JSON-RPC completion lands on a background thread.
+    private func deletePlaylistTail(playerID: String, index: Int, stopAt: Int,
+                                    completion: ((Bool) -> Void)?) {
+        guard index > stopAt else { completion?(true); return }
+        let deleteCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playlist", "delete", index]]
+        ]
+        sendJSONRPCCommandDirect(deleteCommand) { [weak self] _ in
+            guard let self = self else { completion?(true); return }
+            self.deletePlaylistTail(playerID: playerID, index: index - 1,
+                                    stopAt: stopAt, completion: completion)
         }
     }
 
