@@ -4,6 +4,9 @@ import SwiftUI
 import WebKit
 import os.log
 import UIKit
+#if canImport(SafariServices)
+import SafariServices  // iOS-only; absent on tvOS (which has no in-app browser)
+#endif
 
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
@@ -1155,13 +1158,13 @@ struct WebView: UIViewRepresentable {
                     }
                 }
                 
-                // For external links, only open in Safari if it's a user-initiated link click
+                // For external links, open in an in-app Safari sheet on a user-initiated link click
                 if navigationAction.navigationType == .linkActivated {
-                    os_log(.info, log: logger, "🌐 Opening external link in Safari: %{public}s", urlString)
-                    
-                    // Open in Safari
-                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                    
+                    os_log(.info, log: logger, "🌐 Opening external link in in-app Safari sheet: %{public}s", urlString)
+
+                    // In-app Safari sheet (keeps player controls one Done-tap away)
+                    presentInAppBrowser(url, from: webView)
+
                     // Cancel the navigation in WebView
                     decisionHandler(.cancel)
                     return
@@ -1192,13 +1195,39 @@ struct WebView: UIViewRepresentable {
                     }
                 }
                 
-                // For external URLs, open in Safari
-                os_log(.info, log: logger, "🌐 Opening external URL in Safari: %{public}s", urlString)
-                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                // For external URLs (Material weblinks open via window.open, which routes here),
+                // present an in-app Safari sheet instead of ejecting to the system Safari app.
+                os_log(.info, log: logger, "🌐 Opening external URL in in-app Safari sheet: %{public}s", urlString)
+                presentInAppBrowser(url, from: webView)
             }
-            
+
             // Return nil to prevent creating a new WebView
             return nil
+        }
+
+        /// Present an external URL in an in-app Safari sheet (`SFSafariViewController`) rather than
+        /// bouncing to the system Safari app. The Done button always returns to the Material UI with
+        /// playback and screen state intact, so the user can't get stranded on a web page with no way
+        /// back to player controls. This whole file is iOS-only (it uses WKWebView); the
+        /// `canImport(SafariServices)` guard just keeps the new dependency honestly conditional.
+        private func presentInAppBrowser(_ url: URL, from webView: WKWebView) {
+            #if canImport(SafariServices)
+            // SFSafariViewController only supports http/https; anything else falls through to the system.
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                // Walk to the top-most presented controller so we don't present on one already presenting.
+                var top = webView.window?.rootViewController
+                while let presented = top?.presentedViewController {
+                    top = presented
+                }
+                if let presenter = top {
+                    presenter.present(SFSafariViewController(url: url), animated: true, completion: nil)
+                    return
+                }
+                os_log(.error, log: logger, "⚠️ No presenter for in-app Safari sheet; falling back to system Safari")
+            }
+            #endif
+            // Non-web scheme, no SafariServices, or no presenter → hand off to the system.
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
     }
 }

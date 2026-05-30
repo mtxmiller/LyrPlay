@@ -257,8 +257,20 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - User-Agent for Web Requests
+    /// User-Agent sent on JSON-RPC / CometD HTTP requests. LMS stores this as the player's
+    /// `controllerUA` and uses it to decide capability: the "Safari" token matches the server's
+    /// `WEBBROWSER_UA_RE` (Slim/Utils/Misc.pm), which makes `canFollowWeblinks()` true and gates
+    /// `weblink`-bearing menu items (e.g. the 1001 Albums shelf).
+    ///
+    /// iOS keeps "Safari": it renders web (its UI is a WebView) and follows weblinks via an in-app
+    /// Safari sheet. tvOS drops it: Apple TV has no web browser, so advertising web capability only
+    /// makes the server offer weblinks the tvOS client can't open.
     var customUserAgent: String {
+        #if os(tvOS)
+        return "LyrPlay"
+        #else
         return "LyrPlay Safari"
+        #endif
     }
     
     // MARK: - Dynamic Capabilities String
