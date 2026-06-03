@@ -54,6 +54,24 @@ class SlimProtoCoordinator: ObservableObject {
     // the stream turns out to have a known duration (file/podcast).
     private var metadataRefreshTimer: Timer?
 
+    // MARK: - Metadata Last-Write-Wins Guard
+    //
+    // fetchCurrentTrackMetadata() fires from ~6 sites (initial stream, track
+    // start, resume, radio-refresh tick, boundary-drift, ICY change). Around a
+    // sync-group track boundary several overlap, so their HTTP responses can land
+    // out of order. Without a guard, a stale response repaints the PREVIOUS
+    // track's title/artist/album/position/bitrate — the intermittent staleness
+    // bug. Each fetch stamps a monotonic seq; parse applies only if the response
+    // is newer than the last one we APPLIED (not the last we fetched). Comparing
+    // against last-applied — not last-fetched — means a good earlier response
+    // still lands if the newest fetch errors out, instead of leaving the track
+    // stale until the next boundary. Both are read/written on the main thread
+    // only (all fetch sites dispatch to main), so no atomics needed. The accept
+    // decision lives in MonotonicGate so it is unit-testable in isolation —
+    // applyParsedMetadata depends on AudioManager and isn't unit-testable.
+    private var metadataFetchSeq: Int = 0
+    private var metadataGate = MonotonicGate()
+
     // MARK: - Background State Tracking
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
@@ -2213,7 +2231,12 @@ extension SlimProtoCoordinator {
     
     private func fetchCurrentTrackMetadata() {
         let playerID = settings.playerMACAddress
-        
+
+        // Stamp this fetch. The response is only applied if it's still the newest
+        // one we've seen succeed (see lastAppliedMetadataSeq in parseTrackMetadata).
+        metadataFetchSeq += 1
+        let seq = metadataFetchSeq
+
         // SIMPLIFIED: Use Material skin's minimal tag set for efficiency
         let jsonRPC = [
             "id": 1,
@@ -2257,31 +2280,35 @@ extension SlimProtoCoordinator {
                 os_log(.error, log: self.logger, "No enhanced metadata received")
                 return
             }
-            
-            self.parseTrackMetadata(data: data)
+
+            self.parseTrackMetadata(data: data, seq: seq)
         }
         
         task.resume()
         os_log(.debug, log: logger, "🌐 Requesting enhanced track metadata")
     }
     
+    /// The flattened result of one metadata response, ready to apply. Decoupling
+    /// parse (JSON → struct) from apply (struct → managers) lets the last-write-wins
+    /// guard be unit-tested with crafted seq values and no network/JSON.
+    struct ParsedTrackMetadata {
+        let title: String
+        let artist: String
+        let album: String
+        let duration: Double?          // nil = preserve existing
+        let bitrate: String?           // nil = LMS has no bitrate for this source
+        let artworkURL: String?        // nil = no artwork (clears the cover)
+        let playlistIndex: Int?        // nil = position not reported this response
+        let playlistTracks: Int?
+    }
+
     // SIMPLIFIED: parseTrackMetadata method using Material skin approach
-    private func parseTrackMetadata(data: Data) {
+    private func parseTrackMetadata(data: Data, seq: Int) {
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let result = json["result"] as? [String: Any],
                let loop = result["playlist_loop"] as? [[String: Any]],
                let firstTrack = loop.first {
-
-                // Update CarPlay button states based on server's playlist position
-                if let totalTracks = result["playlist_tracks"] as? Int,
-                   let currentIndex = result["playlist_cur_index"] as? Int {
-                    os_log(.info, log: logger, "🎵 Playlist position: %d/%d", currentIndex + 1, totalTracks)
-                    audioManager.updatePlaylistPosition(
-                        currentIndex: currentIndex,
-                        totalTracks: totalTracks
-                    )
-                }
 
                 // SIMPLIFIED: Use Material skin's straightforward metadata approach
                 let trackTitle = firstTrack["title"] as? String ?? firstTrack["track"] as? String ?? "LyrPlay"
@@ -2314,34 +2341,19 @@ extension SlimProtoCoordinator {
                 os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🎵 Material-style: '%{public}s' by %{public}s%{public}s",
                        trackTitle, trackArtist, artworkURL != nil ? " [artwork]" : "")
 
-                let metadataTimestamp = Date()
-                os_log(.info, log: logger, "[BOUNDARY-DRIFT] 📊 METADATA UPDATE TIMESTAMP: %{public}s", metadataTimestamp.description)
+                let parsed = ParsedTrackMetadata(
+                    title: trackTitle,
+                    artist: trackArtist,
+                    album: trackAlbum,
+                    duration: serverDuration,
+                    bitrate: trackBitrate,
+                    artworkURL: artworkURL,
+                    playlistIndex: result["playlist_cur_index"] as? Int,
+                    playlistTracks: result["playlist_tracks"] as? Int
+                )
 
                 DispatchQueue.main.async {
-                    // Apply LMS's authoritative bitrate to the stream-info display.
-                    self.audioManager.updateStreamBitrate(text: trackBitrate)
-
-                    // Only update duration if server explicitly provides it (Material skin approach)
-                    if let duration = serverDuration, duration > 0.0 {
-                        self.audioManager.updateTrackMetadata(
-                            title: trackTitle,
-                            artist: trackArtist,
-                            album: trackAlbum,
-                            artworkURL: artworkURL,
-                            duration: duration
-                        )
-                    } else {
-                        // Don't update duration - preserve existing duration
-                        self.audioManager.updateTrackMetadata(
-                            title: trackTitle,
-                            artist: trackArtist,
-                            album: trackAlbum,
-                            artworkURL: artworkURL
-                            // duration parameter omitted - keeps existing duration
-                        )
-                    }
-
-                    os_log(.info, log: self.logger, "[BOUNDARY-DRIFT] ✅ METADATA APPLIED TO LOCK SCREEN - new track info should appear now")
+                    self.applyParsedMetadata(parsed, seq: seq)
                 }
 
             } else {
@@ -2350,6 +2362,53 @@ extension SlimProtoCoordinator {
         } catch {
             os_log(.error, log: logger, "[BOUNDARY-DRIFT] JSON parsing error: %{public}s", error.localizedDescription)
         }
+    }
+
+    /// Synchronous last-write-wins apply for a parsed metadata response. Gates the
+    /// ENTIRE apply (playlist position → CarPlay buttons, bitrate → info line, and
+    /// title/artist/album/artwork) on the seq so a stale response can't push ANY
+    /// out-of-date field. Returns `true` if applied, `false` if dropped as stale.
+    /// Accepts only responses NEWER than the last one applied, so a failed newer
+    /// fetch can't sentence an in-flight good response to "stale until next track."
+    /// Must be called on the main thread.
+    @discardableResult
+    func applyParsedMetadata(_ parsed: ParsedTrackMetadata, seq: Int) -> Bool {
+        guard metadataGate.admit(seq) else {
+            os_log(.info, log: logger, "[BOUNDARY-DRIFT] Dropping stale metadata (seq %d <= applied %d)", seq, metadataGate.lastAdmitted)
+            return false
+        }
+
+        // Update CarPlay button states based on server's playlist position
+        if let totalTracks = parsed.playlistTracks, let currentIndex = parsed.playlistIndex {
+            os_log(.info, log: logger, "🎵 Playlist position: %d/%d", currentIndex + 1, totalTracks)
+            audioManager.updatePlaylistPosition(currentIndex: currentIndex, totalTracks: totalTracks)
+        }
+
+        // Apply LMS's authoritative bitrate to the stream-info display.
+        audioManager.updateStreamBitrate(text: parsed.bitrate)
+
+        // Only update duration if server explicitly provides it (Material skin approach)
+        if let duration = parsed.duration, duration > 0.0 {
+            audioManager.updateTrackMetadata(
+                title: parsed.title,
+                artist: parsed.artist,
+                album: parsed.album,
+                artworkURL: parsed.artworkURL,
+                duration: duration
+            )
+        } else {
+            // Don't update duration - preserve existing duration
+            audioManager.updateTrackMetadata(
+                title: parsed.title,
+                artist: parsed.artist,
+                album: parsed.album,
+                artworkURL: parsed.artworkURL
+                // duration parameter omitted - keeps existing duration
+            )
+        }
+
+        os_log(.info, log: logger, "[BOUNDARY-DRIFT] ✅ METADATA APPLIED TO LOCK SCREEN - new track info should appear now")
+        return true
     }
     // MARK: - Helper Method to Determine Source Type
     // Add to SlimProtoConnectionManagerDelegate extension

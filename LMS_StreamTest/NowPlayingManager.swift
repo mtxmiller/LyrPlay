@@ -29,6 +29,36 @@ class NowPlayingManager: ObservableObject {
     private var lastUpdatedTime: Double = -1.0
     private var lastUpdatedPlayingState: Bool = false
 
+    // MARK: - Track Generation Guard (last-write-wins across the two async hops)
+    //
+    // A track change applies text (title/artist/album) synchronously, then kicks
+    // off a SECOND async hop to download the cover. Without a shared guard, an
+    // older fetch's response or a slower cover download can land after a newer
+    // one and overwrite the correct data — and worse, text and cover can end up
+    // pointing at DIFFERENT tracks. This is the intermittent "synced player shows
+    // the wrong/stale cover, then self-heals next track" bug.
+    //
+    //   updateTrackMetadata(B)  → bump generation to N, paint text(B)
+    //     └─ loadArtwork(B, gen=N) ── async download ──┐
+    //   updateTrackMetadata(C)  → bump generation to N+1, paint text(C)
+    //     └─ loadArtwork(C, gen=N+1) ─ async download ─┤
+    //                                                  ▼
+    //   applyArtwork(imageB, gen=N)  → N != N+1 → DROP (stale, never paints)
+    //   applyArtwork(imageC, gen=N+1)→ match     → paints
+    //
+    // Every mutation of currentArtwork goes through applyArtwork(_:forGeneration:)
+    // so text and cover can never desync. All reads/writes happen on the main
+    // thread (updateTrackMetadata is called on main; loadArtwork's completion
+    // hops to main before calling applyArtwork), so a plain Int is sufficient.
+    private var trackGeneration: Int = 0
+    private var artworkTask: URLSessionDataTask?
+
+    #if DEBUG
+    /// Test-only read access to the current track generation so unit tests can
+    /// assert the last-write-wins artwork guard without driving real downloads.
+    var currentTrackGenerationForTesting: Int { trackGeneration }
+    #endif
+
     // Log throttling (only log lock screen updates every 10 seconds)
     private var lastLockScreenLogTime: Date?
 
@@ -269,20 +299,48 @@ class NowPlayingManager: ObservableObject {
 
         // Reset deduplication state so next update goes through immediately
         lastUpdatedTime = -1.0
-        
+
+        // Open a new track generation. Text above is already painted; the cover
+        // (a second async hop) is gated on this same generation so text and cover
+        // can never end up showing different tracks.
+        trackGeneration += 1
+        let generation = trackGeneration
+
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
-            loadArtwork(from: url)
+            loadArtwork(from: url, generation: generation)
         } else {
-            currentArtwork = nil
-            // Update immediately without artwork
+            // No artwork for this track — clear (guarded so a late stale load
+            // can't repaint), then refresh now-playing immediately.
+            applyArtwork(nil, forGeneration: generation)
             let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         }
     }
-    
-    private func loadArtwork(from url: URL) {
-        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s", url.absoluteString)
+
+    /// Synchronous last-write-wins apply for cover art. The ONE place
+    /// `currentArtwork` is mutated. Returns `true` if applied, `false` if dropped
+    /// as stale. Factored out (no network, no async) so the generation guard is
+    /// directly unit-testable. Must be called on the main thread.
+    @discardableResult
+    func applyArtwork(_ image: UIImage?, forGeneration generation: Int) -> Bool {
+        guard generation == trackGeneration else {
+            os_log(.info, log: logger, "🖼️ Dropping stale artwork (gen %d != current %d)", generation, trackGeneration)
+            return false
+        }
+        currentArtwork = image
+        return true
+    }
+
+    private func loadArtwork(from url: URL, generation: Int) {
+        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s (gen %d)", url.absoluteString, generation)
+
+        // Cancel any prior in-flight artwork download. On Apple TV covers can be
+        // 2048px; without this, superseded loads still download in full before
+        // being dropped by the generation guard. A cancelled task's completion
+        // fires with NSURLErrorCancelled and an older generation, so the guard
+        // drops it — cancellation never clears the current cover.
+        artworkTask?.cancel()
 
         // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
         var request = URLRequest(url: url)
@@ -290,26 +348,37 @@ class NowPlayingManager: ObservableObject {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                let image: UIImage?
                 if let error = error {
-                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
-                    self?.currentArtwork = nil
-                } else if let data = data, let image = UIImage(data: data) {
-                    os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Artwork loaded successfully")
-                    self?.currentArtwork = image
+                    os_log(.error, log: self.logger, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
+                    image = nil
+                } else if let data = data, let decoded = UIImage(data: data) {
+                    os_log(.info, log: self.logger, "✅ Artwork loaded successfully")
+                    image = decoded
                 } else {
-                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Invalid artwork data")
-                    self?.currentArtwork = nil
+                    os_log(.error, log: self.logger, "❌ Invalid artwork data")
+                    image = nil
                 }
-                
-                // Update now playing info with or without artwork
-                if let self = self {
+
+                // Apply only if this is still the current track's load. A genuine
+                // current-track failure applies `nil` (clear to no-art) so the
+                // cover always matches the playing track — never the previous one.
+                let applied = self.applyArtwork(image, forGeneration: generation)
+
+                // Refresh now-playing only for the winning load; stale loads
+                // must not push an out-of-date now-playing snapshot.
+                if applied {
                     let (currentTime, isPlaying, _) = self.getCurrentPlaybackInfo()
                     self.updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
                 }
             }
-        }.resume()
+        }
+        artworkTask = task
+        task.resume()
     }
     
     // MARK: - Now Playing Info Updates
@@ -414,7 +483,12 @@ class NowPlayingManager: ObservableObject {
     func clearNowPlayingInfo() {
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         nowPlayingInfoCenter.nowPlayingInfo = nil
-        
+
+        // Open a new generation and cancel any in-flight load so a download that
+        // completes after this teardown can't repaint a cover over the cleared state.
+        trackGeneration += 1
+        artworkTask?.cancel()
+
         // Reset to defaults
         currentTrackTitle = "LyrPlay"
         currentArtist = "Unknown Artist"
