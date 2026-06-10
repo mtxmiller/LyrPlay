@@ -144,3 +144,6 @@ test-content/
 
 # Experimental scratch (LMS convert.conf snippets, etc. — share manually, not via git)
 experimental/
+
+# Python bytecode (smoke harness)
+__pycache__/
