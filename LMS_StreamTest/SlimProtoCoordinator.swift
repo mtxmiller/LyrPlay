@@ -1962,12 +1962,7 @@ extension SlimProtoCoordinator {
             }
 
             // Toggle to next state (0→1→2→0)
-            let newMode: Int
-            switch currentShuffle {
-            case 2: newMode = 0  // albums → off
-            case 1: newMode = 2  // songs → albums
-            default: newMode = 1  // off → songs
-            }
+            let newMode = PlaylistModeCycle.nextShuffle(currentShuffle)
 
             os_log(.info, log: self.logger, "🔀 Shuffle: %d → %d", currentShuffle, newMode)
 
@@ -1997,6 +1992,88 @@ extension SlimProtoCoordinator {
                     // Notify CarPlay to update button icon
                     completion?(newMode)
                 }
+            }
+        }
+    }
+
+    /// Toggles repeat mode through LMS's 3-state cycle: off→all→one→off
+    /// (Apple Music ordering). Called by the tvOS Now Playing repeat button (w53).
+    /// Mirrors toggleShuffleMode minus the MPRemoteCommandCenter update — no
+    /// iOS caller registers a repeat remote command yet.
+    /// - Parameter completion: Optional callback with the new repeat mode —
+    ///   value legend (not cycle order): 0=off, 2=all, 1=one
+    public func toggleRepeatMode(completion: ((Int) -> Void)? = nil) {
+        let playerID = settings.playerMACAddress
+
+        // Query current repeat state
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:"]]
+        ]
+
+        os_log(.info, log: logger, "🔁 Repeat toggle requested...")
+
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            let currentRepeat: Int
+            if let result = response["result"] as? [String: Any],
+               let repeatMode = result["playlist repeat"] as? Int {
+                currentRepeat = repeatMode
+            } else {
+                currentRepeat = 0
+                os_log(.info, log: self.logger, "⚠️ Could not read repeat state, defaulting to 0")
+            }
+
+            let newMode = PlaylistModeCycle.nextRepeat(currentRepeat)
+            os_log(.info, log: self.logger, "🔁 Repeat: %d → %d", currentRepeat, newMode)
+
+            let repeatCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [playerID, ["playlist", "repeat", newMode]]
+            ]
+
+            self.sendJSONRPCCommandDirect(repeatCommand) { [weak self] repeatResponse in
+                guard let self = self else { return }
+                if !repeatResponse.isEmpty {
+                    os_log(.info, log: self.logger, "✅ Repeat mode set to %d", newMode)
+                    completion?(newMode)
+                }
+            }
+        }
+    }
+
+    /// Reads the player's current repeat + shuffle modes in one status query.
+    /// tvOS Now Playing syncs its button state with this on appear and on track
+    /// change (same query CarPlay's syncShuffleButtonWithServer fires for
+    /// shuffle alone). Completion runs on the main thread.
+    ///
+    /// On a failed/unparseable query the completion is NOT invoked — callers
+    /// keep their last known state. Fabricating (0, 0) here would paint mode
+    /// buttons "off" during a network blip and make the next tap cycle from
+    /// the wrong starting point.
+    /// - Parameter completion: (repeatMode, shuffleMode) per LMS values
+    ///   (repeat 0=off, 2=all, 1=one; shuffle 0=off, 1=songs, 2=albums).
+    public func fetchPlaylistModes(completion: @escaping (Int, Int) -> Void) {
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1, "tags:"]]
+        ]
+
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let result = response["result"] as? [String: Any] else {
+                if let self {
+                    os_log(.info, log: self.logger, "⚠️ Could not read playlist modes — keeping last known state")
+                }
+                return
+            }
+            let repeatMode = result["playlist repeat"] as? Int ?? 0
+            let shuffleMode = result["playlist shuffle"] as? Int ?? 0
+            DispatchQueue.main.async {
+                completion(repeatMode, shuffleMode)
             }
         }
     }
@@ -2544,3 +2621,26 @@ protocol SlimProtoJSONRPCRunner: AnyObject {
 }
 
 extension SlimProtoCoordinator: SlimProtoJSONRPCRunner {}
+
+// MARK: - Playlist mode cycles (w53)
+
+/// LMS playlist-mode toggle orderings, pure so unit tests can pin them:
+/// - shuffle: 0 off → 1 songs → 2 albums → 0 (pre-existing toggleShuffleMode order)
+/// - repeat:  0 off → 2 all → 1 one → 0 (Apple Music ordering)
+enum PlaylistModeCycle {
+    static func nextShuffle(_ current: Int) -> Int {
+        switch current {
+        case 1: return 2   // songs → albums
+        case 2: return 0   // albums → off
+        default: return 1  // off (or unknown) → songs
+        }
+    }
+
+    static func nextRepeat(_ current: Int) -> Int {
+        switch current {
+        case 2: return 1   // all → one
+        case 1: return 0   // one → off
+        default: return 2  // off (or unknown) → all
+        }
+    }
+}
