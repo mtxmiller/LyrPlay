@@ -26,19 +26,10 @@ struct SearchView: View {
 
     @State private var searchTerm: String = ""
 
-    // Per-domain results.
-    @State private var artistResults: [Artist] = []
-    @State private var albumResults: [Album] = []
-    @State private var trackResults: [PlaylistTrack] = []
-    @State private var playlistResults: [Playlist] = []
-
-    // Lifecycle gates.
-    @State private var hasFetched: Bool = false
-    @State private var inFlight: Int = 0
-
-    // D5=B cancellation token. Every fan-out gets a fresh UUID; responses with
-    // a stale token bail without touching results.
-    @State private var lastQueryToken: UUID = UUID()
+    // Per-domain results + lifecycle gates + D5=B cancellation token, extracted
+    // to a testable model (98q.13). The view owns debounce + history + drill-in;
+    // the model owns the fan-out and the stale-response guard.
+    @StateObject private var results: SearchResultsModel
 
     // Debounce timer.
     @State private var debounceTask: Task<Void, Never>? = nil
@@ -56,19 +47,28 @@ struct SearchView: View {
     @State private var selectedDrill: BuiltinTrackListView.Source? = nil
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "SearchView")
-    private let resultLimit = 25
     private let debounceMs: UInt64 = 500_000_000  // 500ms in ns
+
+    init(coordinator: SlimProtoCoordinator, settings: SettingsManager) {
+        self.coordinator = coordinator
+        _settings = ObservedObject(wrappedValue: settings)
+        // The model pins the coordinator captured at first install for this view
+        // identity. Safe today because ContentView's server-change path tears the
+        // TabView down (isConnected flips false), destroying this identity — if
+        // that ever changes, the model keeps firing at the old coordinator.
+        _results = StateObject(wrappedValue: SearchResultsModel(runner: coordinator))
+    }
 
     var body: some View {
         TVScreen {
             Group {
                 if searchTerm.isEmpty {
                     preSearchView
-                } else if inFlight > 0 && !hasFetched {
+                } else if results.inFlight > 0 && !results.hasFetched {
                     ProgressView()
                         .scaleEffect(2.0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if allResultsEmpty && hasFetched {
+                } else if results.allResultsEmpty && results.hasFetched {
                     noResultsView
                 } else {
                     resultsView
@@ -89,7 +89,7 @@ struct SearchView: View {
         }
         .onDisappear {
             // Cancel any pending debounce so a tab switch mid-debounce doesn't fire 4
-            // unnecessary JSON-RPC requests against detached @State.
+            // unnecessary JSON-RPC requests against a model nobody is rendering.
             debounceTask?.cancel()
         }
         .fullScreenCover(item: $selectedArtist) { artist in
@@ -185,9 +185,9 @@ struct SearchView: View {
         // D3=A: sectioned single screen. Empty sections suppressed.
         // ForEach identity by parsed item id (98q.9 /review hardening).
         TVList {
-            if !artistResults.isEmpty {
+            if !results.artistResults.isEmpty {
                 Section {
-                    ForEach(artistResults) { artist in
+                    ForEach(results.artistResults) { artist in
                         Button { tapArtist(artist) } label: {
                             MediaRow(
                                 primary: artist.name,
@@ -202,9 +202,9 @@ struct SearchView: View {
                     Text("Artists").tvSectionHeader()
                 }
             }
-            if !albumResults.isEmpty {
+            if !results.albumResults.isEmpty {
                 Section {
-                    ForEach(albumResults, id: \.id) { album in
+                    ForEach(results.albumResults, id: \.id) { album in
                         Button { tapAlbum(album) } label: {
                             MediaRow(
                                 primary: album.name,
@@ -224,9 +224,9 @@ struct SearchView: View {
                     Text("Albums").tvSectionHeader()
                 }
             }
-            if !trackResults.isEmpty {
+            if !results.trackResults.isEmpty {
                 Section {
-                    ForEach(trackResults, id: \.id) { track in
+                    ForEach(results.trackResults, id: \.id) { track in
                         Button { tapTrack(track) } label: {
                             MediaRow(
                                 primary: track.title,
@@ -245,9 +245,9 @@ struct SearchView: View {
                     Text("Tracks").tvSectionHeader()
                 }
             }
-            if !playlistResults.isEmpty {
+            if !results.playlistResults.isEmpty {
                 Section {
-                    ForEach(playlistResults, id: \.id) { playlist in
+                    ForEach(results.playlistResults, id: \.id) { playlist in
                         Button { tapPlaylist(playlist) } label: {
                             MediaRow(
                                 primary: playlist.name,
@@ -272,15 +272,6 @@ struct SearchView: View {
         return display.isEmpty ? nil : display
     }
 
-    // MARK: - Result aggregation
-
-    private var allResultsEmpty: Bool {
-        artistResults.isEmpty
-            && albumResults.isEmpty
-            && trackResults.isEmpty
-            && playlistResults.isEmpty
-    }
-
     // MARK: - Debounce + fan-out
 
     private func scheduleSearch(for term: String) {
@@ -290,12 +281,7 @@ struct SearchView: View {
 
         // Empty: reset to pre-search state.
         if trimmed.isEmpty {
-            artistResults = []
-            albumResults = []
-            trackResults = []
-            playlistResults = []
-            hasFetched = false
-            inFlight = 0
+            results.reset()
             return
         }
 
@@ -304,12 +290,7 @@ struct SearchView: View {
         // Reset results so backspacing from "pink" to "p" doesn't leave stale results
         // on screen with the search bar showing "p".
         if trimmed.count < 2 {
-            artistResults = []
-            albumResults = []
-            trackResults = []
-            playlistResults = []
-            hasFetched = false
-            inFlight = 0
+            results.reset()
             return
         }
 
@@ -321,125 +302,9 @@ struct SearchView: View {
     }
 
     private func fireSearch(for term: String) {
-        let token = UUID()
-        lastQueryToken = token
-        inFlight = 4
-        // Don't reset hasFetched here — keep prior results visible while the new
-        // query is in flight (Material UI pattern).
-
         SearchHistoryStore.add(query: term)
         history = SearchHistoryStore.all()
-
-        os_log(.info, log: logger, "🔎 Search fan-out for \"%{public}s\" [token=%{public}s]",
-               term, token.uuidString)
-
-        fetchArtists(term: term, token: token)
-        fetchAlbums(term: term, token: token)
-        fetchTracks(term: term, token: token)
-        fetchPlaylists(term: term, token: token)
-    }
-
-    private func fetchArtists(term: String, token: UUID) {
-        let cmd: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["artists", 0, resultLimit, "tags:s", "search:\(term)"]]
-        ]
-        coordinator.sendJSONRPCCommandDirect(cmd) { response in
-            DispatchQueue.main.async {
-                guard token == lastQueryToken else {
-                    os_log(.info, log: logger, "🚫 Stale artists response [token=%{public}s]", token.uuidString)
-                    return
-                }
-                if let result = response["result"] as? [String: Any],
-                   let loop = result["artists_loop"] as? [[String: Any]] {
-                    artistResults = Artist.parseLoop(loop)
-                } else {
-                    artistResults = []
-                }
-                completeOne(label: "artists", count: artistResults.count)
-            }
-        }
-    }
-
-    private func fetchAlbums(term: String, token: UUID) {
-        // tags:ajly matches AlbumListView (98q.9). The `j` tag returns artwork_track_id
-        // which LMSArtworkURL.cover needs — without it, fallback to album.id builds a
-        // URL LMS does not serve (album covers live under their first track's id).
-        let cmd: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["albums", 0, resultLimit, "tags:ajly", "search:\(term)"]]
-        ]
-        coordinator.sendJSONRPCCommandDirect(cmd) { response in
-            DispatchQueue.main.async {
-                guard token == lastQueryToken else {
-                    os_log(.info, log: logger, "🚫 Stale albums response [token=%{public}s]", token.uuidString)
-                    return
-                }
-                if let result = response["result"] as? [String: Any],
-                   let loop = result["albums_loop"] as? [[String: Any]] {
-                    albumResults = Album.parseLoop(loop)
-                } else {
-                    albumResults = []
-                }
-                completeOne(label: "albums", count: albumResults.count)
-            }
-        }
-    }
-
-    private func fetchTracks(term: String, token: UUID) {
-        let cmd: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["tracks", 0, resultLimit, "tags:elcy", "search:\(term)"]]
-        ]
-        coordinator.sendJSONRPCCommandDirect(cmd) { response in
-            DispatchQueue.main.async {
-                guard token == lastQueryToken else {
-                    os_log(.info, log: logger, "🚫 Stale tracks response [token=%{public}s]", token.uuidString)
-                    return
-                }
-                if let result = response["result"] as? [String: Any],
-                   let loop = result["titles_loop"] as? [[String: Any]] {
-                    // LMS tracks query returns `titles_loop` (the row name is "title", not "track").
-                    trackResults = PlaylistTrack.parseLoop(loop)
-                } else {
-                    trackResults = []
-                }
-                completeOne(label: "tracks", count: trackResults.count)
-            }
-        }
-    }
-
-    private func fetchPlaylists(term: String, token: UUID) {
-        let cmd: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": ["", ["playlists", 0, resultLimit, "tags:su", "search:\(term)"]]
-        ]
-        coordinator.sendJSONRPCCommandDirect(cmd) { response in
-            DispatchQueue.main.async {
-                guard token == lastQueryToken else {
-                    os_log(.info, log: logger, "🚫 Stale playlists response [token=%{public}s]", token.uuidString)
-                    return
-                }
-                if let result = response["result"] as? [String: Any],
-                   let loop = result["playlists_loop"] as? [[String: Any]] {
-                    playlistResults = Playlist.parseLoop(loop)
-                } else {
-                    playlistResults = []
-                }
-                completeOne(label: "playlists", count: playlistResults.count)
-            }
-        }
-    }
-
-    private func completeOne(label: String, count: Int) {
-        inFlight = max(0, inFlight - 1)
-        hasFetched = true
-        os_log(.info, log: logger, "✅ Search %{public}s: %d items (inFlight=%d)",
-               label, count, inFlight)
+        results.fireSearch(for: term)
     }
 
     // MARK: - Tap handlers

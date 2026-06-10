@@ -2610,6 +2610,18 @@ extension SlimProtoCoordinator {
 
 }
 
+// MARK: - JSON-RPC runner seam (98q.13)
+
+/// Single-method seam over the stateless JSON-RPC direct-command path.
+/// Views and models that only fire a query and parse the response depend on
+/// this instead of the full coordinator, so unit tests can inject a mock
+/// runner (delayed / out-of-order completions) — see SearchResultsModelTests.
+protocol SlimProtoJSONRPCRunner: AnyObject {
+    func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void)
+}
+
+extension SlimProtoCoordinator: SlimProtoJSONRPCRunner {}
+
 // MARK: - Playlist mode cycles (w53)
 
 /// LMS playlist-mode toggle orderings, pure so unit tests can pin them:

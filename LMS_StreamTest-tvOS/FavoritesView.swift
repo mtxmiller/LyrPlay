@@ -10,7 +10,9 @@ import os.log
 ///
 /// Tap-to-play stays on the Library tab per D6 (CarPlay convention).
 struct FavoritesView: View {
-    let coordinator: SlimProtoCoordinator
+    // Only needs the stateless JSON-RPC seam (98q.13) — no playback control,
+    // no child views that require the concrete coordinator.
+    let coordinator: any SlimProtoJSONRPCRunner
     @ObservedObject var settings: SettingsManager
 
     @State private var items: [FavoriteItem] = []
