@@ -18,6 +18,11 @@ struct NowPlayingView: View {
     @State private var scrubElapsed: Double = 0
     @State private var showVisualizer: Bool = false
     @State private var showQueue: Bool = false
+    // LMS playlist modes (w53). Synced from the server on appear / track change
+    // and after each toggle — same sync points CarPlay uses for its shuffle
+    // button (external toggles mid-screen reflect on the next track change).
+    @State private var shuffleMode: Int = 0   // 0=off, 1=songs, 2=albums
+    @State private var repeatMode: Int = 0    // 0=off, 1=one, 2=all
     @State private var didInitialFocus: Bool = false
     @FocusState private var playbackFocused: Bool
     @FocusState private var artworkFocused: Bool
@@ -53,6 +58,7 @@ struct NowPlayingView: View {
         .onAppear {
             tick()
             updateAccent()                                  // initial sample if artwork already loaded
+            syncPlaylistModes()
             // Defer focus assignment so SwiftUI focus engine has time to register focusable views.
             // Gate on didInitialFocus so re-appears (TabView tab switching) don't override
             // the focus state SwiftUI preserved between tab switches.
@@ -64,6 +70,9 @@ struct NowPlayingView: View {
             }
         }
         .onChange(of: nowPlaying.currentArtwork) { _, _ in updateAccent() }
+        // Track changes are the cheap re-sync point for repeat/shuffle toggled
+        // from another controller (Material web UI, iPhone) — w53.
+        .onChange(of: nowPlaying.currentTrackTitle) { _, _ in syncPlaylistModes() }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in tick() }
         .fullScreenCover(isPresented: $showVisualizer) {
             VisualizerView(accentColor: accentRGB,
@@ -375,7 +384,16 @@ struct NowPlayingView: View {
     // MARK: - Transport row
 
     private var transportRow: some View {
+        // shuffle | prev | play | next | repeat | queue (Apple Music ordering
+        // with the queue link kept rightmost, w53).
         HStack(spacing: 0) {
+            transportButton(
+                systemImage: "shuffle",
+                accessibilityLabel: shuffleAccessibilityLabel,
+                iconColor: shuffleMode != 0 ? accentColor : nil,
+                action: toggleShuffle
+            )
+            Spacer()
             transportButton(
                 systemImage: "backward.fill",
                 accessibilityLabel: "Previous Track",
@@ -394,12 +412,35 @@ struct NowPlayingView: View {
                 accessibilityLabel: "Next Track",
                 action: { sendCommand("next") }
             )
+            Spacer()
+            transportButton(
+                systemImage: repeatMode == 1 ? "repeat.1" : "repeat",
+                accessibilityLabel: repeatAccessibilityLabel,
+                iconColor: repeatMode != 0 ? accentColor : nil,
+                action: toggleRepeat
+            )
             if nowPlaying.hasTrackLoaded {
                 Spacer()
                 queueNavigationLink
             }
         }
         .padding(.horizontal, 24)
+    }
+
+    private var shuffleAccessibilityLabel: String {
+        switch shuffleMode {
+        case 1: return "Shuffle: Songs"
+        case 2: return "Shuffle: Albums"
+        default: return "Shuffle: Off"
+        }
+    }
+
+    private var repeatAccessibilityLabel: String {
+        switch repeatMode {
+        case 1: return "Repeat: One"
+        case 2: return "Repeat: All"
+        default: return "Repeat: Off"
+        }
     }
 
     private var queueNavigationLink: some View {
@@ -417,6 +458,7 @@ struct NowPlayingView: View {
         systemImage: String,
         accessibilityLabel: String,
         isPrimary: Bool = false,
+        iconColor: Color? = nil,
         action: @escaping () -> Void
     ) -> some View {
         CircleFocusButton(
@@ -424,6 +466,7 @@ struct NowPlayingView: View {
             accessibilityLabel: accessibilityLabel,
             diameter: isPrimary ? 88 : 72,
             iconSize: isPrimary ? 32 : 24,
+            iconColor: iconColor,
             action: action
         )
     }
@@ -510,6 +553,27 @@ struct NowPlayingView: View {
         coordinator.sendLockScreenCommand(command)
     }
 
+    // MARK: - Repeat / shuffle (w53)
+
+    private func syncPlaylistModes() {
+        coordinator.fetchPlaylistModes { repeatMode, shuffleMode in
+            self.repeatMode = repeatMode
+            self.shuffleMode = shuffleMode
+        }
+    }
+
+    private func toggleShuffle() {
+        coordinator.toggleShuffleMode { newMode in
+            DispatchQueue.main.async { shuffleMode = newMode }
+        }
+    }
+
+    private func toggleRepeat() {
+        coordinator.toggleRepeatMode { newMode in
+            DispatchQueue.main.async { repeatMode = newMode }
+        }
+    }
+
     // MARK: - Helpers
 
     private func formatTime(_ seconds: Double) -> String {
@@ -560,6 +624,8 @@ private struct CircleFocusButton: View {
     let accessibilityLabel: String
     let diameter: CGFloat
     let iconSize: CGFloat
+    /// Active-state tint (w53 repeat/shuffle). nil → standard primary icon.
+    var iconColor: Color? = nil
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -584,7 +650,7 @@ private struct CircleFocusButton: View {
                     .strokeBorder(.white.opacity(isFocused ? 0.40 : 0), lineWidth: 2)
                 Image(systemName: systemImage)
                     .font(.system(size: iconSize, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(iconColor ?? Color.primary)
             }
             .frame(width: diameter, height: diameter)
             .scaleEffect(isFocused ? 1.08 : 1.0)
