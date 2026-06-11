@@ -892,6 +892,123 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    // MARK: - Favorites (GH#92)
+
+    /// CarPlay Favorites entry point — fetch the user's starred list, then push
+    /// a CPListTemplate of top-level playable favorites. Mirrors the
+    /// showPlaylists → fetch → display skeleton.
+    private func showFavorites() {
+        os_log(.info, log: logger, "⭐ Showing favorites in CarPlay")
+        fetchFavorites { [weak self] favorites in
+            self?.displayFavorites(favorites)
+        }
+    }
+
+    /// System-scoped favorites LIST. Caps at 100 (matches tvOS FavoritesView).
+    ///
+    /// Do NOT pass "feedMode:1": it switches the response to OPML shape
+    /// (result.items, no per-item id) which breaks tap-to-play. Without it LMS
+    /// returns result.loop_loop with proper id values usable as item_id:N.
+    private func fetchFavorites(completion: @escaping ([FavoriteItem]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available for favorites")
+            completion([])
+            return
+        }
+
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["favorites", "items", 0, 100, "want_url:1"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else {
+                completion([])
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any] else {
+                    os_log(.error, log: self.logger, "❌ Invalid favorites response format")
+                    completion([])
+                    return
+                }
+                if let loop = result["loop_loop"] as? [[String: Any]] {
+                    completion(FavoriteItem.parseLoop(loop))
+                } else {
+                    completion([])
+                }
+            }
+        }
+    }
+
+    private func displayFavorites(_ favorites: [FavoriteItem]) {
+        // Empty / folder-only list: show an explicit row, not a blank template.
+        // (A favorites list that is entirely folders parses to [] today.)
+        guard !favorites.isEmpty else {
+            let emptyItem = CPListItem(
+                text: "No favorites",
+                detailText: "Add favorites in LyrPlay to see them here",
+                image: nil,
+                accessoryImage: nil,
+                accessoryType: .none
+            )
+            let template = CPListTemplate(title: "Favorites", sections: [CPListSection(items: [emptyItem])])
+            interfaceController?.pushTemplate(template, animated: true)
+            os_log(.info, log: logger, "⭐ Favorites empty — showed placeholder")
+            return
+        }
+
+        // Clamp to the vehicle's item limit (same guard as the artist index).
+        let clamped = Array(favorites.prefix(CPListTemplate.maximumItemCount))
+
+        var favoriteItems: [CPListItem] = []
+        for favorite in clamped {
+            let item = CPListItem(
+                text: favorite.name,
+                detailText: nil,
+                image: nil,
+                accessoryImage: nil,
+                accessoryType: .none
+            )
+            item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                self?.handleFavoriteSelection(favorite)
+                completion()
+            }
+            favoriteItems.append(item)
+        }
+
+        let favoritesTemplate = CPListTemplate(
+            title: "Favorites",
+            sections: [CPListSection(items: favoriteItems)]
+        )
+        interfaceController?.pushTemplate(favoritesTemplate, animated: true)
+        os_log(.info, log: logger, "✅ Displayed %d favorites", favoriteItems.count)
+    }
+
+    private func handleFavoriteSelection(_ favorite: FavoriteItem) {
+        os_log(.info, log: logger, "▶️ Play favorite: %{public}s", favorite.name)
+
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available to play favorite")
+            showErrorMessage("No connection to LMS server")
+            return
+        }
+
+        // Player-targeted. `favorites playlist play item_id:N` per lms-material
+        // RADIOS_BASE_ACTIONS — keyed by FavoriteItem.id, NOT url.
+        let playerID = SettingsManager.shared.playerMACAddress
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["favorites", "playlist", "play", "item_id:\(favorite.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { _ in }
+
+        pushNowPlayingTemplate()
+    }
+
     // MARK: - Error Handling
 
     private func showErrorMessage(_ message: String) {
@@ -1169,6 +1286,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         if let randomRow = buildAlbumImageRow(cachedRandomReleases, title: "Random Releases") {
             items.append(randomRow)
         }
+
+        // Favorites (GH#92) — user's starred list, placed under Random Releases.
+        // Drills into a list of top-level playable favorites; folder items
+        // (hasitems:1) are skipped by FavoriteItem.parseLoop — recursive folder
+        // drill is the fast-follow tracked in bd LMS_StreamTest-n12.
+        let favoritesItem = CPListItem(
+            text: "★ Favorites",
+            detailText: "Your saved favorites",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        favoritesItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showFavorites()
+            completion()
+        }
+        items.append(favoritesItem)
 
         // Add Browse Artists item (alphabetical)
         let browseArtistsItem = CPListItem(
