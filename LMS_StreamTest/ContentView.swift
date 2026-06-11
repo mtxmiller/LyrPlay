@@ -29,6 +29,8 @@ struct ContentView: View {
     // Drives reactive topPad injection in WebView.updateUIView: when this changes
     // (cold launch / CarPlay foreground 0→59, rotation), updateUIView re-injects.
     @State private var topInset: CGFloat = 0
+    /// GH#75: hardware volume rocker → external player forwarding
+    @StateObject private var volumeRocker = VolumeRockerForwarder()
 
     /// Detect if running as iPad app on Mac (no status bar, so ignore top safe area)
     private var isRunningOnMac: Bool {
@@ -159,6 +161,12 @@ struct ContentView: View {
                     webViewReference: $webView,
                     onSettingsPressed: {
                         showingSettings = true
+                    },
+                    onMaterialPlayerChanged: { player in
+                        // Refresh the JS channel alongside every report — the
+                        // WebView reference may have been recreated (reload).
+                        volumeRocker.webView = webView
+                        volumeRocker.materialPlayerChanged(player)
                     }
                 )
                 // WebView fills edge-to-edge; Material's topPad CSS var handles status bar spacing.
@@ -472,10 +480,17 @@ struct ContentView: View {
         // - appSettings: Custom iOS app settings integration
         // - player: Show only specified player when iOS Player Focus is enabled
         // - topPad: Extends Material toolbar background behind iOS status bar
+        // - nativePlayer=w: Material posts MATERIAL-PLAYER messages to the mskNative
+        //   handler on every player switch (GH#75 volume rocker). The VALUE must be
+        //   the letter 'w' (WebKit) — Material's parser maps w→3, c→2, anything
+        //   else→1 (Android NativeReceiver, which silently no-ops in WKWebView).
+        //   Verified against Material 6.4.2's served bundle. Must be in BOTH
+        //   branches; in Player Focus mode only LyrPlay is visible so the rocker
+        //   feature is intentionally inert there.
         if settings.iOSPlayerFocus {
-            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         } else {
-            return "\(baseURL)?hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
 
@@ -768,7 +783,9 @@ struct WebView: UIViewRepresentable {
     @Binding var hasConnectionError: Bool
     @Binding var webViewReference: WKWebView?
     let onSettingsPressed: () -> Void
-    
+    /// GH#75: Material's selected player changed (nil = unknown — reload/process kill).
+    let onMaterialPlayerChanged: (MaterialPlayerMessage?) -> Void
+
     private let logger = OSLog(subsystem: "com.lmsstream", category: "WebView")
     
     func makeUIView(context: Context) -> WKWebView {
@@ -784,6 +801,9 @@ struct WebView: UIViewRepresentable {
         // CRITICAL: Enable custom URL scheme handling for Material integration
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "lmsStreamHandler")
+        // GH#75: Material's native bridge — receives MATERIAL-PLAYER messages
+        // when loaded with nativePlayer=3 (lms-material utils.js emitNative dest 3)
+        contentController.add(context.coordinator, name: "mskNative")
         configuration.userContentController = contentController
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -881,7 +901,18 @@ struct WebView: UIViewRepresentable {
         // MARK: - Material Settings Integration Handler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             os_log(.info, log: logger, "📱 Received message from Material: %{public}s", message.name)
-            
+
+            // GH#75: player-switch reports from Material's native bridge
+            if message.name == "mskNative" {
+                if let body = message.body as? String {
+                    let player = MaterialPlayerMessage.parse(body)
+                    DispatchQueue.main.async {
+                        self.parent.onMaterialPlayerChanged(player)
+                    }
+                }
+                return
+            }
+
             if message.name == "lmsStreamHandler" {
                 if let body = message.body as? String {
                     os_log(.info, log: logger, "📱 Material message body: %{public}s", body)
@@ -901,6 +932,8 @@ struct WebView: UIViewRepresentable {
             os_log(.info, log: logger, "📡 WebView: Started loading Material interface")
             DispatchQueue.main.async {
                 self.parent.loadError = nil
+                // GH#75: selected player is unknown until Material re-reports it
+                self.parent.onMaterialPlayerChanged(nil)
             }
         }
         
@@ -1066,6 +1099,8 @@ struct WebView: UIViewRepresentable {
             os_log(.error, log: logger, "WebView content process terminated by iOS - reloading Material interface")
             DispatchQueue.main.async {
                 self.parent.isLoading = true
+                // GH#75: JS state is gone — disengage the rocker until reload re-reports
+                self.parent.onMaterialPlayerChanged(nil)
             }
             webView.reload()
         }

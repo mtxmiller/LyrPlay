@@ -5,7 +5,7 @@ import os.log
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AppDelegate")
-    
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         os_log(.info, log: logger, "App launching")
         
