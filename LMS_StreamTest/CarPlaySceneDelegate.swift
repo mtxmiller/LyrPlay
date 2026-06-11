@@ -1,5 +1,6 @@
 import UIKit
 import CarPlay
+import Combine
 import os.log
 
 @objc(CarPlaySceneDelegate)
@@ -23,6 +24,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     // dropped on the next rebuild. See GH #85.
     private var currentShuffleMode: Int = 0          // 0=off, 1=songs, 2=albums
     private var dstmEnabled: Bool = false            // player has a DSTM provider set
+
+    // Favorite (star) button state for the current track (GH#92, option C — live
+    // filled/empty star). Synced from the server on connect, on Now Playing
+    // appear, and on every track change (via trackChangeCancellable) so the icon
+    // reflects reality before the user taps — a blind toggle could silently
+    // delete a curated favorite. `favoriteIndex` is the `index` field returned by
+    // `favorites exists` and is the `item_id` used to delete.
+    private var currentTrackFavoriteURL: String?
+    private var currentTrackFavoriteTitle: String?
+    private var currentTrackIsFavorited: Bool = false
+    private var currentTrackFavoriteIndex: String?
+    private var trackChangeCancellable: AnyCancellable?
 
 
     // MARK: - Services
@@ -53,6 +66,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // Playing button; both are refreshed once server shuffle state + DSTM
         // availability are synced after connection.
         rebuildNowPlayingButtons()
+
+        // Re-sync the favorite star on every track change while CarPlay is up, so
+        // the filled/empty state is always current (GH#92 option C). Subscribes to
+        // NowPlayingManager's published title — keeps the hook CarPlay-local with no
+        // edits to shared/audio code. dropFirst skips the initial value (connect
+        // already syncs via resyncNowPlayingButtons).
+        setupTrackChangeObserver()
 
         // Set template immediately - user sees UI right away
         interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
@@ -118,6 +138,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             NotificationCenter.default.removeObserver(observer)
             connectionObserver = nil
         }
+        trackChangeCancellable?.cancel()
+        trackChangeCancellable = nil
         hasLoadedData = false
         os_log(.info, log: logger, "  ✅ Interface controller cleared")
         os_log(.info, log: logger, "🚗 CARPLAY DISCONNECTED")
@@ -230,6 +252,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func resyncNowPlayingButtons() {
         syncShuffleButtonWithServer()
         syncDSTMAvailability()
+        syncFavoriteButtonWithServer()
     }
 
     // MARK: - Scene Lifecycle
@@ -2614,12 +2637,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// main thread (CPNowPlayingTemplate is UI).
     private func rebuildNowPlayingButtons() {
         var buttons: [CPNowPlayingButton] = [makeShuffleButton(for: currentShuffleMode)]
+        buttons.append(makeFavoriteButton())
         if dstmEnabled {
             buttons.append(makeKeepPlayingButton())
         }
         CPNowPlayingTemplate.shared.updateNowPlayingButtons(buttons)
-        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, keepPlaying %{public}s)",
-               currentShuffleMode, dstmEnabled ? "on" : "off")
+        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, favorited %{public}s, keepPlaying %{public}s)",
+               currentShuffleMode, currentTrackIsFavorited ? "yes" : "no", dstmEnabled ? "on" : "off")
     }
 
     /// Shuffle button with a distinct icon per LMS shuffle mode (0=off, 1=songs, 2=albums).
@@ -2726,6 +2750,144 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 os_log(.info, log: self.logger, "🎚️ DSTM availability: %{public}s",
                        enabled ? "enabled" : "disabled")
                 self.rebuildNowPlayingButtons()
+            }
+        }
+    }
+
+    // MARK: - Favorite (star) button (GH#92, option C)
+
+    /// Subscribe to track changes so the star reflects the *current* track. We
+    /// can't observe CarPlay's metadata directly, so we ride NowPlayingManager's
+    /// published title (the app updates it on every track boundary). Keeps the
+    /// hook CarPlay-local — no edits to shared/audio code.
+    private func setupTrackChangeObserver() {
+        trackChangeCancellable = AudioManager.shared.getNowPlayingManager()
+            .$currentTrackTitle
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncFavoriteButtonWithServer()
+            }
+    }
+
+    /// Read the current track's URL from the server, then ask whether it's a
+    /// favorite. Two cheap queries — only on connect / Now Playing appear / track
+    /// change, never polled. Caches URL+title (for add) and the favorite `index`
+    /// (for delete), then rebuilds the row so the star shows the right state.
+    private func syncFavoriteButtonWithServer() {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+        let playerID = SettingsManager.shared.playerMACAddress
+
+        // tag "u" = track URL; title is returned by default in playlist_loop.
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:u"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            guard let result = response["result"] as? [String: Any],
+                  let loop = result["playlist_loop"] as? [[String: Any]],
+                  let current = loop.first,
+                  let url = current["url"] as? String, !url.isEmpty else {
+                // No track / no URL — clear favorite state and rebuild.
+                DispatchQueue.main.async {
+                    self.currentTrackFavoriteURL = nil
+                    self.currentTrackFavoriteTitle = nil
+                    self.currentTrackIsFavorited = false
+                    self.currentTrackFavoriteIndex = nil
+                    self.rebuildNowPlayingButtons()
+                }
+                return
+            }
+
+            let title = (current["title"] as? String) ?? "Unknown"
+
+            // favorites exists -> {exists:0} or {exists:1, index:"<item_id>"}.
+            // System-scoped (no player MAC). `index` is the delete item_id.
+            let existsCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "exists", url]]
+            ]
+
+            coordinator.sendJSONRPCCommandDirect(existsCommand) { [weak self] existsResponse in
+                guard let self = self else { return }
+
+                var favorited = false
+                var index: String? = nil
+                if let r = existsResponse["result"] as? [String: Any] {
+                    if let e = r["exists"] as? Int { favorited = (e == 1) }
+                    else if let e = r["exists"] as? String { favorited = (e == "1") }
+                    if let i = r["index"] as? String { index = i }
+                    else if let i = r["index"] as? Int { index = String(i) }
+                }
+
+                DispatchQueue.main.async {
+                    self.currentTrackFavoriteURL = url
+                    self.currentTrackFavoriteTitle = title
+                    self.currentTrackIsFavorited = favorited
+                    self.currentTrackFavoriteIndex = index
+                    self.rebuildNowPlayingButtons()
+                }
+            }
+        }
+    }
+
+    /// Star icon reflects cached state: filled when the current track is already a
+    /// favorite, outline when not. Tap toggles — informed, not blind.
+    private func makeFavoriteButton() -> CPNowPlayingImageButton {
+        let iconName = currentTrackIsFavorited ? "star.fill" : "star"
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let image = UIImage(systemName: iconName, withConfiguration: config)
+            ?? UIImage(systemName: "star")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
+            self?.toggleCurrentTrackFavorite()
+        }
+    }
+
+    /// Toggle the current track's favorite state. Filled star -> delete by the
+    /// cached `index`; outline star -> add by URL+title, then re-sync to capture
+    /// the new `index` so a later un-tap can delete it.
+    private func toggleCurrentTrackFavorite() {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ Coordinator unavailable for favorite toggle")
+            return
+        }
+        guard let url = currentTrackFavoriteURL else {
+            os_log(.info, log: logger, "⭐ No current track URL yet — favorite toggle ignored")
+            return
+        }
+
+        if currentTrackIsFavorited, let index = currentTrackFavoriteIndex {
+            os_log(.info, log: logger, "☆ Removing favorite (item_id:%{public}s)", index)
+            let command: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "delete", "item_id:\(index)"]]
+            ]
+            coordinator.sendJSONRPCCommandDirect(command) { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.currentTrackIsFavorited = false
+                    self.currentTrackFavoriteIndex = nil
+                    self.rebuildNowPlayingButtons()
+                }
+            }
+        } else {
+            let title = currentTrackFavoriteTitle ?? "Unknown"
+            os_log(.info, log: logger, "★ Adding favorite: %{public}s", title)
+            let command: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "add", "url:\(url)", "title:\(title)"]]
+            ]
+            coordinator.sendJSONRPCCommandDirect(command) { [weak self] _ in
+                // Re-sync to capture the new favorite's index for a future delete.
+                DispatchQueue.main.async { self?.syncFavoriteButtonWithServer() }
             }
         }
     }
