@@ -27,7 +27,10 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
 
     private var logic = VolumeRockerLogic()
     private var volumeView: MPVolumeView?
-    private var volumeObservation: NSKeyValueObservation?
+    /// Press detector: polls the MPVolumeView slider value. `outputVolume` KVO
+    /// is NOT used — it freezes after app suspension (see startVolumePolling).
+    private var volumePollTimer: Timer?
+    private var lastSliderValue: Float?
     private var savedVolume: Float?
     private var pollTimer: Timer?
     private var selectedPlayerID: String?
@@ -39,16 +42,16 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         restoreStaleSaveIfNeeded()
 
         NotificationCenter.default.addObserver(
-            self, selector: #selector(appStateChanged),
+            self, selector: #selector(appDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(
-            self, selector: #selector(appStateChanged),
+            self, selector: #selector(appWillResignActive),
             name: UIApplication.willResignActiveNotification, object: nil)
     }
 
     deinit {
         pollTimer?.invalidate()
-        volumeObservation?.invalidate()
+        volumePollTimer?.invalidate()
     }
 
     // MARK: - Inputs
@@ -63,18 +66,30 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         managePollTimer()
     }
 
-    @objc private func appStateChanged() {
+    @objc private func appDidBecomeActive() {
         reevaluate()
         managePollTimer()
     }
 
+    /// Inside `willResignActive`, `UIApplication.applicationState` is still
+    /// `.active` (iOS flips it to `.inactive` only after this returns). Reading
+    /// it here would keep the rocker engaged across backgrounding — leaving the
+    /// `outputVolume` KVO registered while the app is suspended, where it goes
+    /// stale and never fires again, so the buttons stop working until a restart.
+    /// Force the inactive evaluation so we disengage (tear down KVO + view,
+    /// restore phone volume) now and re-engage cleanly on `didBecomeActive`.
+    @objc private func appWillResignActive() {
+        reevaluate(appActiveOverride: false)
+        managePollTimer(appActiveOverride: false)
+    }
+
     // MARK: - Evaluation
 
-    private func reevaluate() {
+    private func reevaluate(appActiveOverride: Bool? = nil) {
         let conditions = VolumeRockerLogic.Conditions(
             selectedPlayerID: selectedPlayerID,
             localPlayerID: SettingsManager.shared.playerMACAddress,
-            appActive: UIApplication.shared.applicationState == .active,
+            appActive: appActiveOverride ?? (UIApplication.shared.applicationState == .active),
             localPlayerBusy: Self.isLocalPlayerBusy()
         )
         perform(logic.evaluate(conditions))
@@ -89,12 +104,13 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
     /// Playback state has no observable — poll at 1s, but ONLY while an
     /// external player is selected and the app is active (the only window
     /// where a playback transition changes engage state).
-    private func managePollTimer() {
+    private func managePollTimer(appActiveOverride: Bool? = nil) {
+        let appActive = appActiveOverride ?? (UIApplication.shared.applicationState == .active)
         let localMAC = SettingsManager.shared.playerMACAddress
         let externalSelected = selectedPlayerID.map {
             $0.caseInsensitiveCompare(localMAC) != .orderedSame
         } ?? false
-        let shouldPoll = externalSelected && UIApplication.shared.applicationState == .active
+        let shouldPoll = externalSelected && appActive
 
         if shouldPoll && pollTimer == nil {
             pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -125,15 +141,14 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         savedVolume = current
         UserDefaults.standard.set(current, forKey: Self.savedVolumeKey)
         installVolumeView()
-        startObserving()
+        startVolumePolling()
         os_log(.info, log: logger, "🔊 Engaged — rocker → external player (saved phone volume %.2f)", current)
     }
 
     private func disengage() {
-        // Stop observing BEFORE the restore write so its KVO event never
+        // Stop polling BEFORE the restore write so its slider change never
         // feeds the logic (belt and suspenders — logic is disengaged too).
-        volumeObservation?.invalidate()
-        volumeObservation = nil
+        stopVolumePolling()
         pollTimer?.invalidate()
         pollTimer = nil
 
@@ -152,16 +167,39 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         }
     }
 
-    private func startObserving() {
-        guard volumeObservation == nil else { return }
-        volumeObservation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.old, .new]) { [weak self] _, change in
-            guard let self = self,
-                  let old = change.oldValue, let new = change.newValue else { return }
-            DispatchQueue.main.async {
-                self.perform(self.logic.volumeChanged(from: old, to: new,
-                                                      at: ProcessInfo.processInfo.systemUptime))
-            }
+    /// Detect hardware-volume presses by polling the hidden MPVolumeView
+    /// slider. We do NOT use `AVAudioSession.outputVolume` KVO: after the app
+    /// is suspended — which happens within ~1-2 min whenever the local player
+    /// is idle, i.e. exactly the rocker's engaged state — `outputVolume`
+    /// freezes and its KVO stops firing, while the MPVolumeView slider keeps
+    /// tracking the buttons (device-verified 2026-06-11: outVol stuck at 0.500
+    /// while sliderVal climbed 0.500 → 0.562 → 0.625). The slider value works
+    /// in every state and needs no audio-session management (Critical Rule #2).
+    /// Runs on the main run loop, only while engaged; deltas feed the same
+    /// `VolumeRockerLogic` the KVO path used.
+    private func startVolumePolling() {
+        guard volumePollTimer == nil else { return }
+        lastSliderValue = currentSliderValue()
+        volumePollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, let new = self.currentSliderValue() else { return }
+            let old = self.lastSliderValue ?? new
+            self.lastSliderValue = new
+            guard new != old else { return }
+            self.perform(self.logic.volumeChanged(from: old, to: new,
+                                                  at: ProcessInfo.processInfo.systemUptime))
         }
+    }
+
+    private func stopVolumePolling() {
+        volumePollTimer?.invalidate()
+        volumePollTimer = nil
+        lastSliderValue = nil
+    }
+
+    /// Current value of the hidden MPVolumeView's embedded slider, or nil if
+    /// the view/slider isn't wired up yet.
+    private func currentSliderValue() -> Float? {
+        volumeView?.subviews.compactMap { $0 as? UISlider }.first?.value
     }
 
     private func forwardPress(up: Bool) {
