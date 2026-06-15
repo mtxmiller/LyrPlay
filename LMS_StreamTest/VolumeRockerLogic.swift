@@ -44,10 +44,22 @@ struct VolumeRockerLogic {
         var selectedPlayerID: String?
         /// This device's player MAC (SettingsManager.playerMACAddress).
         var localPlayerID: String
+        /// True while the app is in the foreground OR transiently inactive
+        /// (Control Center / notification pulldown). ONLY true backgrounding
+        /// flips this false — a transient inactive must NOT disengage, or the
+        /// disengage/re-engage bounce injects phantom presses (GH#75 creep).
         var appActive: Bool
         /// Local player in active playback ("Playing"/"Buffering" — includes
         /// silent-recovery-muted streams, which are live BASS channels).
         var localPlayerBusy: Bool
+        /// Master kill-switch (Settings → "Hardware Volume Buttons"). When
+        /// false the rocker never engages, whatever the player/app state.
+        var featureEnabled: Bool
+        /// Selected external player has LMS fixed output
+        /// (digitalVolumeControl=0): forwarding volume is a no-op there, so we
+        /// stay disengaged and leave the native HUD alone (e.g. a WiiM locked
+        /// to fixed volume).
+        var selectedPlayerFixedVolume: Bool
     }
 
     static let recenterTarget: Float = 0.5
@@ -67,7 +79,8 @@ struct VolumeRockerLogic {
         } else {
             externalSelected = false
         }
-        let shouldEngage = c.appActive && !c.localPlayerBusy && externalSelected
+        let shouldEngage = c.featureEnabled && c.appActive && !c.localPlayerBusy
+            && externalSelected && !c.selectedPlayerFixedVolume
 
         if shouldEngage && !isEngaged {
             isEngaged = true

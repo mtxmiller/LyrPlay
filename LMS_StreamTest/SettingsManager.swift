@@ -33,6 +33,7 @@ class SettingsManager: ObservableObject {
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
+    @Published var hardwareVolumeButtonsEnabled: Bool = true  // iOS: forward hardware volume buttons to the selected external player (GH#75 kill switch)
     /// tvOS Library tab: set of `LibraryShelf` rawValues that the user has
     /// enabled. Defaults to `LibraryShelf.defaultEnabled` on first run.
     /// Persisted as a sorted comma-separated rawValue list in UserDefaults
@@ -164,6 +165,7 @@ class SettingsManager: ObservableObject {
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
         static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
         static let experimentalRateMatching = "ExperimentalRateMatching"
+        static let hardwareVolumeButtonsEnabled = "HardwareVolumeButtonsEnabled"
         static let enabledLibraryShelves = "EnabledLibraryShelves"
         static let seenPluginShelfKeys = "SeenPluginShelfKeys"
     }
@@ -332,6 +334,7 @@ class SettingsManager: ObservableObject {
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
         experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
+        hardwareVolumeButtonsEnabled = UserDefaults.standard.object(forKey: Keys.hardwareVolumeButtonsEnabled) as? Bool ?? true
 
         // Library shelves: stored as comma-separated rawValues so the on-disk
         // value is greppable. Missing/empty → first-run defaults from the
@@ -393,6 +396,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
         UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
+        UserDefaults.standard.set(hardwareVolumeButtonsEnabled, forKey: Keys.hardwareVolumeButtonsEnabled)
         // Sorted to keep the on-disk value diff-stable when the set order changes.
         UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
         UserDefaults.standard.set(seenPluginShelfKeys.sorted().joined(separator: ","), forKey: Keys.seenPluginShelfKeys)

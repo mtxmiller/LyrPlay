@@ -281,6 +281,28 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
 
+                    #if os(iOS)
+                    Toggle(isOn: $settings.hardwareVolumeButtonsEnabled) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "speaker.wave.2")
+                                    .foregroundColor(.orange)
+                                    .frame(width: 20)
+                                Text("Hardware Volume Buttons")
+                                    .font(.body)
+                            }
+                            Text("Forward the phone's volume buttons to the selected player. Turn off to use them for the phone's own volume. Skipped automatically for fixed-volume players.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .onChange(of: settings.hardwareVolumeButtonsEnabled) { _ in
+                        settings.saveSettings()
+                    }
+                    .padding(.vertical, 4)
+                    #endif
+
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {

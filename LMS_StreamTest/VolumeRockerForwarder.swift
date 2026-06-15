@@ -34,6 +34,17 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
     private var savedVolume: Float?
     private var pollTimer: Timer?
     private var selectedPlayerID: String?
+    /// Per-player LMS `digitalVolumeControl`: true = fixed output, where
+    /// forwarding volume is a no-op so the rocker stays disengaged and the
+    /// native HUD is left alone. Populated lazily via JSON-RPC on player change
+    /// (keyed by lowercased MAC).
+    private var fixedVolumeCache: [String: Bool] = [:]
+    /// Cancellable disengage writes. A fast foreground bounce (re-engage)
+    /// cancels them so a late restore write never lands into a running poll —
+    /// that stale write was being read as a phantom press, creeping the player
+    /// volume up on every background/resume (GH#75 follow-up).
+    private var restoreWork: DispatchWorkItem?
+    private var removeViewWork: DispatchWorkItem?
 
     weak var webView: WKWebView?
 
@@ -45,13 +56,15 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             self, selector: #selector(appDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(
-            self, selector: #selector(appWillResignActive),
-            name: UIApplication.willResignActiveNotification, object: nil)
+            self, selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification, object: nil)
     }
 
     deinit {
         pollTimer?.invalidate()
         volumePollTimer?.invalidate()
+        restoreWork?.cancel()
+        removeViewWork?.cancel()
     }
 
     // MARK: - Inputs
@@ -62,6 +75,7 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         selectedPlayerID = player?.id
         os_log(.info, log: logger, "🔊 Material player: %{public}s",
                player.map { "\($0.name ?? "?") [\($0.id)]" } ?? "unknown")
+        if let id = player?.id { refreshFixedVolume(for: id) }
         reevaluate()
         managePollTimer()
     }
@@ -71,14 +85,15 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         managePollTimer()
     }
 
-    /// Inside `willResignActive`, `UIApplication.applicationState` is still
-    /// `.active` (iOS flips it to `.inactive` only after this returns). Reading
-    /// it here would keep the rocker engaged across backgrounding — leaving the
-    /// `outputVolume` KVO registered while the app is suspended, where it goes
-    /// stale and never fires again, so the buttons stop working until a restart.
-    /// Force the inactive evaluation so we disengage (tear down KVO + view,
-    /// restore phone volume) now and re-engage cleanly on `didBecomeActive`.
-    @objc private func appWillResignActive() {
+    /// Disengage only on TRUE backgrounding, never on a transient `.inactive`
+    /// (Control Center / notification pulldown). The slider-poll detector works
+    /// while inactive, so there's no need to tear down on every interruption —
+    /// and doing so was the bug: the disengage (restore phone volume) raced the
+    /// re-engage (recenter to 0.5) on `didBecomeActive`, and the running poll
+    /// read the leftover restore write as a phantom volume-up press, creeping
+    /// the player volume on every interruption (GH#75 follow-up). Backgrounding
+    /// still disengages so the phone isn't parked at 0.5 while suspended.
+    @objc private func appDidEnterBackground() {
         reevaluate(appActiveOverride: false)
         managePollTimer(appActiveOverride: false)
     }
@@ -89,10 +104,18 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         let conditions = VolumeRockerLogic.Conditions(
             selectedPlayerID: selectedPlayerID,
             localPlayerID: SettingsManager.shared.playerMACAddress,
-            appActive: appActiveOverride ?? (UIApplication.shared.applicationState == .active),
-            localPlayerBusy: Self.isLocalPlayerBusy()
+            appActive: appActiveOverride ?? Self.appForegrounded(),
+            localPlayerBusy: Self.isLocalPlayerBusy(),
+            featureEnabled: SettingsManager.shared.hardwareVolumeButtonsEnabled,
+            selectedPlayerFixedVolume: isSelectedPlayerFixedVolume()
         )
         perform(logic.evaluate(conditions))
+    }
+
+    /// Foreground OR transiently inactive (Control Center / notification) — only
+    /// true backgrounding counts as not-active (see `appDidEnterBackground`).
+    private static func appForegrounded() -> Bool {
+        UIApplication.shared.applicationState != .background
     }
 
     private static func isLocalPlayerBusy() -> Bool {
@@ -101,11 +124,18 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         return state == "Playing" || state == "Buffering"
     }
 
+    /// Cached fixed-volume verdict for the selected player; defaults to false
+    /// (variable) until the JSON-RPC query lands, then `reevaluate()` re-runs.
+    private func isSelectedPlayerFixedVolume() -> Bool {
+        guard let id = selectedPlayerID else { return false }
+        return fixedVolumeCache[id.lowercased()] ?? false
+    }
+
     /// Playback state has no observable — poll at 1s, but ONLY while an
     /// external player is selected and the app is active (the only window
     /// where a playback transition changes engage state).
     private func managePollTimer(appActiveOverride: Bool? = nil) {
-        let appActive = appActiveOverride ?? (UIApplication.shared.applicationState == .active)
+        let appActive = appActiveOverride ?? Self.appForegrounded()
         let localMAC = SettingsManager.shared.playerMACAddress
         let externalSelected = selectedPlayerID.map {
             $0.caseInsensitiveCompare(localMAC) != .orderedSame
@@ -137,12 +167,22 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
     }
 
     private func engage() {
-        let current = AVAudioSession.sharedInstance().outputVolume
-        savedVolume = current
-        UserDefaults.standard.set(current, forKey: Self.savedVolumeKey)
+        // Fast foreground bounce: a disengage restore is still pending. Cancel
+        // it and KEEP the real saved volume — re-reading outputVolume now would
+        // capture the parked 0.5, and letting the stale restore write land would
+        // feed the poll a phantom press (GH#75 creep).
+        if restoreWork != nil {
+            restoreWork?.cancel(); restoreWork = nil
+            removeViewWork?.cancel(); removeViewWork = nil
+            os_log(.info, log: logger, "🔊 Re-engaged before restore landed — kept saved phone volume %.2f", savedVolume ?? -1)
+        } else {
+            let current = AVAudioSession.sharedInstance().outputVolume
+            savedVolume = current
+            UserDefaults.standard.set(current, forKey: Self.savedVolumeKey)
+            os_log(.info, log: logger, "🔊 Engaged — rocker → external player (saved phone volume %.2f)", current)
+        }
         installVolumeView()
         startVolumePolling()
-        os_log(.info, log: logger, "🔊 Engaged — rocker → external player (saved phone volume %.2f)", current)
     }
 
     private func disengage() {
@@ -152,19 +192,33 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
 
-        if let restore = savedVolume {
-            setSystemVolume(restore)
-            os_log(.info, log: logger, "🔊 Disengaged — phone volume restored to %.2f", restore)
+        // Schedule the phone-volume restore as a cancellable unit so a fast
+        // re-engage (see engage()) can cancel it before it writes. savedVolume /
+        // UserDefaults are cleared INSIDE the work so a kill before it runs
+        // still leaves the value for launch recovery.
+        let restore = savedVolume
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if let restore = restore {
+                self.setSystemVolume(restore)
+                os_log(.info, log: self.logger, "🔊 Disengaged — phone volume restored to %.2f", restore)
+            }
+            self.savedVolume = nil
+            UserDefaults.standard.removeObject(forKey: Self.savedVolumeKey)
+            self.restoreWork = nil
         }
-        savedVolume = nil
-        UserDefaults.standard.removeObject(forKey: Self.savedVolumeKey)
+        restoreWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
 
-        // Remove the view after the restore write has landed; HUD
-        // suppression must not outlive engagement.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        // Remove the view after the restore write has landed; HUD suppression
+        // must not outlive engagement. Cancelled by a fast re-engage.
+        let remove = DispatchWorkItem { [weak self] in
             guard let self = self, self.savedVolume == nil else { return }
             self.removeVolumeView()
+            self.removeViewWork = nil
         }
+        removeViewWork = remove
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: remove)
     }
 
     /// Detect hardware-volume presses by polling the hidden MPVolumeView
@@ -226,6 +280,39 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
                 os_log(.error, log: logger, "🔊 Press JS failed: %{public}s", error.localizedDescription)
             } else if let handled = result as? Bool, !handled {
                 os_log(.error, log: logger, "🔊 Press JS: Material volume globals missing (skin too old?)")
+            }
+        }
+    }
+
+    // MARK: - Fixed-volume detection (GH#75 follow-up)
+
+    /// Query LMS `digitalVolumeControl` for a player and cache the verdict.
+    /// dvc=0 means fixed output (a soundbar / streamer locked to a set level,
+    /// e.g. a WiiM set to fixed volume), where forwarding volume does nothing —
+    /// so the rocker won't engage and the native HUD keeps controlling the
+    /// phone. The local player is skipped (the rocker never engages for it);
+    /// each external MAC is queried once and cached.
+    private func refreshFixedVolume(for playerID: String) {
+        let key = playerID.lowercased()
+        if key == SettingsManager.shared.playerMACAddress.lowercased() { return }
+        if fixedVolumeCache[key] != nil { return }
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+
+        let query: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "digitalVolumeControl", "?"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(query) { [weak self] response in
+            // LMS returns the pref value under result._p2 ("0" = fixed output).
+            let value = (response["result"] as? [String: Any])?["_p2"]
+            let isFixed = (value as? String == "0") || (value as? Int == 0)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.fixedVolumeCache[key] = isFixed
+                os_log(.info, log: self.logger, "🔊 %{public}s digitalVolumeControl → %{public}s",
+                       playerID, isFixed ? "FIXED (rocker off)" : "variable")
+                self.reevaluate()
             }
         }
     }

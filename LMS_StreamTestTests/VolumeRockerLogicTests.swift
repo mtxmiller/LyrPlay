@@ -13,13 +13,17 @@ final class VolumeRockerLogicTests: XCTestCase {
     private func conditions(
         selected: String? = "11:22:33:44:55:66",
         appActive: Bool = true,
-        busy: Bool = false
+        busy: Bool = false,
+        featureEnabled: Bool = true,
+        fixedVolume: Bool = false
     ) -> VolumeRockerLogic.Conditions {
         VolumeRockerLogic.Conditions(
             selectedPlayerID: selected,
             localPlayerID: localMAC,
             appActive: appActive,
-            localPlayerBusy: busy
+            localPlayerBusy: busy,
+            featureEnabled: featureEnabled,
+            selectedPlayerFixedVolume: fixedVolume
         )
     }
 
@@ -61,6 +65,30 @@ final class VolumeRockerLogicTests: XCTestCase {
     func testDoesNotEngageWithUnknownPlayer() {
         var logic = VolumeRockerLogic()
         XCTAssertEqual(logic.evaluate(conditions(selected: nil)), [])
+    }
+
+    func testDoesNotEngageWhenFeatureDisabled() {
+        var logic = VolumeRockerLogic()
+        XCTAssertEqual(logic.evaluate(conditions(featureEnabled: false)), [])
+        XCTAssertFalse(logic.isEngaged)
+    }
+
+    func testDoesNotEngageForFixedVolumePlayer() {
+        var logic = VolumeRockerLogic()
+        XCTAssertEqual(logic.evaluate(conditions(fixedVolume: true)), [])
+        XCTAssertFalse(logic.isEngaged)
+    }
+
+    func testDisengagesWhenFeatureTurnedOff() {
+        var logic = engagedLogic()
+        XCTAssertEqual(logic.evaluate(conditions(featureEnabled: false)), [.disengage])
+        XCTAssertFalse(logic.isEngaged)
+    }
+
+    func testDisengagesWhenSelectedPlayerReportsFixedVolume() {
+        var logic = engagedLogic()
+        XCTAssertEqual(logic.evaluate(conditions(fixedVolume: true)), [.disengage])
+        XCTAssertFalse(logic.isEngaged)
     }
 
     func testRepeatedEvaluationIsIdempotent() {
