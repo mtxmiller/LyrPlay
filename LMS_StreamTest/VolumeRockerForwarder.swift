@@ -45,13 +45,19 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
     /// volume up on every background/resume (GH#75 follow-up).
     private var restoreWork: DispatchWorkItem?
     private var removeViewWork: DispatchWorkItem?
+    /// The system-volume value held while engaged — the user's OWN volume
+    /// (clamped into the detectable band), NOT a fixed 0.5. Set on engage.
+    private var baseline: Float = VolumeRockerLogic.recenterTarget
     /// True from the moment a recenter write is issued until the polled slider
-    /// settles back at the target. A recenter is a self-inflicted write that
-    /// can animate through intermediate values — a big jump when the phone
-    /// volume is low (e.g. 0.05 → 0.5 on engage) — and an intermediate poll
-    /// sample was being misclassified as a real press, jumping the external
-    /// player's volume on player switch. Suppress the whole transition.
+    /// settles back at the baseline. A recenter is a self-inflicted write that
+    /// can animate through intermediate values, and an intermediate poll sample
+    /// was being misclassified as a real press. Suppress the whole transition.
     private var suppressingRecenter = false
+    /// Safety bound: force-clear `suppressingRecenter` if it hasn't settled
+    /// within this many poll ticks (~1s), so a dropped write can never wedge
+    /// press detection off permanently.
+    private var suppressTicks = 0
+    private static let maxSuppressTicks = 12
 
     weak var webView: WKWebView?
 
@@ -169,10 +175,11 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             case .pressUp: forwardPress(up: true)
             case .pressDown: forwardPress(up: false)
             case .recenter:
-                // Suppress the poll until the slider settles back at target —
-                // the write may animate through intermediate values.
+                // Suppress the poll until the slider settles back at the
+                // baseline — the write may animate through intermediate values.
                 suppressingRecenter = true
-                setSystemVolume(VolumeRockerLogic.recenterTarget)
+                suppressTicks = 0
+                setSystemVolume(baseline)
             }
         }
     }
@@ -192,6 +199,9 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             UserDefaults.standard.set(current, forKey: Self.savedVolumeKey)
             os_log(.info, log: logger, "🔊 Engaged — rocker → external player (saved phone volume %.2f)", current)
         }
+        // Hold the sensor at the user's OWN volume (clamped just off the rails),
+        // never a fixed 0.5 — so engaging doesn't jump the device volume.
+        baseline = VolumeRockerLogic.workingBaseline(for: savedVolume ?? VolumeRockerLogic.recenterTarget)
         installVolumeView()
         startVolumePolling()
     }
@@ -221,7 +231,8 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         restoreWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
 
-        // Remove the view after the restore write has landed; HUD suppression
+        // Remove the view only after the restore write (which may retry for up
+        // to ~0.7s if the slider is slow to wire) has landed; HUD suppression
         // must not outlive engagement. Cancelled by a fast re-engage.
         let remove = DispatchWorkItem { [weak self] in
             guard let self = self, self.savedVolume == nil else { return }
@@ -229,7 +240,7 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             self.removeViewWork = nil
         }
         removeViewWork = remove
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: remove)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: remove)
     }
 
     /// Detect hardware-volume presses by polling the hidden MPVolumeView
@@ -253,19 +264,26 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             if self.suppressingRecenter {
                 // Swallow every sample of the recenter transition (pre-write
                 // stale value + any animated climb) so none is read as a press.
-                // Once it settles at target, feed ONE event so the logic drains
-                // its pending-recenter counter, then resume detection.
-                if abs(new - VolumeRockerLogic.recenterTarget) < VolumeRockerLogic.recenterEpsilon {
+                // Once it settles at the baseline, feed ONE event so the logic
+                // drains its pending-recenter counter, then resume detection.
+                self.suppressTicks += 1
+                let settled = abs(new - self.baseline) < VolumeRockerLogic.recenterEpsilon
+                if settled || self.suppressTicks >= Self.maxSuppressTicks {
+                    if !settled {
+                        os_log(.error, log: self.logger, "🔊 Recenter never settled (%.2f vs %.2f) — un-wedging detection", new, self.baseline)
+                    }
                     self.suppressingRecenter = false
                     self.perform(self.logic.volumeChanged(from: old, to: new,
-                                                          at: ProcessInfo.processInfo.systemUptime))
+                                                          at: ProcessInfo.processInfo.systemUptime,
+                                                          target: self.baseline))
                 }
                 return
             }
 
             guard new != old else { return }
             self.perform(self.logic.volumeChanged(from: old, to: new,
-                                                  at: ProcessInfo.processInfo.systemUptime))
+                                                  at: ProcessInfo.processInfo.systemUptime,
+                                                  target: self.baseline))
         }
     }
 
@@ -274,6 +292,7 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         volumePollTimer = nil
         lastSliderValue = nil
         suppressingRecenter = false
+        suppressTicks = 0
     }
 
     /// Current value of the hidden MPVolumeView's embedded slider, or nil if
@@ -366,17 +385,22 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             .first { $0.isKeyWindow }
     }
 
-    /// The slider inside MPVolumeView isn't wired immediately after the
-    /// view joins the window — write after a short main-queue delay.
-    private func setSystemVolume(_ value: Float) {
+    /// The slider inside MPVolumeView isn't wired immediately after the view
+    /// joins the window — write after a short main-queue delay, and RETRY if
+    /// it isn't ready yet (a freshly re-installed view can take a few hundred
+    /// ms). Dropping the write silently was what left the device volume
+    /// stranded and drifting across engage/disengage cycles.
+    private func setSystemVolume(_ value: Float, attempt: Int = 0) {
         installVolumeView()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
-            guard let slider = self.volumeView?.subviews.compactMap({ $0 as? UISlider }).first else {
-                os_log(.error, log: self.logger, "🔊 MPVolumeView slider not found — volume write dropped")
-                return
+            if let slider = self.volumeView?.subviews.compactMap({ $0 as? UISlider }).first {
+                slider.value = value
+            } else if attempt < 5 {
+                self.setSystemVolume(value, attempt: attempt + 1)
+            } else {
+                os_log(.error, log: self.logger, "🔊 MPVolumeView slider not found after retries — volume write dropped")
             }
-            slider.value = value
         }
     }
 

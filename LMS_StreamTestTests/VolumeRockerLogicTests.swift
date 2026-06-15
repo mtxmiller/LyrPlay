@@ -218,6 +218,34 @@ final class VolumeRockerLogicTests: XCTestCase {
         XCTAssertNil(VolumeRockerLogic.staleRestoreVolume(persisted: -0.1))
     }
 
+    // MARK: - Working baseline (no-jump engage)
+
+    func testWorkingBaselineLeavesMidrangeUntouched() {
+        // The whole point: a normal volume is NOT moved to 0.5 on engage.
+        XCTAssertEqual(VolumeRockerLogic.workingBaseline(for: 0.30), 0.30, accuracy: 0.0001)
+        XCTAssertEqual(VolumeRockerLogic.workingBaseline(for: 0.65), 0.65, accuracy: 0.0001)
+    }
+
+    func testWorkingBaselineNudgesOnlyNearTheRails() {
+        // Muted / near-mute gets nudged up exactly one step so a down-press
+        // stays detectable; near-max gets nudged down one step.
+        XCTAssertEqual(VolumeRockerLogic.workingBaseline(for: 0.0), VolumeRockerLogic.baselineMin, accuracy: 0.0001)
+        XCTAssertEqual(VolumeRockerLogic.workingBaseline(for: 0.02), VolumeRockerLogic.baselineMin, accuracy: 0.0001)
+        XCTAssertEqual(VolumeRockerLogic.workingBaseline(for: 1.0), VolumeRockerLogic.baselineMax, accuracy: 0.0001)
+    }
+
+    func testRecenterSwallowUsesPassedBaselineNotHalf() {
+        // With a low baseline, the recenter write lands at the baseline (not
+        // 0.5) and must still be swallowed.
+        var logic = VolumeRockerLogic()
+        XCTAssertEqual(logic.evaluate(conditions()), [.engage, .recenter])
+        XCTAssertEqual(logic.volumeChanged(from: 0.05, to: 0.0625, at: 0, target: 0.0625), [])
+        XCTAssertEqual(logic.pendingRecenters, 0)
+        // A real up-press from that baseline still classifies + re-centers.
+        XCTAssertEqual(logic.volumeChanged(from: 0.0625, to: 0.125, at: 1.0, target: 0.0625),
+                       [.pressUp, .recenter])
+    }
+
     func testStaleRestoreAcceptsBoundaries() {
         XCTAssertEqual(VolumeRockerLogic.staleRestoreVolume(persisted: 0.0), 0.0)
         XCTAssertEqual(VolumeRockerLogic.staleRestoreVolume(persisted: 1.0), 1.0)

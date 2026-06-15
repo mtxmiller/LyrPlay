@@ -33,7 +33,7 @@ class SettingsManager: ObservableObject {
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
-    @Published var hardwareVolumeButtonsEnabled: Bool = true  // iOS: forward hardware volume buttons to the selected external player (GH#75 kill switch)
+    @Published var hardwareVolumeButtonsEnabled: Bool = false  // iOS: forward hardware volume buttons to the selected external player (GH#75) — default OFF, opt-in while hardened
     /// tvOS Library tab: set of `LibraryShelf` rawValues that the user has
     /// enabled. Defaults to `LibraryShelf.defaultEnabled` on first run.
     /// Persisted as a sorted comma-separated rawValue list in UserDefaults
@@ -334,7 +334,7 @@ class SettingsManager: ObservableObject {
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
         experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
-        hardwareVolumeButtonsEnabled = UserDefaults.standard.object(forKey: Keys.hardwareVolumeButtonsEnabled) as? Bool ?? true
+        hardwareVolumeButtonsEnabled = UserDefaults.standard.object(forKey: Keys.hardwareVolumeButtonsEnabled) as? Bool ?? false
 
         // Library shelves: stored as comma-separated rawValues so the on-disk
         // value is greppable. Missing/empty → first-run defaults from the

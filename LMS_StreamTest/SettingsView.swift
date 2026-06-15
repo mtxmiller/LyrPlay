@@ -291,7 +291,7 @@ struct SettingsView: View {
                                 Text("Hardware Volume Buttons")
                                     .font(.body)
                             }
-                            Text("Forward the phone's volume buttons to the selected player. Turn off to use them for the phone's own volume. Skipped automatically for fixed-volume players.")
+                            Text("Experimental. Forward the phone's volume buttons to the selected player when it isn't this device. Off by default; leave off to use the buttons for the phone's own volume. Skipped automatically for fixed-volume players.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .padding(.leading, 28)

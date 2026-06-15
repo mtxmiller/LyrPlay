@@ -62,9 +62,28 @@ struct VolumeRockerLogic {
         var selectedPlayerFixedVolume: Bool
     }
 
+    /// Default recenter target. The shell now passes a per-engage baseline
+    /// (the user's OWN volume, clamped into the band below) so engaging never
+    /// yanks the device volume to 50%; this constant is only the fallback/test
+    /// default for `volumeChanged`.
     static let recenterTarget: Float = 0.5
     static let recenterEpsilon: Float = 0.01
     static let coalescingWindow: TimeInterval = 0.2
+
+    /// Working-baseline band. The sensor (system volume) must sit at least one
+    /// iOS volume step (1/16 = 0.0625) away from both rails so a press is
+    /// detectable in either direction. Clamp the user's real volume into
+    /// [1/16, 15/16]; only volumes within one step of mute/max get nudged, and
+    /// the original is restored on disengage.
+    static let baselineMin: Float = 0.0625
+    static let baselineMax: Float = 0.9375
+
+    /// The system-volume value to hold while engaged, derived from the user's
+    /// real volume — their own level untouched in the normal midrange, nudged
+    /// at most one step only when pinned near mute or max.
+    static func workingBaseline(for volume: Float) -> Float {
+        min(baselineMax, max(baselineMin, volume))
+    }
 
     private(set) var isEngaged = false
     private(set) var pendingRecenters = 0
@@ -98,12 +117,13 @@ struct VolumeRockerLogic {
 
     /// Classify one KVO outputVolume event. `now` is any monotonic clock
     /// (injected for testability).
-    mutating func volumeChanged(from old: Float, to new: Float, at now: TimeInterval) -> [Action] {
+    mutating func volumeChanged(from old: Float, to new: Float, at now: TimeInterval,
+                                target: Float = recenterTarget) -> [Action] {
         guard isEngaged else { return [] }
 
-        // Self-inflicted re-center write lands ≈0.5: swallow exactly one
-        // per outstanding recenter.
-        if pendingRecenters > 0 && abs(new - Self.recenterTarget) < Self.recenterEpsilon {
+        // Self-inflicted re-center write lands ≈ the baseline target: swallow
+        // exactly one per outstanding recenter.
+        if pendingRecenters > 0 && abs(new - target) < Self.recenterEpsilon {
             pendingRecenters -= 1
             return []
         }
@@ -115,8 +135,8 @@ struct VolumeRockerLogic {
             actions.append(new > old ? .pressUp : .pressDown)
             lastPressAt = now
         }
-        // One outstanding recenter is enough — writing 0.5 twice fires no
-        // second KVO event, which would strand the counter.
+        // One outstanding recenter is enough — writing the target twice fires
+        // no second event, which would strand the counter.
         if pendingRecenters == 0 {
             actions.append(.recenter)
             pendingRecenters += 1
