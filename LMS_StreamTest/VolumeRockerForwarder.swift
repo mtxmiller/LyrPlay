@@ -45,6 +45,13 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
     /// volume up on every background/resume (GH#75 follow-up).
     private var restoreWork: DispatchWorkItem?
     private var removeViewWork: DispatchWorkItem?
+    /// True from the moment a recenter write is issued until the polled slider
+    /// settles back at the target. A recenter is a self-inflicted write that
+    /// can animate through intermediate values — a big jump when the phone
+    /// volume is low (e.g. 0.05 → 0.5 on engage) — and an intermediate poll
+    /// sample was being misclassified as a real press, jumping the external
+    /// player's volume on player switch. Suppress the whole transition.
+    private var suppressingRecenter = false
 
     weak var webView: WKWebView?
 
@@ -161,7 +168,11 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             case .disengage: disengage()
             case .pressUp: forwardPress(up: true)
             case .pressDown: forwardPress(up: false)
-            case .recenter: setSystemVolume(VolumeRockerLogic.recenterTarget)
+            case .recenter:
+                // Suppress the poll until the slider settles back at target —
+                // the write may animate through intermediate values.
+                suppressingRecenter = true
+                setSystemVolume(VolumeRockerLogic.recenterTarget)
             }
         }
     }
@@ -238,6 +249,20 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
             guard let self = self, let new = self.currentSliderValue() else { return }
             let old = self.lastSliderValue ?? new
             self.lastSliderValue = new
+
+            if self.suppressingRecenter {
+                // Swallow every sample of the recenter transition (pre-write
+                // stale value + any animated climb) so none is read as a press.
+                // Once it settles at target, feed ONE event so the logic drains
+                // its pending-recenter counter, then resume detection.
+                if abs(new - VolumeRockerLogic.recenterTarget) < VolumeRockerLogic.recenterEpsilon {
+                    self.suppressingRecenter = false
+                    self.perform(self.logic.volumeChanged(from: old, to: new,
+                                                          at: ProcessInfo.processInfo.systemUptime))
+                }
+                return
+            }
+
             guard new != old else { return }
             self.perform(self.logic.volumeChanged(from: old, to: new,
                                                   at: ProcessInfo.processInfo.systemUptime))
@@ -248,6 +273,7 @@ final class VolumeRockerForwarder: NSObject, ObservableObject {
         volumePollTimer?.invalidate()
         volumePollTimer = nil
         lastSliderValue = nil
+        suppressingRecenter = false
     }
 
     /// Current value of the hidden MPVolumeView's embedded slider, or nil if
