@@ -682,6 +682,14 @@ class AudioPlayer: NSObject, ObservableObject {
         return volume
     }
 
+    /// Mute the current stream immediately for silent recovery.
+    /// Mirrors AudioStreamDecoder.applyMuting() so an already-playing legacy URL stream
+    /// (FLAC/seek path) is silenced now, not just the next stream via muteNextStream.
+    func applyMuting() {
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
+    }
+
     /// Restore DSP gain after silent recovery (respects active ReplayGain)
     func restoreDSPGain() {
         guard currentStream != 0 else { return }

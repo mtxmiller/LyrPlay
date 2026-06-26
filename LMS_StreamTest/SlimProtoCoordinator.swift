@@ -7,6 +7,7 @@ import os.log
 #if os(iOS)
 import WebKit
 import MediaPlayer
+import AVFoundation
 #endif
 
 extension Notification.Name {
@@ -505,6 +506,10 @@ class SlimProtoCoordinator: ObservableObject {
     
     // MARK: - Recovery State Management
     private var isRecoveryInProgress = false
+    // Armed during silent (app-open) recovery once the pause command is sent. The unmute
+    // is gated on the real STMp pause confirmation in didPauseStream() rather than a fixed
+    // timer, so DSP gain is only restored after audio has actually stopped flowing.
+    private var awaitingSilentRecoveryUnmute = false
     private let recoveryQueue = DispatchQueue(label: "recovery.queue", qos: .userInitiated)
     
     // MARK: - Playlist-Based Position Recovery (Home Assistant Approach)
@@ -556,6 +561,19 @@ class SlimProtoCoordinator: ObservableObject {
     
     /// Perform playlist jump recovery with context-aware play/pause behavior
     /// - Parameter shouldPlay: If true, starts playing after jump (noplay=0). If false, stays paused (noplay=1)
+    /// Clear the silent-recovery unmute latch and restore DSP gain, always on the main
+    /// queue so the flag access is serialized with the arming and fallback timers (also on
+    /// main). Safe no-op if the latch isn't armed. Call sites (didPauseStream/didStopStream)
+    /// run on the socket queue, so this hop also keeps the BASS gain restore off that thread.
+    private func finishSilentRecoveryIfArmed(reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.awaitingSilentRecoveryUnmute else { return }
+            self.awaitingSilentRecoveryUnmute = false
+            self.audioManager.disableSilentRecoveryMode()
+            os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (%{public}s)", reason)
+        }
+    }
+
     func performPlaylistRecovery(shouldPlay: Bool = true) {
         recoveryQueue.async { [weak self] in
             guard let self = self else { return }
@@ -588,6 +606,7 @@ class SlimProtoCoordinator: ObservableObject {
                 self.isRecoveryInProgress = false
                 // Don't leave audio muted if the jump callback never fires — handlePendingRecovery(.appOpen)
                 // sets the mute flags before this function runs, and only the success callback unmutes.
+                self.awaitingSilentRecoveryUnmute = false
                 self.audioManager.disableSilentRecoveryMode()
             }
         }
@@ -654,13 +673,23 @@ class SlimProtoCoordinator: ObservableObject {
             if !shouldPlay {
                 os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    // Arm the event-gated unmute BEFORE sending pause. didPauseStream() will
+                    // restore volume the moment the STMp pause confirmation lands — i.e. once
+                    // BASS is actually paused. The old fixed +2s timer could fire while the
+                    // stream was still playing (or before the async STRM start landed), which
+                    // is what leaked the intermittent (~10%) blip.
+                    self.awaitingSilentRecoveryUnmute = true
+
                     // Send pause command (channel still muted)
                     self.sendJSONRPCCommand("pause")
 
-                    // Wait longer for pause to complete, THEN restore channel volume
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
+                    // so the engine is never left muted. No-op if didPauseStream already did it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                        guard self.awaitingSilentRecoveryUnmute else { return }
+                        self.awaitingSilentRecoveryUnmute = false
                         self.audioManager.disableSilentRecoveryMode()
-                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (3s after pause)")
+                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (fallback timer)")
                     }
                 }
             }
@@ -697,6 +726,23 @@ class SlimProtoCoordinator: ObservableObject {
             // so a subsequent cold launch can still gate on it.
             UserDefaults.standard.removeObject(forKey: "lyrplay_backgrounded_at")
             backgroundedTime = nil
+
+            #if os(iOS)
+            // CarPlay returns to the car expecting playback to RESUME, not land paused.
+            // The muted "jump → pause" dance fights CarPlay's own autoplay and (when its
+            // fixed-timer mute races the async stream) leaks an audible blip. When CarPlay
+            // is the active output we still need the playlist jump — the server has forgotten
+            // our position after the 300s forget window, so a bare play won't resume — but
+            // with shouldPlay=true: jump and play at the saved position, no mute, no pause.
+            let carPlayConnected = AVAudioSession.sharedInstance().currentOutputs.contains(.carAudio)
+            if carPlayConnected {
+                os_log(.info, log: logger, "🚗 App open recovery: CarPlay connected - resuming (jump + play, no mute/pause)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.performPlaylistRecovery(shouldPlay: true)
+                }
+                return
+            }
+            #endif
 
             os_log(.info, log: logger, "🔇 App open recovery: muted + paused")
             audioManager.enableSilentRecoveryMode()  // Mute before server sends audio
@@ -1187,6 +1233,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         
         // Normal foreground or background pause - let background handler deal with position saving
         audioManager.pause()
+
+        // Event-gated silent-recovery unmute: now that BASS is actually paused (no audio
+        // flowing), it is safe to restore DSP gain. Gating on this real pause confirmation
+        // instead of a fixed timer removes the unmute-vs-playback race behind the blip.
+        finishSilentRecoveryIfArmed(reason: "pause confirmed")
+
         stopPlaybackHeartbeat()
         stopRadioMetadataRefreshTimer()
 
@@ -1232,6 +1284,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "⏹️ Server stop command")
 
         audioManager.stop()
+
+        // If a silent-recovery pause was turned into a STOP by the server, didPauseStream
+        // never fires — clear the latch here too so it can't unmute a later unrelated pause.
+        // (The +3.5s fallback timer would also catch it; this just closes the window sooner.)
+        finishSilentRecoveryIfArmed(reason: "stop")
 
         // CRITICAL: Clear gapless flag - stop command means next track is manual skip, not gapless!
         // If we don't clear this, old buffered audio keeps playing after skip

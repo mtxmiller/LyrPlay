@@ -444,6 +444,11 @@ class AudioManager: NSObject, ObservableObject {
             streamDecoder.applyMuting()
         }
 
+        // Also mute any existing legacy URL stream (FLAC/seek path) immediately. Setting
+        // muteNextStream only covers the NEXT stream, so a currently-playing legacy stream
+        // would otherwise stay audible during the recovery window.
+        audioPlayer.applyMuting()
+
         os_log(.error, log: logger, "[APP-RECOVERY] 🔇 SILENT RECOVERY MODE ENABLED")
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 audioPlayer.muteNextStream = %{public}s", audioPlayer.muteNextStream ? "TRUE" : "FALSE")
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.muteNextStream = %{public}s", streamDecoder.muteNextStream ? "TRUE" : "FALSE")
