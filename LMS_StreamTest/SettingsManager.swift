@@ -195,17 +195,13 @@ class SettingsManager: ObservableObject {
         #endif
     }
 
-    /// Default audio format for first-run users. tvOS gets lossless-first (FLAC →
-    /// flc,ops,ogg,alc,aac,mp3) since Apple TV is wired ethernet and typically
-    /// connected to high-end audio gear. iOS stays on `.compressed` (mp3,aac) as
-    /// the bandwidth-conservative default for mobile.
-    private static let defaultAudioFormat: AudioFormat = {
-        #if os(tvOS)
-        return .flac
-        #else
-        return .compressed
-        #endif
-    }()
+    /// Default audio format for first-run users: lossless-first (FLAC →
+    /// flc,ops,ogg,alc,aac,mp3) on both platforms. FLAC advertises native lossless
+    /// with lossy fallbacks, so the server only transcodes when it actually needs
+    /// to — a fresh install plays lossless instead of silently transcoding
+    /// everything to MP3. Users who want the bandwidth-conservative path can still
+    /// pick `.compressed` (mp3,aac) in Settings → Audio Format.
+    private static let defaultAudioFormat: AudioFormat = .flac
 
     /// Default for `keepScreenAwake`. tvOS defaults to ON because the Apple TV
     /// is a plugged-in living-room display where users expect album art to stay
