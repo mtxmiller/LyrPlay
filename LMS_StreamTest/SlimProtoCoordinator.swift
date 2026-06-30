@@ -876,10 +876,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // IMPROVED FAILOVER: Switch servers if current server keeps failing
         let reconnectionAttempts = connectionManager.getReconnectionAttempts()
 
-        // Try backup server if primary fails once (fast failover, issue #76)
+        // Try backup server if primary fails twice (fast failover, issue #76).
+        // >= 2 (not >= 1) so a single transient blip on a normally-reachable
+        // primary — dropped first SYN, momentary Wi-Fi stall, server mid-restart —
+        // gets one free retry before we abandon it for backup.
         if settings.automaticFailoverEnabled &&
            settings.currentActiveServer == .primary &&
-           reconnectionAttempts >= 1 &&
+           reconnectionAttempts >= 2 &&
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
 
@@ -895,12 +898,13 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             // CRITICAL: Reset reconnection counter when switching servers
             connectionManager.resetReconnectionAttempts()
         }
-        // Try primary server if backup fails once (fast failover)
-        // Guard on non-empty primary host (symmetric with forward branch) — prevents
-        // snapping to an empty/unreachable primary and reconnect-looping.
+        // Try primary server if backup fails twice (fast failover).
+        // Symmetric with the forward branch: >= 2 absorbs one transient backup
+        // blip, and the non-empty primary-host guard prevents snapping to an
+        // empty/unreachable primary and reconnect-looping.
         else if settings.automaticFailoverEnabled &&
                 settings.currentActiveServer == .backup &&
-                reconnectionAttempts >= 1 &&
+                reconnectionAttempts >= 2 &&
                 !settings.serverHost.isEmpty {
 
             os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary (session-only)", reconnectionAttempts)
