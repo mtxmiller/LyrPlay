@@ -17,12 +17,17 @@ import Foundation
 ///                                  else delta>0 → pressUp / delta<0 → pressDown
 ///                                  (coalesced: ≤1 press per 200 ms window)
 ///
-/// Re-center bookkeeping: every `.recenter` the shell performs fires one
-/// KVO event landing ≈0.5. `pendingRecenters` swallows exactly that many
-/// ≈0.5 events; a REAL press that lands exactly on 0.5 (hardware steps are
-/// 0.05 on current devices, so 0.55 → 0.50 is real) classifies normally
-/// once the counter is drained. The counter never exceeds 1 because a
-/// second slider-write to the same value fires no KVO event.
+/// Re-center is LAZY (GH#75 lag fix): it fires only when a press drifts the
+/// slider to the edge of the detectable band (`baselineMin`/`baselineMax`),
+/// not after every press — eager recentering blacked out detection after each
+/// press and dropped the next one. Midrange presses just classify by delta and
+/// leave the slider where it is.
+///
+/// Re-center bookkeeping: each `.recenter` the shell performs fires one event
+/// landing ≈baseline. `pendingRecenters` swallows exactly that one event; a
+/// REAL press that lands on the baseline classifies normally once the counter
+/// is drained. The counter never exceeds 1 because a second slider-write to the
+/// same value fires no event.
 struct VolumeRockerLogic {
 
     enum Action: Equatable {
@@ -135,9 +140,18 @@ struct VolumeRockerLogic {
             actions.append(new > old ? .pressUp : .pressDown)
             lastPressAt = now
         }
-        // One outstanding recenter is enough — writing the target twice fires
-        // no second event, which would strand the counter.
-        if pendingRecenters == 0 {
+        // LAZY RECENTER (GH#75 lag fix). Recentering writes the baseline back to
+        // the slider, and the shell suppresses press detection for the whole
+        // recenter transition (~200 ms, up to ~1.2 s if a press lands mid-write
+        // and wedges it). Doing that after EVERY press created a detection
+        // blackout after every press, dropping the next press — the user had to
+        // space presses out ("press and wait") or double-tap. We only need to
+        // recenter to keep the slider off the rails so a press stays detectable
+        // in both directions. Detection itself runs on per-tick deltas and does
+        // not care where the slider sits, so leave it alone in the midrange and
+        // recenter only once it has drifted to the edge of the detectable band.
+        let nearRail = new <= Self.baselineMin || new >= Self.baselineMax
+        if nearRail && pendingRecenters == 0 {
             actions.append(.recenter)
             pendingRecenters += 1
         }

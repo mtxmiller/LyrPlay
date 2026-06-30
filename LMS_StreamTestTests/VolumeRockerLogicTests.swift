@@ -124,33 +124,55 @@ final class VolumeRockerLogicTests: XCTestCase {
 
     func testVolumeUpClassifiesAsPressUp() {
         var logic = engagedLogic()
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp, .recenter])
+        // Midrange press: classify by delta, NO recenter (lazy recenter).
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp])
+        XCTAssertEqual(logic.pendingRecenters, 0)
     }
 
     func testVolumeDownClassifiesAsPressDown() {
         var logic = engagedLogic()
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.45, at: 1.0), [.pressDown, .recenter])
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.45, at: 1.0), [.pressDown])
+        XCTAssertEqual(logic.pendingRecenters, 0)
     }
 
-    func testRealPressLandingExactlyOnRecenterTarget() {
-        // Spike-verified: hardware steps are 0.05, so 0.55 → 0.50 is a real
-        // down-press. With the counter drained it must classify, not be
-        // swallowed.
+    // MARK: - Lazy recenter (GH#75 lag fix)
+
+    func testMidrangePressesDoNotRecenter() {
+        // The core of the lag fix: repeated midrange presses classify but never
+        // recenter, so there is no post-press detection blackout in the shell.
         var logic = engagedLogic()
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp, .recenter])
-        // Drain the recenter write from that press.
-        XCTAssertEqual(logic.volumeChanged(from: 0.55, to: 0.5, at: 1.05), [])
-        // Now a real press sequence ending exactly on 0.5:
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 2.0), [.pressUp, .recenter])
-        XCTAssertEqual(logic.pendingRecenters, 1)
-        // Down-press fires BEFORE the recenter write lands: 0.55 → 0.50.
-        // Counter swallows it as the recenter echo (documented narrow
-        // limitation), then the real recenter write fires no event (already
-        // 0.5) — counter must not strand.
-        XCTAssertEqual(logic.volumeChanged(from: 0.55, to: 0.5, at: 2.3), [])
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.5625, at: 1.0), [.pressUp])
+        XCTAssertEqual(logic.volumeChanged(from: 0.5625, to: 0.625, at: 1.3), [.pressUp])
+        XCTAssertEqual(logic.volumeChanged(from: 0.625, to: 0.6875, at: 1.6), [.pressUp])
         XCTAssertEqual(logic.pendingRecenters, 0)
-        // Next press classifies normally — detection alive.
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.45, at: 3.0), [.pressDown, .recenter])
+    }
+
+    func testRecenterFiresAtUpperBandEdge() {
+        // A press that drifts the slider to the top of the detectable band
+        // recenters so the next up-press can't pin against the rail undetected.
+        var logic = engagedLogic()
+        XCTAssertEqual(logic.volumeChanged(from: 0.875, to: 0.9375, at: 1.0), [.pressUp, .recenter])
+        XCTAssertEqual(logic.pendingRecenters, 1)
+    }
+
+    func testRecenterFiresAtLowerBandEdge() {
+        var logic = engagedLogic()
+        XCTAssertEqual(logic.volumeChanged(from: 0.125, to: 0.0625, at: 1.0), [.pressDown, .recenter])
+        XCTAssertEqual(logic.pendingRecenters, 1)
+    }
+
+    func testRailRecenterEchoDrainsAndDetectionSurvives() {
+        // After a rail recenter, the baseline write echo drains the counter, and
+        // the next press classifies normally — the counter must not strand
+        // detection.
+        var logic = engagedLogic()
+        XCTAssertEqual(logic.volumeChanged(from: 0.875, to: 0.9375, at: 1.0), [.pressUp, .recenter])
+        XCTAssertEqual(logic.pendingRecenters, 1)
+        // Recenter write echo back to baseline (0.5) is swallowed.
+        XCTAssertEqual(logic.volumeChanged(from: 0.9375, to: 0.5, at: 1.2), [])
+        XCTAssertEqual(logic.pendingRecenters, 0)
+        // Detection alive: a fresh midrange press classifies, no recenter.
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.5625, at: 2.0), [.pressUp])
     }
 
     func testNoChangeEventIsIgnored() {
@@ -167,30 +189,35 @@ final class VolumeRockerLogicTests: XCTestCase {
 
     func testSecondEventInsideWindowIsCoalesced() {
         var logic = engagedLogic()
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp, .recenter])
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp])
         // 100 ms later (Control Center drag / OS-coalesced burst): no press,
-        // and no duplicate recenter while one is outstanding.
+        // and no recenter in the midrange.
         XCTAssertEqual(logic.volumeChanged(from: 0.55, to: 0.6, at: 1.1), [])
-        XCTAssertEqual(logic.pendingRecenters, 1)
+        XCTAssertEqual(logic.pendingRecenters, 0)
     }
 
     func testEventAfterWindowPressesAgain() {
         var logic = engagedLogic()
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp, .recenter])
-        XCTAssertEqual(logic.volumeChanged(from: 0.55, to: 0.5, at: 1.1), [])   // recenter echo drains
-        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.3), [.pressUp, .recenter])
+        XCTAssertEqual(logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0), [.pressUp])
+        // Within the 200 ms window: coalesced away.
+        XCTAssertEqual(logic.volumeChanged(from: 0.55, to: 0.6, at: 1.1), [])
+        // After the window: classifies again, still midrange so no recenter.
+        XCTAssertEqual(logic.volumeChanged(from: 0.6, to: 0.65, at: 1.3), [.pressUp])
+        XCTAssertEqual(logic.pendingRecenters, 0)
     }
 
     // MARK: - Re-center counter bookkeeping
 
     func testCounterNeverExceedsOne() {
         var logic = engagedLogic()
-        _ = logic.volumeChanged(from: 0.5, to: 0.55, at: 1.0)   // press, recenter → 1
-        _ = logic.volumeChanged(from: 0.55, to: 0.6, at: 1.05)  // coalesced, counter stays 1
-        _ = logic.volumeChanged(from: 0.6, to: 0.65, at: 1.1)   // coalesced, counter stays 1
+        // Drift to the upper band edge — recenter fires once, counter → 1.
+        XCTAssertEqual(logic.volumeChanged(from: 0.875, to: 0.9375, at: 1.0), [.pressUp, .recenter])
         XCTAssertEqual(logic.pendingRecenters, 1)
-        // Single recenter write echo drains it fully.
-        XCTAssertEqual(logic.volumeChanged(from: 0.65, to: 0.5, at: 1.2), [])
+        // A coalesced burst still at/over the rail must not stack a second recenter.
+        _ = logic.volumeChanged(from: 0.9375, to: 1.0, at: 1.05)
+        XCTAssertEqual(logic.pendingRecenters, 1)
+        // Single recenter write echo (back to baseline 0.5) drains it fully.
+        XCTAssertEqual(logic.volumeChanged(from: 1.0, to: 0.5, at: 1.2), [])
         XCTAssertEqual(logic.pendingRecenters, 0)
     }
 
@@ -241,9 +268,10 @@ final class VolumeRockerLogicTests: XCTestCase {
         XCTAssertEqual(logic.evaluate(conditions()), [.engage, .recenter])
         XCTAssertEqual(logic.volumeChanged(from: 0.05, to: 0.0625, at: 0, target: 0.0625), [])
         XCTAssertEqual(logic.pendingRecenters, 0)
-        // A real up-press from that baseline still classifies + re-centers.
+        // A real up-press from that low baseline classifies; 0.125 is back
+        // inside the band so no recenter is needed (lazy recenter).
         XCTAssertEqual(logic.volumeChanged(from: 0.0625, to: 0.125, at: 1.0, target: 0.0625),
-                       [.pressUp, .recenter])
+                       [.pressUp])
     }
 
     func testStaleRestoreAcceptsBoundaries() {
