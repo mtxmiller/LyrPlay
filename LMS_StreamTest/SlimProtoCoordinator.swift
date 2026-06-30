@@ -883,8 +883,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
            settings.isBackupServerEnabled &&
            !settings.backupServerHost.isEmpty {
 
-            os_log(.info, log: logger, "🔄 Primary server failed after %d attempts - switching to backup", reconnectionAttempts)
-            settings.switchToBackupServer()
+            os_log(.info, log: logger, "🔄 Primary server failed after %d attempts - switching to backup (session-only)", reconnectionAttempts)
+            settings.failoverToBackupServer()
 
             // Update client with backup server settings
             client.updateServerSettings(
@@ -903,8 +903,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
                 reconnectionAttempts >= 1 &&
                 !settings.serverHost.isEmpty {
 
-            os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary", reconnectionAttempts)
-            settings.switchToPrimaryServer()
+            os_log(.info, log: logger, "🔄 Backup server failed after %d attempts - falling back to primary (session-only)", reconnectionAttempts)
+            settings.failoverToPrimaryServer()
 
             // Update client with primary server settings
             client.updateServerSettings(

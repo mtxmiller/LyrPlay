@@ -383,7 +383,9 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(automaticFailoverEnabled, forKey: Keys.automaticFailoverEnabled)
-        UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
+        // currentActiveServer is persisted explicitly via persistActiveServer() (user-initiated
+        // switches + full reset only), NOT here — so an automatic failover that changes it
+        // in-session is never written to disk and can't overwrite the saved preference. (bd 9iu)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
@@ -677,6 +679,7 @@ class SettingsManager: ObservableObject {
 
         os_log(.info, log: logger, "✅ Reset complete: All server settings cleared, active server reset to primary")
         saveSettings()
+        persistActiveServer()  // saveSettings no longer writes this key — persist the reset explicitly
     }
     
     // MARK: - Computed Properties
@@ -838,15 +841,35 @@ class SettingsManager: ObservableObject {
     }
 
     // MARK: - Server Switching
+    // USER-initiated switches PERSIST the choice — this is the saved server preference.
     func switchToBackupServer() {
         guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
         currentActiveServer = .backup
-        saveSettings()
+        persistActiveServer()
     }
 
     func switchToPrimaryServer() {
         currentActiveServer = .primary
-        saveSettings()
+        persistActiveServer()
+    }
+
+    // Automatic-failover switches are SESSION-ONLY: they redirect the live connection (and
+    // the WebView, via the @Published change) but do NOT persist, so a transient connect
+    // failure to the chosen server can't overwrite the user's saved preference. The next
+    // launch starts from the manually-selected server. (bd LMS_StreamTest-9iu)
+    func failoverToBackupServer() {
+        guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
+        currentActiveServer = .backup
+    }
+
+    func failoverToPrimaryServer() {
+        currentActiveServer = .primary
+    }
+
+    /// Persist ONLY the active-server choice. Called by user-initiated switches and the
+    /// full-reset path — never by automatic failover, so failover stays session-only.
+    private func persistActiveServer() {
+        UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
     }
 
     func switchToOtherServer() {

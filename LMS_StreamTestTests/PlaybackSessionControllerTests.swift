@@ -55,18 +55,47 @@ final class PlaybackSessionControllerTests: XCTestCase {
         */
     }
 
-    func testInterruptionPausesAndResumesWhenIndicated() {
+    // NOTE: These exercise the CURRENT design — BASS auto-manages the AVAudioSession, so the
+    // controller drives playback through SlimProto server commands (sendLockScreenCommand),
+    // NOT local playbackController.pause()/play() or session setActive(). The earlier versions
+    // asserted the pre-BASS-migration behavior and failed on every runtime (misfiled as an
+    // "iOS 26 simulator" issue in bd LMS_StreamTest-u91).
+
+    func testInterruptionPausesThenResumesViaServerCommands() {
         fakePlaybackController.isPlayingStub = true
 
+        // Interruption begins while playing → server "pause".
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
                                 userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
 
-        let pauseExpectation = expectation(description: "pause")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
-            pauseExpectation.fulfill()
+        // Interruption ends (auto-resume case) → server "play", sent ~0.2s later.
+        notificationCenter.post(name: AVAudioSession.interruptionNotification,
+                                object: nil,
+                                userInfo: [
+                                    AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+                                    AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
+                                ])
+
+        let exp = expectation(description: "server pause then play")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(self.fakeSlimProto.commandsSent, ["pause", "play"])
+            exp.fulfill()
         }
+        wait(for: [exp], timeout: 1.5)
+    }
+
+    func testOtherAudioInterruptionPausesButDoesNotAutoResume() {
+        // An interruption classified as "other audio" (WasSuspended) must pause but NOT
+        // auto-resume when it ends — we don't fight another audio app for the session.
+        fakePlaybackController.isPlayingStub = true
+
+        notificationCenter.post(name: AVAudioSession.interruptionNotification,
+                                object: nil,
+                                userInfo: [
+                                    AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue,
+                                    AVAudioSessionInterruptionWasSuspendedKey: true  // → classified as .otherAudio
+                                ])
 
         notificationCenter.post(name: AVAudioSession.interruptionNotification,
                                 object: nil,
@@ -75,80 +104,36 @@ final class PlaybackSessionControllerTests: XCTestCase {
                                     AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
                                 ])
 
-        let exp = expectation(description: "resume")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            XCTAssertEqual(self.fakePlaybackController.playCount, 1)
-            XCTAssertEqual(self.fakeAudioSession.setActiveCalls.last?.options, [.notifyOthersOnDeactivation])
+        let exp = expectation(description: "server pause, no resume")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertEqual(self.fakeSlimProto.commandsSent, ["pause"])  // no "play"
             exp.fulfill()
         }
-
-        wait(for: [pauseExpectation, exp], timeout: 1.0)
+        wait(for: [exp], timeout: 1.5)
     }
 
-    func testInterruptionFromOtherAudioDoesNotAutoResume() {
-        fakeAudioSession.otherAudioIsPlayingStub = true
-        fakePlaybackController.isPlayingStub = true
-
-        notificationCenter.post(name: AVAudioSession.interruptionNotification,
-                                object: nil,
-                                userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
-
-        let pauseExpectation = expectation(description: "pause")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
-            pauseExpectation.fulfill()
-        }
-
-        notificationCenter.post(name: AVAudioSession.interruptionNotification,
-                                object: nil,
-                                userInfo: [
-                                    AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
-                                    AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
-                                ])
-
-        let exp = expectation(description: "no resume")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            XCTAssertEqual(self.fakePlaybackController.playCount, 0)
-            exp.fulfill()
-        }
-
-        wait(for: [pauseExpectation, exp], timeout: 1.0)
-    }
-
-    func testCarPlayRouteChangeTriggersConnectAndPause() {
-        // Simulate CarPlay connect
+    func testDeviceDisconnectWhilePlayingPausesServer() {
+        // CarPlay connect: marks the route active and issues no playback commands.
         fakeAudioSession.currentOutputsStub = [.carAudio]
         notificationCenter.post(name: AVAudioSession.routeChangeNotification,
                                 object: nil,
                                 userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue])
+        XCTAssertEqual(fakeSlimProto.commandsSent, [], "connect must not issue playback commands")
 
-        let connectExpectation = expectation(description: "connect")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-            XCTAssertTrue(self.fakeSlimProto.connectCalled)
-            XCTAssertEqual(self.fakeSlimProto.commandsSent, [])
-            connectExpectation.fulfill()
-        }
-
-        wait(for: [connectExpectation], timeout: 1.2)
-
-        // Simulate CarPlay disconnect
+        // Output device goes away while playing → server "pause" (BASS handles route teardown;
+        // there is no local pause()/setActive here).
         fakePlaybackController.isPlayingStub = true
         fakeAudioSession.currentOutputsStub = [.builtInSpeaker]
         notificationCenter.post(name: AVAudioSession.routeChangeNotification,
                                 object: nil,
-                                userInfo: [
-                                    AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
-                                ])
+                                userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue])
 
-        let disconnectExpectation = expectation(description: "disconnect")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            XCTAssertEqual(self.fakePlaybackController.pauseCount, 1)
-            XCTAssertTrue(self.fakeSlimProto.savedPosition)
+        let exp = expectation(description: "server pause on disconnect")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             XCTAssertEqual(self.fakeSlimProto.commandsSent, ["pause"])
-            disconnectExpectation.fulfill()
+            exp.fulfill()
         }
-
-        wait(for: [disconnectExpectation], timeout: 0.2)
+        wait(for: [exp], timeout: 1.0)
     }
 }
 

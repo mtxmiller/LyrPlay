@@ -43,7 +43,7 @@ xcodebuild test -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest \
   -only-testing:LMS_StreamTestTests
 ```
 
-Known-failing on simulator: 3 `PlaybackSessionControllerTests` interruption/route-change tests fail on the iOS 26 runtime (bd `LMS_StreamTest-u91`); don't attribute them to your change — but confirm your change didn't add NEW failures.
+The full iOS unit suite passes. (The 3 `PlaybackSessionControllerTests` interruption/route-change tests that used to fail were stale assertions of pre-BASS-migration behavior — local pause/play + manual `setActive` — not an iOS 26 issue; rewritten to assert the current server-command behavior. bd `LMS_StreamTest-u91`, closed.) If unit tests fail, investigate — don't pre-attribute to a known-failing list.
 
 Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) must be verified on **both** platforms.
 
