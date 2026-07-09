@@ -9,6 +9,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     var interfaceController: CPInterfaceController?
     private var browseTemplate: CPListTemplate?
 
+    /// CarPlay caps the navigation stack at 5 templates. Favorites folder
+    /// drill-down refuses to push once `templates.count` reaches this.
+    private static let maxTemplateDepth = 5
+
     // Cached data for fast template updates
     private var cachedNewMusic: [Album] = []
     private var cachedRandomReleases: [Album] = []
@@ -844,6 +848,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     // MARK: - Artwork Loading
 
+    /// Shared image fetch core: 3s timeout + optional HTTP Basic auth header.
+    /// Callers build the URL (coverID thumbnail via `loadArtwork`, favorite icon
+    /// via `favoriteArtworkURL`, …). BASS callbacks aside, this runs on a
+    /// URLSession queue; callers marshal `completion` to main as needed.
+    private func fetchImage(url: URL, completion: @escaping (UIImage?) -> Void) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3.0
+
+        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
+        if let authHeader = SettingsManager.shared.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data = data, let image = UIImage(data: data) {
+                completion(image)
+            } else {
+                completion(nil)
+            }
+        }.resume()
+    }
+
     private func loadArtwork(coverID: String?, completion: @escaping (UIImage?) -> Void) {
         guard let coverID = coverID, !coverID.isEmpty else {
             completion(nil)
@@ -859,22 +885,44 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        // Create request with 3s timeout (matches other CarPlay artwork loading)
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3.0
+        fetchImage(url: url, completion: completion)
+    }
 
-        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
-        if let authHeader = settings.generateAuthHeader() {
-            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+    /// Resolve a favorite's `icon`/`image` string into a loadable artwork URL.
+    /// Pure + unit-tested (`CarPlayArtworkTests`). iOS/CarPlay twin of tvOS
+    /// `LMSArtworkURL.favoriteIcon` — kept separate on purpose: auth differs
+    /// (header here vs URL-embedded credentials on tvOS) and CarPlay force-requests
+    /// a 200x200 thumbnail for local `/music/<id>` covers. Handles the three shapes
+    /// LMS returns (verified on 192.168.1.8):
+    ///   1. absolute "http(s)://…"           -> used as-is
+    ///   2. server-relative "/imageproxy/…"  -> host+port + path
+    ///   3. relative "music/<id>/cover.png"  -> host+port + "/" + path
+    /// For local `music/<id>/cover.*` art, rewrite to the `cover_200x200_o.*`
+    /// thumbnail variant. `/imageproxy/` and plugin icons pass through unresized
+    /// (server sends them small). Returns nil for nil/empty.
+    static func favoriteArtworkURL(from icon: String?, host: String, port: Int) -> URL? {
+        guard let raw = icon, !raw.isEmpty else { return nil }
+
+        // Absolute URL — use verbatim.
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            return URL(string: raw)
         }
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let data = data, let image = UIImage(data: data) {
-                completion(image)
-            } else {
-                completion(nil)
-            }
-        }.resume()
+        // Rewrite full-res local cover art to a CarPlay-sized thumbnail:
+        //   music/<id>/cover.png -> music/<id>/cover_200x200_o.png
+        var path = raw
+        if (path.hasPrefix("music/") || path.hasPrefix("/music/")),
+           !path.contains("_200x200_"),
+           let coverDot = path.range(of: "/cover.") {
+            path.replaceSubrange(coverDot, with: "/cover_200x200_o.")
+        }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        components.path = path.hasPrefix("/") ? path : "/" + path
+        return components.url
     }
 
     private func loadArtworkForTracks(_ tracks: [PlaylistTrack], completion: @escaping ([String: UIImage]) -> Void) {
@@ -932,17 +980,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// Do NOT pass "feedMode:1": it switches the response to OPML shape
     /// (result.items, no per-item id) which breaks tap-to-play. Without it LMS
     /// returns result.loop_loop with proper id values usable as item_id:N.
-    private func fetchFavorites(completion: @escaping ([FavoriteItem]) -> Void) {
+    private func fetchFavorites(itemID: String? = nil, completion: @escaping ([FavoriteItem]) -> Void) {
         guard let coordinator = AudioManager.shared.slimClient else {
             os_log(.error, log: logger, "❌ No coordinator available for favorites")
             completion([])
             return
         }
 
+        // Top level passes no item_id; a folder drill appends item_id:<id> to
+        // fetch that folder's children (verified on 192.168.1.8: dotted child ids).
+        var favoritesQuery: [Any] = ["favorites", "items", 0, 100, "want_url:1"]
+        if let itemID = itemID {
+            favoritesQuery.append("item_id:\(itemID)")
+        }
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["favorites", "items", 0, 100, "want_url:1"]]
+            "params": ["", favoritesQuery]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -966,9 +1020,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    private func displayFavorites(_ favorites: [FavoriteItem]) {
-        // Empty / folder-only list: show an explicit row, not a blank template.
-        // (A favorites list that is entirely folders parses to [] today.)
+    /// Render one level of favorites. `title` is "Favorites" at the top level,
+    /// or the folder name when drilling. Folders get a disclosure chevron and
+    /// drill; everything else plays on tap. Artwork loads async and fills rows
+    /// in after the push (capped — see below).
+    private func displayFavorites(_ favorites: [FavoriteItem], title: String = "Favorites") {
+        // Empty list: show an explicit row, not a blank template.
         guard !favorites.isEmpty else {
             let emptyItem = CPListItem(
                 text: "No favorites",
@@ -977,25 +1034,32 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 accessoryImage: nil,
                 accessoryType: .none
             )
-            let template = CPListTemplate(title: "Favorites", sections: [CPListSection(items: [emptyItem])])
+            let template = CPListTemplate(title: title, sections: [CPListSection(items: [emptyItem])])
             interfaceController?.pushTemplate(template, animated: true)
-            os_log(.info, log: logger, "⭐ Favorites empty — showed placeholder")
+            os_log(.info, log: logger, "⭐ Favorites empty — showed placeholder (%{public}s)", title)
             return
         }
 
-        // Clamp to the vehicle's item limit (same guard as the artist index).
-        let clamped = Array(favorites.prefix(CPListTemplate.maximumItemCount))
+        // Folders first, then everything else in insertion order (stable within
+        // each group). CarPlay truncates long lists — more aggressively while
+        // driving — and folders are the newest favorites (last in insertion
+        // order), so without this they fall off the bottom first.
+        let ordered = favorites.filter { $0.isFolder } + favorites.filter { !$0.isFolder }
 
+        // Clamp to the vehicle's item limit (same guard as the artist index).
+        let clamped = Array(ordered.prefix(CPListTemplate.maximumItemCount))
+
+        let placeholder = createMusicPlaceholderImage()
         var favoriteItems: [CPListItem] = []
         for favorite in clamped {
             let item = CPListItem(
                 text: favorite.name,
-                detailText: nil,
-                image: nil,
+                detailText: favorite.isFolder ? "Folder" : nil,
+                image: placeholder,
                 accessoryImage: nil,
-                accessoryType: .none
+                accessoryType: favorite.isFolder ? .disclosureIndicator : .none
             )
-            item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            item.handler = { [weak self] (_: CPSelectableListItem, completion: @escaping () -> Void) in
                 self?.handleFavoriteSelection(favorite)
                 completion()
             }
@@ -1003,14 +1067,40 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let favoritesTemplate = CPListTemplate(
-            title: "Favorites",
+            title: title,
             sections: [CPListSection(items: favoriteItems)]
         )
         interfaceController?.pushTemplate(favoritesTemplate, animated: true)
-        os_log(.info, log: logger, "✅ Displayed %d favorites", favoriteItems.count)
+        os_log(.info, log: logger, "✅ Displayed %d favorites (%{public}s)", favoriteItems.count, title)
+
+        // Load artwork async and fill each row in as it arrives (CPListItem.setImage
+        // updates a row already on-screen). CarPlay has no lazy-load-on-scroll, so
+        // cap at the first 16 rows to bound concurrent fetches (matches
+        // loadArtworkForTracks). Rows beyond 16 keep the placeholder.
+        let settings = SettingsManager.shared
+        for (index, favorite) in clamped.prefix(16).enumerated() {
+            guard let url = CarPlaySceneDelegate.favoriteArtworkURL(
+                from: favorite.icon,
+                host: settings.activeServerHost,
+                port: settings.activeServerWebPort
+            ) else { continue }
+            fetchImage(url: url) { image in
+                guard let image = image else { return }
+                DispatchQueue.main.async {
+                    favoriteItems[index].setImage(image)
+                }
+            }
+        }
     }
 
     private func handleFavoriteSelection(_ favorite: FavoriteItem) {
+        // Folders drill; everything else (albums, tracks, radio, podcast
+        // episodes — anything isAudio or url-bearing) plays on tap.
+        if favorite.isFolder {
+            drillIntoFolder(favorite)
+            return
+        }
+
         os_log(.info, log: logger, "▶️ Play favorite: %{public}s", favorite.name)
 
         guard let coordinator = AudioManager.shared.slimClient else {
@@ -1030,6 +1120,35 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { _ in }
 
         pushNowPlayingTemplate()
+    }
+
+    /// Drill into a favorites FOLDER (hasitems, non-audio) by fetching its
+    /// children and pushing a new list. Guards CarPlay's 5-template navigation
+    /// cap: `interfaceController.templates.count` is the WHOLE stack (root=1,
+    /// Favorites=2, …), so refuse the push once it would exceed the cap and show
+    /// an honest row instead — there is no in-app deep-link to a nested favorite
+    /// (the app UI is a Material WebView).
+    private func drillIntoFolder(_ folder: FavoriteItem) {
+        os_log(.info, log: logger, "📂 Drill into favorites folder: %{public}s", folder.name)
+
+        let stackDepth = interfaceController?.templates.count ?? 0
+        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
+            let tooDeep = CPListItem(
+                text: "Can’t go deeper here",
+                detailText: "Open this folder in the LyrPlay app",
+                image: nil,
+                accessoryImage: nil,
+                accessoryType: .none
+            )
+            let template = CPListTemplate(title: folder.name, sections: [CPListSection(items: [tooDeep])])
+            interfaceController?.pushTemplate(template, animated: true)
+            os_log(.info, log: logger, "⛔ Favorites folder too deep for CarPlay (%d templates)", stackDepth)
+            return
+        }
+
+        fetchFavorites(itemID: folder.id) { [weak self] items in
+            self?.displayFavorites(items, title: folder.name)
+        }
     }
 
     // MARK: - Error Handling
@@ -1310,10 +1429,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             items.append(randomRow)
         }
 
-        // Favorites (GH#92) — user's starred list, placed under Random Releases.
-        // Drills into a list of top-level playable favorites; folder items
-        // (hasitems:1) are skipped by FavoriteItem.parseLoop — recursive folder
-        // drill is the fast-follow tracked in bd LMS_StreamTest-n12.
+        // Favorites (GH#92, k63) — user's starred list, placed under Random
+        // Releases. Drills into playable favorites; folder items (hasitems &&
+        // !isAudio) drill recursively into their children (guarded by CarPlay's
+        // template-depth cap). Album browse-then-play is out of scope by design.
         let favoritesItem = CPListItem(
             text: "★ Favorites",
             detailText: "Your saved favorites",

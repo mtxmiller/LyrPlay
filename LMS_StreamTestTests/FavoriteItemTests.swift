@@ -28,15 +28,18 @@ final class FavoriteItemTests: XCTestCase {
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[0].id, "stream:1")
         XCTAssertEqual(items[0].name, "BBC Radio 3")
-        XCTAssertEqual(items[0].url, "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_three")
         XCTAssertEqual(items[0].icon, "/imageproxy/bbc-radio-3.png", "uses 'image' key when present")
         XCTAssertEqual(items[0].type, "audio")
         XCTAssertTrue(items[0].isAudio)
+        XCTAssertFalse(items[0].isFolder, "playable audio is not a folder")
         XCTAssertEqual(items[1].id, "42", "numeric id coerced to String")
         XCTAssertEqual(items[1].icon, "/music/12345/cover.jpg", "falls back to 'icon' key when 'image' missing")
+        XCTAssertFalse(items[1].isFolder)
     }
 
-    func testParseLoopFiltersFolderItems() {
+    // REGRESSION (k63): folders were dropped in v1; they are now RETAINED and
+    // flagged isFolder so CarPlay can drill. Consumers that can't drill filter.
+    func testParseLoopRetainsFoldersAndFlagsThem() {
         let raw: [[String: Any]] = [
             [
                 "id": "track-1",
@@ -47,13 +50,13 @@ final class FavoriteItemTests: XCTestCase {
             [
                 "id": "folder-1",
                 "name": "Spotty",
-                "hasitems": 1  // folder item — must be filtered
+                "hasitems": 1  // folder — retained, isFolder true
             ],
             [
                 "id": "folder-2",
                 "name": "BBC Sounds",
-                "url": "",        // empty url + hasitems
-                "hasitems": "1"   // String shape
+                "url": "",        // empty url + hasitems, String shape
+                "hasitems": "1"
             ],
             [
                 "id": "track-2",
@@ -65,33 +68,65 @@ final class FavoriteItemTests: XCTestCase {
 
         let items = FavoriteItem.parseLoop(raw)
 
-        XCTAssertEqual(items.count, 2, "folder items (hasitems=1) are dropped in v1 — see LMS_StreamTest-5bs for v2 drill-down")
-        XCTAssertEqual(items[0].name, "Playable Track")
-        XCTAssertEqual(items[1].name, "Another Playable")
+        XCTAssertEqual(items.count, 4, "folders are retained now, not dropped")
+        XCTAssertEqual(items.map(\.name), ["Playable Track", "Spotty", "BBC Sounds", "Another Playable"])
+        XCTAssertEqual(items.filter(\.isFolder).map(\.name), ["Spotty", "BBC Sounds"], "hasitems items flagged as folders")
+        XCTAssertFalse(items[0].isFolder)
+        XCTAssertFalse(items[3].isFolder)
     }
 
-    func testParseLoopFiltersMissingOrEmptyUrl() {
+    // Verified on 192.168.1.8: podcast/OPML episodes come back hasitems:1 AND
+    // isaudio:1 with no url. Those are PLAYABLE leaves, not folders — classifying
+    // on hasitems alone would make every episode drill instead of play.
+    func testPodcastEpisodeIsPlayableNotFolder() {
         let raw: [[String: Any]] = [
             [
-                "id": "1",
-                "name": "Has URL",
-                "url": "http://example.com/stream"
-            ],
-            [
-                "id": "2",
-                "name": "Empty URL"
-                // url field missing entirely
-            ],
-            [
-                "id": "3",
-                "name": "Empty String URL",
-                "url": ""
+                "id": "7208d7a2.0.0",
+                "name": "Episode 5489",
+                "hasitems": 1,
+                "isaudio": 1
+                // no url
             ]
         ]
 
         let items = FavoriteItem.parseLoop(raw)
 
-        XCTAssertEqual(items.count, 1, "items without a non-empty playable URL are dropped")
+        XCTAssertEqual(items.count, 1, "audio-with-hasitems episode is kept via the isAudio gate")
+        XCTAssertTrue(items[0].isAudio)
+        XCTAssertFalse(items[0].isFolder, "hasitems AND isaudio -> playable leaf, not a folder")
+    }
+
+    // A real LMS folder can carry a url (verified: listen.warroom.org/feed.xml).
+    // isFolder must derive from hasitems && !isAudio, NOT from url absence.
+    func testFolderWithUrlIsStillFolder() {
+        let raw: [[String: Any]] = [
+            [
+                "id": "7208d7a2.0",
+                "name": "Bannon's War Room",
+                "type": "link",
+                "hasitems": 1,
+                "isaudio": 0,
+                "url": "https://listen.warroom.org/feed.xml"
+            ]
+        ]
+
+        let items = FavoriteItem.parseLoop(raw)
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertTrue(items[0].isFolder, "hasitems && !isAudio -> folder even though it has a url")
+    }
+
+    // Keep-gate: hasitems OR isAudio OR non-empty url. A url-less, non-audio,
+    // non-folder row (e.g. type:text separator) is dropped.
+    func testUrlLessNonAudioNonFolderIsDropped() {
+        let raw: [[String: Any]] = [
+            ["id": "sep-1", "name": "— separator —", "type": "text"],
+            ["id": "ok-1", "name": "Has URL", "url": "http://example.com/stream"]
+        ]
+
+        let items = FavoriteItem.parseLoop(raw)
+
+        XCTAssertEqual(items.count, 1, "text/url-less non-audio non-folder rows are dropped")
         XCTAssertEqual(items[0].name, "Has URL")
     }
 

@@ -103,7 +103,9 @@ struct FavoritesView: View {
                     return
                 }
                 if let loop = result["loop_loop"] as? [[String: Any]] {
-                    items = FavoriteItem.parseLoop(loop)
+                    // parseLoop now retains folders; tvOS has no drill-down yet
+                    // (LMS_StreamTest-5bs), so hide them here.
+                    items = FavoriteItem.parseLoop(loop).filter { !$0.isFolder }
                 } else {
                     items = []
                 }

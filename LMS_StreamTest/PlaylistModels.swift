@@ -375,36 +375,47 @@ extension Album {
 // MARK: - Favorite Item Data Model
 
 /// Single item from LMS `["favorites", "items"]` JSON-RPC.
-/// Used by the tvOS Library tab's Favorites sub-view. v1 renders only items
-/// with playable URLs; folder items (`hasitems == 1`) are filtered out by `parseLoop`.
-/// See `LMS_StreamTest-5bs` for the v2 hierarchical-folder follow-up.
+/// `parseLoop` RETAINS folder items and flags them via `isFolder`; each consumer
+/// decides what to do with them. CarPlay drills into folders; tvOS surfaces that
+/// can't drill (FavoritesView, LibraryView, the Radios shelf) must
+/// `.filter { !$0.isFolder }`. See `LMS_StreamTest-5bs` for the tvOS drill-down.
 struct FavoriteItem: Identifiable {
     let id: String
     let name: String
-    let url: String
     let icon: String?     // image / cover / icon URL — may be relative server path or absolute
     let type: String?     // "audio", "playlist", "link", etc.
     let isAudio: Bool
+    /// Drillable container (LMS `hasitems == 1` that is NOT itself audio).
+    /// Podcast/OPML episodes come back as `hasitems:1` AND `isaudio:1` — those
+    /// are PLAYABLE leaves, not folders (verified on 192.168.1.8), so `isFolder`
+    /// requires `hasitems && !isAudio`.
+    let isFolder: Bool
 }
 
 extension FavoriteItem {
     private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "FavoriteItem")
 
-    /// Parses a `loop_loop` array from `["favorites", "items"], ["want_url:1", "feedMode:1"]`.
-    /// Filters: keeps only items with a non-empty `url` AND `hasitems != 1`.
-    /// Folder items (radio aggregators, plugin sub-trees) are skipped in v1 — see `LMS_StreamTest-5bs`.
+    /// Parses a `loop_loop` array from `["favorites", "items"]`.
+    /// Keep-gate: an item survives if it is a folder (`hasitems==1`), is audio
+    /// (`isaudio==1`), or carries a non-empty `url` — which drops `type:text`
+    /// separators and other url-less non-playables. Folders are RETAINED and
+    /// flagged `isFolder` (callers that can't drill must filter them);
+    /// `isFolder = hasitems==1 && !isAudio`. `url` is read only as a keep-gate,
+    /// never stored — no consumer plays by url (all dispatch on `id`).
     static func parseLoop(_ data: [[String: Any]]) -> [FavoriteItem] {
         return data.compactMap { itemData -> FavoriteItem? in
-            // Skip folder items (LMS marks them with hasitems:1).
-            // Match both Int and String shapes — LMS is inconsistent across endpoints.
-            let hasItemsInt = itemData["hasitems"] as? Int
-            let hasItemsStr = itemData["hasitems"] as? String
-            if hasItemsInt == 1 || hasItemsStr == "1" {
-                return nil
-            }
+            // hasitems / isaudio arrive as Int OR String — LMS is inconsistent
+            // across endpoints, so match both shapes.
+            let hasItems = (itemData["hasitems"] as? Int == 1)
+                || (itemData["hasitems"] as? String == "1")
+            let isAudio = (itemData["isaudio"] as? Int == 1)
+                || (itemData["isaudio"] as? String == "1")
 
-            // Require a non-empty playable URL.
-            guard let url = itemData["url"] as? String, !url.isEmpty else {
+            // Keep-gate: drillable folder, playable audio item, or anything with
+            // a non-empty playable URL. Everything else is dropped.
+            let url = itemData["url"] as? String
+            let hasURL = !(url ?? "").isEmpty
+            guard hasItems || isAudio || hasURL else {
                 return nil
             }
 
@@ -432,23 +443,17 @@ extension FavoriteItem {
 
             let type = itemData["type"] as? String
 
-            // isaudio is 0/1 Int (LMS pattern); accept String form too.
-            let isAudio: Bool
-            if let n = itemData["isaudio"] as? Int {
-                isAudio = (n == 1)
-            } else if let s = itemData["isaudio"] as? String {
-                isAudio = (s == "1")
-            } else {
-                isAudio = false
-            }
+            // Folder = a container we can drill. A hasitems item that is ALSO
+            // audio (podcast/OPML episode) is a playable leaf, NOT a folder.
+            let isFolder = hasItems && !isAudio
 
             return FavoriteItem(
                 id: id,
                 name: name,
-                url: url,
                 icon: icon,
                 type: type,
-                isAudio: isAudio
+                isAudio: isAudio,
+                isFolder: isFolder
             )
         }
     }
@@ -600,7 +605,9 @@ extension HomeExtraResponse {
         // raw URL instead of the favorites item_id command.
         if let loop = result["material_home_radios_loop"] as? [[String: Any]], !loop.isEmpty {
             let withIds = synthesizeIdFromUrl(loop)
-            let radios = FavoriteItem.parseLoop(withIds)
+            // parseLoop now retains folders; the Radios shelf plays by url/id and
+            // can't drill, so hide any folder items.
+            let radios = FavoriteItem.parseLoop(withIds).filter { !$0.isFolder }
             if !radios.isEmpty {
                 sections.append(HomeExtraSection(id: "radios", title: "Radios", items: .favorites(radios)))
             }

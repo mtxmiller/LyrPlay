@@ -276,7 +276,8 @@ final class HomeExtraResponseTests: XCTestCase {
             XCTAssertEqual(radios[0].id, "https://listen.warroom.org/feed.xml",
                            "synthesized id IS the url — HomeExtraShelf uses it as the play-URL payload")
             XCTAssertEqual(radios[0].name, "Bannon`s War Room")
-            XCTAssertEqual(radios[0].url, "https://listen.warroom.org/feed.xml")
+            // (url is no longer stored on FavoriteItem — the synthesized id above IS the url)
+            XCTAssertFalse(radios[0].isFolder, "radios are playable, not folders")
             XCTAssertEqual(radios[1].id, "http://stream.example/fip.mp3")
         } else {
             XCTFail("expected favorites payload (radios reuse that case)")

@@ -290,7 +290,9 @@ struct LibraryView: View {
               let loop = result["loop_loop"] as? [[String: Any]] else {
             return nil
         }
-        let favs = FavoriteItem.parseLoop(loop)
+        // parseLoop now retains folders; the Library favorites shelf can't drill
+        // (LMS_StreamTest-5bs), so hide them here.
+        let favs = FavoriteItem.parseLoop(loop).filter { !$0.isFolder }
         guard !favs.isEmpty else { return nil }
         return HomeExtraSection(id: "favorites", title: "Favorites", items: .favorites(favs))
     }
