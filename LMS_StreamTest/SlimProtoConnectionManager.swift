@@ -55,7 +55,7 @@ class SlimProtoConnectionManager {
     
     
     // MARK: - Health Monitoring
-    private var healthCheckTimer: Timer?
+    private var healthCheckTimer: DispatchSourceTimer?
     private var lastHeartbeatResponse: Date?
     private let heartbeatTimeout: TimeInterval = 30.0
     
@@ -379,15 +379,22 @@ class SlimProtoConnectionManager {
     private func startHealthMonitoring(interval: TimeInterval = 15.0) {
         stopHealthMonitoring()
         
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        // DispatchSourceTimer, not Timer — this runs from didConnect() on the
+        // socket delegate queue, which has no RunLoop for a Timer to fire on
+        // (same bug class scheduleReconnection already fixed).
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
             self?.performHealthCheck()
         }
-        
+        timer.resume()
+        healthCheckTimer = timer
+
         os_log(.info, log: logger, "💓 Health monitoring started (%.0f sec intervals)", interval)
     }
-    
+
     private func stopHealthMonitoring() {
-        healthCheckTimer?.invalidate()
+        healthCheckTimer?.cancel()
         healthCheckTimer = nil
     }
     
