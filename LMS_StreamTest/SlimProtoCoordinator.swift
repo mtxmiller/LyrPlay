@@ -1470,9 +1470,9 @@ extension SlimProtoCoordinator {
     /// This is the player's local timer that gets synchronized with server
     private func gettime_ms() -> UInt32 {
         // Use system uptime in milliseconds (monotonic, doesn't change with clock adjustments)
-        let uptimeSeconds = ProcessInfo.processInfo.systemUptime
-        let uptimeMilliseconds = UInt32(uptimeSeconds * 1000)
-        return uptimeMilliseconds
+        // Wraps at UInt32.max (~49.7 days uptime) like squeezelite's gettime_ms —
+        // trackJiffiesEpoch re-syncs the epoch after a wrap
+        return SlimProtoClient.jiffies(uptimeSeconds: ProcessInfo.processInfo.systemUptime)
     }
 
     // MARK: - Sync Group Persistence

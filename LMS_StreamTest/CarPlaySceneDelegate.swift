@@ -9,8 +9,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     var interfaceController: CPInterfaceController?
     private var browseTemplate: CPListTemplate?
 
-    /// CarPlay caps the navigation stack at 5 templates. Favorites folder
-    /// drill-down refuses to push once `templates.count` reaches this.
+    /// CarPlay caps the navigation stack at 5 templates. Pushing past the cap
+    /// raises NSException (clientExceededHierarchyDepthLimit) and crashes, so
+    /// every push must go through pushTemplateSafely().
     private static let maxTemplateDepth = 5
 
     // Cached data for fast template updates
@@ -235,7 +236,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         interfaceController.popToRootTemplate(animated: false) { [weak self] success, error in
             guard let self = self else { return }
 
-            interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
+            self.pushTemplateSafely(nowPlayingTemplate, animated: true) { success, error in
                 if let error = error {
                     os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
                 } else if success {
@@ -245,6 +246,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     self.resyncNowPlayingButtons()
                 }
             }
+        }
+    }
+
+    /// Push a template only when CarPlay's 5-template stack cap allows it.
+    /// Exceeding the cap raises NSException in CPInterfaceController
+    /// (clientExceededHierarchyDepthLimit) and crashes the app — refuse and
+    /// log instead. All pushTemplate calls must go through here.
+    private func pushTemplateSafely(_ template: CPTemplate, animated: Bool,
+                                    completion: ((Bool, Error?) -> Void)? = nil) {
+        guard let interfaceController = interfaceController else {
+            os_log(.error, log: logger, "❌ Cannot push template - no interface controller")
+            completion?(false, nil)
+            return
+        }
+        let stackDepth = interfaceController.templates.count
+        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
+            os_log(.error, log: logger, "⛔ Refusing template push — CarPlay stack at cap (%d)", stackDepth)
+            completion?(false, nil)
+            return
+        }
+        interfaceController.pushTemplate(template, animated: animated) { success, error in
+            completion?(success, error)
         }
     }
 
@@ -320,7 +343,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             sections: [CPListSection(items: playlistItems)]
         )
 
-        interfaceController?.pushTemplate(playlistsTemplate, animated: true)
+        pushTemplateSafely(playlistsTemplate, animated: true)
         os_log(.info, log: logger, "✅ Displayed %d playlists", playlistItems.count)
     }
     
@@ -467,7 +490,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: trackItems)]
             )
 
-            self.interfaceController?.pushTemplate(tracksTemplate, animated: true)
+            self.pushTemplateSafely(tracksTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d tracks for playlist %{public}s", trackItems.count - 1, playlist.name)
         }
     }
@@ -648,8 +671,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 self.interfaceController?.popToRootTemplate(animated: false) { [weak self] _, _ in
                     guard let self = self else { return }
                     let nowPlaying = CPNowPlayingTemplate.shared
-                    self.interfaceController?.pushTemplate(nowPlaying, animated: false) { _, _ in
-                        self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                    self.pushTemplateSafely(nowPlaying, animated: false) { _, _ in
+                        self.pushTemplateSafely(upNextTemplate, animated: true)
                     }
                 }
                 os_log(.info, log: self.logger, "✅ Displayed Up Next queue with %d tracks", queueItems.count)
@@ -1035,7 +1058,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 accessoryType: .none
             )
             let template = CPListTemplate(title: title, sections: [CPListSection(items: [emptyItem])])
-            interfaceController?.pushTemplate(template, animated: true)
+            pushTemplateSafely(template, animated: true)
             os_log(.info, log: logger, "⭐ Favorites empty — showed placeholder (%{public}s)", title)
             return
         }
@@ -1070,7 +1093,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             title: title,
             sections: [CPListSection(items: favoriteItems)]
         )
-        interfaceController?.pushTemplate(favoritesTemplate, animated: true)
+        pushTemplateSafely(favoritesTemplate, animated: true)
         os_log(.info, log: logger, "✅ Displayed %d favorites (%{public}s)", favoriteItems.count, title)
 
         // Load artwork async and fill each row in as it arrives (CPListItem.setImage
@@ -1126,22 +1149,21 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// children and pushing a new list. Guards CarPlay's 5-template navigation
     /// cap: `interfaceController.templates.count` is the WHOLE stack (root=1,
     /// Favorites=2, …), so refuse the push once it would exceed the cap and show
-    /// an honest row instead — there is no in-app deep-link to a nested favorite
+    /// a modal alert instead — there is no in-app deep-link to a nested favorite
     /// (the app UI is a Material WebView).
     private func drillIntoFolder(_ folder: FavoriteItem) {
         os_log(.info, log: logger, "📂 Drill into favorites folder: %{public}s", folder.name)
 
         let stackDepth = interfaceController?.templates.count ?? 0
         guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
-            let tooDeep = CPListItem(
-                text: "Can’t go deeper here",
-                detailText: "Open this folder in the LyrPlay app",
-                image: nil,
-                accessoryImage: nil,
-                accessoryType: .none
+            // Present modally — a push here would itself exceed the cap and crash
+            let alert = CPAlertTemplate(
+                titleVariants: ["Can’t go deeper here — open this folder in the LyrPlay app"],
+                actions: [CPAlertAction(title: "OK", style: .default) { [weak self] _ in
+                    self?.interfaceController?.dismissTemplate(animated: true, completion: nil)
+                }]
             )
-            let template = CPListTemplate(title: folder.name, sections: [CPListSection(items: [tooDeep])])
-            interfaceController?.pushTemplate(template, animated: true)
+            interfaceController?.presentTemplate(alert, animated: true, completion: nil)
             os_log(.info, log: logger, "⛔ Favorites folder too deep for CarPlay (%d templates)", stackDepth)
             return
         }
@@ -1167,7 +1189,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             sections: [CPListSection(items: [errorItem])]
         )
 
-        interfaceController?.pushTemplate(errorTemplate, animated: true)
+        pushTemplateSafely(errorTemplate, animated: true)
         os_log(.error, log: logger, "🚗 CarPlay error: %{public}s", message)
     }
 
@@ -1876,7 +1898,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: rangeItems)]
                 )
 
-                self.interfaceController?.pushTemplate(browseTemplate, animated: true)
+                self.pushTemplateSafely(browseTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed artist index with %d ranges", rangeItems.count)
             }
         }
@@ -1958,7 +1980,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: artistItems)]
                 )
 
-                self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+                self.pushTemplateSafely(artistsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d artists for %{public}s (%d remaining)",
                        artists.count, title, max(0, count - pageSize))
             }
@@ -2006,7 +2028,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: albumItems)]
                 )
 
-                self.interfaceController?.pushTemplate(albumsTemplate, animated: true)
+                self.pushTemplateSafely(albumsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d random albums", albumItems.count)
             }
         }
@@ -2087,7 +2109,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: artistItems)]
             )
 
-            self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+            self.pushTemplateSafely(artistsTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d random artists", artistItems.count)
         }
     }
@@ -2131,7 +2153,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: albumItems)]
                 )
 
-                self.interfaceController?.pushTemplate(albumsTemplate, animated: true)
+                self.pushTemplateSafely(albumsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d albums for %{public}s", albumItems.count, artist.name)
             }
         }
@@ -2678,7 +2700,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: trackItems)]
             )
 
-            self.interfaceController?.pushTemplate(tracksTemplate, animated: true)
+            self.pushTemplateSafely(tracksTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
         }
     }

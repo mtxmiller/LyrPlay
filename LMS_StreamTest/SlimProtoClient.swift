@@ -336,6 +336,14 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
                settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
+    /// System uptime in milliseconds as SlimProto jiffies, wrapping at
+    /// UInt32.max (~49.7 days of uptime) like squeezelite's gettime_ms.
+    /// A plain UInt32(Double) conversion traps past that uptime, crashing the
+    /// app on every STAT send until the phone is rebooted (bd LMS_StreamTest-7a8).
+    static func jiffies(uptimeSeconds: TimeInterval) -> UInt32 {
+        return UInt32(truncatingIfNeeded: Int64(uptimeSeconds * 1000))
+    }
+
     func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {
         guard isConnected else {
             os_log(.error, log: logger, "Cannot send status - not connected")
@@ -401,7 +409,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // Server calculates player's jiffies epoch based on this value
         // Using wrong time source causes synchronized start to target far future
         // squeezelite: gettime_ms() = system uptime in milliseconds
-        let jiffies = UInt32(ProcessInfo.processInfo.systemUptime * 1000)
+        let jiffies = SlimProtoClient.jiffies(uptimeSeconds: ProcessInfo.processInfo.systemUptime)
         statusData.append(Data([
             UInt8((jiffies >> 24) & 0xff),
             UInt8((jiffies >> 16) & 0xff),
