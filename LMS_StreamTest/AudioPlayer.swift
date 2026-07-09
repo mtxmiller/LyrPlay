@@ -429,7 +429,11 @@ class AudioPlayer: NSObject, ObservableObject {
         stopStartAtMonitoring()
 
         if currentStream != 0 {
+            // Cancel any pending sync-correction resume before freeing (same
+            // ordering as cleanup() — see generation-counter note there).
+            cancelPendingResume()
             BASS_ChannelStop(currentStream)
+            BASS_StreamFree(currentStream)
             currentStream = 0
         }
 
