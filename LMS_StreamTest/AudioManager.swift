@@ -395,17 +395,22 @@ class AudioManager: NSObject, ObservableObject {
     }
     
     func getPosition() -> Float {
-        // Use decoder position for push streams, audio player position for URL streams
-        if streamDecoder.isPlaying() {
+        // Use decoder position for push streams, audio player position for URL streams.
+        // hasValidStream() (not isPlaying()) so a PAUSED push stream reports its real
+        // position instead of falling through to the idle URL player's 0 — same fix
+        // getAudioPlayerTimeForFallback already has.
+        if streamDecoder.hasValidStream() {
             return Float(streamDecoder.getCurrentPosition())
         }
         return audioPlayer.getPosition()
     }
-    
+
     func getPlayerState() -> String {
-        // Check push stream first (for gapless/direct streams)
-        if streamDecoder.isPlaying() {
-            return "Playing"
+        // Check push stream first (for gapless/direct streams). hasValidStream()
+        // (not isPlaying()) so a PAUSED push stream reports "Paused" instead of
+        // falling through to the idle URL player's "Stopped".
+        if streamDecoder.hasValidStream() {
+            return streamDecoder.getPlayerState()
         }
         // Fall back to URL stream player state
         return audioPlayer.getPlayerState()

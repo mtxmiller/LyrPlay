@@ -1842,6 +1842,20 @@ class AudioStreamDecoder {
         return BASS_ChannelIsActive(pushStream) == DWORD(BASS_ACTIVE_PLAYING)
     }
 
+    /// Player-state string for the push stream, mirroring the values
+    /// AudioPlayer.getPlayerState() returns so AudioManager can report a
+    /// single vocabulary regardless of which pipeline is active.
+    func getPlayerState() -> String {
+        guard pushStream != 0 else { return "No Stream" }
+        switch BASS_ChannelIsActive(pushStream) {
+        case DWORD(BASS_ACTIVE_STOPPED): return "Stopped"
+        case DWORD(BASS_ACTIVE_PLAYING): return "Playing"
+        case DWORD(BASS_ACTIVE_PAUSED): return "Paused"
+        case DWORD(BASS_ACTIVE_STALLED): return "Buffering"
+        default: return "Unknown"
+        }
+    }
+
     /// Check if we have a valid push stream (playing OR paused)
     func hasValidStream() -> Bool {
         guard pushStream != 0 else { return false }
