@@ -549,18 +549,17 @@ class SlimProtoCommandHandler: ObservableObject {
         slimProtoClient?.sendStatus("STMf")
     }
     
-    private func handleStatusRequest(_ payload: Data) {
-        // Extract server timestamp from strm 't' command
-        // In strm packets, the replay_gain field (bytes 20-23) contains the timestamp for 't' commands
-        var serverTimestamp: UInt32 = 0
+    /// Server timestamp to echo back in STAT for strm 't' — it lives in the
+    /// replay_gain field, bytes 14..<18 of the 'aaaaaaaCCCaCCCNnN' strm layout
+    /// (squeezelite slimproto.c: sendSTAT("STMt", strm->replay_gain)).
+    /// Bytes 20..<24 are server_ip, which is NOT the timestamp.
+    static func serverTimestamp(fromStrmPayload payload: Data) -> UInt32 {
+        guard payload.count >= 24 else { return 0 }
+        return payload.subdata(in: 14..<18).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+    }
 
-        if payload.count >= 24 {
-            // Extract the replay_gain field which contains the server timestamp for 't' commands
-            let timestampBytes = payload.subdata(in: 20..<24)
-            serverTimestamp = timestampBytes.withUnsafeBytes { bytes in
-                bytes.load(as: UInt32.self).bigEndian
-            }
-        }
+    private func handleStatusRequest(_ payload: Data) {
+        let serverTimestamp = Self.serverTimestamp(fromStrmPayload: payload)
 
         // Check if we're waiting for next track (after sending STMd)
         if waitingForNextTrack {
