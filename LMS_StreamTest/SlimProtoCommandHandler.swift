@@ -151,6 +151,29 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "✅ SETD player name sent: '%{public}s' (%d bytes)", playerName, setdData.count)
     }
     
+    // MARK: - Stream Format Validation
+    /// Map a strm 's' format byte to a display name; nil = unsupported format.
+    static func formatName(forStrmFormatByte format: UInt8) -> String? {
+        switch format {
+        case UInt8(ascii: "a"): return "AAC"
+        case UInt8(ascii: "A"): return "ALAC"
+        case UInt8(ascii: "m"): return "MP3"
+        case UInt8(ascii: "f"): return "FLAC"
+        case UInt8(ascii: "p"): return "PCM"
+        case UInt8(ascii: "w"): return "WAV"
+        case UInt8(ascii: "o"): return "OGG"
+        case UInt8(ascii: "u"): return "Opus"
+        default: return nil
+        }
+    }
+
+    /// Whether a strm frame must be rejected with STMn for its format byte.
+    /// Only 's' (start) carries a real format — every other command has a
+    /// filler byte there and must never be answered with a decode error.
+    static func rejectsFormat(streamCommand: UInt8, format: UInt8) -> Bool {
+        streamCommand == UInt8(ascii: "s") && formatName(forStrmFormatByte: format) == nil
+    }
+
     // MARK: - Stream Command Processing (UPDATED for FLAC)
     private func processServerCommand(_ command: String, payload: Data) {
         guard command == "strm" else { return }
@@ -182,87 +205,24 @@ class SlimProtoCommandHandler: ObservableObject {
                        commandChar, streamCommand, format, format, replayGainFloat)
             }
             
-            // UPDATED: Enhanced format handling with FLAC support
-            var formatName = "Unknown"
-            var shouldAccept = false
-            
-            switch format {
-            case 97:  // 'a' = AAC
-                formatName = "AAC"
-                shouldAccept = true
-                // OLD: Always logged
-                // os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
-                // NEW: Only log for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
-                }
-                
-            case 65:  // 'A' = ALAC
-                formatName = "ALAC"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering ALAC - excellent for iOS!")
-                }
-                
-            case 109: // 'm' = MP3
-                formatName = "MP3"
-                shouldAccept = true
-                // OLD: Always logged (causing spam)
-                // os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
-                // NEW: Only log for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
-                }
-                
-            case 102: // 'f' = FLAC
-                formatName = "FLAC"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering FLAC")
-                }
-                
-            case 112: // 'p' = PCM
-                formatName = "PCM"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering PCM")
-                }
+            // Format is only meaningful on 's' (start) — LMS packs a filler
+            // byte ('m') into every non-'s' frame, and squeezelite only parses
+            // format in its 's' handler. Rejecting a status poll ('t') or
+            // pause/unpause with STMn makes LMS treat the track as failed.
+            let formatName = Self.formatName(forStrmFormatByte: format) ?? "Unknown"
 
-            case 119: // 'w' = WAV
-                formatName = "WAV"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering WAV - native BASS support!")
-                }
-
-            case 111: // 'o' = OGG
-                formatName = "OGG"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering OGG - Bass native support!")
-                }
-                
-            case 117: // 'u' = Opus
-                formatName = "Opus"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering Opus - Bass native support!")
-                }
-                
-            default:
-                // Only log unknown formats for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
-                }
-                shouldAccept = false
-            }
-            
-            if !shouldAccept {
-                os_log(.info, log: logger, "🔄 Rejecting %{public}s format, requesting AAC transcode", formatName)
+            if Self.rejectsFormat(streamCommand: streamCommand, format: format) {
+                os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
+                os_log(.info, log: logger, "🔄 Rejecting unknown format, requesting transcode")
                 slimProtoClient?.sendStatus("STMn")
                 return
             }
-                        
+
+            if streamCommand == UInt8(ascii: "s") {
+                os_log(.info, log: logger, "✅ Server offering %{public}s", formatName)
+            }
+
+
             if payload.count > 24 {
                 let httpData = payload.subdata(in: 24..<payload.count)
                 if let httpRequest = String(data: httpData, encoding: .utf8) {
