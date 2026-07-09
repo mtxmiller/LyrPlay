@@ -35,6 +35,31 @@ struct SlimProtoCommand {
     }
 }
 
+// MARK: - Framing
+/// Decision logic for the 2-byte length-prefixed SlimProto server stream,
+/// extracted as a pure function so the invalid-length path is unit-testable.
+enum SlimProtoFraming {
+    /// Sanity cap — real server frames are far smaller. An over-cap frame is
+    /// treated as garbage, but its payload must still be consumed to keep the
+    /// TCP stream aligned on frame boundaries.
+    static let maxMessageLength: UInt16 = 10000
+
+    enum HeaderAction: Equatable {
+        case readMessage(length: UInt16)    // valid frame — read its payload
+        case discardPayload(length: UInt16) // over-cap frame — consume and drop payload
+        case readNextHeader                 // zero-length frame — nothing to consume
+    }
+
+    static func action(forHeader data: Data) -> HeaderAction {
+        guard data.count >= 2 else { return .readNextHeader }
+        let length = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
+        if length == 0 { return .readNextHeader }
+        return length < maxMessageLength
+            ? .readMessage(length: length)
+            : .discardPayload(length: length)
+    }
+}
+
 // MARK: - Core Protocol Handler
 class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     
@@ -218,19 +243,23 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
                 return
             }
             
-            // Parse 2-byte length in network order
-            let messageLength = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-
             // Too spammy - uncomment only for debugging message parsing
             // os_log(.debug, log: logger, "Server message length: %d bytes", messageLength)
 
-            if messageLength > 0 && messageLength < 10000 {
-                socket.readData(toLength: UInt(messageLength), withTimeout: 30, tag: 1)
-            } else {
-                os_log(.error, log: logger, "Invalid message length: %d", messageLength)
+            switch SlimProtoFraming.action(forHeader: data) {
+            case .readMessage(let length):
+                socket.readData(toLength: UInt(length), withTimeout: 30, tag: 1)
+            case .discardPayload(let length):
+                // The oversized frame's payload is still in the TCP stream —
+                // it must be consumed before the next header read, or every
+                // subsequent "header" is actually message body (permanent desync).
+                os_log(.error, log: logger, "Invalid message length: %d — discarding payload to stay frame-aligned", length)
+                socket.readData(toLength: UInt(length), withTimeout: 30, tag: 2)
+            case .readNextHeader:
+                os_log(.error, log: logger, "Zero message length")
                 socket.readData(toLength: 2, withTimeout: 30, tag: 0)
             }
-            
+
         } else if tag == 1 {
             // Read complete message
             guard data.count >= 4 else {
@@ -258,6 +287,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             delegate?.slimProtoDidReceiveCommand(command)
             
             // Continue reading
+            socket.readData(toLength: 2, withTimeout: 30, tag: 0)
+
+        } else if tag == 2 {
+            // Discarded payload of an invalid-length frame — stream is
+            // frame-aligned again, resume header reads.
             socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         }
     }
