@@ -1329,7 +1329,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.fetchCurrentTrackMetadata()
         }
 
-        client.sendStatus("STMr")
+        // STMr is sent by the command handler (handleUnpauseCommand) — one
+        // owner per protocol reply. bd LMS_StreamTest-433.3.3
     }
 
     func didStopStream() {
@@ -1368,7 +1369,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Note: ICY metadata callbacks are handled automatically by BASS
 
-        client.sendStatus("STMf")
+        // STMf is sent by the command handler (handleStopCommand/
+        // handleFlushCommand) — one owner per protocol reply. bd LMS_StreamTest-433.3.3
     }
 
     // MARK: - Gapless Playback - Track Decode Complete
@@ -1476,22 +1478,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func didReceiveStatusRequest() {
-        // Server is asking "are you alive?" - just confirm we're here
-        // Don't confuse it with local player timing information
-        
-        let statusCode: String
-        if commandHandler.streamState == "Paused" {
-            statusCode = "STMp"  // We're paused
-        } else {
-            statusCode = "STMt"  // We're playing/ready
-        }
-        
-        client.sendStatus(statusCode)
-        
-        // Record that we responded (shows connection is alive)
+        // Bookkeeping only. The command handler owns the protocol reply — it
+        // sends STMt/STMp WITH the server-timestamp echo (LMS uses the echo
+        // for playPoint/RTT in sync groups). Sending a second, timestamp-less
+        // STAT from here doubled STAT volume and perturbed the sync math.
+        // bd LMS_StreamTest-433.3.3
         connectionManager.recordHeartbeatResponse()
-        
-        //os_log(.debug, log: logger, "📍 Responded to server status request with %{public}s", statusCode)
     }
     
     
