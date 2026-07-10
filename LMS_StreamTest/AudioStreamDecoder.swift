@@ -384,6 +384,14 @@ class AudioStreamDecoder {
     /// Reset when starting new track, set when buffer threshold reached
     private var sentSTMl: Bool = false
 
+    /// Write position (totalBytesPushed) at the current track's decode start.
+    /// The STMl buffer-ready check measures bytes pushed for THIS track as
+    /// (totalBytesPushed - stmlBaselineBytes) — totalBytesPushed itself is
+    /// deliberately cumulative across gapless tracks, so comparing it directly
+    /// against the threshold made STMl fire on the first chunk of every track
+    /// after the first. Guarded by stateLock. bd LMS_StreamTest-433.4.5
+    private var stmlBaselineBytes: UInt64 = 0
+
     /// Buffer threshold for STMl signaling (2 seconds of audio)
     /// When buffer reaches this level, we signal server we're ready for sync
     private var bufferReadyThreshold: Int {
@@ -1181,6 +1189,7 @@ class AudioStreamDecoder {
             isDecoding = true
             manualStop = false  // This is a fresh start, not a manual stop
             decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
+            stmlBaselineBytes = totalBytesPushed  // STMl threshold measures from THIS track's start
         } else {
             pendingTrackBoundary = false
         }
@@ -1290,6 +1299,7 @@ class AudioStreamDecoder {
             statStreamBytesReceived = 0
             decodeCompletedNaturally = false
             skippedSecondsThisTrack = 0
+            stmlBaselineBytes = 0
             stateLock.unlock()
             let stateAfter = BASS_ChannelIsActive(pushStream)
             os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
@@ -1310,6 +1320,7 @@ class AudioStreamDecoder {
             statStreamBytesReceived = 0
             decodeCompletedNaturally = false
             skippedSecondsThisTrack = 0
+            stmlBaselineBytes = 0
         }
         stateLock.unlock()
 
@@ -1630,13 +1641,16 @@ class AudioStreamDecoder {
                 // Reset throttle counter when not throttling
                 self.throttleLogCounter = 0
 
-                // Check if buffer ready for STMl signaling
-                // FIX: Use totalBytesPushed instead of playbackBuffered
-                // playbackBuffered is BASS's tiny internal buffer, not our push queue
-                // totalBytesPushed tracks how much we've actually queued for playback
-                if !self.sentSTMl && self.totalBytesPushed >= UInt64(self.bufferReadyThreshold) {
-                    os_log(.info, log: self.logger, "📊 Buffer threshold reached (%llu bytes >= %d), signaling STMl",
-                           self.totalBytesPushed, self.bufferReadyThreshold)
+                // Check if buffer ready for STMl signaling — measured against
+                // THIS track's decode start, not the cumulative write position
+                // (see stmlBaselineBytes).
+                self.stateLock.lock()
+                let pushedThisTrack = self.totalBytesPushed >= self.stmlBaselineBytes
+                    ? self.totalBytesPushed - self.stmlBaselineBytes : 0
+                self.stateLock.unlock()
+                if !self.sentSTMl && pushedThisTrack >= UInt64(self.bufferReadyThreshold) {
+                    os_log(.info, log: self.logger, "📊 Buffer threshold reached (%llu bytes this track >= %d), signaling STMl",
+                           pushedThisTrack, self.bufferReadyThreshold)
                     self.sentSTMl = true
 
                     // Notify delegate on main thread (server expects STMl before synchronized start)
@@ -2029,6 +2043,7 @@ class AudioStreamDecoder {
         manualStop = false
         decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
         skippedSecondsThisTrack = 0
+        stmlBaselineBytes = 0  // totalBytesPushed was just reset above
         stateLock.unlock()
 
         // Use the EXISTING decoder (already connected, at position 0:00!)
