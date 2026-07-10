@@ -101,11 +101,11 @@ class SlimProtoCommandHandler: ObservableObject {
                     os_log(.info, log: logger, "📛 Server setting player name to: '%{public}s'", trimmedName)
                     
                     // Update our settings with the server-provided name
-                    DispatchQueue.main.async {
-                        self.settings.playerName = trimmedName
-                        self.settings.saveSettings()
-                    }
-                    
+                    // (command processing runs on main — no hop needed)
+                    settings.playerName = trimmedName
+                    settings.saveSettings()
+
+
                     // Confirm the change back to server
                     sendSetdPlayerName(trimmedName)
                 } else {

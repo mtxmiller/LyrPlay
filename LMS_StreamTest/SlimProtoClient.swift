@@ -195,43 +195,52 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     }
     
     // MARK: - Socket Delegate Methods
+    // NOTE (single-threaded control plane, bd LMS_StreamTest-433.2.1):
+    // GCDAsyncSocket delivers these callbacks on the socket queue. Socket I/O
+    // (HELO send, read re-arm, framing) stays here, but connection state and
+    // every delegate notification hop to MAIN — the whole control plane
+    // (coordinator, command handler, timers) is main-thread-confined,
+    // matching squeezelite's single-threaded slimproto loop.
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
-        lastSuccessfulConnection = Date()  // ADD THIS LINE
-        isConnected = true
         os_log(.info, log: logger, "✅ Connected to LMS at %{public}s:%d", host, port)
-        
-        // Send HELO message
+
+        // Send HELO and arm the first header read immediately — the server
+        // replies to HELO right away.
         sendHelo()
-        
-        // Start reading server messages - they start with 2-byte length
         socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         os_log(.info, log: logger, "Read data initiated after connect - expecting 2-byte length header")
-        
-        // Request initial status after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if !self.hasRequestedInitialStatus {
-                self.hasRequestedInitialStatus = true
-                self.sendStatus("STMt")
-                os_log(.info, log: self.logger, "🔄 Requested initial status to detect existing streams")
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.lastSuccessfulConnection = Date()
+            self.isConnected = true
+
+            // Request initial status after brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !self.hasRequestedInitialStatus {
+                    self.hasRequestedInitialStatus = true
+                    self.sendStatus("STMt")
+                    os_log(.info, log: self.logger, "🔄 Requested initial status to detect existing streams")
+                }
             }
+
+            self.delegate?.slimProtoDidConnect()
         }
-        
-        // Notify delegate
-        delegate?.slimProtoDidConnect()
     }
-    
+
     func socketDidDisconnect(_ sock: GCDAsyncSocket, withError err: Error?) {
-        isConnected = false
-        hasRequestedInitialStatus = false
-        
         if let error = err {
             os_log(.error, log: logger, "❌ Disconnected with error: %{public}s", error.localizedDescription)
         } else {
             os_log(.info, log: logger, "🔌 Disconnected gracefully")
         }
-        
-        // Notify delegate
-        delegate?.slimProtoDidDisconnect(error: err)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isConnected = false
+            self.hasRequestedInitialStatus = false
+            self.delegate?.slimProtoDidDisconnect(error: err)
+        }
     }
     
     func socket(_ sock: GCDAsyncSocket, didRead data: Data, withTag tag: Int) {
@@ -283,9 +292,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             // Too spammy - uncomment only for debugging server commands
             // os_log(.debug, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
 
-            // Notify delegate
-            delegate?.slimProtoDidReceiveCommand(command)
-            
+            // Command processing runs on main (single-threaded control plane).
+            // Main-queue FIFO preserves server command order.
+            DispatchQueue.main.async { [weak self] in
+                self?.delegate?.slimProtoDidReceiveCommand(command)
+            }
+
             // Continue reading
             socket.readData(toLength: 2, withTimeout: 30, tag: 0)
 

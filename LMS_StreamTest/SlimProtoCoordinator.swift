@@ -150,11 +150,10 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     private func setupAudioCallbacks() {
-        // Set up track ended callback
+        // Set up track ended callback (already invoked on main — the BASS
+        // end-sync in AudioPlayer.setupCallbacks marshals before delegating)
         audioManager.onTrackEnded = { [weak self] in
-            DispatchQueue.main.async {
-                self?.commandHandler.notifyTrackEnded()
-            }
+            self?.commandHandler.notifyTrackEnded()
         }
         
         // Connect audio manager back to coordinator for lock screen support
