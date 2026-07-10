@@ -100,7 +100,7 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Player Synchronization (Multi-room Audio)
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
     private var jiffiesOffsetList: [TimeInterval] = []  // Track drift for corrections (max 8 entries)
-    private var syncGroupID: Data?  // 10-byte sync group ID from serv packet (PHASE 5)
+    private var syncGroupID: String?  // 10-digit sync group ID from serv packet (PHASE 5)
     private let syncController: SyncController  // BASS_ATTRIB_FREQ rate matching for sub-100ms drift
 
     // MARK: - ICY Metadata Tracking
@@ -1546,37 +1546,39 @@ extension SlimProtoCoordinator {
 
     // MARK: - Sync Group Persistence
 
+    /// Parse the sync-group ID out of a serv payload. Real LMS layout
+    /// (slimserver/Slim/Control/Commands.pm:312): `pack 'NA10'` = 4-byte server
+    /// IP + 10 ASCII digits when the player is in a sync group, or `pack 'N'` =
+    /// bare 4-byte IP when not. (The old parser expected an invented
+    /// IP+HTTP-port+CLI-port+group layout ≥18 bytes that never matched, so the
+    /// group was never saved. bd LMS_StreamTest-433.4.2)
+    /// Returns nil when there is no group; "0000000000" is the unset pref.
+    static func syncGroup(fromServPayload payload: Data) -> String? {
+        guard payload.count >= 14 else { return nil }
+        let idData = payload.subdata(in: 4..<14)
+        guard let id = String(data: idData, encoding: .ascii),
+              id.count == 10,
+              id.allSatisfy({ $0.isNumber }),
+              id != "0000000000" else { return nil }
+        return id
+    }
+
     /// Parse serv packet and extract sync group ID for multi-room persistence
     private func handleServPacket(_ payload: Data) {
-        // serv packet structure (from SlimProto documentation):
-        // - Server IP (4 bytes)
-        // - HTTP port (2 bytes)
-        // - CLI port (2 bytes)
-        // - Sync group ID (10 bytes) - THIS IS WHAT WE NEED
-        // Total minimum: 18 bytes
-
-        guard payload.count >= 18 else {
-            os_log(.error, log: logger, "⚠️ serv packet too short: %d bytes (expected >= 18)", payload.count)
+        guard payload.count >= 4 else {
+            os_log(.error, log: logger, "⚠️ serv packet too short: %d bytes (expected >= 4)", payload.count)
             return
         }
 
-        // Extract sync group ID from bytes 8-17 (10 bytes)
-        let syncGroup = payload.subdata(in: 8..<18)
-
-        // Check if sync group is all zeros (no sync group)
-        let isEmptySyncGroup = syncGroup.allSatisfy { $0 == 0 }
-
-        if isEmptySyncGroup {
+        if let group = Self.syncGroup(fromServPayload: payload) {
+            os_log(.info, log: logger, "🔗 Sync group ID received: %{public}s", group)
+            syncGroupID = group
+            settings.saveSyncGroupID(group)
+        } else {
             // No sync group - clear stored value
             os_log(.info, log: logger, "🔗 No sync group (player not synced)")
             syncGroupID = nil
             settings.clearSyncGroupID()
-        } else {
-            // Store sync group ID
-            os_log(.info, log: logger, "🔗 Sync group ID received: %{public}s",
-                   syncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
-            syncGroupID = syncGroup
-            settings.saveSyncGroupID(syncGroup)
         }
     }
 

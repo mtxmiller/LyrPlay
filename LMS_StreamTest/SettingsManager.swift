@@ -431,16 +431,18 @@ class SettingsManager: ObservableObject {
 
     // MARK: - PHASE 5: Sync Group Persistence
 
-    /// Save sync group ID to UserDefaults for reconnection persistence
-    func saveSyncGroupID(_ syncGroupID: Data) {
+    /// Save sync group ID (10 ASCII digits from the serv packet) for reconnection persistence
+    func saveSyncGroupID(_ syncGroupID: String) {
         UserDefaults.standard.set(syncGroupID, forKey: Keys.syncGroupID)
         UserDefaults.standard.synchronize()
         os_log(.info, log: logger, "🔗 Sync group ID saved to UserDefaults")
     }
 
-    /// Load saved sync group ID from UserDefaults
-    func loadSyncGroupID() -> Data? {
-        return UserDefaults.standard.data(forKey: Keys.syncGroupID)
+    /// Load saved sync group ID from UserDefaults.
+    /// string(forKey:) returns nil for the old (broken) raw-Data storage, so
+    /// stale pre-fix values are silently ignored rather than migrated.
+    func loadSyncGroupID() -> String? {
+        return UserDefaults.standard.string(forKey: Keys.syncGroupID)
     }
 
     /// Clear sync group ID (when player leaves sync group)

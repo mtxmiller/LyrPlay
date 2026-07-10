@@ -350,20 +350,21 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
 
         // *** FIXED: Enhanced capabilities string with user-configurable FLAC support ***
-        let capabilities = settings.capabilitiesString
+        var capabilities = settings.capabilitiesString
+
+        // Rejoin sync group across reconnects: the server regex-matches the TEXT
+        // "SyncgroupID=\d{10}" INSIDE the capabilities string (Slimproto.pm:985),
+        // and squeezelite appends ",SyncgroupID=<digits>" (slimproto.c:480). The
+        // old form — NUL + 10 raw bytes after the string — could never match.
+        // bd LMS_StreamTest-433.4.2
+        if let savedSyncGroup = settings.loadSyncGroupID() {
+            capabilities += ",SyncgroupID=\(savedSyncGroup)"
+            os_log(.info, log: logger, "🔗 Including saved sync group ID in HELO: %{public}s", savedSyncGroup)
+        }
+
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
-        }
-
-        // Include sync group ID if we have one from previous connection
-        if let savedSyncGroup = settings.loadSyncGroupID() {
-            // Add null terminator after capabilities string
-            helloData.append(0)
-            // Append 10-byte sync group ID
-            helloData.append(savedSyncGroup)
-            os_log(.info, log: logger, "🔗 Including saved sync group ID in HELO: %{public}s",
-                   savedSyncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
         }
 
         // Create full message
