@@ -1415,6 +1415,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         client.sendStatus("STMn")
     }
 
+    /// Send STMu when the output buffer drains after a natural decode completion —
+    /// squeezelite's output-underrun signal (slimproto.c:716). The server maps it
+    /// to its Stopped event: end-of-playlist → clean stop (strm 'q'); next track
+    /// still being prepared → plays it when ready. bd LMS_StreamTest-nzj
+    func sendPlaybackComplete() {
+        os_log(.info, log: logger, "🏁 Playback complete (output drained) - sending STMu to server")
+        client.sendStatus("STMu")
+    }
+
     /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
     /// This keeps Material UI in sync with actual audio playback
     func sendTrackStarted() {

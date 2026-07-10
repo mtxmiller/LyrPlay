@@ -143,6 +143,14 @@ class AudioStreamDecoder {
     private var statStreamBufferedBytes: UInt64 = 0
     private var statStreamBytesReceived: UInt64 = 0
 
+    /// Armed by the decode loop's natural-completion exits; consumed by
+    /// handleBufferEnd so a buffer STALL only reports end-of-playback (STMu)
+    /// when the track's data really finished decoding — never at track start
+    /// (empty buffer before first push) or on a mid-track network stall.
+    /// Cleared whenever a new decode starts or the stream is stopped/flushed.
+    /// Guarded by stateLock. bd LMS_StreamTest-nzj
+    private var decodeCompletedNaturally = false
+
     /// Track bytes at last buffer diagnostic log (for throttling)
     private var lastBufferDiagnosticBytes: UInt64 = 0
 
@@ -1161,6 +1169,7 @@ class AudioStreamDecoder {
         if stillCurrent {
             isDecoding = true
             manualStop = false  // This is a fresh start, not a manual stop
+            decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
         } else {
             pendingTrackBoundary = false
         }
@@ -1192,6 +1201,7 @@ class AudioStreamDecoder {
         decodeGeneration += 1   // Supersede any queued start and running loop
         manualStop = true       // Mark as manual stop
         isDecoding = false
+        decodeCompletedNaturally = false  // Manual stop — drain must not report end-of-playback
         stateLock.unlock()
 
         // Clean up sync start monitoring
@@ -1267,6 +1277,7 @@ class AudioStreamDecoder {
             lastBufferDiagnosticBytes = 0
             statStreamBufferedBytes = 0
             statStreamBytesReceived = 0
+            decodeCompletedNaturally = false
             stateLock.unlock()
             let stateAfter = BASS_ChannelIsActive(pushStream)
             os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
@@ -1285,6 +1296,7 @@ class AudioStreamDecoder {
             lastBufferDiagnosticBytes = 0  // Reset buffer diagnostic counter
             statStreamBufferedBytes = 0
             statStreamBytesReceived = 0
+            decodeCompletedNaturally = false
         }
         stateLock.unlock()
 
@@ -1304,6 +1316,22 @@ class AudioStreamDecoder {
         stateLock.lock()
         defer { stateLock.unlock() }
         return isDecoding && generation == decodeGeneration
+    }
+
+    /// Arm the drain→STMu latch (called from the loop's natural-completion exits).
+    private func markDecodeCompletedNaturally() {
+        stateLock.lock()
+        decodeCompletedNaturally = true
+        stateLock.unlock()
+    }
+
+    /// Consume the drain→STMu latch; returns whether it was armed.
+    private func consumeDecodeCompletedNaturally() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let wasArmed = decodeCompletedNaturally
+        decodeCompletedNaturally = false
+        return wasArmed
     }
 
     /// manualStop read for the loop's exit paths (guarded by stateLock).
@@ -1389,6 +1417,7 @@ class AudioStreamDecoder {
 
                             if !self.wasManuallyStopped() {
                                 os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
+                                self.markDecodeCompletedNaturally()
                                 DispatchQueue.main.async {
                                     self.delegate?.audioStreamDecoderDidCompleteTrack(self)
                                 }
@@ -1447,6 +1476,7 @@ class AudioStreamDecoder {
 
                         if !self.wasManuallyStopped() {
                             os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
+                            self.markDecodeCompletedNaturally()
                             DispatchQueue.main.async {
                                 self.delegate?.audioStreamDecoderDidCompleteTrack(self)
                             }
@@ -1889,7 +1919,19 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "🎵 Buffer end reached - checking for pending track")
 
         guard let pending = pendingTrack else {
-            os_log(.info, log: logger, "📊 No pending track - buffer naturally ended")
+            // Natural drain with nothing queued. If the last track's decode
+            // completed naturally, this is squeezelite's output-underrun moment
+            // (output empty + decode stopped + stream disconnected) — report it
+            // so the server can end playback (STMu). Without this, at true
+            // end-of-playlist the server stays in "play" forever and its
+            // displayed time sawtooths between extrapolation and stale STAT
+            // anchors. bd LMS_StreamTest-nzj
+            if consumeDecodeCompletedNaturally() {
+                os_log(.info, log: logger, "🏁 Output drained after natural decode completion - playback finished")
+                delegate?.audioStreamDecoderDidDrainAfterTrackComplete(self)
+            } else {
+                os_log(.info, log: logger, "📊 No pending track - buffer naturally ended")
+            }
             return
         }
 
@@ -1965,6 +2007,7 @@ class AudioStreamDecoder {
         lastBufferDiagnosticBytes = 0
         isDecoding = true
         manualStop = false
+        decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
         stateLock.unlock()
 
         // Use the EXISTING decoder (already connected, at position 0:00!)
@@ -2122,6 +2165,13 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// Called when decoder completes a track naturally (like squeezelite's DECODE_COMPLETE → STMd)
     /// This means the track finished decoding naturally (not manual skip)
     func audioStreamDecoderDidCompleteTrack(_ decoder: AudioStreamDecoder)
+
+    /// Called when the output buffer drains AFTER a natural decode completion
+    /// with no new track queued — squeezelite's output-underrun condition
+    /// (output empty + decode stopped + stream disconnected → STMu). At true
+    /// end-of-playlist this is the only signal that playback actually finished;
+    /// without it the server stays in "play" forever. bd LMS_StreamTest-nzj
+    func audioStreamDecoderDidDrainAfterTrackComplete(_ decoder: AudioStreamDecoder)
 
     /// Called when decoder encounters an error
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int)

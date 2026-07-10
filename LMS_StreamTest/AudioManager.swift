@@ -728,6 +728,14 @@ extension AudioManager: AudioStreamDecoderDelegate {
         slimClient?.sendTrackDecodeComplete()
     }
 
+    func audioStreamDecoderDidDrainAfterTrackComplete(_ decoder: AudioStreamDecoder) {
+        os_log(.info, log: logger, "🏁 Output drained after decode complete - sending STMu to server")
+        // Like squeezelite: output empty + DECODE_STOPPED + stream disconnected → STMu.
+        // At end-of-playlist the server answers with a clean stop (strm 'q');
+        // mid-playlist (slow next track) it plays the queued song when ready.
+        slimClient?.sendPlaybackComplete()
+    }
+
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int) {
         os_log(.error, log: logger, "❌ Decoder error: %d - sending STMn to server", error)
         // Like squeezelite: DECODE_ERROR → send STMn
