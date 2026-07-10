@@ -632,6 +632,18 @@ class SlimProtoCommandHandler: ObservableObject {
     //   [10..13] new_gainL (u32, 16.16 fixed point; 65536 = unity)
     //   [14..17] new_gainR (u32, 16.16 fixed point)
     // Mirrors squeezelite's process_audg (slimproto.c): when dvc=0, apply unity gain.
+    /// Map audg gains to the single BASS volume. BASS_ATTRIB_VOLDSP is one
+    /// value for both channels, so true per-channel balance isn't representable
+    /// without a mixer matrix (overkill for a phone/TV player). We take
+    /// max(L, R): a hard-left/right balance in LMS keeps playing at the louder
+    /// channel's level instead of silently halving or dropping the setting.
+    /// dvc=0 (fixed volume) = unity, like squeezelite. bd LMS_StreamTest-433.4.4
+    static func volume(fromAudgDVC dvc: UInt8, gainL: UInt32, gainR: UInt32) -> Float {
+        guard dvc != 0 else { return 1.0 }
+        let gain = max(gainL, gainR)
+        return max(0.0, min(1.0, Float(gain) / 65536.0))
+    }
+
     private func processVolumeCommand(_ payload: Data) {
         guard payload.count >= 18 else {
             os_log(.error, log: logger, "Volume command payload too short: %d bytes", payload.count)
@@ -642,12 +654,14 @@ class SlimProtoCommandHandler: ObservableObject {
         let newGainL = payload.subdata(in: 10..<14).withUnsafeBytes {
             $0.load(as: UInt32.self).bigEndian
         }
+        let newGainR = payload.subdata(in: 14..<18).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
 
-        let normalizedVolume: Float = (dvc == 0) ? 1.0 : Float(newGainL) / 65536.0
-        let clampedVolume = max(0.0, min(1.0, normalizedVolume))
+        let clampedVolume = Self.volume(fromAudgDVC: dvc, gainL: newGainL, gainR: newGainR)
 
         #if DEBUG
-        os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u → volume=%.3f", dvc, newGainL, clampedVolume)
+        os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u gainR=%u → volume=%.3f", dvc, newGainL, newGainR, clampedVolume)
         #endif
 
         if let coordinator = delegate as? SlimProtoCoordinator {
