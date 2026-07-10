@@ -762,9 +762,18 @@ class SlimProtoCoordinator: ObservableObject {
             // Network restored: resume previous state
             os_log(.info, log: logger, "🔄 Network restored recovery: wasPlaying=%{public}s", wasPlayingBeforeDisconnect ? "YES" : "NO")
 
-            // Only recover if we were playing or paused before disconnect
-            guard wasPlayingBeforeDisconnect || wasPausedBeforeDisconnect else {
-                os_log(.info, log: logger, "🔄 Network restored: was not playing/paused - no recovery needed")
+            // Only recover if we were playing or paused before disconnect.
+            // Paused sessions additionally honor enableAppOpenRecovery: before
+            // the Paused-state fix (433.1.4) a paused push stream misreported
+            // "Stopped", so the paused arm here never fired — restoring a
+            // paused session is app-open recovery in the user's mental model,
+            // and must respect the toggle. Playing sessions always recover
+            // (mid-playback continuity, not app-open recovery).
+            guard wasPlayingBeforeDisconnect || (wasPausedBeforeDisconnect && settings.enableAppOpenRecovery) else {
+                os_log(.info, log: logger, "🔄 Network restored: no recovery needed (playing=%{public}s, paused=%{public}s, appOpenRecovery=%{public}s)",
+                       wasPlayingBeforeDisconnect ? "YES" : "NO",
+                       wasPausedBeforeDisconnect ? "YES" : "NO",
+                       settings.enableAppOpenRecovery ? "ON" : "OFF")
                 return
             }
 
