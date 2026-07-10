@@ -86,6 +86,16 @@ class SlimProtoCoordinator: ObservableObject {
     private var wasPlayingBeforeDisconnect: Bool = false
     /// Was audio paused when connection was lost? (for networkRestored recovery)
     private var wasPausedBeforeDisconnect: Bool = false
+    /// Ignore server-time polls until this instant. Set when a playlist-jump
+    /// recovery is issued: the server computes displayed time as
+    /// startOffset + the client's last STAT elapsed, and STATs sent during the
+    /// reconnect window still carry the DEAD pre-background stream's position —
+    /// so for up to ~1s after the jump the server reports startOffset + stale
+    /// elapsed (observed: exactly 2× the resume position, bd LMS_StreamTest-egd
+    /// follow-up). A 3s poll that samples that window paints and interpolates
+    /// the spike on the lock screen ("timer hunts"). We know the true position
+    /// (we chose it), so we seed the tracker and skip polls while poisoned.
+    private var suppressServerTimePollsUntil: Date?
 
     // MARK: - Player Synchronization (Multi-room Audio)
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
@@ -647,6 +657,13 @@ class SlimProtoCoordinator: ObservableObject {
         } else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔊 Normal recovery mode - no muting needed")
         }
+
+        // We chose the resume position, so display it immediately and hold it while
+        // the server's play point is poisoned (see suppressServerTimePollsUntil).
+        // Seed BEFORE the jump so no poll race can paint the spike first.
+        simpleTimeTracker.updateFromServer(time: savedPosition, playing: shouldPlay)
+        suppressServerTimePollsUntil = Date().addingTimeInterval(3.0)
+        os_log(.info, log: logger, "⏱️ Seeded time tracker at %.2f, suppressing server-time polls for 3s", savedPosition)
 
         // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
         // After 300s server forget, new client is STOPPED, and noplay=1 only calls resetSongqueue()
@@ -1308,7 +1325,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "🧹 Cleared gapless flag - next track will flush buffer")
 
         // CRITICAL FIX: Update both SimpleTimeTracker AND NowPlayingManager to stop interpolating
-        updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
+        // Skipped during a recovery window: the server sends strm 'q' as part of executing
+        // the playlist jump, and zeroing here would repaint the lock screen at 0:00 until
+        // the window closes — the "backward" leg of the timer-hunting bug.
+        if serverTimeUpdatesSuppressed() {
+            os_log(.info, log: logger, "⏱️ Skipping time reset on strm 'q' during recovery window")
+        } else {
+            updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
+        }
 
         // Stop periodic server time fetching
         stopServerTimeFetching()
@@ -1613,6 +1637,15 @@ extension SlimProtoCoordinator {
             let mode = result["mode"] as? String ?? "stop"
             let isPlaying = (mode == "play")
 
+            // During a playlist-jump recovery the server's reported time is
+            // poisoned by our own stale STATs (startOffset + dead stream's
+            // elapsed). The tracker was seeded with the true resume position
+            // when the jump was issued — hold it until the window closes.
+            if serverTimeUpdatesSuppressed() {
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll during recovery window (server=%.2f)", serverTime)
+                return
+            }
+
             // PHASE 1: Track jiffies epoch for player synchronization
             // Get current local jiffies (milliseconds since app start)
             let currentJiffies = gettime_ms()
@@ -1653,6 +1686,16 @@ extension SlimProtoCoordinator {
         }
     }
     
+    /// True while inside the post-jump recovery window during which server-derived
+    /// time (polls, strm 'q' resets) must not overwrite the seeded tracker position.
+    /// Clears the window lazily once it has expired. Main thread only.
+    private func serverTimeUpdatesSuppressed() -> Bool {
+        guard let until = suppressServerTimePollsUntil else { return false }
+        if Date() < until { return true }
+        suppressServerTimePollsUntil = nil
+        return false
+    }
+
     /// Get current interpolated time (Material-style approach only)
     func getCurrentInterpolatedTime() -> (time: Double, playing: Bool) {
         // SIMPLIFIED: Use only SimpleTimeTracker (Material-style approach)
