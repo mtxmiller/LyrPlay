@@ -151,6 +151,16 @@ class AudioStreamDecoder {
     /// Guarded by stateLock. bd LMS_StreamTest-nzj
     private var decodeCompletedNaturally = false
 
+    /// Seconds of audio content discarded by skipAhead drift corrections since
+    /// the current track started playing. Skipped bytes never enter the push
+    /// stream, so BASS's playback position under-represents song content by
+    /// this amount — getCurrentPosition adds it back. Kept OUT of
+    /// totalBytesPushed: that is the write position ("writep") boundary marks
+    /// are measured against, and counting discarded bytes there pushed every
+    /// later boundary past the true track start (late STMs).
+    /// Guarded by stateLock. bd LMS_StreamTest-433.5.1
+    private var skippedSecondsThisTrack: Double = 0
+
     /// Track bytes at last buffer diagnostic log (for throttling)
     private var lastBufferDiagnosticBytes: UInt64 = 0
 
@@ -1163,6 +1173,7 @@ class AudioStreamDecoder {
                 // For first track, totalBytesPushed should start at current playback position
                 // This handles cases where push stream already has data
                 totalBytesPushed = currentPlaybackPosition
+                skippedSecondsThisTrack = 0  // Fresh (non-gapless) start — no carried skip credit
                 os_log(.info, log: logger, "📊 Initializing cumulative write tracking: totalBytesPushed=%llu", totalBytesPushed)
             }
         }
@@ -1278,6 +1289,7 @@ class AudioStreamDecoder {
             statStreamBufferedBytes = 0
             statStreamBytesReceived = 0
             decodeCompletedNaturally = false
+            skippedSecondsThisTrack = 0
             stateLock.unlock()
             let stateAfter = BASS_ChannelIsActive(pushStream)
             os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
@@ -1297,6 +1309,7 @@ class AudioStreamDecoder {
             statStreamBufferedBytes = 0
             statStreamBytesReceived = 0
             decodeCompletedNaturally = false
+            skippedSecondsThisTrack = 0
         }
         stateLock.unlock()
 
@@ -1541,8 +1554,13 @@ class AudioStreamDecoder {
                            bytesToDiscard, Double(bytesToDiscard) / Double(self.sampleRate * self.channels * 4),
                            self.skipAheadBytesRemaining)
 
-                    // Still track position even though we're not pushing to BASS
-                    self.totalBytesPushed += UInt64(bytesRead)
+                    // Discarded bytes must NOT count into totalBytesPushed — it is
+                    // the write position boundaries are marked against, and only
+                    // bytes actually in the push stream belong there (bd 433.5.1).
+                    // Track the skipped song content separately so position
+                    // reporting stays continuous. The whole chunk is discarded
+                    // (`continue` below), so bytesRead is the truthful amount.
+                    self.skippedSecondsThisTrack += Double(bytesRead) / Double(self.sampleRate * self.channels * 4)
 
                     // Continue to next loop iteration - don't push this data
                     self.stateLock.unlock()
@@ -1905,9 +1923,11 @@ class AudioStreamDecoder {
 
         // Clear boundary marker - now getCurrentPosition() will calculate
         // normally (under stateLock — the decode loop marks the NEXT track's
-        // boundary under the same lock)
+        // boundary under the same lock). Skipped-content credit belongs to the
+        // track that just finished — the new track's data is complete.
         stateLock.lock()
         trackBoundaryPosition = nil
+        skippedSecondsThisTrack = 0
         stateLock.unlock()
 
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ Boundary handling complete")
@@ -2008,6 +2028,7 @@ class AudioStreamDecoder {
         isDecoding = true
         manualStop = false
         decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
+        skippedSecondsThisTrack = 0
         stateLock.unlock()
 
         // Use the EXISTING decoder (already connected, at position 0:00!)
@@ -2059,6 +2080,7 @@ class AudioStreamDecoder {
         let boundary = trackBoundaryPosition
         let trackStart = trackStartPosition
         let previousStart = previousTrackStartPosition
+        let skippedSeconds = skippedSecondsThisTrack
         stateLock.unlock()
 
         // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
@@ -2078,7 +2100,7 @@ class AudioStreamDecoder {
             let trackBytes = playbackBytes - previousStart
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
-            let trackPosition = seconds + trackStartTimeOffset
+            let trackPosition = seconds + trackStartTimeOffset + skippedSeconds
 
             // Log "before boundary" position, but throttle to every 4 seconds to prevent duplicate spam
             let now = Date()
@@ -2106,7 +2128,7 @@ class AudioStreamDecoder {
         let bytesPerSecond = sampleRate * channels * 4  // 4 bytes per float sample
         let seconds = Double(trackBytes) / Double(bytesPerSecond)
 
-        let trackPosition = seconds + trackStartTimeOffset
+        let trackPosition = seconds + trackStartTimeOffset + skippedSeconds
         return max(0, trackPosition)  // Ensure non-negative
     }
 
