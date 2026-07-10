@@ -1969,6 +1969,18 @@ class AudioStreamDecoder {
             return
         }
 
+        // A STALL with a deferred track queued is only "current track finished"
+        // when the current track's decode actually completed. STALL also fires
+        // on a mid-track network underrun — starting the deferred track then
+        // would truncate the rest of the current track. Keep it queued; BASS
+        // resumes automatically when the decoder pushes more data, and the
+        // real end-of-track drain re-enters here with the latch armed.
+        // bd LMS_StreamTest-433.5.2
+        guard consumeDecodeCompletedNaturally() else {
+            os_log(.error, log: logger, "⏳ Buffer stalled mid-track (network underrun?) with deferred track queued - waiting, NOT starting it early")
+            return
+        }
+
         os_log(.info, log: logger, "🎵 Starting deferred track due to format mismatch")
         os_log(.info, log: logger, "📊 Deferred track: %{public}s (format: %{public}s)",
                pending.url, pending.format)
