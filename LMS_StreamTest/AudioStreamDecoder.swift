@@ -926,6 +926,15 @@ class AudioStreamDecoder {
         let generation = decodeGeneration
         stateLock.unlock()
 
+        // Store the track start time offset SYNCHRONOUSLY (pre-433.2.2 timing).
+        // Position reporting (getCurrentPosition → STAT elapsed → server time →
+        // lock screen) adds this offset; if it were set inside the async
+        // performStartDecoding, heartbeats in the window until
+        // BASS_StreamCreateURL completes would report the OLD track's offset
+        // against a flushed stream, making the displayed time hunt around
+        // after a playlist-jump seek (bd LMS_StreamTest-egd).
+        trackStartTimeOffset = startTime
+
         decodeQueue.async { [weak self] in
             self?.performStartDecoding(url, format: format, isNewTrack: isNewTrack,
                                        startTime: startTime, replayGain: replayGain,
@@ -971,8 +980,8 @@ class AudioStreamDecoder {
             setReplayGain(effectiveGain)
         }
 
-        // Store track start time offset for server-side seeks
-        trackStartTimeOffset = startTime
+        // (trackStartTimeOffset is set synchronously in startDecodingFromURL —
+        // see bd LMS_StreamTest-egd)
 
         currentFormat = format
 
