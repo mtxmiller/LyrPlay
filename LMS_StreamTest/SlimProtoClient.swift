@@ -80,8 +80,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var isPaused: Bool = false
     private var isStreamActive: Bool = false
     
-    private var lastSuccessfulConnection: Date?
-
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -212,7 +210,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.lastSuccessfulConnection = Date()
             self.isConnected = true
 
             // Request initial status after brief delay
@@ -417,6 +414,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             statusData.append(0) // Playing/other
         }
         
+        // Real buffer/byte telemetry from the active stream path — the old code
+        // fabricated all three (fullness = size/2, bytesReceived = wall clock ×
+        // 40000). LMS uses them for rebuffer detection and display; squeezelite
+        // reports real values. bd LMS_StreamTest-433.4.3
+        let telemetry = commandHandler?.getStatTelemetry() ?? SlimProtoStatTelemetry()
+
         // Buffer info (8 bytes total)
         // Network buffer size in bytes (not playback buffer duration)
         let bufferSize = UInt32(settings.networkBufferKB * 1024)
@@ -426,18 +429,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             UInt8((bufferSize >> 8) & 0xff),
             UInt8(bufferSize & 0xff)
         ]))
-        
-        let bufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : bufferSize / 2
+
+        // Rcv buffer fullness: bytes downloaded but not yet decoded, clamped to
+        // the reported capacity.
+        let bufferFullness = UInt32(min(telemetry.streamBufferedBytes, UInt64(bufferSize)))
         statusData.append(Data([
             UInt8((bufferFullness >> 24) & 0xff),
             UInt8((bufferFullness >> 16) & 0xff),
             UInt8((bufferFullness >> 8) & 0xff),
             UInt8(bufferFullness & 0xff)
         ]))
-        
-        // Bytes received (8 bytes total)
-        let connectionDuration = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
-        let bytesReceived: UInt64 = UInt64(abs(connectionDuration) * 40000)
+
+        // Bytes received (8 bytes total): downloaded since the current stream
+        // started (squeezelite's per-stream counter, reset by each strm 's').
+        let bytesReceived = telemetry.bytesReceived
         statusData.append(Data([
             UInt8((bytesReceived >> 56) & 0xff),
             UInt8((bytesReceived >> 48) & 0xff),
@@ -464,17 +469,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             UInt8(jiffies & 0xff)
         ]))
         
-        // Output buffer size (4 bytes)
-        let outputBufferSize: UInt32 = 8192
+        // Output buffer size (4 bytes): decoded-PCM capacity (decode loop's
+        // soft-throttle ceiling on the push path). Floor at the old constant so
+        // an idle player never reports a zero-size buffer (server-side ratios).
+        let outputBufferSize = max(UInt32(clamping: telemetry.outputBufferCapacity), 8192)
         statusData.append(Data([
             UInt8((outputBufferSize >> 24) & 0xff),
             UInt8((outputBufferSize >> 16) & 0xff),
             UInt8((outputBufferSize >> 8) & 0xff),
             UInt8(outputBufferSize & 0xff)
         ]))
-        
-        // Output buffer fullness (4 bytes)
-        let outputBufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : 4096
+
+        // Output buffer fullness (4 bytes): decoded PCM awaiting playback
+        // (push-stream queue + BASS playback buffer), clamped to capacity.
+        let outputBufferFullness = UInt32(min(telemetry.outputBufferedBytes, UInt64(outputBufferSize)))
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
             UInt8((outputBufferFullness >> 16) & 0xff),

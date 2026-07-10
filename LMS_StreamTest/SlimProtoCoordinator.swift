@@ -1467,6 +1467,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         return audioManager.getAudioPlayerTimeForFallback()
     }
 
+    /// Real STAT buffer/byte telemetry for status packets (bd LMS_StreamTest-433.4.3).
+    func getStatTelemetry() -> SlimProtoStatTelemetry {
+        return audioManager.statTelemetry()
+    }
+
     func hasActiveStream() -> Bool {
         // Check if we have an active BASS stream (not stale after reconnect)
         // This includes both URL streams (audioPlayer) and push streams (streamDecoder)

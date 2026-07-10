@@ -389,6 +389,14 @@ class AudioManager: NSObject, ObservableObject {
         }
         return audioPlayer.getCurrentTime()
     }
+
+    /// Real STAT buffer/byte telemetry from whichever stream path is active.
+    func statTelemetry() -> SlimProtoStatTelemetry {
+        if streamDecoder.hasValidStream() {
+            return streamDecoder.statTelemetry()
+        }
+        return audioPlayer.statTelemetry()
+    }
     
     func getDuration() -> Double {
         return audioPlayer.getDuration()

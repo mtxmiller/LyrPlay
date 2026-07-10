@@ -5,6 +5,21 @@ import Foundation
 import AVFoundation
 import os.log
 
+// MARK: - STAT Telemetry
+
+/// Real buffer/byte numbers for SlimProto STAT packets (bd LMS_StreamTest-433.4.3).
+/// Maps LyrPlay's BASS architecture onto squeezelite's STAT fields:
+/// - streamBufferedBytes → rcv buffer fullness (downloaded, not yet decoded)
+/// - outputBufferedBytes → output buffer fullness (decoded PCM awaiting playback:
+///   push-stream queue + BASS playback buffer)
+/// - bytesReceived → bytes downloaded since the current stream started
+struct SlimProtoStatTelemetry {
+    var streamBufferedBytes: UInt64 = 0
+    var outputBufferedBytes: UInt64 = 0
+    var outputBufferCapacity: UInt64 = 0
+    var bytesReceived: UInt64 = 0
+}
+
 // MARK: - Global BASS Callbacks
 
 /// Global callback for track boundary sync
@@ -59,6 +74,30 @@ class AudioStreamDecoder {
     /// Nominal bytes per second (sampleRate × channels × 4 for float32). For SyncController.
     var nominalBytesPerSecond: Int { sampleRate * channels * 4 }
 
+    /// Real buffer/byte numbers for SlimProto STAT packets (replaces the old
+    /// fabricated constants; bd LMS_StreamTest-433.4.3).
+    /// Output side is queried live from the push stream (stable handle, same
+    /// pattern as pushStreamPositionBytes); input side comes from the snapshot
+    /// the decode loop stashes each iteration, because the loop owns
+    /// decoderStream and control-plane threads must not touch it.
+    func statTelemetry() -> SlimProtoStatTelemetry {
+        guard pushStream != 0 else { return SlimProtoStatTelemetry() }
+        let rawQ = BASS_StreamPutData(pushStream, nil, 0)
+        let rawPB = BASS_ChannelGetData(pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let queued = (rawQ == DWORD.max) ? 0 : UInt64(rawQ)
+        let playback = (rawPB == DWORD.max) ? 0 : UInt64(rawPB)
+        stateLock.lock()
+        let input = statStreamBufferedBytes
+        let received = statStreamBytesReceived
+        stateLock.unlock()
+        return SlimProtoStatTelemetry(
+            streamBufferedBytes: input,
+            outputBufferedBytes: queued + playback,
+            outputBufferCapacity: UInt64(maxBufferSize),
+            bytesReceived: received
+        )
+    }
+
     /// BASS decoder stream handle (decodes HTTP URL without playing)
     private var decoderStream: HSTREAM = 0
 
@@ -96,6 +135,13 @@ class AudioStreamDecoder {
 
     /// Track total bytes decoded and pushed (for debugging)
     private var totalBytesPushed: UInt64 = 0
+
+    /// STAT telemetry snapshot, stashed by the decode loop each iteration
+    /// (the loop owns decoderStream — see statTelemetry()). Guarded by stateLock.
+    /// streamBuffered = downloaded but not yet decoded; bytesReceived =
+    /// downloaded since the current decoder stream started.
+    private var statStreamBufferedBytes: UInt64 = 0
+    private var statStreamBytesReceived: UInt64 = 0
 
     /// Track bytes at last buffer diagnostic log (for throttling)
     private var lastBufferDiagnosticBytes: UInt64 = 0
@@ -1219,6 +1265,8 @@ class AudioStreamDecoder {
             trackBoundaryPosition = nil
             totalBytesPushed = 0
             lastBufferDiagnosticBytes = 0
+            statStreamBufferedBytes = 0
+            statStreamBytesReceived = 0
             stateLock.unlock()
             let stateAfter = BASS_ChannelIsActive(pushStream)
             os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
@@ -1235,6 +1283,8 @@ class AudioStreamDecoder {
             trackBoundaryPosition = nil  // Clear old gapless boundary from previous track
             totalBytesPushed = 0  // Reset write position
             lastBufferDiagnosticBytes = 0  // Reset buffer diagnostic counter
+            statStreamBufferedBytes = 0
+            statStreamBytesReceived = 0
         }
         stateLock.unlock()
 
@@ -1295,6 +1345,19 @@ class AudioStreamDecoder {
                 // BASS returns -1 (DWORD.max) on error (e.g. stream ended) — treat as 0
                 let throttlePB = (rawPB == DWORD.max) ? 0 : Int(rawPB)
                 let throttleQ = (rawQ == DWORD.max) ? 0 : Int(rawQ)
+
+                // Stash input-side STAT telemetry: only this loop may touch
+                // decoderStream (ownership, bd 433.2.2), so the control plane
+                // reads these snapshots instead. -1 (QWORD.max) = not available.
+                let statDownloaded = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
+                let statReadPos = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CURRENT))
+                if statDownloaded != UInt64.max {
+                    self.stateLock.lock()
+                    self.statStreamBytesReceived = statDownloaded
+                    self.statStreamBufferedBytes = (statReadPos != UInt64.max && statDownloaded > statReadPos)
+                        ? statDownloaded - statReadPos : 0
+                    self.stateLock.unlock()
+                }
 
                 // Throttle if total buffer is full (~10s of audio)
                 if (throttlePB + throttleQ) > self.maxBufferSize {

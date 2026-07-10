@@ -431,6 +431,14 @@ class SlimProtoCommandHandler: ObservableObject {
         return lastKnownPosition
     }
 
+    /// Real STAT buffer/byte telemetry (bd LMS_StreamTest-433.4.3).
+    func getStatTelemetry() -> SlimProtoStatTelemetry {
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            return coordinator.getStatTelemetry()
+        }
+        return SlimProtoStatTelemetry()
+    }
+
     // PHASE 2: Enhanced unpause command with synchronized start timing
     func handleUnpauseCommand(jiffies: UInt32 = 0) {
         os_log(.info, log: logger, "▶️ Server unpause command (jiffies: %u)", jiffies)

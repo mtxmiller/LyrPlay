@@ -90,6 +90,34 @@ class AudioPlayer: NSObject, ObservableObject {
     /// is active; visualizer falls back to the push-stream path in that case.
     var activeBASSStream: HSTREAM { currentStream }
 
+    /// Real buffer/byte numbers for SlimProto STAT packets on the URL-stream
+    /// path (radio, transcoded-seek formats). Safe to query directly: the URL
+    /// stream is created/freed on the control plane, unlike the decoder-owned
+    /// push-path stream. bd LMS_StreamTest-433.4.3
+    func statTelemetry() -> SlimProtoStatTelemetry {
+        guard currentStream != 0 else { return SlimProtoStatTelemetry() }
+        let downloaded = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_DOWNLOAD))
+        let readPos = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_CURRENT))
+        let rawAvailable = BASS_ChannelGetData(currentStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let available = (rawAvailable == DWORD.max) ? 0 : UInt64(rawAvailable)
+        var buffered: UInt64 = 0
+        var received: UInt64 = 0
+        if downloaded != UInt64.max {
+            received = downloaded
+            if readPos != UInt64.max && downloaded > readPos {
+                buffered = downloaded - readPos
+            }
+        }
+        return SlimProtoStatTelemetry(
+            streamBufferedBytes: buffered,
+            outputBufferedBytes: available,
+            // BASS playback buffer default is 500ms; report a capacity that
+            // comfortably bounds it so fullness/size ratios stay sane.
+            outputBufferCapacity: max(available, 1_048_576),
+            bytesReceived: received
+        )
+    }
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
     private let settings = SettingsManager.shared
