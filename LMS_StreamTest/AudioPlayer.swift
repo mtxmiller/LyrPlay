@@ -1034,24 +1034,35 @@ class AudioPlayer: NSObject, ObservableObject {
         
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         
-        // Track end detection with data parameter filtering - CRITICAL for SlimProto integration
+        // Track end detection - CRITICAL for SlimProto integration.
+        //
+        // NOTE (bd LMS_StreamTest-433.5.5): BASS_SYNC_END's data values are
+        // 1 = MOD-music backward jump, 2 = BASS_POS_END position sync,
+        // 3 = tail end — NONE occur for HTTP audio streams, and a dropped
+        // connection still ends with data=0. The old "data != 0 = network
+        // issue, ignore" filter here could never trigger and did NOT prevent
+        // premature track-end on cellular. Decision: premature ends (stream
+        // drop mid-track) are reported truthfully like squeezelite — the
+        // STMd/STMu flow lets the server (which knows the real duration)
+        // decide whether to restart or advance. Routing them to
+        // audioPlayerDidStall instead would silently halt playback (that
+        // handler is a no-op). We log short ends for field diagnosis.
         BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_END), 0, { handle, channel, data, user in
             guard let user = user else { return }
             let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
-            
+
             DispatchQueue.main.async {
-                // CRITICAL: Only treat data=0 as natural track completion (fixes cellular false positives)
-                if data == 0 && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
-                    // Natural track end detected
-                    let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    
-                    os_log(.info, log: player.logger, "🎵 Track ended naturally (data=0, pos: %.2f, length: %.2f)", currentPos, totalLength)
-                    player.delegate?.audioPlayerDidReachEnd()
-                } else if data != 0 {
-                    // Network/stream issue - ignore (fixes cellular FLAC premature skipping)
-                    os_log(.info, log: player.logger, "⚠️ BASS_SYNC_END data=%d (ignoring - not natural track end)", data)
+                guard !player.isIntentionallyPaused && !player.isIntentionallyStopped else { return }
+
+                let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
+                let expected = player.metadataDuration
+                if expected > 0, currentPos > 0, currentPos < expected - 5.0 {
+                    os_log(.error, log: player.logger, "⚠️ Track ended %.0fs short of expected duration (%.2f / %.2f) - likely dropped stream; reporting end, server drives recovery",
+                           expected - currentPos, currentPos, expected)
+                } else {
+                    os_log(.info, log: player.logger, "🎵 Track ended naturally (pos: %.2f)", currentPos)
                 }
+                player.delegate?.audioPlayerDidReachEnd()
             }
         }, selfPtr)
         
