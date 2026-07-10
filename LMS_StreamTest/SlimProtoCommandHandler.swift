@@ -1,5 +1,5 @@
 // File: SlimProtoCommandHandler.swift
-// UPDATED: Native FLAC support enabled with StreamingKit
+// SlimProto strm/audg/setd command processing; audio playback runs on BASS
 import Foundation
 import Combine
 import os.log
@@ -23,13 +23,6 @@ class SlimProtoCommandHandler: ObservableObject {
     private var isStreamActive = false
     var isPausedByLockScreen = false
     private var lastKnownPosition: Double = 0.0
-    private var streamPosition: Double = 0.0
-    private var streamDuration: Double = 0.0
-    private var streamStartTime: Date?
-    private var isStreamPaused: Bool = false
-    private var lastStreamUpdate: Date = Date()
-    private var serverStartTime: Date?
-    private var serverStartPosition: Double = 0.0
     private var isManualSkipInProgress = false
     private var skipProtectionTimer: Timer?
     private var waitingForNextTrack = false  // True after STMd sent, waiting for server's response
@@ -325,10 +318,7 @@ class SlimProtoCommandHandler: ObservableObject {
         slimProtoClient?.sendStatus("STMf")
 
         // Update state
-        serverStartTime = Date()
-        serverStartPosition = startTime
         lastKnownPosition = startTime
-        isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
         waitingForNextTrack = false  // Server responded with new track - playlist NOT ended
@@ -379,7 +369,6 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
 
             // Don't track position - server knows where we are
-            isStreamPaused = true
             // DON'T automatically set isPausedByLockScreen - only SlimProtoCoordinator should set this
             // for actual lock screen pauses
 
@@ -400,7 +389,6 @@ class SlimProtoCommandHandler: ObservableObject {
                 os_log(.debug, log: logger, "✅ Timed pause initiated")
             } else {
                 os_log(.error, log: logger, "❌ Cannot access coordinator for timed pause - falling back to regular pause")
-                isStreamPaused = true
                 delegate?.didPauseStream()
             }
         }
@@ -455,7 +443,6 @@ class SlimProtoCommandHandler: ObservableObject {
                 coordinator.performPlaylistRecovery()
 
                 // Don't call didResumeStream() - wait for fresh stream from playlist jump
-                isStreamPaused = false
                 isPausedByLockScreen = false
                 return
             }
@@ -465,7 +452,6 @@ class SlimProtoCommandHandler: ObservableObject {
         if jiffies == 0 {
             // Immediate unpause - no synchronization needed
             os_log(.info, log: logger, "▶️ Immediate unpause (jiffies=0) - starting playback now")
-            isStreamPaused = false
             isPausedByLockScreen = false
             delegate?.didResumeStream()
         } else {
@@ -480,14 +466,12 @@ class SlimProtoCommandHandler: ObservableObject {
                 // Forward to coordinator which routes to AudioManager → AudioPlayer
                 coordinator.startAtJiffies(startAtJiffies)
 
-                isStreamPaused = false
                 isPausedByLockScreen = false
 
                 os_log(.debug, log: logger, "✅ Synchronized start initiated via coordinator")
             } else {
                 // Fallback if coordinator not available
                 os_log(.error, log: logger, "❌ Cannot access coordinator for synchronized start - falling back to immediate resume")
-                isStreamPaused = false
                 isPausedByLockScreen = false
                 delegate?.didResumeStream()
             }
@@ -586,11 +570,8 @@ class SlimProtoCommandHandler: ObservableObject {
 
         // Reset all tracking state first
         isStreamActive = false
-        isStreamPaused = false
         isPausedByLockScreen = false
         lastKnownPosition = 0.0
-        serverStartTime = nil
-        serverStartPosition = 0.0
 
         // Send STMd (decoder ready)
         slimProtoClient?.sendStatus("STMd")

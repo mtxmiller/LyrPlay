@@ -75,11 +75,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var host: String = ""
     private var port: UInt16 = 3483
     private var hasRequestedInitialStatus = false
-    
-    // MARK: - Time Reporting State
-    private var isPaused: Bool = false
-    private var isStreamActive: Bool = false
-    
+
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -309,10 +305,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private func sendHelo() {
         os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
 
-        // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
-        // Use device ID 9 (squeezelite) which is better recognized by LMS
-        // This prevents the "AppleCoreMedia" identification issue
-        let deviceID: UInt8 = 12   // squeezelite - well-supported by LMS
+        // Device ID 12 = squeezelite — well-recognized by LMS. Prevents the
+        // "AppleCoreMedia" identification issue.
+        let deviceID: UInt8 = 12
         let revision: UInt8 = 0   // Standard revision
 
         // Get MAC address from settings
@@ -323,7 +318,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
         var helloData = Data()
 
-        // Device ID (1 byte) - 9 = squeezelite for better LMS compatibility
+        // Device ID (1 byte) - 12 = squeezelite
         helloData.append(deviceID)
 
         // Revision (1 byte)

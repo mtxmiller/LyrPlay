@@ -221,8 +221,6 @@ class SlimProtoCoordinator: ObservableObject {
     func disconnect() {
         os_log(.info, log: logger, "🔌 Disconnecting from server with position save")
         connectionManager.userInitiatedDisconnection()
-        // DON'T stop server time sync immediately - preserve last known good time for lock screen
-        // stopServerTimeSync()
         client.disconnectWithPositionSave()
     }
     
@@ -274,15 +272,6 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     /// Request server-side seek for transcoding pipeline fixes
-    // MARK: - Server Time Sync Management (Using SimpleTimeTracker)
-    private func startServerTimeSync() {
-        os_log(.debug, log: logger, "🔄 Using simplified SlimProto time tracking")
-    }
-    
-    private func stopServerTimeSync() {
-        os_log(.debug, log: logger, "⏹️ Simplified time tracking stopped")
-    }
-    
     func requestFreshMetadata() {
         os_log(.info, log: logger, "🔄 Requesting fresh metadata due to stream change")
         fetchCurrentTrackMetadata()
@@ -507,7 +496,6 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     deinit {
-        stopServerTimeSync()
         stopServerTimeFetching()  // Stop our simplified server time fetching
         // Use position-saving disconnect when app is being deallocated
         client.disconnectWithPositionSave()
@@ -855,7 +843,6 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Don't start any status timers here
         // Heartbeat only starts during playback
 
-        startServerTimeSync()
         setupNowPlayingManagerIntegration()
 
         // Apply tvOS volume policy if user opted in (fixOutputAt100Percent).
@@ -905,7 +892,6 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         connectionManager.didDisconnect(error: error)
 
         stopPlaybackHeartbeat()
-        stopServerTimeSync()
     }
     
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {

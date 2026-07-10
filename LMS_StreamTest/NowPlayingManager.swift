@@ -27,7 +27,6 @@ class NowPlayingManager: ObservableObject {
 
     // MARK: - Deduplication State (prevent flooding MPNowPlayingInfoCenter)
     private var lastUpdatedTime: Double = -1.0
-    private var lastUpdatedPlayingState: Bool = false
 
     // MARK: - Track Generation Guard (last-write-wins across the two async hops)
     //
@@ -65,7 +64,6 @@ class NowPlayingManager: ObservableObject {
     private var lockScreenStoredPosition: Double = 0.0
     private var lockScreenStoredTimestamp: Date?
     private var lockScreenWasPlaying: Bool = false
-    private var connectionLostTime: Date?
 
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
@@ -120,9 +118,8 @@ class NowPlayingManager: ObservableObject {
         // Update now playing info with current time (no throttling)
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
 
-        // Save last updated values (for other logic)
+        // Save last updated value (for other logic)
         lastUpdatedTime = currentTime
-        lastUpdatedPlayingState = isPlaying
 
         // Throttle logging to every 10 seconds to reduce spam
         let shouldLog: Bool
