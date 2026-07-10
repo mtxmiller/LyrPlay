@@ -428,14 +428,9 @@ class AudioPlayer: NSObject, ObservableObject {
         playbackState = .stopped
         stopStartAtMonitoring()
 
-        if currentStream != 0 {
-            // Cancel any pending sync-correction resume before freeing (same
-            // ordering as cleanup() — see generation-counter note there).
-            cancelPendingResume()
-            BASS_ChannelStop(currentStream)
-            BASS_StreamFree(currentStream)
-            currentStream = 0
-        }
+        // Stop, free, and zero the stream (plus clear stream info) — reuse
+        // cleanup() so the BASS teardown sequence lives in one place.
+        cleanup()
 
         delegate?.audioPlayerDidStop()
         os_log(.debug, log: logger, "⏹️ CBass stopped playback")

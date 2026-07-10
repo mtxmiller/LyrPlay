@@ -75,10 +75,24 @@ class AudioStreamDecoder {
     private let decodeQueue: DispatchQueue
 
     /// Flag indicating if decoder is actively processing
+    /// Guarded by stateLock — written by the control plane, read by the loop.
     private var isDecoding: Bool = false
 
     /// Flag to track if decoder was manually stopped (vs natural completion)
+    /// Guarded by stateLock.
     private var manualStop: Bool = false
+
+    /// Guards decoder state shared between the control plane and the decode
+    /// loop: decodeGeneration, isDecoding, manualStop, skipAheadBytesRemaining,
+    /// and the write-position math (totalBytesPushed + the boundary fields
+    /// flushBuffer resets). bd LMS_StreamTest-433.2.2.
+    private let stateLock = NSLock()
+
+    /// Bumped by every startDecodingFromURL/stopDecoding. A queued start or a
+    /// running decode loop whose captured generation no longer matches has
+    /// been superseded and must exit without touching current-generation
+    /// state. Guarded by stateLock.
+    private var decodeGeneration: Int = 0
 
     /// Track total bytes decoded and pushed (for debugging)
     private var totalBytesPushed: UInt64 = 0
@@ -574,9 +588,12 @@ class AudioStreamDecoder {
         let bytesPerSecond = sampleRate * channels * 4
         let bytesToSkip = Int(duration * Double(bytesPerSecond))
 
-        // Set the skip counter - decoder loop will discard this many bytes
-        // Access is thread-safe because decoder loop runs on decodeQueue exclusively
+        // Set the skip counter - decoder loop will discard this many bytes.
+        // skipAhead is called from the control plane while the loop runs on
+        // decodeQueue, so the counter is guarded by stateLock.
+        stateLock.lock()
         skipAheadBytesRemaining = bytesToSkip
+        stateLock.unlock()
 
         os_log(.info, log: logger, "⏩ Will discard next %d bytes (%.3f seconds) from decoder",
                bytesToSkip, duration)
@@ -739,7 +756,18 @@ class AudioStreamDecoder {
             }
 
             os_log(.info, log: logger, "▶️ Push stream playback started (muted: %{public}s)", muteNextStream ? "YES" : "NO")
-            delegate?.audioStreamDecoderDidStartPlayback(self)
+            // The control plane is main-confined (bd 433.2.1). Keep the call
+            // synchronous when already on main — the deferred-STMs handshake
+            // relies on the callback firing in the same turn as ChannelPlay —
+            // and marshal when called from decodeQueue (format-mismatch path).
+            if Thread.isMainThread {
+                delegate?.audioStreamDecoderDidStartPlayback(self)
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.delegate?.audioStreamDecoderDidStartPlayback(self)
+                }
+            }
             return true
         } else {
             let error = BASS_ErrorGetCode()
@@ -889,6 +917,35 @@ class AudioStreamDecoder {
     ///   - startTime: Seconds into track where this stream starts (for server-side seeks)
     ///   - replayGain: Linear gain multiplier from server (1.0 = no change)
     func startDecodingFromURL(_ url: String, format: String, isNewTrack: Bool = false, startTime: Double = 0.0, replayGain: Float = 1.0) {
+        // Claim a generation slot NOW (caller order defines supersession),
+        // then do the blocking work on decodeQueue — BASS_StreamCreateURL is
+        // a synchronous HTTP connect (up to BASS NET_TIMEOUT ~5s) and must
+        // never stall the main thread (bd LMS_StreamTest-433.2.2).
+        stateLock.lock()
+        decodeGeneration += 1
+        let generation = decodeGeneration
+        stateLock.unlock()
+
+        decodeQueue.async { [weak self] in
+            self?.performStartDecoding(url, format: format, isNewTrack: isNewTrack,
+                                       startTime: startTime, replayGain: replayGain,
+                                       generation: generation)
+        }
+    }
+
+    /// Runs on decodeQueue. The decode loop executes inline at the end, so
+    /// the serial queue naturally orders: [start A][loop A][start B][loop B] —
+    /// a superseded start bails at the generation check, and a superseded
+    /// loop exits within one iteration and frees only its own stream.
+    private func performStartDecoding(_ url: String, format: String, isNewTrack: Bool, startTime: Double, replayGain: Float, generation: Int) {
+        stateLock.lock()
+        let superseded = (generation != decodeGeneration)
+        stateLock.unlock()
+        guard !superseded else {
+            os_log(.info, log: logger, "⏭️ Skipping superseded decode start for %{public}s", url)
+            return
+        }
+
         os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
 
         // Reset measured-bitrate state — new track means a new decoder stream
@@ -953,7 +1010,7 @@ class AudioStreamDecoder {
                actualSampleRate, actualChannels, sampleRate, channels)
 
         // NOTE: Don't update stream info here! This happens during PREFETCHING.
-        // Stream info is updated when track actually starts (after startDecoderLoop).
+        // Stream info is updated when track actually starts (just before runDecoderLoop).
         // Updating here would show the NEXT track's sample rate while CURRENT track plays.
 
         // If sample rate doesn't match, we need to recreate push stream
@@ -989,7 +1046,10 @@ class AudioStreamDecoder {
                 return
             }
 
-            // Not gapless - safe to recreate stream immediately
+            // Not gapless - safe to recreate stream immediately, here on
+            // decodeQueue (initializePushStream's AVAudioSession sample-rate
+            // call is blocking and must stay off main; startPlayback marshals
+            // its own delegate callback to main).
             os_log(.error, log: logger, "⚠️ Format mismatch! Recreating push stream to match decoder")
 
             // Update our stored format
@@ -1003,11 +1063,16 @@ class AudioStreamDecoder {
             }
 
             initializePushStream(sampleRate: sampleRate, channels: channels)
-            startPlayback()
+            _ = startPlayback()
         }
 
-        // Mark position tracking
-        if pushStream != 0 {
+        // ONE critical section: re-check the generation (a stopDecoding/new
+        // start may have landed while BASS_StreamCreateURL was blocking),
+        // mark position tracking (flushBuffer on the control plane resets
+        // these same fields), and claim the loop slot.
+        stateLock.lock()
+        let stillCurrent = (generation == decodeGeneration)
+        if stillCurrent, pushStream != 0 {
             if isNewTrack {
                 // New track: Set flag to mark boundary when FIRST DECODED CHUNK is written
                 // Like squeezelite: decode.new_stream = true when STRM arrives
@@ -1038,21 +1103,41 @@ class AudioStreamDecoder {
                 os_log(.info, log: logger, "📊 Initializing cumulative write tracking: totalBytesPushed=%llu", totalBytesPushed)
             }
         }
+        if stillCurrent {
+            isDecoding = true
+            manualStop = false  // This is a fresh start, not a manual stop
+        } else {
+            pendingTrackBoundary = false
+        }
+        stateLock.unlock()
 
-        // Start decoder loop (like squeezelite's decode_thread)
-        isDecoding = true
-        manualStop = false  // This is a fresh start, not a manual stop
-        startDecoderLoop()
+        // If superseded, free the stream we just created — the newer start
+        // is queued behind us on decodeQueue.
+        guard stillCurrent else {
+            os_log(.info, log: logger, "⏭️ Decode start superseded during stream creation — freeing")
+            if decoderStream != 0 {
+                BASS_StreamFree(decoderStream)
+                decoderStream = 0
+            }
+            return
+        }
 
         // Update stream info NOW (track is actually starting, not just buffering)
         updateStreamInfoFromDecoder(decoderStream)
+
+        // Run the decoder loop inline (like squeezelite's decode_thread) —
+        // decodeQueue serializes it against any queued starts.
+        runDecoderLoop(generation: generation)
     }
 
     /// Stop current decoder stream
     func stopDecoding() {
         os_log(.info, log: logger, "⏹️ Stopping decoder (manual stop)")
-        manualStop = true  // Mark as manual stop
+        stateLock.lock()
+        decodeGeneration += 1   // Supersede any queued start and running loop
+        manualStop = true       // Mark as manual stop
         isDecoding = false
+        stateLock.unlock()
 
         // Clean up sync start monitoring
         if isWaitingForUnpause {
@@ -1076,10 +1161,11 @@ class AudioStreamDecoder {
             pendingTrack = nil
         }
 
-        if decoderStream != 0 {
-            BASS_StreamFree(decoderStream)
-            decoderStream = 0
-        }
+        // Do NOT free decoderStream here: the decode loop owns its handle and
+        // frees it on exit — it notices the generation bump within one
+        // iteration (≤50ms). Freeing from here raced the loop's
+        // BASS_ChannelGetData, and could free a NEWER stream created by a
+        // start that was queued after this stop (bd LMS_StreamTest-433.2.2).
     }
 
     /// Flush push stream buffer (clear all buffered audio)
@@ -1098,7 +1184,13 @@ class AudioStreamDecoder {
         // Just reset position and restart to clear buffer
 
         // Method 1: Set position to 0 to reset stream (per BASS docs)
-        // This resets both buffer contents AND position counter
+        // This resets both buffer contents AND position counter.
+        // The reset and the write-position math must be one critical section:
+        // the decode loop's push+count runs under the same lock, so a chunk
+        // either lands fully before the flush (and is cleared with the
+        // buffer) or is dropped by the loop's generation check — never
+        // half-counted across the reset (bd LMS_StreamTest-433.2.2).
+        stateLock.lock()
         BASS_ChannelSetPosition(pushStream, 0, DWORD(BASS_POS_BYTE))
 
         // Sync mode: don't restart playback here — the sync timer (after 'u' arrives)
@@ -1118,6 +1210,7 @@ class AudioStreamDecoder {
             trackBoundaryPosition = nil
             totalBytesPushed = 0
             lastBufferDiagnosticBytes = 0
+            stateLock.unlock()
             let stateAfter = BASS_ChannelIsActive(pushStream)
             os_log(.info, log: logger, "🧹 Buffer cleared + BASS paused (state=%d), playback deferred to sync timer", stateAfter)
             return
@@ -1128,15 +1221,18 @@ class AudioStreamDecoder {
         // Trust BASS to handle device switching automatically
         let result = BASS_ChannelPlay(pushStream, 1)  // 1 = restart (clears buffer)
         if result != 0 {
-            // Verify position was reset
-            let newPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
-            os_log(.info, log: logger, "📊 BASS position AFTER flush: %llu (should be 0)", newPos)
-
             trackStartPosition = 0  // Reset track start for position calculation
             previousTrackStartPosition = 0
             trackBoundaryPosition = nil  // Clear old gapless boundary from previous track
             totalBytesPushed = 0  // Reset write position
             lastBufferDiagnosticBytes = 0  // Reset buffer diagnostic counter
+        }
+        stateLock.unlock()
+
+        if result != 0 {
+            // Verify position was reset
+            let newPos = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
+            os_log(.info, log: logger, "📊 BASS position AFTER flush: %llu (should be 0)", newPos)
             os_log(.info, log: logger, "✅ Buffer flushed and restarted - BASS auto-handled device switching")
         } else {
             let error = BASS_ErrorGetCode()
@@ -1144,12 +1240,28 @@ class AudioStreamDecoder {
         }
     }
 
-    /// Decoder loop - pulls PCM from decoder stream and pushes to push stream
-    /// This matches squeezelite's decode_thread() architecture
-    private func startDecoderLoop() {
-        decodeQueue.async { [weak self] in
-            guard let self = self else { return }
+    /// Loop-continuation check, taken once per iteration under stateLock.
+    private func shouldContinueDecoding(generation: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return isDecoding && generation == decodeGeneration
+    }
 
+    /// manualStop read for the loop's exit paths (guarded by stateLock).
+    private func wasManuallyStopped() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return manualStop
+    }
+
+    /// Decoder loop - pulls PCM from decoder stream and pushes to push stream
+    /// This matches squeezelite's decode_thread() architecture.
+    /// Runs INLINE on decodeQueue (from performStartDecoding /
+    /// startDeferredTrack), so the serial queue orders loops against queued
+    /// starts. Exits within one iteration when its generation is superseded,
+    /// and its exit cleanup is the only place the active decoder stream is
+    /// freed (bd LMS_StreamTest-433.2.2).
+    private func runDecoderLoop(generation: Int) {
             os_log(.info, log: self.logger, "🔄 Decoder loop started")
 
             // Snapshot for no-progress timeout: detect streams that never produce audio
@@ -1160,7 +1272,7 @@ class AudioStreamDecoder {
             let bufferSize = 4096
             var buffer = [Float](repeating: 0, count: bufferSize)
 
-            while self.isDecoding && self.decoderStream != 0 {
+            while self.shouldContinueDecoding(generation: generation) && self.decoderStream != 0 {
                 // Check if push stream has space (like squeezelite checks outputbuf space)
                 guard self.pushStream != 0 else {
                     os_log(.error, log: self.logger, "⚠️ No push stream available")
@@ -1203,7 +1315,7 @@ class AudioStreamDecoder {
                             os_log(.info, log: self.logger, "✅ Decoder finished (ENDED + HTTP disconnected)")
                             os_log(.info, log: self.logger, "📊 Total decoded: %llu bytes (%.2f seconds of audio)", self.totalBytesPushed, totalSeconds)
 
-                            if !self.manualStop {
+                            if !self.wasManuallyStopped() {
                                 os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
                                 DispatchQueue.main.async {
                                     self.delegate?.audioStreamDecoderDidCompleteTrack(self)
@@ -1225,7 +1337,7 @@ class AudioStreamDecoder {
                         // No-progress timeout: if 10s with no new audio decoded, stream is undecodable
                         if self.totalBytesPushed == bytesAtLoopStart && now.timeIntervalSince(loopStartTime) > 10.0 {
                             os_log(.error, log: self.logger, "❌ Decoder timeout: 10s with no audio decoded - stream may be undecodable")
-                            if !self.manualStop {
+                            if !self.wasManuallyStopped() {
                                 DispatchQueue.main.async {
                                     self.delegate?.audioStreamDecoderDidEncounterError(self, error: -1)
                                 }
@@ -1241,7 +1353,7 @@ class AudioStreamDecoder {
                     os_log(.error, log: self.logger, "❌ Decoder stream error: %d", error)
 
                     // On error, notify delegate
-                    if !self.manualStop {
+                    if !self.wasManuallyStopped() {
                         DispatchQueue.main.async {
                             self.delegate?.audioStreamDecoderDidEncounterError(self, error: Int(error))
                         }
@@ -1261,7 +1373,7 @@ class AudioStreamDecoder {
                         os_log(.info, log: self.logger, "✅ Decoder finished (no more frames + HTTP disconnected)")
                         os_log(.info, log: self.logger, "📊 Total decoded: %llu bytes (%.2f seconds of audio)", self.totalBytesPushed, totalSeconds)
 
-                        if !self.manualStop {
+                        if !self.wasManuallyStopped() {
                             os_log(.info, log: self.logger, "🎵 Track decode COMPLETE (natural end) - notifying delegate")
                             DispatchQueue.main.async {
                                 self.delegate?.audioStreamDecoderDidCompleteTrack(self)
@@ -1275,7 +1387,7 @@ class AudioStreamDecoder {
                     // No-progress timeout: if 10s with no new audio decoded, stream is undecodable
                     if self.totalBytesPushed == bytesAtLoopStart && Date().timeIntervalSince(loopStartTime) > 10.0 {
                         os_log(.error, log: self.logger, "❌ Decoder timeout: 10s with no audio decoded - stream may be undecodable")
-                        if !self.manualStop {
+                        if !self.wasManuallyStopped() {
                             DispatchQueue.main.async {
                                 self.delegate?.audioStreamDecoderDidEncounterError(self, error: -1)
                             }
@@ -1286,6 +1398,20 @@ class AudioStreamDecoder {
                     // Still connected - no data available yet, wait a bit (like squeezelite's usleep)
                     Thread.sleep(forTimeInterval: 0.001)
                     continue
+                }
+
+                // Push + write-position math is ONE critical section with the
+                // control plane's flushBuffer/skipAhead: a chunk either lands
+                // fully before a flush (and is cleared with the buffer) or is
+                // dropped by the generation check — never half-counted
+                // (bd LMS_StreamTest-433.2.2).
+                self.stateLock.lock()
+
+                guard self.isDecoding && generation == self.decodeGeneration else {
+                    // Superseded after this chunk was decoded — drop it rather
+                    // than pushing stale audio past a stop/flush.
+                    self.stateLock.unlock()
+                    break
                 }
 
                 // SQUEEZELITE-STYLE: Mark boundary when first chunk of new track is written
@@ -1317,6 +1443,7 @@ class AudioStreamDecoder {
                     self.totalBytesPushed += UInt64(bytesRead)
 
                     // Continue to next loop iteration - don't push this data
+                    self.stateLock.unlock()
                     continue
                 }
 
@@ -1331,10 +1458,18 @@ class AudioStreamDecoder {
                 }
 
                 if pushed == DWORD.max {
+                    self.stateLock.unlock()
                     let error = BASS_ErrorGetCode()
                     os_log(.error, log: self.logger, "❌ StreamPutData failed: %d", error)
                     break
                 }
+
+                // Count the chunk immediately — it IS in the push buffer now.
+                // (The soft-throttle `continue` below used to skip this
+                // increment, silently dropping throttled chunks from the
+                // write-position math.)
+                self.totalBytesPushed += UInt64(bytesRead)
+                self.stateLock.unlock()
 
                 // DIAGNOSTIC: Check what "queued" actually means
                 // Per BASS docs: BASS_StreamPutData returns "amount of data currently queued"
@@ -1375,9 +1510,6 @@ class AudioStreamDecoder {
                 // Reset throttle counter when not throttling
                 self.throttleLogCounter = 0
 
-                // Track total bytes for position calculation
-                self.totalBytesPushed += UInt64(bytesRead)
-
                 // Check if buffer ready for STMl signaling
                 // FIX: Use totalBytesPushed instead of playbackBuffered
                 // playbackBuffered is BASS's tiny internal buffer, not our push queue
@@ -1396,20 +1528,34 @@ class AudioStreamDecoder {
 
             os_log(.info, log: self.logger, "🛑 Decoder loop stopped")
 
-            // Clean up decoder stream
+            // Clean up decoder stream — safe unconditionally: any newer start
+            // is queued behind this block on the serial decodeQueue, so the
+            // handle here is still this loop's own.
             if self.decoderStream != 0 {
                 BASS_StreamFree(self.decoderStream)
                 self.decoderStream = 0
             }
-        }
     }
 
     // MARK: - Stream Info Update
 
+    /// currentStreamInfo is @Published (SwiftUI-observed) — assignments must
+    /// happen on main. This path is reached from decodeQueue during track
+    /// start (performStartDecoding), so marshal when off-main.
+    private func setCurrentStreamInfoOnMain(_ info: AudioPlayer.StreamInfo?) {
+        if Thread.isMainThread {
+            audioPlayer?.currentStreamInfo = info
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.audioPlayer?.currentStreamInfo = info
+            }
+        }
+    }
+
     /// Update stream info from decoder stream (shows actual format: FLAC, MP3, etc.)
     private func updateStreamInfoFromDecoder(_ stream: HSTREAM) {
         guard stream != 0 else {
-            audioPlayer?.currentStreamInfo = nil
+            setCurrentStreamInfoOnMain(nil)
             return
         }
 
@@ -1435,7 +1581,7 @@ class AudioStreamDecoder {
             bitrateText: audioPlayer?.carryOverBitrateText
         )
 
-        audioPlayer?.currentStreamInfo = streamInfo
+        setCurrentStreamInfoOnMain(streamInfo)
         os_log(.info, log: logger, "📊 Stream info: %{public}s", streamInfo.displayString)
     }
 
@@ -1505,8 +1651,7 @@ class AudioStreamDecoder {
             syncStartJiffies = nil
         }
 
-        // Stop decoding
-        isDecoding = false
+        // Stop decoding (bumps the generation and clears isDecoding under lock)
         stopDecoding()
 
         // Cancel any pending sync-correction resume before freeing.
@@ -1656,8 +1801,12 @@ class AudioStreamDecoder {
         delegate?.audioStreamDecoderDidReachTrackBoundary(self)
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ STMs SENT - new track should start playing now")
 
-        // Clear boundary marker - now getCurrentPosition() will calculate normally
+        // Clear boundary marker - now getCurrentPosition() will calculate
+        // normally (under stateLock — the decode loop marks the NEXT track's
+        // boundary under the same lock)
+        stateLock.lock()
         trackBoundaryPosition = nil
+        stateLock.unlock()
 
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] ✅ Boundary handling complete")
     }
@@ -1733,23 +1882,31 @@ class AudioStreamDecoder {
         os_log(.error, log: logger, "[APP-RECOVERY] ▶️ Calling startPlayback() - should apply muting if muteNextStream=TRUE")
         startPlayback()
 
-        // Use the EXISTING decoder (already connected, at position 0:00!)
-        // This preserves the HTTP connection so we get the track from the beginning
-        decoderStream = track.decoderStream
-
-        // Mark as first track (new stream, starting fresh)
+        // Mark as first track (new stream, starting fresh) and claim a fresh
+        // generation for the deferred track's loop
+        stateLock.lock()
+        decodeGeneration += 1
+        let generation = decodeGeneration
         trackStartPosition = 0
         previousTrackStartPosition = 0
         totalBytesPushed = 0
         lastBufferDiagnosticBytes = 0
-
-        // Start decode loop with existing decoder
         isDecoding = true
         manualStop = false
-        startDecoderLoop()
+        stateLock.unlock()
+
+        // Use the EXISTING decoder (already connected, at position 0:00!)
+        // This preserves the HTTP connection so we get the track from the
+        // beginning. Handle assignment + decode loop run on decodeQueue,
+        // which owns the decoder stream (bd LMS_StreamTest-433.2.2).
+        decodeQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.decoderStream = track.decoderStream
+            self.runDecoderLoop(generation: generation)
+        }
 
         // Update stream info NOW (deferred track is actually starting)
-        updateStreamInfoFromDecoder(decoderStream)
+        updateStreamInfoFromDecoder(track.decoderStream)
 
         // Notify delegate that deferred track started (for STMs)
         os_log(.error, log: logger, "[APP-RECOVERY] 📡 Notifying delegate of deferred track start")
@@ -1780,28 +1937,30 @@ class AudioStreamDecoder {
         // BASS_POS_DECODE would give decode position (ahead due to buffering)
         let playbackBytes = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
 
-        // Too spammy - uncomment only for debugging position calculations
-        // #if DEBUG
-        // os_log(.info, log: logger, "📊 POS: BASS playback=%llu trackStart=%llu prevStart=%llu boundary=%{public}s",
-        //        playbackBytes, trackStartPosition, previousTrackStartPosition,
-        //        trackBoundaryPosition.map { String($0) } ?? "none")
-        // #endif
+        // Snapshot the boundary fields under stateLock — the decode loop
+        // updates them mid-gapless under the same lock; a torn read here
+        // would feed garbage to MPNowPlayingInfoCenter.
+        stateLock.lock()
+        let boundary = trackBoundaryPosition
+        let trackStart = trackStartPosition
+        let previousStart = previousTrackStartPosition
+        stateLock.unlock()
 
         // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
         // When new track is queued, trackStartPosition is updated to the boundary position
         // But we shouldn't report "new track at 0 seconds" until playback actually reaches that boundary!
         // Instead, continue reporting position from the PREVIOUS track's start position
-        if let boundaryPos = trackBoundaryPosition, playbackBytes < boundaryPos {
+        if let boundaryPos = boundary, playbackBytes < boundaryPos {
             // Still playing old track - calculate position from PREVIOUS track start
             // previousTrackStartPosition is saved before trackStartPosition gets updated to boundary
 
             // Protect against underflow
-            guard playbackBytes >= previousTrackStartPosition else {
-                os_log(.error, log: logger, "⚠️ Before boundary: playback (%llu) < previous start (%llu) - returning 0", playbackBytes, previousTrackStartPosition)
+            guard playbackBytes >= previousStart else {
+                os_log(.error, log: logger, "⚠️ Before boundary: playback (%llu) < previous start (%llu) - returning 0", playbackBytes, previousStart)
                 return 0
             }
 
-            let trackBytes = playbackBytes - previousTrackStartPosition
+            let trackBytes = playbackBytes - previousStart
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
             let trackPosition = seconds + trackStartTimeOffset
@@ -1820,12 +1979,12 @@ class AudioStreamDecoder {
         // After boundary: Calculate position within NEW track (like squeezelite: position - track_start)
         // CRITICAL: Protect against underflow if playback position < trackStart
         // This can happen after buffer flush or on edge cases
-        guard playbackBytes >= UInt64(trackStartPosition) else {
-            os_log(.error, log: logger, "⚠️ Playback position (%llu) < track start (%llu) - returning 0", playbackBytes, trackStartPosition)
+        guard playbackBytes >= trackStart else {
+            os_log(.error, log: logger, "⚠️ Playback position (%llu) < track start (%llu) - returning 0", playbackBytes, trackStart)
             return 0
         }
 
-        let trackBytes = playbackBytes - UInt64(trackStartPosition)
+        let trackBytes = playbackBytes - trackStart
 
         // Convert bytes to seconds
         // Float samples = 4 bytes per sample
