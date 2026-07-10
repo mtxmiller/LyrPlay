@@ -521,15 +521,13 @@ class SlimProtoCommandHandler: ObservableObject {
     private func handleStatusRequest(_ payload: Data) {
         let serverTimestamp = Self.serverTimestamp(fromStrmPayload: payload)
 
-        // Check if we're waiting for next track (after sending STMd)
-        if waitingForNextTrack {
-            // Server sent status request instead of new track → playlist ended
-            os_log(.info, log: logger, "🛑 End of playlist detected - server sent status request after STMd")
-            waitingForNextTrack = false
-            slimProtoClient?.sendStatus("STMu", serverTimestamp: serverTimestamp)
-            delegate?.didStopStream()
-            return
-        }
+        // NOTE: no "poll after STMd = playlist ended" heuristic here. The server's
+        // ~1Hz 't' polls run on an independent schedule from its STMd response, so a
+        // poll landing in the STMd → next-strm-'s' gap (transcoder spin-up, slow
+        // disk) is normal, not end-of-playlist — guessing from poll timing falsely
+        // stopped playback between tracks. squeezelite answers polls truthfully and
+        // lets the server drive; end-of-playback is reported via STMu when output
+        // actually drains (see notifyTrackEnded). bd LMS_StreamTest-433.4.1
 
         delegate?.didReceiveStatusRequest()
 
@@ -589,10 +587,20 @@ class SlimProtoCommandHandler: ObservableObject {
         // Send STMd (decoder ready)
         slimProtoClient?.sendStatus("STMd")
 
+        // Send STMu (output underrun / playback complete). BASS_SYNC_END on a URL
+        // stream means decode complete AND output drained AND stream disconnected
+        // simultaneously — squeezelite's exact STMu condition (slimproto.c:716:
+        // output_full == 0 && stream_state <= DISCONNECT && DECODE_STOPPED).
+        // The server's Stopped-event state table does the right thing with it:
+        // end of playlist (streaming IDLE) → clean stop; next track being prepared
+        // (TRACKWAIT/STREAMING) → buffer and continue. This replaces the removed
+        // poll-timing heuristic as the truthful end-of-playback signal.
+        slimProtoClient?.sendStatus("STMu")
+
         // Set flag to track that we're waiting for server's response
         waitingForNextTrack = true
 
-        os_log(.info, log: logger, "✅ STMd sent - waiting for server response (next track or playlist end)")
+        os_log(.info, log: logger, "✅ STMd+STMu sent - server drives next track or stop")
     }
 
     func startSkipProtection() {
