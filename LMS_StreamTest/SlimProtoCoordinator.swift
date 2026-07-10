@@ -1213,7 +1213,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Start push stream playback with AudioStreamDecoder
         // isGapless: true means DON'T flush buffer, let old audio finish
         // waitForUnpause: true means defer BASS_ChannelPlay until 'u' with sync jiffies arrives
-        audioManager.startPushStreamPlayback(url: url, format: format, sampleRate: 44100, channels: 2, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForUnpause: waitForUnpause)
+        audioManager.startPushStreamPlayback(url: url, format: format, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForUnpause: waitForUnpause)
 
         // Reset gapless flag after use
         expectingGaplessTransition = false

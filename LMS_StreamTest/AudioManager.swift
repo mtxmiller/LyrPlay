@@ -168,8 +168,8 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
-    func startPushStreamPlayback(url: String, format: String, sampleRate: Int = 44100, channels: Int = 2, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
-        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s @ %dHz (gapless: %d, waitForSync: %{public}s)", format, sampleRate, isGapless, waitForUnpause ? "YES" : "NO")
+    func startPushStreamPlayback(url: String, format: String, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
+        os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s (gapless: %d, waitForSync: %{public}s)", format, isGapless, waitForUnpause ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
         // Configure audio session
@@ -180,34 +180,19 @@ class AudioManager: NSObject, ObservableObject {
         let hasValidStream = streamDecoder.hasValidStream()
 
         if !hasValidStream {
-            // First time: Create push stream
-            os_log(.info, log: logger, "📊 Creating new push stream (first track)")
-            streamDecoder.initializePushStream(sampleRate: sampleRate, channels: channels)
+            // First track (or post-cleanup): DON'T create the push stream here.
+            // The decoder creates it at the stream's ACTUAL rate/channels once
+            // BASS reports them (performStartDecoding) — the old flow created a
+            // hardcoded 44.1k/2ch stream and immediately freed + recreated it
+            // on mismatch, with an extra AVAudioSession preferred-rate change,
+            // at the most latency-sensitive moment. ReplayGain is stored by the
+            // decoder (setReplayGain guards on stream existence) and applied at
+            // creation; startPlayback honors the sync-wait flag set below.
+            // bd LMS_StreamTest-433.5.3
+            os_log(.info, log: logger, "📊 First track - push stream will be created at decoder-reported format")
 
-            // Sync-wait must be set AFTER initializePushStream (its delegate callback
-            // may invoke SyncController.reset which doesn't touch the flag, but the
-            // ordering is clearest this way) and BEFORE startPlayback() so its existing
-            // isWaitingForUnpause guard takes effect.
             if waitForUnpause {
                 streamDecoder.markUnpausePending()
-            }
-
-            // CRITICAL: Apply ReplayGain BEFORE starting playback
-            // Without this, BASS_ChannelPlay initializes the DSP chain with VOLDSP=1.0 (unity),
-            // and the first audio frames play without ReplayGain until startDecodingFromURL sets it.
-            // This matches AudioPlayer's URL stream path which sets gain before BASS_ChannelPlay.
-            let effectiveGain = (replayGain > 0.0) ? replayGain : 1.0
-            if effectiveGain != 1.0 {
-                streamDecoder.setReplayGain(effectiveGain)
-                os_log(.info, log: logger, "🎚️ Pre-applied ReplayGain %.4f before first playback start", effectiveGain)
-            }
-
-            // Start playback (DSP chain now has correct VOLDSP from the start)
-            if streamDecoder.startPlayback() {
-                os_log(.info, log: logger, "✅ Push stream playback started")
-            } else {
-                os_log(.error, log: logger, "❌ Failed to start push stream playback")
-                return
             }
         } else if !isGapless {
             // Manual skip: Stop old decoder, flush buffer

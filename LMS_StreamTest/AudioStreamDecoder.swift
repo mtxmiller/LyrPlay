@@ -1094,8 +1094,23 @@ class AudioStreamDecoder {
         // Stream info is updated when track actually starts (just before runDecoderLoop).
         // Updating here would show the NEXT track's sample rate while CURRENT track plays.
 
+        if pushStream == 0 {
+            // First track of a session — creation was deferred by
+            // startPushStreamPlayback so the stream is born at the decoder's
+            // ACTUAL format instead of a 44.1k placeholder that gets torn down
+            // on mismatch. Runs here on decodeQueue (same as the mismatch-
+            // recreate path below); startPlayback honors isWaitingForUnpause
+            // and muteNextStream, and its delegate callback marshals to main.
+            // bd LMS_StreamTest-433.5.3
+            os_log(.info, log: logger, "🎵 Creating push stream at decoder format: %dHz/%dch", actualSampleRate, actualChannels)
+            sampleRate = actualSampleRate
+            channels = actualChannels
+            initializePushStream(sampleRate: sampleRate, channels: channels)
+            setReplayGain(currentReplayGain)  // apply gain stored while streamless
+            _ = startPlayback()
+        }
         // If sample rate doesn't match, we need to recreate push stream
-        if actualSampleRate != sampleRate || actualChannels != channels {
+        else if actualSampleRate != sampleRate || actualChannels != channels {
             os_log(.error, log: logger, "⚠️ Format mismatch! Decoder: %dHz/%dch, Stream: %dHz/%dch",
                    actualSampleRate, actualChannels, sampleRate, channels)
 
