@@ -554,14 +554,54 @@ class SlimProtoCoordinator: ObservableObject {
             }
             
             // Save to user preferences for recovery (using live position, not server time)
-            UserDefaults.standard.set(playlistCurIndex, forKey: "lyrplay_recovery_index")
-            UserDefaults.standard.set(currentPosition, forKey: "lyrplay_recovery_position") 
+            self.setRecoveryIndexFromServer(playlistCurIndex)
+            UserDefaults.standard.set(currentPosition, forKey: "lyrplay_recovery_position")
             UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
             
             os_log(.info, log: self.logger, "💾 Saved recovery state: track %d at %.2f seconds (live position)", playlistCurIndex, currentPosition)
         }
     }
     
+    // MARK: - Recovery Index (single write path, bd LMS_StreamTest-433.5.4)
+
+    /// lyrplay_recovery_index previously had four racing writers (local
+    /// boundary increment, 3s server-time poll, position-save roundtrip, and
+    /// two no-op self-assignments). A poll response that left the server
+    /// BEFORE a gapless boundary could land AFTER the local increment and
+    /// rewind the index — the next recovery then jumped to the PREVIOUS track.
+    /// All writes now route through the two methods below. UserDefaults-backed
+    /// (thread-safe) because the position-save write arrives on a URLSession
+    /// completion thread.
+    private static let recoveryIndexBumpStampKey = "lyrplay_recovery_index_bumped_at"
+
+    /// Reject a server-derived index that moves BACKWARD within a short window
+    /// after a local boundary bump — it's a stale in-flight response. Backward
+    /// moves outside the window are legitimate (user picked an earlier track).
+    static func acceptServerRecoveryIndex(current: Int, proposed: Int, secondsSinceBoundaryBump: TimeInterval) -> Bool {
+        if proposed >= current { return true }
+        return secondsSinceBoundaryBump > 10.0
+    }
+
+    /// Local increment at a gapless track boundary — always wins, stamps its time.
+    func bumpRecoveryIndexAtBoundary() {
+        let bumped = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index") + 1
+        UserDefaults.standard.set(bumped, forKey: "lyrplay_recovery_index")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.recoveryIndexBumpStampKey)
+        os_log(.info, log: logger, "📍 Track boundary: recovery index incremented to %d", bumped)
+    }
+
+    /// Server-derived index (status poll / position-save roundtrip), stale-guarded.
+    func setRecoveryIndexFromServer(_ index: Int) {
+        let current = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
+        let bumpedAt = UserDefaults.standard.double(forKey: Self.recoveryIndexBumpStampKey)
+        let sinceBump = Date().timeIntervalSince1970 - bumpedAt
+        if Self.acceptServerRecoveryIndex(current: current, proposed: index, secondsSinceBoundaryBump: sinceBump) {
+            UserDefaults.standard.set(index, forKey: "lyrplay_recovery_index")
+        } else {
+            os_log(.info, log: logger, "📍 Rejected stale server recovery index %d (current %d, %.1fs after boundary bump)", index, current, sinceBump)
+        }
+    }
+
     /// Perform playlist jump recovery with context-aware play/pause behavior
     /// - Parameter shouldPlay: If true, starts playing after jump (noplay=0). If false, stays paused (noplay=1)
     /// Clear the silent-recovery unmute latch and restore DSP gain, always on the main
@@ -873,7 +913,6 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         if position > 0 {
             UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
             UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
-            UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
             os_log(.info, log: logger, "💾 Saved recovery state on disconnect: %.2f seconds (interpolated)", position)
         }
 
@@ -1422,9 +1461,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // UNIFIED RECOVERY: Increment track index on boundary (LMS_StreamTest-6lb)
         // This works even when disconnected - ensures our local index tracks gapless transitions
-        let currentIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        UserDefaults.standard.set(currentIndex + 1, forKey: "lyrplay_recovery_index")
-        os_log(.info, log: logger, "📍 Track boundary: recovery index incremented to %d", currentIndex + 1)
+        bumpRecoveryIndexAtBoundary()
 
         // CRITICAL FIX: Reset SimpleTimeTracker to 0 when new track starts
         // This ensures lock screen shows 0:00 for the new track, not stale time from previous track
@@ -1698,12 +1735,13 @@ extension SlimProtoCoordinator {
             // NowPlayingManager's timer never stops, so position is saved even when disconnected
 
             // UNIFIED RECOVERY: Sync track index from server when connected (LMS_StreamTest-6lb)
-            // This ensures our local index is authoritative when server tells us current track
+            // Stale-guarded: a poll response predating a gapless boundary must
+            // not rewind the locally-incremented index (bd LMS_StreamTest-433.5.4).
             if let serverIndex = result["playlist_cur_index"] as? Int {
-                UserDefaults.standard.set(serverIndex, forKey: "lyrplay_recovery_index")
+                setRecoveryIndexFromServer(serverIndex)
             } else if let serverIndexString = result["playlist_cur_index"] as? String,
                       let serverIndex = Int(serverIndexString) {
-                UserDefaults.standard.set(serverIndex, forKey: "lyrplay_recovery_index")
+                setRecoveryIndexFromServer(serverIndex)
             }
 
             if shouldLog {
@@ -1813,7 +1851,6 @@ extension SlimProtoCoordinator {
             if position > 0 {
                 UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
                 UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
-                UserDefaults.standard.set(UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"), forKey: "lyrplay_recovery_index")
             }
             // Server roundtrip overwrites with authoritative data if reachable
             saveCurrentPositionForRecovery()
