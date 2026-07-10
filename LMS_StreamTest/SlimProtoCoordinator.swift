@@ -514,12 +514,18 @@ class SlimProtoCoordinator: ObservableObject {
     }
     
     // MARK: - Recovery State Management
+    // All recovery state below is main-thread-confined: check-and-set, clears,
+    // and every timeout/completion closure that touches it hops to main first.
     private var isRecoveryInProgress = false
+    /// Monotonic token identifying the current recovery. The 10s stuck-lock timeout
+    /// and the playlist-jump completion capture their generation and no-op if a
+    /// newer recovery has since started — a stale timer must not clear a later
+    /// recovery's lock or unmute its mid-establishment silent stream (audio burst).
+    private var recoveryGeneration = 0
     // Armed during silent (app-open) recovery once the pause command is sent. The unmute
     // is gated on the real STMp pause confirmation in didPauseStream() rather than a fixed
     // timer, so DSP gain is only restored after audio has actually stopped flowing.
     private var awaitingSilentRecoveryUnmute = false
-    private let recoveryQueue = DispatchQueue(label: "recovery.queue", qos: .userInitiated)
     
     // MARK: - Playlist-Based Position Recovery (Home Assistant Approach)
     
@@ -584,7 +590,11 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     func performPlaylistRecovery(shouldPlay: Bool = true) {
-        recoveryQueue.async { [weak self] in
+        // Check-and-set must happen on the same queue that clears the lock (main).
+        // The old recoveryQueue hop didn't serialize against main-thread clears, so
+        // two near-simultaneous triggers could both pass the guard and interleave
+        // (double playlist jump / double mute-unmute). bd LMS_StreamTest-433.3.2
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
             // Check if recovery is already in progress
@@ -595,21 +605,29 @@ class SlimProtoCoordinator: ObservableObject {
 
             // Set recovery in progress
             self.isRecoveryInProgress = true
-            os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
+            self.recoveryGeneration += 1
+            os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s, gen %d)", shouldPlay ? "YES" : "NO", self.recoveryGeneration)
 
-            DispatchQueue.main.async { [weak self] in
-                self?.executePlaylistRecovery(shouldPlay: shouldPlay)
-            }
+            self.executePlaylistRecovery(shouldPlay: shouldPlay)
         }
     }
 
     private func executePlaylistRecovery(shouldPlay: Bool) {
         os_log(.error, log: logger, "[APP-RECOVERY] 🎯 EXECUTING PLAYLIST RECOVERY (shouldPlay: %{public}s)", shouldPlay ? "YES" : "NO")
 
+        // Capture this recovery's identity: closures below no-op if a newer
+        // recovery has started by the time they fire.
+        let generation = recoveryGeneration
+
         // CRITICAL FIX: Add timeout to prevent permanent recovery lock if JSONRPC callback fails
         // This prevents CarPlay "Resume Playback" from hanging on subsequent attempts
         DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
             guard let self = self else { return }
+            // Only clear OUR recovery. Without the generation check: recovery A
+            // completes at t=3s, recovery B starts at t=8s (silent mute armed),
+            // A's timer fires at t=10s → clears B's lock and unmutes B's
+            // mid-establishment stream → audible burst.
+            guard self.recoveryGeneration == generation else { return }
             if self.isRecoveryInProgress {
                 os_log(.error, log: self.logger, "⚠️ RECOVERY TIMEOUT - Clearing lock after 10s (callback likely failed)")
                 self.isRecoveryInProgress = false
@@ -681,43 +699,62 @@ class SlimProtoCoordinator: ObservableObject {
         ]
         
         sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
-            guard let self = self else { return }
-            os_log(.info, log: self.logger, "🎯 Playlist jump recovery completed")
+            // URLSession invokes this on a background thread — hop to main, where
+            // all recovery state lives.
+            DispatchQueue.main.async {
+                guard let self = self else { return }
 
-            // If we jumped with shouldPlay=false, pause after stream establishes (silently muted)
-            // Longer delay (1.5s) ensures stream is fully established before pause
-            if !shouldPlay {
-                os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    // Arm the event-gated unmute BEFORE sending pause. didPauseStream() will
-                    // restore volume the moment the STMp pause confirmation lands — i.e. once
-                    // BASS is actually paused. The old fixed +2s timer could fire while the
-                    // stream was still playing (or before the async STRM start landed), which
-                    // is what leaked the intermittent (~10%) blip.
-                    self.awaitingSilentRecoveryUnmute = true
+                // A stale completion (our 10s timeout already released the lock and a
+                // newer recovery took over) must not clear the newer recovery's lock,
+                // run the pause dance against its stream, or delete its recovery data.
+                guard self.recoveryGeneration == generation else {
+                    os_log(.error, log: self.logger, "🔒 Ignoring stale playlist-jump completion (gen %d, current %d)", generation, self.recoveryGeneration)
+                    return
+                }
 
-                    // Send pause command (channel still muted)
-                    self.sendJSONRPCCommand("pause")
+                os_log(.info, log: self.logger, "🎯 Playlist jump recovery completed")
 
-                    // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
-                    // so the engine is never left muted. No-op if didPauseStream already did it.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                        guard self.awaitingSilentRecoveryUnmute else { return }
-                        self.awaitingSilentRecoveryUnmute = false
-                        self.audioManager.disableSilentRecoveryMode()
-                        os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (fallback timer)")
+                // If we jumped with shouldPlay=false, pause after stream establishes (silently muted)
+                // Longer delay (1.5s) ensures stream is fully established before pause
+                if !shouldPlay {
+                    os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        // If a newer recovery started while we waited, it owns the stream
+                        // now — pausing it or arming our unmute latch would corrupt it.
+                        guard self.recoveryGeneration == generation else { return }
+
+                        // Arm the event-gated unmute BEFORE sending pause. didPauseStream() will
+                        // restore volume the moment the STMp pause confirmation lands — i.e. once
+                        // BASS is actually paused. The old fixed +2s timer could fire while the
+                        // stream was still playing (or before the async STRM start landed), which
+                        // is what leaked the intermittent (~10%) blip.
+                        self.awaitingSilentRecoveryUnmute = true
+
+                        // Send pause command (channel still muted)
+                        self.sendJSONRPCCommand("pause")
+
+                        // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
+                        // so the engine is never left muted. No-op if didPauseStream already did it.
+                        // Deliberately NOT generation-gated: its only job is "never stay muted",
+                        // which is safe to enforce in any generation.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                            guard self.awaitingSilentRecoveryUnmute else { return }
+                            self.awaitingSilentRecoveryUnmute = false
+                            self.audioManager.disableSilentRecoveryMode()
+                            os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (fallback timer)")
+                        }
                     }
                 }
+
+                // Clear recovery flag after completion
+                self.isRecoveryInProgress = false
+                os_log(.info, log: self.logger, "🔒 Recovery state cleared - other recovery methods can now proceed")
+
+                // Clear recovery data after successful use
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
             }
-
-            // Clear recovery flag after completion
-            self.isRecoveryInProgress = false
-            os_log(.info, log: self.logger, "🔒 Recovery state cleared - other recovery methods can now proceed")
-
-            // Clear recovery data after successful use
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
-            UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
         }
     }
 
