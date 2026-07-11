@@ -617,6 +617,30 @@ class SlimProtoCoordinator: ObservableObject {
         }
     }
 
+    /// Timeout-path teardown for silent recovery (bd 34l): the STMp pause
+    /// confirmation may never arrive, so unlike finishSilentRecoveryIfArmed
+    /// (which runs AFTER a real pause), audio may still be flowing here.
+    /// If the engine is muted and not settled ("Buffering"/stalled counts —
+    /// BASS auto-resumes a stalled stream when data arrives, so it is NOT
+    /// safe to unmute), pause locally, mark the tracker paused, and retry the
+    /// server pause before restoring gain. Paused-at-position is silent
+    /// recovery's intended end state; the re-sent pause re-aligns the server
+    /// whenever it lands (didPauseStream then runs the full bookkeeping).
+    /// Must be called on main.
+    private func settleSilentRecoveryAudio(reason: String) {
+        if audioManager.isSilentRecoveryMuted {
+            let state = audioManager.getPlayerState()
+            if state != "Paused" && state != "Stopped" {
+                os_log(.info, log: logger, "⏸️ %{public}s: state '%{public}s' may still be audible - pausing locally + retrying server pause", reason, state)
+                audioManager.pause()
+                simpleTimeTracker.updateFromServer(time: simpleTimeTracker.getCurrentTimeDouble(), playing: false)
+                sendJSONRPCCommand("pause")
+            }
+        }
+        audioManager.disableSilentRecoveryMode()
+        os_log(.info, log: logger, "🔊 Silent recovery complete - volume restored (%{public}s)", reason)
+    }
+
     func performPlaylistRecovery(shouldPlay: Bool = true) {
         // Check-and-set must happen on the same queue that clears the lock (main).
         // The old recoveryQueue hop didn't serialize against main-thread clears, so
@@ -661,8 +685,11 @@ class SlimProtoCoordinator: ObservableObject {
                 self.isRecoveryInProgress = false
                 // Don't leave audio muted if the jump callback never fires — handlePendingRecovery(.appOpen)
                 // sets the mute flags before this function runs, and only the success callback unmutes.
+                // settle (not a bare disable): the server may have started the stream even though
+                // the callback was lost, so a still-flowing muted stream needs the local pause +
+                // server-pause retry before gain is restored (bd 34l). No-op when mute isn't armed.
                 self.awaitingSilentRecoveryUnmute = false
-                self.audioManager.disableSilentRecoveryMode()
+                self.settleSilentRecoveryAudio(reason: "recovery timeout")
             }
         }
 
@@ -768,8 +795,7 @@ class SlimProtoCoordinator: ObservableObject {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                             guard self.awaitingSilentRecoveryUnmute else { return }
                             self.awaitingSilentRecoveryUnmute = false
-                            self.audioManager.disableSilentRecoveryMode()
-                            os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (fallback timer)")
+                            self.settleSilentRecoveryAudio(reason: "fallback timer")
                         }
                     }
                 }

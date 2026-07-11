@@ -350,20 +350,23 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        // SILENT RECOVERY: Mute using DSP gain (like ReplayGain) instead of volume
-        // BASS_ATTRIB_VOLDSP applies gain to sample data - should actually work!
-        // Use 0.001 instead of 0.0 to avoid any potential edge cases (-60dB = effectively silent)
-        if muteNextStream {
-            BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-            os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (sample-level muting, -60dB)")
-        }
-
         setupCallbacks()
 
         // Apply ReplayGain BEFORE starting playback if pending
         if pendingReplayGain > 0.0 {
             applyReplayGain(pendingReplayGain)
             pendingReplayGain = 0.0  // Clear after application
+        }
+
+        // SILENT RECOVERY: mute AFTER the ReplayGain write — both target VOLDSP,
+        // so gain-after-mute would overwrite the mute and the recovery stream
+        // would play at full gain (bd 34l). applyReplayGain stored the gain in
+        // currentReplayGain, which restoreDSPGain re-applies on unmute. Must be
+        // BEFORE ChannelPlay: VOLDSP changes during playback are delayed by the
+        // playback buffer, so a late mute lets the buffered head play audibly.
+        if muteNextStream {
+            applyMuting()
+            os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: muted before play (legacy URL stream)")
         }
 
         let playResult = BASS_ChannelPlay(currentStream, 0)
@@ -712,6 +715,8 @@ class AudioPlayer: NSObject, ObservableObject {
     /// Mute the current stream immediately for silent recovery.
     /// Mirrors AudioStreamDecoder.applyMuting() so an already-playing legacy URL stream
     /// (FLAC/seek path) is silenced now, not just the next stream via muteNextStream.
+    /// 0.001 rather than true 0.0 (-60dB = effectively silent) to avoid any
+    /// potential BASS edge cases with a zero gain value.
     func applyMuting() {
         guard currentStream != 0 else { return }
         BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)

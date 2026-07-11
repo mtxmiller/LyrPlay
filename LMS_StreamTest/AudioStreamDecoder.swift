@@ -478,15 +478,15 @@ class AudioStreamDecoder {
                 let wallAtStart = Date()
                 // ============================================================
 
+                // SILENT RECOVERY: mute BEFORE ChannelPlay — VOLDSP set after
+                // play starts is delayed by the playback buffer (bd 34l).
+                if self.muteNextStream {
+                    self.applyMuting()
+                }
+
                 let result = BASS_ChannelPlay(self.pushStream, 0)
 
                 if result != 0 {
-                    // Apply muting if needed (for silent recovery)
-                    if self.muteNextStream {
-                        BASS_ChannelSetAttribute(self.pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-                        os_log(.info, log: self.logger, "🔇 DSP gain = 0.001 (synchronized start with muting)")
-                    }
-
                     os_log(.info, log: self.logger, "✅ Synchronized playback started successfully (muted: %{public}s)", self.muteNextStream ? "YES" : "NO")
                     self.delegate?.audioStreamDecoderDidStartPlayback(self)
 
@@ -771,6 +771,16 @@ class AudioStreamDecoder {
             os_log(.info, log: logger, "🔊 Applied stored volume to new stream: %.2f", currentVolume)
         }
 
+        // SILENT RECOVERY: mute at creation, before any sample is processed.
+        // VOLDSP changes during playback are delayed by BASS's playback buffer
+        // (docs: "not heard instantaneously due to buffering") — a mute applied
+        // at/after ChannelPlay lets the buffered head of the stream play at
+        // full gain, which was the intermittent app-open blip (bd 34l). Here
+        // the stream has processed zero samples, so everything is muted.
+        if muteNextStream {
+            applyMuting()
+        }
+
         os_log(.info, log: logger, "✅ Push stream created: handle=%d", pushStream)
 
         // SyncController hook (D4): fresh stream → reset rate offset & drift residual.
@@ -816,17 +826,17 @@ class AudioStreamDecoder {
             return true  // Return success - we're ready, just waiting for sync time
         }
 
+        // SILENT RECOVERY: mute BEFORE ChannelPlay. VOLDSP set after play starts
+        // is delayed by the playback buffer (bd 34l) — the buffered head would
+        // play at full gain. Normally already muted at stream creation; this
+        // re-assert covers a stream that existed before recovery armed.
+        if muteNextStream {
+            applyMuting()
+        }
+
         let result = BASS_ChannelPlay(pushStream, 0)
 
         if result != 0 {
-            // SILENT RECOVERY: Mute using DSP gain (like ReplayGain) instead of volume
-            // BASS_ATTRIB_VOLDSP applies gain to sample data - should actually work!
-            // Use 0.001 instead of 0.0 to avoid any potential edge cases (-60dB = effectively silent)
-            if muteNextStream {
-                BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-                os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (sample-level muting, -60dB)")
-            }
-
             os_log(.info, log: logger, "▶️ Push stream playback started (muted: %{public}s)", muteNextStream ? "YES" : "NO")
             // The control plane is main-confined (bd 433.2.1). Keep the call
             // synchronous when already on main — the deferred-STMs handshake
@@ -867,8 +877,7 @@ class AudioStreamDecoder {
         // SILENT RECOVERY: Apply muting if requested (for app foreground recovery)
         // resumePlayback() bypasses startPlayback(), so we need to check muteNextStream here too
         if muteNextStream {
-            BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-            os_log(.error, log: logger, "[APP-RECOVERY] 🔇 APPLYING MUTING: DSP gain = 0.001 (resumed stream muting)")
+            applyMuting()
         } else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔊 NO MUTING: muteNextStream = FALSE")
         }
@@ -890,13 +899,15 @@ class AudioStreamDecoder {
         }
     }
 
-    /// Apply muting (DSP gain) to current push stream
-    /// Used when flushBuffer() bypasses startPlayback()
+    /// Apply muting (DSP gain) to current push stream — the single mute
+    /// primitive for silent recovery (bd 34l); every mute site routes here.
+    /// 0.001 rather than true 0.0 (-60dB = effectively silent) to avoid any
+    /// potential BASS edge cases with a zero gain value.
     func applyMuting() {
         guard pushStream != 0 else { return }
 
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-        os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (manual muting)")
+        os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (muted)")
     }
 
     /// Restore DSP gain after silent recovery (respects active ReplayGain)
@@ -1324,6 +1335,12 @@ class AudioStreamDecoder {
         // Method 2: Restart to clear the buffer
         // BASS_ChannelPlay with restart=TRUE clears buffer contents
         // Trust BASS to handle device switching automatically
+        // Re-assert silent-recovery mute across the restart — VOLDSP persists on
+        // the handle, but every play site checks explicitly rather than relying
+        // on that implicitly (bd 34l).
+        if muteNextStream {
+            applyMuting()
+        }
         let result = BASS_ChannelPlay(pushStream, 1)  // 1 = restart (clears buffer)
         if result != 0 {
             trackStartPosition = 0  // Reset track start for position calculation

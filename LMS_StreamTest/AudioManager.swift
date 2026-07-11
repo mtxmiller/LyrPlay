@@ -453,6 +453,13 @@ class AudioManager: NSObject, ObservableObject {
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 streamDecoder.hasValidStream() = %{public}s", streamDecoder.hasValidStream() ? "TRUE" : "FALSE")
     }
 
+    /// True while silent-recovery muting is engaged on either engine.
+    /// Lets the coordinator's fallback/timeout paths distinguish "muted stream
+    /// may still be flowing" from a normal (audible) recovery before restoring gain.
+    var isSilentRecoveryMuted: Bool {
+        audioPlayer.muteNextStream || streamDecoder.muteNextStream
+    }
+
     /// Disable silent mode and restore normal DSP gain
     func disableSilentRecoveryMode() {
         audioPlayer.muteNextStream = false
