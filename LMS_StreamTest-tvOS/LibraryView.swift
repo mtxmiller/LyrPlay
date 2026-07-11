@@ -46,10 +46,18 @@ struct LibraryView: View {
 
     @SwiftUI.State private var state: State = .loading
     @SwiftUI.State private var hasFetched: Bool = false
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Per-fetch `count` param. Material's `NUM_HOME_ITEMS` is the floor (10);
     /// 15 gives slight headroom while keeping the response small.
     private static let homeExtraCount = 15
+
+    /// Max age of cached shelves before an appear refetches even without a
+    /// rescan. Plugin shelves change server-side daily with no lastscan
+    /// movement (bd 3xn — mherger's stale 1001 Albums tile). The refetch
+    /// swaps shelves in place (no spinner), so the only cost is one cheap
+    /// JSON-RPC round trip at most once per hour.
+    private static let shelfCacheTTL: TimeInterval = 60 * 60
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSLibraryView")
 
@@ -66,6 +74,15 @@ struct LibraryView: View {
             // A toggle changes which shelves to request, not library content,
             // so this bypasses the lastscan short-circuit.
             Task { await forceRefetch() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Wake with Library already frontmost doesn't refire onAppear —
+            // without this, an app left on this tab overnight keeps stale
+            // shelves past the TTL (bd 3xn). refresh() short-circuits inside
+            // the TTL, so this is free on quick suspend/resume cycles.
+            if phase == .active {
+                Task { await refresh() }
+            }
         }
     }
 
@@ -128,8 +145,10 @@ struct LibraryView: View {
         let lastscan = await probeLastScan()
 
         if hasFetched, isSettledState,
-           let lastscan, settings.lastSeenLastScan[token] == lastscan {
-            os_log(.info, log: logger, "♻️ Library: lastscan unchanged (%lld) — reusing cached shelves", lastscan)
+           let lastscan, settings.lastSeenLastScan[token] == lastscan,
+           let fetched = settings.lastShelfFetchDate[token],
+           Date().timeIntervalSince(fetched) < Self.shelfCacheTTL {
+            os_log(.info, log: logger, "♻️ Library: lastscan unchanged (%lld), cache age %.0fs — reusing cached shelves", lastscan, Date().timeIntervalSince(fetched))
             return
         }
         await performFetch(token: token, lastscan: lastscan)
@@ -188,6 +207,7 @@ struct LibraryView: View {
         guard let result else {
             os_log(.error, log: logger, "❌ home-extra: invalid response — BrowseLibraryView fallback")
             state = .browseLibraryFallback
+            settings.lastShelfFetchDate[token] = Date()
             hasFetched = true
             return
         }
@@ -196,6 +216,7 @@ struct LibraryView: View {
         guard parsed.materialInstalled else {
             os_log(.info, log: logger, "ℹ️ home-extra: no material_home flag — BrowseLibraryView fallback")
             state = .browseLibraryFallback
+            settings.lastShelfFetchDate[token] = Date()
             hasFetched = true
             return
         }
@@ -209,6 +230,7 @@ struct LibraryView: View {
         if let lastscan {
             settings.lastSeenLastScan[token] = lastscan
         }
+        settings.lastShelfFetchDate[token] = Date()
         hasFetched = true
     }
 

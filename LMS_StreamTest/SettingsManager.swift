@@ -52,6 +52,11 @@ class SettingsManager: ObservableObject {
     /// means the library hasn't been rescanned, so the cached shelves stand.
     /// In-memory only (app restart re-fetches once, same as today).
     var lastSeenLastScan: [String: Int64] = [:]
+    /// tvOS Library tab: timestamp of the last shelf fetch per server-token.
+    /// Plugin shelves (home-extra-3rdparty — 1001 Albums, Spotty rows) change
+    /// server-side without a rescan, so an unchanged lastscan alone must not
+    /// keep the cache alive forever (bd 3xn). In-memory only.
+    var lastShelfFetchDate: [String: Date] = [:]
     /// Plugin shelf keys (`plugin:<id>`) the app has discovered before.
     /// Used to apply first-run enable defaults only to genuinely-new plugin
     /// shelves. Persisted alongside `enabledLibraryShelves`.
