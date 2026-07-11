@@ -145,7 +145,9 @@ struct HomeExtraShelf: View {
             ForEach(Array(favs.enumerated()), id: \.offset) { _, fav in
                 MediaTile(
                     title: fav.name,
-                    secondary: fav.type,
+                    // "audio" is wire taxonomy, not an artist — hide it
+                    // (favorites carry no artist field; see FavoritesFolderView).
+                    secondary: fav.type == "audio" ? nil : fav.type,
                     artworkURL: LMSArtworkURL.favoriteIcon(fav.icon, settings: settings),
                     placeholderSymbol: fav.isFolder ? "folder.fill"
                         : (section.id == "radios" ? "antenna.radiowaves.left.and.right" : "star.fill"),

@@ -221,7 +221,11 @@ struct FavoritesFolderView: View {
                 } label: {
                     MediaRow(
                         primary: item.name,
-                        secondary: item.isFolder ? nil : item.type,
+                        // Favorites carry no artist field — `type` is wire
+                        // taxonomy ("audio", "playlist", "link"). "audio" on a
+                        // song row reads as a bogus artist name, so hide it;
+                        // rarer types ("playlist", "link") stay as a useful hint.
+                        secondary: (item.isFolder || item.type == "audio") ? nil : item.type,
                         artworkURL: LMSArtworkURL.favoriteIcon(item.icon, settings: settings),
                         placeholderSymbol: item.isFolder ? "folder.fill" : "star.fill"
                     )
