@@ -156,6 +156,15 @@ class AudioPlayer: NSObject, ObservableObject {
     /// When true, stream volume is set to 0 immediately upon creation
     var muteNextStream: Bool = false
 
+    /// Output-stage (BASS_ATTRIB_VOL) instant mute engaged (bd 34l pre-mute).
+    /// While true, setVolume stores but doesn't write, so a server volume
+    /// command can't unmute early. Cleared by restoreOutputVolume().
+    private var outputMuted: Bool = false
+
+    /// Last server volume (mirrors AudioStreamDecoder.currentVolume) — restore
+    /// target for restoreOutputVolume(). BASS_ATTRIB_VOL defaults to 1.0.
+    private var currentOutputVolume: Float = 1.0
+
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
@@ -367,6 +376,13 @@ class AudioPlayer: NSObject, ObservableObject {
         if muteNextStream {
             applyMuting()
             os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: muted before play (legacy URL stream)")
+        }
+
+        // Instant mute engaged (bd 34l): this is a NEW handle — the VOL=0 written
+        // by applyInstantMute() died with the old stream, so re-assert it here or
+        // the new stream plays at BASS default VOL=1.0 during the mute window.
+        if outputMuted {
+            applyInstantMute()
         }
 
         let playResult = BASS_ChannelPlay(currentStream, 0)
@@ -698,18 +714,60 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Volume Control (MINIMAL CBASS)
     func setVolume(_ volume: Float) {
+        let clampedVolume = max(0.0, min(1.0, volume))
+        currentOutputVolume = clampedVolume
+
         guard currentStream != 0 else { return }
 
-        let clampedVolume = max(0.0, min(1.0, volume))
+        // Don't write while the instant mute is engaged (bd 34l) — the stored
+        // value is applied on restoreOutputVolume().
+        if outputMuted {
+            os_log(.info, log: logger, "🔊 Volume stored (instant mute engaged): %.2f", clampedVolume)
+            return
+        }
+
         BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
     }
 
     func getVolume() -> Float {
-        guard currentStream != 0 else { return 1.0 }
+        // While instant-muted the attribute reads 0; report the stored server
+        // volume so UI sync doesn't echo a transient 0 back to the server.
+        guard currentStream != 0, !outputMuted else { return currentOutputVolume }
 
         var volume: Float = 1.0
         BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
         return volume
+    }
+
+    /// Instant output-stage mute for the app-foreground pre-mute (bd 34l).
+    /// See AudioStreamDecoder.applyInstantMute() — VOLDSP can't silence audio
+    /// already in the playback buffer; BASS_ATTRIB_VOL applies at the output
+    /// stage and takes effect immediately.
+    func applyInstantMute() {
+        outputMuted = true
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), 0.0)
+        os_log(.info, log: logger, "🔇 PRE-MUTE: URL stream output volume = 0 (instant)")
+    }
+
+    /// Undo applyInstantMute(). No-op when the instant mute isn't engaged,
+    /// so it's safe to call from every restore path unconditionally.
+    func restoreOutputVolume() {
+        guard outputMuted else { return }
+        outputMuted = false
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), currentOutputVolume)
+        os_log(.info, log: logger, "🔊 PRE-MUTE: URL stream output volume restored to %.2f", currentOutputVolume)
+    }
+
+    /// Pause the URL stream if it's stalled (BASS_ACTIVE_STALLED) so it can't
+    /// auto-resume at full volume when the network thaws after suspension (bd 34l).
+    func pauseIfStalled() {
+        guard currentStream != 0 else { return }
+        if BASS_ChannelIsActive(currentStream) == DWORD(BASS_ACTIVE_STALLED) {
+            BASS_ChannelPause(currentStream)
+            os_log(.info, log: logger, "⏸️ PRE-MUTE: paused stalled URL stream")
+        }
     }
 
     /// Mute the current stream immediately for silent recovery.

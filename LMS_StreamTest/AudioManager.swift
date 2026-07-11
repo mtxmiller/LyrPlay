@@ -428,10 +428,88 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     // MARK: - Silent Recovery Support
+
+    /// Terminal backstop against stuck mute — armed by preMuteForPossibleRecovery()
+    /// AND enableSilentRecoveryMode(). Recovery collisions (superseding generation,
+    /// isRecoveryInProgress rejection) can strand silent-recovery mode with no
+    /// settle path left to call disableSilentRecoveryMode(); this guarantees the
+    /// engine is never silent for more than ~20s no matter which path died.
+    private var muteSafetyCeilingWorkItem: DispatchWorkItem?
+
+    private func armMuteSafetyCeiling(escalated: Bool) {
+        muteSafetyCeilingWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.muteSafetyCeilingWorkItem = nil
+            if self.isSilentRecoveryMuted {
+                if escalated {
+                    // 20s with silent recovery still engaged: every legitimate
+                    // settle path (STMp confirm, 3.5s fallback, 10s recovery
+                    // timeout) has long expired — the recovery was orphaned.
+                    os_log(.error, log: self.logger, "🔊 MUTE CEILING: silent recovery never settled - forcing full unmute")
+                    self.disableSilentRecoveryMode()
+                } else {
+                    // Recovery may still be legitimately in flight (slow server);
+                    // its own 10s timeout should settle it. Extend once.
+                    os_log(.info, log: self.logger, "⏳ MUTE CEILING: silent recovery still engaged - extending 10s")
+                    self.armMuteSafetyCeiling(escalated: true)
+                }
+            } else {
+                os_log(.info, log: self.logger, "🔊 MUTE CEILING: recovery never engaged - restoring output volume")
+                self.cancelPreMute(reason: "self-restore ceiling")
+            }
+        }
+        muteSafetyCeilingWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: work)
+    }
+
+    /// Instantly silence any in-flight audio at app foreground, BEFORE the
+    /// delayed recovery check runs (bd 34l). A stream that stalled during
+    /// suspension auto-resumes at full volume the moment the thawed socket
+    /// delivers data; VOLDSP muting can't silence samples already in the
+    /// playback buffer, so this uses output-stage VOL (instant) and pauses
+    /// stalled streams. Deliberately does NOT set muteNextStream: if recovery
+    /// never engages, later streams must come up audible on their own.
+    func preMuteForPossibleRecovery() {
+        audioPlayer.applyInstantMute()
+        streamDecoder.applyInstantMute()
+        audioPlayer.pauseIfStalled()
+        streamDecoder.pauseIfStalled()
+        os_log(.info, log: logger, "🔇 PRE-MUTE: in-flight audio silenced pending recovery decision")
+        armMuteSafetyCeiling(escalated: false)
+    }
+
+    /// Lift the pre-mute when recovery is skipped or runs audibly (shouldPlay).
+    /// If silent recovery took over, it owns the unmute — leave it engaged and
+    /// KEEP the safety ceiling armed (it's the last line of defense if the
+    /// recovery is later orphaned by a collision).
+    func cancelPreMute(reason: String) {
+        guard !isSilentRecoveryMuted else {
+            os_log(.info, log: logger, "🔇 PRE-MUTE: not restoring (%{public}s) - silent recovery owns the unmute", reason)
+            return
+        }
+        muteSafetyCeilingWorkItem?.cancel()
+        muteSafetyCeilingWorkItem = nil
+        audioPlayer.restoreOutputVolume()
+        streamDecoder.restoreOutputVolume()
+        os_log(.info, log: logger, "🔊 PRE-MUTE: output volume restored (%{public}s)", reason)
+    }
+
     /// Enable silent mode for the next stream (for app foreground recovery)
     func enableSilentRecoveryMode() {
         audioPlayer.muteNextStream = true
         streamDecoder.muteNextStream = true  // Also apply to push streams for gapless
+
+        // Instant output-stage silence for in-flight streams (bd 34l): VOLDSP
+        // below can't mute samples already processed into the playback buffer.
+        // Restored by disableSilentRecoveryMode() on every settle path.
+        audioPlayer.applyInstantMute()
+        streamDecoder.applyInstantMute()
+
+        // Terminal backstop: if this recovery gets orphaned by a collision
+        // (superseding generation / isRecoveryInProgress rejection), no settle
+        // path will ever disable silent mode — the ceiling force-unmutes.
+        armMuteSafetyCeiling(escalated: false)
 
         // CRITICAL FIX: If there's an existing push stream, flush and mute it IMMEDIATELY
         // This clears old buffered audio and ensures silence during recovery
@@ -462,10 +540,15 @@ class AudioManager: NSObject, ObservableObject {
 
     /// Disable silent mode and restore normal DSP gain
     func disableSilentRecoveryMode() {
+        muteSafetyCeilingWorkItem?.cancel()
+        muteSafetyCeilingWorkItem = nil
         audioPlayer.muteNextStream = false
         streamDecoder.muteNextStream = false
         audioPlayer.restoreDSPGain()
         streamDecoder.restoreDSPGain()
+        // Also lift the output-stage instant mute (no-op if not engaged)
+        audioPlayer.restoreOutputVolume()
+        streamDecoder.restoreOutputVolume()
         os_log(.info, log: logger, "🔊 Silent recovery mode disabled - DSP gain restored")
     }
 

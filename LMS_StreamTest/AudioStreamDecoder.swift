@@ -218,6 +218,11 @@ class AudioStreamDecoder {
     /// When true, DSP gain is set to 0.001 immediately upon push stream playback start
     var muteNextStream: Bool = false
 
+    /// Output-stage (BASS_ATTRIB_VOL) instant mute engaged (bd 34l pre-mute).
+    /// While true, setVolume stores but doesn't write, so a server volume
+    /// command can't unmute early. Cleared by restoreOutputVolume().
+    private var outputMuted: Bool = false
+
     // MARK: - Volume and ReplayGain Support
     /// Current volume level (0.0 to 1.0) - applied via BASS_ATTRIB_VOL
     private var currentVolume: Float = 1.0
@@ -765,8 +770,13 @@ class AudioStreamDecoder {
         // Set up buffer stall detection
         setupSyncCallbacks()
 
-        // Apply stored volume setting (server may have sent audg before stream existed)
-        if currentVolume != 1.0 {
+        // Apply stored volume setting (server may have sent audg before stream existed).
+        // While the instant mute is engaged (bd 34l), the new stream must come up at
+        // VOL=0 too — restoreOutputVolume() writes the stored value to this handle.
+        if outputMuted {
+            BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), 0.0)
+            os_log(.info, log: logger, "🔇 New stream created VOL-muted (instant mute engaged)")
+        } else if currentVolume != 1.0 {
             BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), currentVolume)
             os_log(.info, log: logger, "🔊 Applied stored volume to new stream: %.2f", currentVolume)
         }
@@ -918,6 +928,41 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "🔊 APP OPEN RECOVERY: DSP gain restored to %.4f (ReplayGain-aware)", currentReplayGain)
     }
 
+    /// Instant output-stage mute for the app-foreground pre-mute (bd 34l).
+    /// VOLDSP gain is baked into samples at processing time, so it cannot
+    /// silence audio already sitting in the playback buffer; BASS_ATTRIB_VOL
+    /// applies at the output stage and takes effect immediately. Sets the
+    /// flag even with no stream so setVolume can't unmute the window.
+    func applyInstantMute() {
+        outputMuted = true
+        guard pushStream != 0 else { return }
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), 0.0)
+        os_log(.info, log: logger, "🔇 PRE-MUTE: push stream output volume = 0 (instant)")
+    }
+
+    /// Undo applyInstantMute(), re-applying the stored server volume.
+    /// No-op when the instant mute isn't engaged, so it's safe to call
+    /// from every restore path unconditionally.
+    func restoreOutputVolume() {
+        guard outputMuted else { return }
+        outputMuted = false
+        guard pushStream != 0 else { return }
+        BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), currentVolume)
+        os_log(.info, log: logger, "🔊 PRE-MUTE: push stream output volume restored to %.2f", currentVolume)
+    }
+
+    /// Pause the push stream if it's stalled (BASS_ACTIVE_STALLED). A stream
+    /// that stalled while the app was suspended auto-resumes at full volume
+    /// the moment the thawed socket delivers data — pausing it here closes
+    /// that window (bd 34l). Recovery flushes/recreates the stream anyway.
+    func pauseIfStalled() {
+        guard pushStream != 0 else { return }
+        if BASS_ChannelIsActive(pushStream) == DWORD(BASS_ACTIVE_STALLED) {
+            BASS_ChannelPause(pushStream)
+            os_log(.info, log: logger, "⏸️ PRE-MUTE: paused stalled push stream")
+        }
+    }
+
     // MARK: - Volume Control (Server UI Volume)
 
     /// Set volume level from server audg command
@@ -933,6 +978,13 @@ class AudioStreamDecoder {
             return
         }
 
+        // Don't write while the instant mute is engaged (bd 34l) — the stored
+        // value is applied on restoreOutputVolume().
+        if outputMuted {
+            os_log(.info, log: logger, "🔊 Volume stored (instant mute engaged): %.2f", clampedVolume)
+            return
+        }
+
         BASS_ChannelSetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
         #if DEBUG
         os_log(.debug, log: logger, "🔊 Volume set: %.2f", clampedVolume)
@@ -941,7 +993,9 @@ class AudioStreamDecoder {
 
     /// Get current volume level
     func getVolume() -> Float {
-        guard pushStream != 0 else { return currentVolume }
+        // While instant-muted the attribute reads 0; report the stored server
+        // volume so UI sync doesn't echo a transient 0 back to the server.
+        guard pushStream != 0, !outputMuted else { return currentVolume }
 
         var volume: Float = 1.0
         BASS_ChannelGetAttribute(pushStream, DWORD(BASS_ATTRIB_VOL), &volume)

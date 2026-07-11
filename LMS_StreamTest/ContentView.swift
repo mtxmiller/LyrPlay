@@ -275,6 +275,21 @@ struct ContentView: View {
                 }
             }
 
+            // bd 34l: t=0 pre-mute, synchronous. A stream that stalled during
+            // suspension auto-resumes at full volume the moment the thawed socket
+            // delivers data — inside the 0.5s window before the recovery check
+            // below runs — and VOLDSP muting can't silence samples already in the
+            // playback buffer. Instantly VOL-mute in-flight audio now; restored by
+            // the skip branches below, recovery's settle paths, or a 10s ceiling.
+            if settings.enableAppOpenRecovery,
+               !slimProtoCoordinator.isRecoveryActive,  // an in-flight (lock-screen) recovery owns the audio
+               let preDuration = slimProtoCoordinator.getBackgroundDuration(),
+               preDuration > 45,
+               audioManager.getPlayerState() != "Playing" {
+                os_log(.info, log: logger, "🔇 App Foreground: pre-muting in-flight audio (backgrounded %.1fs)", preDuration)
+                audioManager.preMuteForPossibleRecovery()
+            }
+
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -282,12 +297,14 @@ struct ContentView: View {
                 let currentState = audioManager.getPlayerState()
                 if currentState == "Playing" {
                     os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
+                    audioManager.cancelPreMute(reason: "already playing")
                     return
                 }
 
                 // Get background duration from coordinator (centralized tracking)
                 guard let duration = slimProtoCoordinator.getBackgroundDuration() else {
                     os_log(.info, log: logger, "📱 App Foreground: No background time tracked - skipping recovery")
+                    audioManager.cancelPreMute(reason: "no background time")
                     return
                 }
 

@@ -505,6 +505,9 @@ class SlimProtoCoordinator: ObservableObject {
     // All recovery state below is main-thread-confined: check-and-set, clears,
     // and every timeout/completion closure that touches it hops to main first.
     private var isRecoveryInProgress = false
+    /// Read-only view for ContentView's app-open pre-mute (bd 34l): don't VOL-mute
+    /// audio that an in-flight recovery (e.g. lock-screen resume) already owns.
+    var isRecoveryActive: Bool { isRecoveryInProgress }
     /// Monotonic token identifying the current recovery. The 10s stuck-lock timeout
     /// and the playlist-jump completion capture their generation and no-op if a
     /// newer recovery has since started — a stale timer must not clear a later
@@ -652,6 +655,15 @@ class SlimProtoCoordinator: ObservableObject {
             // Check if recovery is already in progress
             guard !self.isRecoveryInProgress else {
                 os_log(.info, log: self.logger, "🔒 Playlist Recovery: Skipping - recovery already in progress")
+                // A rejected SILENT recovery already muted the engine
+                // (enableSilentRecoveryMode at the .appOpen trigger), and none of
+                // its settle paths will ever run. The lock holder is an audible
+                // recovery (.appOpen only issues one silent attempt per trigger),
+                // so unmute now rather than strand the mute until the ceiling.
+                if !shouldPlay && self.audioManager.isSilentRecoveryMuted {
+                    os_log(.info, log: self.logger, "🔊 Silent recovery rejected by lock - unmuting (owner is audible)")
+                    self.audioManager.disableSilentRecoveryMode()
+                }
                 return
             }
 
@@ -729,6 +741,15 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.error, log: logger, "[APP-RECOVERY] ✅ Silent recovery mode enabled - next stream will be muted")
         } else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔊 Normal recovery mode - no muting needed")
+            // An audible recovery must not play silently. If a silent recovery's
+            // mute is still engaged, this recovery superseded it (generation bump)
+            // and its settle paths are all dead — fully unmute here. Otherwise
+            // just lift the app-open pre-mute (bd 34l).
+            if audioManager.isSilentRecoveryMuted {
+                audioManager.disableSilentRecoveryMode()
+            } else {
+                audioManager.cancelPreMute(reason: "audible recovery")
+            }
         }
 
         // We chose the resume position, so display it immediately and hold it while
