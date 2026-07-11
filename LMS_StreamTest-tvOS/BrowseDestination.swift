@@ -27,4 +27,8 @@ enum BrowseDestination: Hashable {
     /// Built-in playlist track list — push a `BuiltinTrackListView` keyed by
     /// `playlist_id` with the playlist's display name for the nav bar.
     case playlistTracks(playlistID: String, title: String)
+    /// Favorites folder drill — push a `FavoritesFolderView` keyed by the
+    /// folder's favorites `item_id` (a tree position like "3.0", not a db
+    /// id). Recursive: a child folder appends another element (`5bs`).
+    case favoritesFolder(itemID: String, title: String)
 }

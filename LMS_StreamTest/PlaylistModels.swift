@@ -376,9 +376,9 @@ extension Album {
 
 /// Single item from LMS `["favorites", "items"]` JSON-RPC.
 /// `parseLoop` RETAINS folder items and flags them via `isFolder`; each consumer
-/// decides what to do with them. CarPlay drills into folders; tvOS surfaces that
-/// can't drill (FavoritesView, LibraryView, the Radios shelf) must
-/// `.filter { !$0.isFolder }`. See `LMS_StreamTest-5bs` for the tvOS drill-down.
+/// decides what to do with them. CarPlay and the tvOS Library favorites shelf
+/// drill into folders (`FavoritesFolderView`, `5bs`); surfaces that can't drill
+/// (the Radios shelf, the unreferenced flat FavoritesView) `.filter { !$0.isFolder }`.
 struct FavoriteItem: Identifiable {
     let id: String
     let name: String

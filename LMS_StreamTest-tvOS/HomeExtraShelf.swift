@@ -139,14 +139,23 @@ struct HomeExtraShelf: View {
         case .favorites(let favs):
             // Favorites and radios both arrive in this case — identical wire
             // shape, dispatch forks inside `playFavorite` on section.id.
-            // Tap-to-play preserved (no track list to drill into).
+            // Leaves tap-to-play; folder favorites drill into the browse
+            // cover via FavoritesFolderView (5bs). Radios are pre-filtered
+            // to leaves at parse time, so isFolder is never true there.
             ForEach(Array(favs.enumerated()), id: \.offset) { _, fav in
                 MediaTile(
                     title: fav.name,
                     secondary: fav.type,
                     artworkURL: LMSArtworkURL.favoriteIcon(fav.icon, settings: settings),
-                    placeholderSymbol: section.id == "radios" ? "antenna.radiowaves.left.and.right" : "star.fill",
-                    action: { playFavorite(fav) }
+                    placeholderSymbol: fav.isFolder ? "folder.fill"
+                        : (section.id == "radios" ? "antenna.radiowaves.left.and.right" : "star.fill"),
+                    action: {
+                        if fav.isFolder {
+                            onBrowseTap(.favoritesFolder(itemID: fav.id, title: fav.name))
+                        } else {
+                            playFavorite(fav)
+                        }
+                    }
                 )
             }
 

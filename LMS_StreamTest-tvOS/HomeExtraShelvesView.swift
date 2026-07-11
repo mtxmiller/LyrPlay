@@ -108,6 +108,13 @@ struct HomeExtraShelvesView: View {
                 coordinator: coordinator,
                 settings: settings
             )
+        case .favoritesFolder(let itemID, _):
+            FavoritesFolderView(
+                itemID: itemID,
+                coordinator: coordinator,
+                settings: settings,
+                path: $jivePath
+            )
         }
     }
 
@@ -130,6 +137,7 @@ extension BrowseDestination: Identifiable {
         case .plugin(let cmd): return "plugin:\(cmd.id.uuidString)"
         case .albumTracks(let aid, _): return "album:\(aid)"
         case .playlistTracks(let pid, _): return "playlist:\(pid)"
+        case .favoritesFolder(let fid, _): return "favfolder:\(fid)"
         }
     }
 }
