@@ -1,6 +1,7 @@
 // File: SettingsViews.swift
 import SwiftUI
 import os.log
+import OSLog
 import WebKit
 import UniformTypeIdentifiers
 import StoreKit
@@ -20,6 +21,9 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @State private var isReconnecting = false
 
+    // Diagnostic log export (bd 34l field debugging)
+    @State private var diagnosticLogStatus: String? = nil
+
     // App Icon state
     @ObservedObject private var purchaseManager = PurchaseManager.shared
     @ObservedObject private var appIconManager = AppIconManager.shared
@@ -30,7 +34,54 @@ struct SettingsView: View {
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
         return "\(version) (\(build))"
     }
-    
+
+    // MARK: - Diagnostic Log Export (bd 34l)
+    // Reads the app's own os_log entries back from the unified log (iOS 15+),
+    // so field issues can be captured without a tethered Mac. Note: OSLogStore
+    // with .currentProcessIdentifier only sees entries from THIS process launch,
+    // which is exactly the warm-resume window recovery debugging needs.
+
+    private func copyDiagnosticLog() {
+        diagnosticLogStatus = "Collecting…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = Self.collectDiagnosticLog()
+            DispatchQueue.main.async {
+                UIPasteboard.general.string = text
+                diagnosticLogStatus = "Copied!"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    diagnosticLogStatus = nil
+                }
+            }
+        }
+    }
+
+    private static func collectDiagnosticLog() -> String {
+        do {
+            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            let position = store.position(date: Date().addingTimeInterval(-30 * 60))
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss.SSS"
+            let lines = try store.getEntries(at: position)
+                .compactMap { $0 as? OSLogEntryLog }
+                .filter { $0.subsystem == "com.lmsstream" }
+                .map { "\(formatter.string(from: $0.date)) [\($0.category)] \($0.composedMessage)" }
+            guard !lines.isEmpty else {
+                return "No LyrPlay log entries found in the last 30 minutes of this app session."
+            }
+            let header = "LyrPlay diagnostic log — \(appDiagnosticVersion()) — exported \(Date())\n"
+            return header + lines.joined(separator: "\n")
+        } catch {
+            return "Log collection failed: \(error.localizedDescription)"
+        }
+    }
+
+    private static func appDiagnosticVersion() -> String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "v\(version) (\(build))"
+    }
+
+
     var body: some View {
         NavigationView {
             Form {
@@ -443,6 +494,17 @@ struct SettingsView: View {
                         value: appVersionDisplay,
                         valueColor: .secondary
                     )
+
+                    Button(action: copyDiagnosticLog) {
+                        SettingsRow(
+                            icon: "doc.text.magnifyingglass",
+                            title: "Copy Diagnostic Log",
+                            value: diagnosticLogStatus ?? "Last 30 min → clipboard",
+                            valueColor: diagnosticLogStatus == "Copied!" ? .green : .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    .disabled(diagnosticLogStatus == "Collecting…")
 
                     #if DEBUG
                     Button(action: {
