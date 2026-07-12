@@ -910,6 +910,18 @@ class SlimProtoCoordinator: ObservableObject {
                 return
             }
 
+            // Nothing to recover when audio is actively playing (bd 261, captured
+            // device log): opening the phone app during a live CarPlay session
+            // cold-launches ContentView, whose recovery gate checks duration/data
+            // but not player state — the jump then stops live playback for ~1s
+            // and rewinds to a stale saved position. The warm-resume path already
+            // skips on Playing; enforce it here so every entry path inherits it.
+            if audioManager.getPlayerState() == "Playing" {
+                os_log(.info, log: logger, "🔊 App open recovery: already playing - skipping (nothing to recover)")
+                audioManager.cancelPreMute(reason: "already playing")
+                return
+            }
+
             #if os(iOS)
             // CarPlay returns to the car expecting playback to RESUME, not land paused.
             // The muted "jump → pause" dance fights CarPlay's own autoplay and (when its
