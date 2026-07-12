@@ -616,8 +616,26 @@ class SlimProtoCoordinator: ObservableObject {
             guard let self = self, self.awaitingSilentRecoveryUnmute else { return }
             self.awaitingSilentRecoveryUnmute = false
             self.audioManager.disableSilentRecoveryMode()
+            self.refreshMaterialStatus()
             os_log(.info, log: self.logger, "🔊 Silent recovery complete - volume restored (%{public}s)", reason)
         }
+    }
+
+    /// Nudge Material to poll player status NOW instead of waiting for its own
+    /// (background-dazed) Cometd cycle. During app-open recovery the server is
+    /// genuinely playing for ~2s before our pause lands; without this nudge
+    /// Material can show "playing" for several more seconds after the pause.
+    /// Same bus event Material fires internally after its own commands.
+    private func refreshMaterialStatus() {
+        #if os(iOS)
+        guard let webView = webView else { return }
+        DispatchQueue.main.async {
+            webView.evaluateJavaScript(
+                "if (typeof bus !== 'undefined' && bus.$emit) { bus.$emit('refreshStatus'); }",
+                completionHandler: nil
+            )
+        }
+        #endif
     }
 
     /// Timeout-path teardown for silent recovery (bd 34l): the STMp pause
@@ -638,9 +656,15 @@ class SlimProtoCoordinator: ObservableObject {
                 audioManager.pause()
                 simpleTimeTracker.updateFromServer(time: simpleTimeTracker.getCurrentTimeDouble(), playing: false)
                 sendJSONRPCCommand("pause")
+                // The retried pause lands asynchronously — poll Material again
+                // after it should have settled so the UI doesn't sit on "playing".
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.refreshMaterialStatus()
+                }
             }
         }
         audioManager.disableSilentRecoveryMode()
+        refreshMaterialStatus()
         os_log(.info, log: logger, "🔊 Silent recovery complete - volume restored (%{public}s)", reason)
     }
 
