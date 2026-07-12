@@ -505,6 +505,10 @@ class SlimProtoCoordinator: ObservableObject {
     // All recovery state below is main-thread-confined: check-and-set, clears,
     // and every timeout/completion closure that touches it hops to main first.
     private var isRecoveryInProgress = false
+    /// Whether the lock-holding recovery is a silent (shouldPlay=false) one.
+    /// A silent recovery rejected by the lock must NOT unmute when the holder
+    /// is itself silent — the holder's dance owns the unmute (bd 34l).
+    private var currentRecoveryIsSilent = false
     /// Read-only view for ContentView's app-open pre-mute (bd 34l): don't VOL-mute
     /// audio that an in-flight recovery (e.g. lock-screen resume) already owns.
     var isRecoveryActive: Bool { isRecoveryInProgress }
@@ -668,6 +672,25 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "🔊 Silent recovery complete - volume restored (%{public}s)", reason)
     }
 
+    /// Early-return path when recovery has no data to jump with. THE BLIP (bd 34l,
+    /// captured in device log 2026-07-12): a double-triggered app open (.networkRestored
+    /// from the background reconnect timer + .appOpen from ContentView) runs two silent
+    /// recoveries; the first consumes the recovery data and starts its muted jump→pause
+    /// dance, the second lands here, and the old bare disableSilentRecoveryMode()
+    /// unmuted the first one's STILL-PLAYING muted stream ~1s before any pause landed.
+    /// For !shouldPlay, settle instead: pause BEFORE unmuting. pause is sent as
+    /// explicit ["pause","1"], so the extra send is idempotent.
+    private func finishRecoveryWithoutJump(shouldPlay: Bool) {
+        if shouldPlay {
+            audioManager.disableSilentRecoveryMode()
+            sendJSONRPCCommand("play")
+        } else {
+            settleSilentRecoveryAudio(reason: "no recovery data")
+            sendJSONRPCCommand("pause")
+        }
+        isRecoveryInProgress = false
+    }
+
     func performPlaylistRecovery(shouldPlay: Bool = true) {
         // Check-and-set must happen on the same queue that clears the lock (main).
         // The old recoveryQueue hop didn't serialize against main-thread clears, so
@@ -681,10 +704,13 @@ class SlimProtoCoordinator: ObservableObject {
                 os_log(.info, log: self.logger, "🔒 Playlist Recovery: Skipping - recovery already in progress")
                 // A rejected SILENT recovery already muted the engine
                 // (enableSilentRecoveryMode at the .appOpen trigger), and none of
-                // its settle paths will ever run. The lock holder is an audible
-                // recovery (.appOpen only issues one silent attempt per trigger),
-                // so unmute now rather than strand the mute until the ceiling.
-                if !shouldPlay && self.audioManager.isSilentRecoveryMuted {
+                // its settle paths will ever run. If the lock holder is AUDIBLE it
+                // will never unmute either, so do it now. If the holder is itself
+                // a silent recovery (double app-open trigger: .networkRestored +
+                // .appOpen — the captured bd 34l blip), leave the mute alone: the
+                // holder's own jump→pause dance settles it, and unmuting here
+                // would blast its still-playing muted stream.
+                if !shouldPlay && self.audioManager.isSilentRecoveryMuted && !self.currentRecoveryIsSilent {
                     os_log(.info, log: self.logger, "🔊 Silent recovery rejected by lock - unmuting (owner is audible)")
                     self.audioManager.disableSilentRecoveryMode()
                 }
@@ -693,6 +719,7 @@ class SlimProtoCoordinator: ObservableObject {
 
             // Set recovery in progress
             self.isRecoveryInProgress = true
+            self.currentRecoveryIsSilent = !shouldPlay
             self.recoveryGeneration += 1
             os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s, gen %d)", shouldPlay ? "YES" : "NO", self.recoveryGeneration)
 
@@ -735,11 +762,7 @@ class SlimProtoCoordinator: ObservableObject {
         // Check if we have recovery data (no time limit - like other music players)
         guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
-            // handlePendingRecovery(.appOpen) mutes the audio engine before this function runs.
-            // Undo it here so a missing-data early-return doesn't leave the next stream silent.
-            audioManager.disableSilentRecoveryMode()
-            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
-            isRecoveryInProgress = false // Clear recovery flag
+            finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
         }
 
@@ -748,10 +771,7 @@ class SlimProtoCoordinator: ObservableObject {
 
         guard savedPosition > 0 else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
-            // Same mute-leak guard as the recovery_timestamp early-return above.
-            audioManager.disableSilentRecoveryMode()
-            sendJSONRPCCommand(shouldPlay ? "play" : "pause")
-            isRecoveryInProgress = false // Clear recovery flag
+            finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
         }
 
@@ -878,6 +898,17 @@ class SlimProtoCoordinator: ObservableObject {
             // so a subsequent cold launch can still gate on it.
             UserDefaults.standard.removeObject(forKey: "lyrplay_backgrounded_at")
             backgroundedTime = nil
+
+            // Double-trigger suppression (bd 34l, captured in device log): the
+            // background reconnect timer can race the foreground wake and fire a
+            // .networkRestored recovery first. It performs the same silent
+            // jump→pause for a paused session — running a second recovery here
+            // consumed no data (the first ate it), bumped the generation (killing
+            // the first one's pause dance), and bare-unmuted its playing stream.
+            guard !isRecoveryInProgress else {
+                os_log(.info, log: logger, "🔇 App open recovery: another recovery already in flight - skipping duplicate")
+                return
+            }
 
             #if os(iOS)
             // CarPlay returns to the car expecting playback to RESUME, not land paused.
