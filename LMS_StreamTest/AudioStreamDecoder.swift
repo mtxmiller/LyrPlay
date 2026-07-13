@@ -1143,6 +1143,18 @@ class AudioStreamDecoder {
         guard decoderStream != 0 else {
             let error = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ Decoder stream creation failed: %d", error)
+            // Report to the server like the decode-loop error paths do (→ STMn,
+            // squeezelite's DECODE_ERROR) — a bare return left the pipeline
+            // silently dead: the current track drained its buffer and playback
+            // just stopped, no transition, until a skip or recovery kicked it
+            // (bd uqi — tester's WireGuard-VPN stops; error 40 = BASS timeout).
+            // On STMn the server marks the track failed and advances.
+            if !wasManuallyStopped() {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.delegate?.audioStreamDecoderDidEncounterError(self, error: Int(error))
+                }
+            }
             return
         }
 
