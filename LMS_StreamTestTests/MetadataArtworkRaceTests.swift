@@ -138,4 +138,89 @@ final class MetadataArtworkRaceTests: XCTestCase {
         XCTAssertTrue(npm.applyArtwork(nil, forGeneration: genC))
         XCTAssertNil(npm.currentArtwork, "a failed current-track cover must clear, not keep the previous cover")
     }
+
+    // MARK: - Radio-poll artwork dedupe (tvOS "blipping artwork", bd a7r)
+    //
+    // The 15s radio metadata poll re-sends identical metadata for the playing
+    // station. Re-downloading the cover published a fresh UIImage instance every
+    // tick, which SwiftUI (reference equality for UIImage) animated as an artwork
+    // change — a visible blip on the tvOS Now Playing screen. updateTrackMetadata
+    // must leave the painted cover untouched when the incoming URL matches the
+    // latched painted URL. applyLoadedArtwork is loadArtwork's synchronous
+    // completion step, driven directly here so no real download is needed.
+
+    private let coverURL = "http://server:9000/music/abc/cover.jpg"
+
+    func testRepeatedPollWithSameArtworkURLKeepsCoverInstanceAndGeneration() {
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "Song A", artist: "x", album: "y")
+        let gen = npm.currentTrackGenerationForTesting
+        let art = makeImage(.red)
+        XCTAssertTrue(npm.applyLoadedArtwork(art, from: coverURL, forGeneration: gen))
+        XCTAssertEqual(npm.lastLoadedArtworkURLForTesting, coverURL)
+
+        // Radio poll tick: same station, same cover URL (title may even change).
+        npm.updateTrackMetadata(title: "Song B", artist: "x", album: "y", artworkURL: coverURL)
+
+        XCTAssertTrue(npm.currentArtwork === art, "unchanged cover URL must keep the SAME UIImage instance (no blip)")
+        XCTAssertEqual(npm.currentTrackGenerationForTesting, gen, "dedupe must not open a new generation")
+        XCTAssertEqual(npm.currentTrackTitle, "Song B", "text must still repaint on a deduped tick")
+    }
+
+    func testFailedLoadDoesNotLatchSoNextPollRetries() {
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "Song A", artist: "x", album: "y")
+        let gen = npm.currentTrackGenerationForTesting
+
+        // Cover download fails: clear applies, but the URL must NOT latch.
+        XCTAssertTrue(npm.applyLoadedArtwork(nil, from: coverURL, forGeneration: gen))
+        XCTAssertNil(npm.currentArtwork)
+        XCTAssertNil(npm.lastLoadedArtworkURLForTesting, "failed load must not latch — the next poll must retry")
+    }
+
+    func testNewArtworkURLInvalidatesLatchBeforeLoading() {
+        // URL-flap safety: once a NEW artwork op starts, the old latch must be
+        // gone, so a flap back to the old URL mid-download reloads instead of
+        // deduping against a cover that is about to be replaced.
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "Song A", artist: "x", album: "y")
+        let gen = npm.currentTrackGenerationForTesting
+        XCTAssertTrue(npm.applyLoadedArtwork(makeImage(.red), from: coverURL, forGeneration: gen))
+        XCTAssertEqual(npm.lastLoadedArtworkURLForTesting, coverURL)
+
+        // Different cover URL arrives — a real download kicks off (ignored here);
+        // synchronously, the latch must already be cleared and a new generation open.
+        npm.updateTrackMetadata(title: "Song B", artist: "x", album: "y",
+                                artworkURL: "http://server:9000/music/def/cover.jpg")
+        XCTAssertNil(npm.lastLoadedArtworkURLForTesting, "starting a new artwork op must invalidate the latch")
+        XCTAssertGreaterThan(npm.currentTrackGenerationForTesting, gen)
+    }
+
+    func testStaleLoadDoesNotLatch() {
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "Song A", artist: "x", album: "y")
+        let genA = npm.currentTrackGenerationForTesting
+        // A newer track opens before A's cover lands.
+        npm.updateTrackMetadata(title: "Song B", artist: "x", album: "y")
+
+        // A's late cover is dropped by the generation guard and must not latch
+        // its URL either — otherwise B's identical-URL poll would dedupe against
+        // a cover that never painted.
+        XCTAssertFalse(npm.applyLoadedArtwork(makeImage(.red), from: coverURL, forGeneration: genA))
+        XCTAssertNil(npm.lastLoadedArtworkURLForTesting)
+        XCTAssertNil(npm.currentArtwork)
+    }
+
+    func testTrackWithNoArtworkStillClearsAfterLatchedCover() {
+        // The nil-URL clear path must be unaffected by the dedupe latch.
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "Song A", artist: "x", album: "y")
+        let gen = npm.currentTrackGenerationForTesting
+        XCTAssertTrue(npm.applyLoadedArtwork(makeImage(.red), from: coverURL, forGeneration: gen))
+        XCTAssertNotNil(npm.currentArtwork)
+
+        npm.updateTrackMetadata(title: "No Art Track", artist: "x", album: "y", artworkURL: nil)
+        XCTAssertNil(npm.currentArtwork, "nil-URL track must clear the cover even when a latch is set")
+        XCTAssertNil(npm.lastLoadedArtworkURLForTesting)
+    }
 }

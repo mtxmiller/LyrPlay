@@ -52,10 +52,23 @@ class NowPlayingManager: ObservableObject {
     private var trackGeneration: Int = 0
     private var artworkTask: URLSessionDataTask?
 
+    // URL of the cover that is currently PAINTED (latched only when a download
+    // succeeds and applies; cleared whenever a new artwork operation starts, so
+    // a URL flap mid-download can never dedupe against a cover that is about to
+    // be replaced). The 15s radio metadata poll re-sends identical metadata for
+    // the playing station; re-downloading the cover published a fresh UIImage
+    // every tick, and SwiftUI compares UIImage by reference — the tvOS Now
+    // Playing screen animated each "change" as a visible artwork blip
+    // (bd LMS_StreamTest-a7r, forum report). Matching URL → repaint text only.
+    private var lastLoadedArtworkURL: String?
+
     #if DEBUG
     /// Test-only read access to the current track generation so unit tests can
     /// assert the last-write-wins artwork guard without driving real downloads.
     var currentTrackGenerationForTesting: Int { trackGeneration }
+
+    /// Test-only read access to the radio-poll dedupe latch.
+    var lastLoadedArtworkURLForTesting: String? { lastLoadedArtworkURL }
     #endif
 
     // Log throttling (only log lock screen updates every 10 seconds)
@@ -297,15 +310,25 @@ class NowPlayingManager: ObservableObject {
         // Reset deduplication state so next update goes through immediately
         lastUpdatedTime = -1.0
 
+        // Radio-poll dedupe: the incoming cover URL is the one already painted —
+        // leave the image alone (no re-download, no new UIImage instance, no
+        // tvOS blip) and just push the possibly-updated text to now-playing.
+        if let artworkURL = artworkURL, artworkURL == lastLoadedArtworkURL {
+            let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+            return
+        }
+
         // Open a new track generation. Text above is already painted; the cover
         // (a second async hop) is gated on this same generation so text and cover
         // can never end up showing different tracks.
         trackGeneration += 1
         let generation = trackGeneration
+        lastLoadedArtworkURL = nil  // new artwork op — latch re-set only on successful load
 
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
-            loadArtwork(from: url, generation: generation)
+            loadArtwork(from: url, urlString: artworkURL, generation: generation)
         } else {
             // No artwork for this track — clear (guarded so a late stale load
             // can't repaint), then refresh now-playing immediately.
@@ -329,7 +352,21 @@ class NowPlayingManager: ObservableObject {
         return true
     }
 
-    private func loadArtwork(from url: URL, generation: Int) {
+    /// Synchronous completion step of an artwork download: last-write-wins apply
+    /// plus the painted-URL latch for the radio-poll dedupe. A failed load (nil
+    /// image) applies the clear but does NOT latch, so the next poll retries.
+    /// Factored out (no network, no async) so the latch is unit-testable
+    /// alongside applyArtwork. Must be called on the main thread.
+    @discardableResult
+    func applyLoadedArtwork(_ image: UIImage?, from urlString: String, forGeneration generation: Int) -> Bool {
+        let applied = applyArtwork(image, forGeneration: generation)
+        if applied && image != nil {
+            lastLoadedArtworkURL = urlString
+        }
+        return applied
+    }
+
+    private func loadArtwork(from url: URL, urlString: String, generation: Int) {
         os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s (gen %d)", url.absoluteString, generation)
 
         // Cancel any prior in-flight artwork download. On Apple TV covers can be
@@ -364,7 +401,7 @@ class NowPlayingManager: ObservableObject {
                 // Apply only if this is still the current track's load. A genuine
                 // current-track failure applies `nil` (clear to no-art) so the
                 // cover always matches the playing track — never the previous one.
-                let applied = self.applyArtwork(image, forGeneration: generation)
+                let applied = self.applyLoadedArtwork(image, from: urlString, forGeneration: generation)
 
                 // Refresh now-playing only for the winning load; stale loads
                 // must not push an out-of-date now-playing snapshot.
@@ -491,6 +528,7 @@ class NowPlayingManager: ObservableObject {
         currentArtist = "Unknown Artist"
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
+        lastLoadedArtworkURL = nil
         metadataDuration = 0.0
         hasTrackLoaded = false
         lastKnownServerTime = 0.0
