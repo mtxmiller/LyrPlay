@@ -1149,7 +1149,17 @@ class AudioStreamDecoder {
             // just stopped, no transition, until a skip or recovery kicked it
             // (bd uqi — tester's WireGuard-VPN stops; error 40 = BASS timeout).
             // On STMn the server marks the track failed and advances.
-            if !wasManuallyStopped() {
+            // Gate on generation, NOT manualStop: manualStop is only cleared on
+            // the success path below, so here it still holds the PREVIOUS
+            // track's stop state — a reconnect's strm 'q' right before this
+            // start left it true and suppressed the STMn, freezing the server
+            // in a playing-at-0s zombie state (dead-spot log, 2026-07-14).
+            // A stop arriving during creation bumps decodeGeneration, so the
+            // generation check covers the case manualStop was guarding.
+            stateLock.lock()
+            let stillCurrent = (generation == decodeGeneration)
+            stateLock.unlock()
+            if stillCurrent {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.delegate?.audioStreamDecoderDidEncounterError(self, error: Int(error))
