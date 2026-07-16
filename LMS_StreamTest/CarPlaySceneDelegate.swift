@@ -944,7 +944,21 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         components.scheme = "http"
         components.host = host
         components.port = port
-        components.path = path.hasPrefix("/") ? path : "/" + path
+        let prefixed = path.hasPrefix("/") ? path : "/" + path
+        // LMS sends these paths ALREADY percent-encoded — a URL-set favorite icon
+        // arrives as "/imageproxy/https%3A%2F%2F…/image.png". `components.path`
+        // re-encodes the '%' signs (%3A → %253A), and the server answers the
+        // mangled imageproxy request with its radio.png fallback — the "black
+        // antenna icon" on every URL-icon favorite (GH#92). Preserve existing
+        // escapes; the round-trip guard rejects malformed escapes, which would
+        // trap in the percentEncodedPath setter.
+        let allowed = CharacterSet.urlPathAllowed.union(CharacterSet(charactersIn: "%"))
+        if let encoded = prefixed.addingPercentEncoding(withAllowedCharacters: allowed),
+           encoded.removingPercentEncoding != nil {
+            components.percentEncodedPath = encoded
+        } else {
+            components.path = prefixed
+        }
         return components.url
     }
 

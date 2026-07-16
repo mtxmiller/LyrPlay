@@ -66,4 +66,34 @@ final class CarPlayArtworkTests: XCTestCase {
     func testEmptyStringReturnsNil() {
         XCTAssertNil(resolve(""))
     }
+
+    // MARK: - Percent-encoded paths (GH#92 "black antenna icon")
+    //
+    // A favorite whose icon is set to a URL comes back from LMS as an
+    // ALREADY-percent-encoded imageproxy path. URLComponents.path re-encodes
+    // the '%' signs (%3A → %253A); the server can't resolve the mangled
+    // embedded URL and serves its radio.png fallback instead — so every
+    // URL-icon favorite showed the black antenna. The resolver must pass
+    // existing escapes through untouched.
+
+    func testImageproxyEscapedURLNotDoubleEncoded() {
+        // Real shape from 192.168.1.8 favorite 4425b0b5.0.
+        XCTAssertEqual(
+            resolve("/imageproxy/https%3A%2F%2Fstation.example%2Flogo.png/image.png"),
+            "http://192.168.1.8:9000/imageproxy/https%3A%2F%2Fstation.example%2Flogo.png/image.png"
+        )
+    }
+
+    func testUnescapedSpaceStillGetsEncoded() {
+        // Plain (unescaped) paths must still be made URL-safe.
+        XCTAssertEqual(resolve("plugins/Some Plugin/icon.png"),
+                       "http://192.168.1.8:9000/plugins/Some%20Plugin/icon.png")
+    }
+
+    func testMalformedEscapeDoesNotTrapAndStillResolves() {
+        // A stray '%' (not a valid escape) must not crash the
+        // percentEncodedPath setter — falls back to plain path encoding.
+        XCTAssertEqual(resolve("html/100% mix.png"),
+                       "http://192.168.1.8:9000/html/100%25%20mix.png")
+    }
 }
