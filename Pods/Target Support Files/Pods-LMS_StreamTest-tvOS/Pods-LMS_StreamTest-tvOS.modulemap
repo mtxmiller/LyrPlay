@@ -1,0 +1,6 @@
+framework module Pods_LMS_StreamTest_tvOS {
+  umbrella header "Pods-LMS_StreamTest-tvOS-umbrella.h"
+
+  export *
+  module * { export * }
+}

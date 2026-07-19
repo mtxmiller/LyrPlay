@@ -1,6 +1,9 @@
 // File: PlaylistModels.swift
-// Data models for CarPlay playlist and Up Next functionality
+// Data models for CarPlay + tvOS playlist, library, and Up Next functionality.
 import Foundation
+import Combine
+import UIKit
+import os.log
 
 // MARK: - Playlist Data Models
 
@@ -75,6 +78,12 @@ struct PlaylistTrack: Identifiable, Codable {
     let duration: Double?
     let trackNumber: Int?
     let artworkURL: String?
+    /// LMS `artwork_url` — the artwork for a remote/plugin track (Bandcamp,
+    /// radio, etc.), an absolute URL or a server-relative `/imageproxy/…` path.
+    /// Such tracks have only a synthetic negative `coverid` that resolves to
+    /// the LMS placeholder on `/music/<id>/cover`, so this is the real source.
+    /// Requires the `K` tag on the `status`/`titles` query.
+    let remoteArtworkURL: String?
     let albumID: String?
     let artistID: String?
     let playlistIndex: Int?  // LMS playlist index (important for playback)
@@ -88,6 +97,7 @@ struct PlaylistTrack: Identifiable, Codable {
         case duration
         case trackNumber = "tracknum"
         case artworkURL = "coverid"
+        case remoteArtworkURL = "artwork_url"
         case albumID = "album_id"
         case artistID = "artist_id"
         case playlistIndex = "playlist index"
@@ -129,6 +139,13 @@ struct PlaylistTrack: Identifiable, Codable {
             artworkURL = nil
         }
 
+        // Remote/plugin artwork — empty string treated as absent.
+        if let remoteArt = try? container.decodeIfPresent(String.self, forKey: .remoteArtworkURL) {
+            remoteArtworkURL = remoteArt.isEmpty ? nil : remoteArt
+        } else {
+            remoteArtworkURL = nil
+        }
+
         // Handle album_id and artist_id as both Int and String
         if let albumIDString = try? container.decode(String.self, forKey: .albumID) {
             albumID = albumIDString
@@ -147,7 +164,7 @@ struct PlaylistTrack: Identifiable, Codable {
         }
     }
     
-    init(id: String, title: String, artist: String? = nil, album: String? = nil, duration: Double? = nil, trackNumber: Int? = nil, artworkURL: String? = nil, albumID: String? = nil, artistID: String? = nil, playlistIndex: Int? = nil) {
+    init(id: String, title: String, artist: String? = nil, album: String? = nil, duration: Double? = nil, trackNumber: Int? = nil, artworkURL: String? = nil, remoteArtworkURL: String? = nil, albumID: String? = nil, artistID: String? = nil, playlistIndex: Int? = nil) {
         self.id = id
         self.title = title
         self.artist = artist
@@ -155,6 +172,7 @@ struct PlaylistTrack: Identifiable, Codable {
         self.duration = duration
         self.trackNumber = trackNumber
         self.artworkURL = artworkURL
+        self.remoteArtworkURL = remoteArtworkURL
         self.albumID = albumID
         self.artistID = artistID
         self.playlistIndex = playlistIndex
@@ -170,6 +188,42 @@ struct PlaylistTrack: Identifiable, Codable {
             return album
         }
         return ""
+    }
+}
+
+extension PlaylistTrack {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "PlaylistTrack")
+
+    /// Parses a playlist_loop / playlisttracks_loop JSON array from LMS into PlaylistTrack instances.
+    /// Malformed entries are logged and skipped; the remainder are returned in input order.
+    static func parseLoop(_ data: [[String: Any]]) -> [PlaylistTrack] {
+        return data.compactMap { trackData in
+            do {
+                let jsonData = try JSONSerialization.data(withJSONObject: trackData)
+                return try JSONDecoder().decode(PlaylistTrack.self, from: jsonData)
+            } catch {
+                os_log(.error, log: parseLogger, "❌ Failed to parse track: %{public}s", error.localizedDescription)
+                return nil
+            }
+        }
+    }
+}
+
+extension Playlist {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Playlist")
+
+    /// Parses a playlists_loop JSON array from LMS into Playlist instances.
+    /// Malformed entries are logged and skipped; the remainder are returned in input order.
+    static func parseLoop(_ data: [[String: Any]]) -> [Playlist] {
+        return data.compactMap { playlistData in
+            do {
+                let jsonData = try JSONSerialization.data(withJSONObject: playlistData)
+                return try JSONDecoder().decode(Playlist.self, from: jsonData)
+            } catch {
+                os_log(.error, log: parseLogger, "❌ Failed to parse playlist: %{public}s", error.localizedDescription)
+                return nil
+            }
+        }
     }
 }
 
@@ -209,9 +263,943 @@ class UpNextQueue: ObservableObject {
 
 // MARK: - Artist Data Model
 
-struct Artist: Identifiable {
+struct Artist: Identifiable, Hashable {
     let id: String
     let name: String
     let albumCount: Int?
+}
+
+extension Artist {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Artist")
+
+    /// Parses an `artists_loop` JSON array from LMS `["artists", ...]` into Artist instances.
+    /// Used by tvOS Search per-domain fan-out (98q.8) where each search fires
+    /// `["artists", 0, 25, "tags:s", "search:<term>"]`. The `tags:s` flag adds sortable_name
+    /// which we ignore. Entries missing id or name are skipped.
+    static func parseLoop(_ data: [[String: Any]]) -> [Artist] {
+        return data.compactMap { artistData -> Artist? in
+            // id arrives as String OR Int from LMS depending on backend.
+            let id: String
+            if let s = artistData["id"] as? String {
+                id = s
+            } else if let n = artistData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ Artist missing id, skipping")
+                return nil
+            }
+
+            guard let name = artistData["artist"] as? String, !name.isEmpty else {
+                os_log(.error, log: parseLogger, "❌ Artist %{public}s missing 'artist' field, skipping", id)
+                return nil
+            }
+
+            return Artist(id: id, name: name, albumCount: nil)
+        }
+    }
+}
+
+// MARK: - Album Data Model
+
+/// Album list item from LMS `albums` JSON-RPC.
+/// CarPlay eagerly loads `artwork: UIImage` into the struct for offline display.
+/// tvOS callers leave `artwork == nil` and resolve via URL through `LMSArtworkURL` + AsyncImage.
+struct Album {
+    let id: String
+    let name: String
+    let artist: String
+    let artworkTrackId: String?  // LMS artwork_track_id field for cover art URLs
+    let artwork: UIImage?
+    let year: Int?
+
+    init(id: String, name: String, artist: String, artworkTrackId: String?, artwork: UIImage?, year: Int? = nil) {
+        self.id = id
+        self.name = name
+        self.artist = artist
+        self.artworkTrackId = artworkTrackId
+        self.artwork = artwork
+        self.year = year
+    }
+}
+
+extension Album {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Album")
+
+    /// Parses an albums_loop JSON array from LMS `["albums", ...]` into Album instances.
+    /// Mirrors CarPlaySceneDelegate's inline parser shape (tags:ajly returns id/album/artist/artwork_track_id/year).
+    /// `artwork` is always nil here; CarPlay populates it post-fetch, tvOS resolves via URL.
+    /// Malformed entries (missing id or album name) are skipped.
+    static func parseLoop(_ data: [[String: Any]]) -> [Album] {
+        return data.compactMap { albumData -> Album? in
+            // id arrives as String OR Int from LMS depending on backend.
+            let id: String
+            if let s = albumData["id"] as? String {
+                id = s
+            } else if let n = albumData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ Album missing id, skipping")
+                return nil
+            }
+
+            guard let name = albumData["album"] as? String else {
+                os_log(.error, log: parseLogger, "❌ Album %{public}s missing 'album' field, skipping", id)
+                return nil
+            }
+
+            let artist = albumData["artist"] as? String ?? ""
+            let artworkTrackId = albumData["artwork_track_id"] as? String
+
+            // year arrives as Int or numeric String depending on backend.
+            let year: Int?
+            if let n = albumData["year"] as? Int {
+                year = n
+            } else if let s = albumData["year"] as? String, let n = Int(s) {
+                year = n
+            } else {
+                year = nil
+            }
+
+            return Album(
+                id: id,
+                name: name,
+                artist: artist,
+                artworkTrackId: artworkTrackId,
+                artwork: nil,
+                year: year
+            )
+        }
+    }
+}
+
+// MARK: - Favorite Item Data Model
+
+/// Single item from LMS `["favorites", "items"]` JSON-RPC.
+/// `parseLoop` RETAINS folder items and flags them via `isFolder`; each consumer
+/// decides what to do with them. CarPlay and the tvOS Library favorites shelf
+/// drill into folders (`FavoritesFolderView`, `5bs`); surfaces that can't drill
+/// (the Radios shelf, the unreferenced flat FavoritesView) `.filter { !$0.isFolder }`.
+struct FavoriteItem: Identifiable {
+    let id: String
+    let name: String
+    let icon: String?     // image / cover / icon URL — may be relative server path or absolute
+    let type: String?     // "audio", "playlist", "link", etc.
+    let isAudio: Bool
+    /// Drillable container (LMS `hasitems == 1` that is NOT itself audio).
+    /// Podcast/OPML episodes come back as `hasitems:1` AND `isaudio:1` — those
+    /// are PLAYABLE leaves, not folders (verified on 192.168.1.8), so `isFolder`
+    /// requires `hasitems && !isAudio`.
+    let isFolder: Bool
+}
+
+extension FavoriteItem {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "FavoriteItem")
+
+    /// Parses a `loop_loop` array from `["favorites", "items"]`.
+    /// Keep-gate: an item survives if it is a folder (`hasitems==1`), is audio
+    /// (`isaudio==1`), or carries a non-empty `url` — which drops `type:text`
+    /// separators and other url-less non-playables. Folders are RETAINED and
+    /// flagged `isFolder` (callers that can't drill must filter them);
+    /// `isFolder = hasitems==1 && !isAudio`. `url` is read only as a keep-gate,
+    /// never stored — no consumer plays by url (all dispatch on `id`).
+    static func parseLoop(_ data: [[String: Any]]) -> [FavoriteItem] {
+        return data.compactMap { itemData -> FavoriteItem? in
+            // hasitems / isaudio arrive as Int OR String — LMS is inconsistent
+            // across endpoints, so match both shapes.
+            let hasItems = (itemData["hasitems"] as? Int == 1)
+                || (itemData["hasitems"] as? String == "1")
+            let isAudio = (itemData["isaudio"] as? Int == 1)
+                || (itemData["isaudio"] as? String == "1")
+
+            // Keep-gate: drillable folder, playable audio item, or anything with
+            // a non-empty playable URL. Everything else is dropped.
+            let url = itemData["url"] as? String
+            let hasURL = !(url ?? "").isEmpty
+            guard hasItems || isAudio || hasURL else {
+                return nil
+            }
+
+            // id arrives as String OR Int from LMS depending on item source.
+            let id: String
+            if let s = itemData["id"] as? String {
+                id = s
+            } else if let n = itemData["id"] as? Int {
+                id = String(n)
+            } else {
+                os_log(.error, log: parseLogger, "❌ FavoriteItem missing id, skipping")
+                return nil
+            }
+
+            // LMS uses `name` for favorites items but `title` is a documented fallback.
+            let name = (itemData["name"] as? String)
+                ?? (itemData["title"] as? String)
+                ?? "Unknown"
+
+            // Artwork can arrive under any of these keys depending on item source.
+            // Material's lmsList similarly probes image / cover / icon.
+            let icon = (itemData["image"] as? String)
+                ?? (itemData["cover"] as? String)
+                ?? (itemData["icon"] as? String)
+
+            let type = itemData["type"] as? String
+
+            // Folder = a container we can drill. A hasitems item that is ALSO
+            // audio (podcast/OPML episode) is a playable leaf, NOT a folder.
+            let isFolder = hasItems && !isAudio
+
+            return FavoriteItem(
+                id: id,
+                name: name,
+                icon: icon,
+                type: type,
+                isAudio: isAudio,
+                isFolder: isFolder
+            )
+        }
+    }
+}
+
+// MARK: - Home Extra (Material Skin) Response
+
+/// One row of Material's `home-extra` response — a labeled category whose items
+/// are all the same kind. `items` carries strongly-typed payload so callers can
+/// dispatch per kind without re-classifying strings.
+struct HomeExtraSection: Identifiable {
+    enum Items {
+        case albums([Album])
+        case artists([Artist])
+        case favorites([FavoriteItem])
+        case playlists([Playlist])
+        /// Plugin-contributed shelf (`home-extra-3rdparty`). Carries the
+        /// section's `base.actions` template plus its Jive items — dispatch
+        /// resolves per item against the base. See JiveItem.parseObj.
+        case jive(base: [String: JiveItemAction], items: [JiveItem])
+    }
+
+    let id: String        // sort key, e.g. "new" / "recentlyplayed" / "artists_new" / "favorites"
+    let title: String     // human-readable header for the shelf
+    let items: Items
+
+    /// For plugin (`.jive`) sections: server-relative icon path from the
+    /// `home-extra-3rdparty` registry, rendered as a badge next to the
+    /// section title. nil for built-in sections (they use SF Symbols).
+    var pluginIcon: String? = nil
+
+    var isEmpty: Bool {
+        switch items {
+        case .albums(let a):    return a.isEmpty
+        case .artists(let a):   return a.isEmpty
+        case .favorites(let f): return f.isEmpty
+        case .playlists(let p): return p.isEmpty
+        case .jive(_, let i):   return i.isEmpty
+        }
+    }
+}
+
+/// Parsed `["material-skin", "home-extra", ...]` response.
+///
+/// `materialInstalled` is the routing signal for tvOS's LibraryView: a missing
+/// `material_home` flag in the wire response means Material Skin is not loaded
+/// on this LMS server and the caller should switch to BrowseLibraryView.
+///
+/// `sections` only contains non-empty shelves; empty `material_home_*_loop`
+/// arrays are filtered out so SwiftUI renders no empty headers.
+struct HomeExtraResponse {
+    let materialInstalled: Bool
+    let sections: [HomeExtraSection]
+}
+
+extension String {
+    /// Repair UTF-8 bytes that were mistakenly decoded as Latin-1 — mojibake
+    /// like "HauptmenÃ¼" for "Hauptmenü" (UTF-8 `C3 BC` read as `Ã` + `¼`).
+    ///
+    /// `home-extra-3rdparty` is the only LMS endpoint that double-encodes its
+    /// payload (`result.items` is JSON-in-JSON); a Perl string with the utf8
+    /// flag off gets byte-corrupted on the second encode. See
+    /// `HomeExtraResponse.parseRegistry`.
+    ///
+    /// Idempotent and safe to apply unconditionally: re-encode each character
+    /// back to Latin-1 bytes, then strictly decode those as UTF-8. Pure ASCII
+    /// round-trips to itself; already-correct UTF-8 (a lone `ü` → byte `0xFC`)
+    /// fails the strict UTF-8 decode (`0xFC` is an invalid lead byte) and
+    /// falls back to the original.
+    func repairingMojibake() -> String {
+        guard let latin1 = data(using: .isoLatin1),
+              let repaired = String(data: latin1, encoding: .utf8) else {
+            return self
+        }
+        return repaired
+    }
+}
+
+extension HomeExtraResponse {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "HomeExtraResponse")
+
+    /// Album sort keys + display titles, in render order. Add/remove here to
+    /// retune the v1 sort selection — keep the order, it's the on-screen order.
+    private static let albumSorts: [(key: String, title: String)] = [
+        ("new",            "New Music"),
+        ("recentlyplayed", "Recently Played"),
+        ("random",         "Random Albums"),
+        ("popular",        "Popular"),
+        ("playcount",      "Most Played"),
+        ("changed",        "Recently Updated"),
+    ]
+
+    /// Artist sort keys + display titles, in render order.
+    private static let artistSorts: [(key: String, title: String)] = [
+        ("artists_new",            "New Artists"),
+        ("artists_recentlyplayed", "Recently Heard Artists"),
+        ("artists_popular",        "Popular Artists"),
+        ("artists_playcount",      "Most Played Artists"),
+    ]
+
+    /// Parse the `result` dict from a `slim.request` envelope wrapping
+    /// `["material-skin", "home-extra", ...]`. Pass the value of the `result`
+    /// key, not the full JSON-RPC envelope.
+    ///
+    /// Empty shelves are filtered out. The `material_home` flag is the only
+    /// signal we use for "is Material installed" — no separate detection probe.
+    static func parse(_ result: [String: Any]) -> HomeExtraResponse {
+        let materialInstalled = parseMaterialHomeFlag(result["material_home"])
+        guard materialInstalled else {
+            return HomeExtraResponse(materialInstalled: false, sections: [])
+        }
+
+        var sections: [HomeExtraSection] = []
+
+        // Album shelves — strip `@idxN` from each item's id before parsing
+        // (Plugin.pm:2295 rewrites ids when an album appears in multiple sorts).
+        for sort in albumSorts {
+            let loopKey = "material_home_\(sort.key)_loop"
+            guard let loop = result[loopKey] as? [[String: Any]], !loop.isEmpty else { continue }
+            let albums = Album.parseLoop(stripIdxSuffix(loop))
+            guard !albums.isEmpty else { continue }
+            sections.append(HomeExtraSection(id: sort.key, title: sort.title, items: .albums(albums)))
+        }
+
+        // Artist shelves — same `@idx` stripping (Plugin.pm:2203 also passes $idmod).
+        for sort in artistSorts {
+            let loopKey = "material_home_\(sort.key)_loop"
+            guard let loop = result[loopKey] as? [[String: Any]], !loop.isEmpty else { continue }
+            let artists = Artist.parseLoop(stripIdxSuffix(loop))
+            guard !artists.isEmpty else { continue }
+            sections.append(HomeExtraSection(id: sort.key, title: sort.title, items: .artists(artists)))
+        }
+
+        // Playlists — clean ids (Plugin.pm:2243 passes $idmod=undef).
+        if let loop = result["material_home_playlists_loop"] as? [[String: Any]], !loop.isEmpty {
+            let playlists = Playlist.parseLoop(loop)
+            if !playlists.isEmpty {
+                sections.append(HomeExtraSection(id: "playlists", title: "Playlists", items: .playlists(playlists)))
+            }
+        }
+
+        // Radios — favorites shape under a different key (Plugin.pm:2218
+        // passes $idmod=undef). Live testing (192.168.1.8) revealed the
+        // items lack a top-level `id` field — `material-skin-query radios`
+        // returns just {name,url,icon,ihe}. Synthesize id from url so
+        // FavoriteItem.parseLoop's id requirement is satisfied. The
+        // synthesized id then drives the tap dispatch in HomeExtraShelf,
+        // which special-cases `section.id == "radios"` to play via the
+        // raw URL instead of the favorites item_id command.
+        if let loop = result["material_home_radios_loop"] as? [[String: Any]], !loop.isEmpty {
+            let withIds = synthesizeIdFromUrl(loop)
+            // parseLoop now retains folders; the Radios shelf plays by url/id and
+            // can't drill, so hide any folder items.
+            let radios = FavoriteItem.parseLoop(withIds).filter { !$0.isFolder }
+            if !radios.isEmpty {
+                sections.append(HomeExtraSection(id: "radios", title: "Radios", items: .favorites(radios)))
+            }
+        }
+
+        // Favorites are NOT in this parser — they're fetched separately by
+        // LibraryView via `["favorites","items"]` and appended as a section.
+        // Reason: `material_home_favorites_obj` carries Jive-shape items
+        // (text/icon/actions, NOT FavoriteItem fields) verified against the
+        // 192.168.1.8 live server 2026-05-15, which would need a v2 Jive
+        // base+commonParams merge parser. The direct favorites query gives
+        // us the same content in a shape FavoriteItem.parseLoop already
+        // speaks fluently.
+
+        os_log(.info, log: parseLogger, "✅ home-extra parsed: %d non-empty shelves", sections.count)
+        return HomeExtraResponse(materialInstalled: true, sections: sections)
+    }
+
+    /// Extract plugin-contributed shelf sections from a `home-extra`
+    /// response. For each registry entry whose `material_home_<id>_obj` key
+    /// is present and non-empty, parse it via `JiveItem.parseObj`.
+    ///
+    /// `<id>` is the registry's `strippedID` (no `3rdparty_` prefix) — the
+    /// same form passed as the request param. Returned sections carry the
+    /// plugin's `shelfKey` as id and its registry title + icon.
+    static func parsePluginSections(_ result: [String: Any],
+                                    registry: [PluginExtraRegistration]) -> [HomeExtraSection] {
+        var sections: [HomeExtraSection] = []
+        for plugin in registry {
+            let key = "material_home_\(plugin.strippedID)_obj"
+            guard let obj = result[key] as? [String: Any] else { continue }
+            let (base, items) = JiveItem.parseObj(obj)
+            guard !items.isEmpty else { continue }
+            sections.append(HomeExtraSection(
+                id: plugin.shelfKey,
+                title: plugin.title,
+                items: .jive(base: base, items: items),
+                pluginIcon: plugin.icon
+            ))
+        }
+        os_log(.info, log: parseLogger, "✅ home-extra: %d plugin shelf sections", sections.count)
+        return sections
+    }
+
+    /// Parse a `["material-skin", "home-extra-3rdparty"]` response into the
+    /// registry of plugin-contributed shelves.
+    ///
+    /// The registry call returns metadata only — `result.items` is a
+    /// **JSON-encoded string** (verified live on 192.168.1.8): an array of
+    /// `{id, title, subtitle, icon, needsPlayer}`. The shelf's actual items
+    /// come from a second `home-extra` call (see PluginExtraRegistration).
+    static func parseRegistry(_ result: [String: Any]) -> [PluginExtraRegistration] {
+        guard let itemsRaw = result["items"] as? String,
+              let data = itemsRaw.data(using: .utf8),
+              let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            os_log(.error, log: parseLogger, "❌ home-extra-3rdparty: result.items not a JSON-encoded array")
+            return []
+        }
+        let registry = array.compactMap { entry -> PluginExtraRegistration? in
+            guard let id = entry["id"] as? String, !id.isEmpty,
+                  let title = entry["title"] as? String, !title.isEmpty else {
+                return nil
+            }
+            let needsPlayer: Bool
+            if let n = entry["needsPlayer"] as? Int { needsPlayer = n == 1 }
+            else if let b = entry["needsPlayer"] as? Bool { needsPlayer = b }
+            else { needsPlayer = false }
+            return PluginExtraRegistration(
+                id: id,
+                title: title.repairingMojibake(),
+                subtitle: (entry["subtitle"] as? String)?.repairingMojibake(),
+                icon: entry["icon"] as? String,
+                needsPlayer: needsPlayer
+            )
+        }
+        os_log(.info, log: parseLogger, "✅ home-extra-3rdparty: %d plugin shelves registered", registry.count)
+        return registry
+    }
+
+    /// `material_home` arrives as either Int 1 or String "1" depending on LMS
+    /// serialization context; treat both as "installed."
+    private static func parseMaterialHomeFlag(_ raw: Any?) -> Bool {
+        if let n = raw as? Int { return n == 1 }
+        if let s = raw as? String { return s == "1" }
+        return false
+    }
+
+    /// Strip Plugin.pm:2295's `@idxN` suffix from each item's `id`. Safe to call
+    /// on items without the suffix (no-op). Only applies to String ids; Int ids
+    /// are passed through unchanged.
+    private static func stripIdxSuffix(_ items: [[String: Any]]) -> [[String: Any]] {
+        return items.map { item in
+            guard let idString = item["id"] as? String,
+                  let atRange = idString.range(of: "@idx") else {
+                return item
+            }
+            var mutable = item
+            mutable["id"] = String(idString[..<atRange.lowerBound])
+            return mutable
+        }
+    }
+
+    /// Synthesize `id` from `url` when missing. Used for the home-extra radios
+    /// loop, whose `material-skin-query radios` results lack top-level ids.
+    /// The synthesized id (the URL itself) doubles as the play-dispatch
+    /// payload in HomeExtraShelf's `radios` branch.
+    private static func synthesizeIdFromUrl(_ items: [[String: Any]]) -> [[String: Any]] {
+        return items.map { item in
+            if item["id"] != nil { return item }
+            guard let url = item["url"] as? String, !url.isEmpty else { return item }
+            var mutable = item
+            mutable["id"] = url
+            return mutable
+        }
+    }
+}
+
+// MARK: - Plugin Extra Registration (home-extra-3rdparty)
+
+/// One entry in the `["material-skin", "home-extra-3rdparty"]` registry — a
+/// plugin-contributed home shelf the LMS server can render (Spotty, TIDAL,
+/// Bandcamp, etc.).
+///
+/// The registry call returns metadata only. The shelf's actual items come
+/// from a second `home-extra` call with `strippedID` passed as a param;
+/// the server resolves the plugin handler and returns the items under
+/// `material_home_<strippedID>_obj`. See HomeExtraResponse.parseRegistry.
+struct PluginExtraRegistration: Identifiable, Equatable {
+    /// Registry id, e.g. "3rdparty_Bandcampdaily" — carries the `3rdparty_`
+    /// prefix as the server returns it.
+    let id: String
+    let title: String
+    let subtitle: String?
+    /// Server-relative icon path, e.g. "plugins/Bandcamp/html/images/logo.png".
+    let icon: String?
+    /// Plugin requires a connected player to resolve its items. Verified
+    /// live: passing an empty player_id returns an empty obj for these.
+    let needsPlayer: Bool
+
+    /// Registry id with the `3rdparty_` prefix removed — the form passed
+    /// back as a `home-extra` param. Plugin.pm:551 re-adds the prefix when
+    /// looking the extra up, so passing the verbatim id returns nothing.
+    var strippedID: String {
+        let prefix = "3rdparty_"
+        return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id
+    }
+
+    /// Key used in `SettingsManager.enabledLibraryShelves`. Prefixed so it
+    /// can never collide with a built-in `LibraryShelf` rawValue.
+    var shelfKey: String { "plugin:\(strippedID)" }
+
+    /// Absolute icon URL, resolving a server-relative path against the
+    /// active LMS host.
+    func iconURL(settings: SettingsManager) -> URL? {
+        settings.absoluteServerURL(icon)
+    }
+}
+
+// MARK: - Jive Items (plugin shelves + SlimBrowse drill-in)
+
+/// A Jive action template — a SlimBrowse command + params. Lives on a
+/// `JiveItem` directly (fully resolved) or on a section's `base.actions`
+/// (a template, where `itemsParams` names the per-item field to merge in).
+struct JiveItemAction {
+    let cmd: [String]
+    let params: [String: Any]
+    /// When this is a base-level template, names the per-item field (e.g.
+    /// "params") whose contents merge into `params`. nil for item-level
+    /// actions, which are already fully resolved.
+    let itemsParams: String?
+    /// Post-action navigation hint from the server ("nowPlaying", "parent",
+    /// "grandparent", "refresh", "home", …). Sent in mixed case — lowercase
+    /// before matching. nil → no post-action navigation. Verified live: a
+    /// Bandcamp `play` action carries `nextWindow: "nowPlaying"`.
+    let nextWindow: String?
+}
+
+/// A `JiveItemAction` resolved against its section `base` into a concrete,
+/// ready-to-fire SlimBrowse command — what `JiveItem.resolvedAction` returns.
+struct ResolvedJiveAction {
+    let cmd: [String]
+    let params: [String: Any]
+    /// Lowercased post-action nav hint — the item's item-level `nextWindow`
+    /// when present, else the action's own. nil → stay put / drill.
+    let nextWindow: String?
+
+    /// The params bag as LMS CLI `key:value` strings. A non-scalar value
+    /// (dict/array — possible in plugin `play`/`more` params) is JSON-encoded;
+    /// a raw `Any` interpolation would yield `["a","b"]`-style garbage.
+    var paramArgs: [String] {
+        params.compactMap { key, value -> String? in
+            if value is [Any] || value is [String: Any] {
+                guard let data = try? JSONSerialization.data(withJSONObject: value),
+                      let json = String(data: data, encoding: .utf8) else { return nil }
+                return "\(key):\(json)"
+            }
+            return "\(key):\(value)"
+        }
+    }
+
+    /// Full CLI argument list — command verbs followed by `key:value` params.
+    var cliArgs: [String] { cmd + paramArgs }
+
+    /// True if this action's `cmd` is a known browse verb (`items`, `tracks`,
+    /// `albums`, …). Used by tvOS classification as the **false-positive
+    /// guard**: a browse cmd always classifies as drill, regardless of any
+    /// leaf hint the item may carry (e.g. `type:"audio"` on a folder item).
+    /// Without this guard, a container row that happens to carry leaf-ish
+    /// metadata would misclassify as a play.
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this.
+    var isBrowseVerb: Bool {
+        let browseVerbs: Set<String> = [
+            "items", "tracks", "albums", "artists", "playlists",
+            "browselibrary", "genres", "years",
+        ]
+        return cmd.contains(where: browseVerbs.contains)
+    }
+
+    /// True if this action is a play-class command (plays / queues audio),
+    /// false if it's a browse-class command (drills into a deeper level).
+    ///
+    /// Used by tvOS Select-vs-drill classification (see `JiveDispatcher.decide`).
+    /// Two forms must be recognized:
+    /// 1. **Plugin SlimBrowse form** — verb in the `cmd` array. Example:
+    ///    Bandcamp leaf play `["Bandcampdaily","playlist","play"]`. We match
+    ///    `play`/`insert`/`add` *anywhere* in the array (the URL/id form
+    ///    `["playlist","play","<url>"]` puts the verb at position [-2], so
+    ///    suffix-match would miss it). We also reject the known browse verbs
+    ///    so a browse cmd like `["...","items"]` does NOT classify as play.
+    /// 2. **Built-in `playlistcontrol` form** — verb in a `cmd:` param. The
+    ///    `cmd` array is `["playlistcontrol"]` and the verb (`cmd:load`,
+    ///    `cmd:add`, `cmd:insert`) lives in `cliArgs`. The `cmd:load` form is
+    ///    what built-in album / playlist play uses (verified live, CarPlay
+    ///    `CarPlaySceneDelegate.swift:2404`).
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this.
+    var isPlayVerb: Bool {
+        // Form 2: playlistcontrol cmd:load / cmd:add / cmd:insert
+        if cmd.first == "playlistcontrol" {
+            return cliArgs.contains { arg in
+                arg == "cmd:load" || arg == "cmd:add" || arg == "cmd:insert"
+            }
+        }
+        // Form 1: SlimBrowse verb in cmd array. Reject browse verbs first so
+        // a hypothetical `["albums","play"]` browse-then-play doesn't trip us.
+        if isBrowseVerb { return false }
+        let playVerbs: Set<String> = ["play", "insert", "add"]
+        return cmd.contains(where: playVerbs.contains)
+    }
+}
+
+/// One item inside a `material_home_<id>_obj.item_loop` — a plugin shelf
+/// entry or a SlimBrowse drill-in row.
+///
+/// Two wire shapes coexist (both verified live on 192.168.1.8): items may
+/// carry their `actions` directly (Bandcamp level-1), or carry only
+/// `params` with the section's `base.actions` supplying the template
+/// (Bandcamp level-2 / canonical SlimBrowse). `resolvedAction` handles both.
+struct JiveItem: Identifiable {
+    /// SwiftUI list identity. The server `id` if present, else synthesized
+    /// from array position + text. Stable within one fetch only — Jive
+    /// items are intentionally ephemeral, never correlate across fetches.
+    let id: String
+    let text: String
+    let subtitle: String?
+    /// Server-relative or absolute icon path.
+    let icon: String?
+    /// Item-level actions keyed by name ("go", "play", "playControl", …).
+    let actions: [String: JiveItemAction]
+    /// The per-item params bag — merged into a base action's params when
+    /// dispatch resolves via the section's `base.actions` template.
+    let params: [String: Any]
+    /// SlimBrowse `goAction` — names the action fired on Select/OK ("go" or
+    /// "play"). Verified live: leaf track items carry `goAction: "play"`,
+    /// browsable items omit it. nil → defaults to "go" (the drill).
+    let goAction: String?
+    /// SlimBrowse `addAction` — names the action for the Add affordance.
+    /// nil → defaults to "add".
+    let addAction: String?
+    /// Item-level post-action nav hint. Wins over the resolved action's own
+    /// `nextWindow` (lms-material `browse-functions.js` reads it first).
+    let nextWindow: String?
+    /// "playlist" / "audio" / etc. A DISPLAY hint only (row icon) — never
+    /// gates control flow. The server's actions + `nextWindow` drive dispatch.
+    let type: String?
+    /// Item-root `style` — "itemplay" on canonical SlimBrowse leaf tracks.
+    /// Used by `hasLeafHint` as a corroborating play signal.
+    let style: String?
+    /// Item-root `presetParams` — the server's "this item can be assigned to a
+    /// numeric preset" bag. Its presence (specifically `favorites_url` +
+    /// `favorites_type:audio`) is a strong leaf-playable signal: only items
+    /// the server considers streamable favorites carry it. Verified live on
+    /// Bandcamp Weekly tracks (goAction:"playControl") and Bandcamp Daily
+    /// tracks (goAction:"play"). Used by `hasLeafHint`.
+    let presetParams: [String: Any]?
+
+    /// The action name fired on Select/OK — `goAction`, default "go".
+    var tapActionName: String { goAction ?? "go" }
+    /// The action name for the Add affordance — `addAction`, default "add".
+    var addActionName: String { addAction ?? "add" }
+
+    /// True if this item carries server-provided leaf-playable hints — used
+    /// as a secondary signal by tvOS classification when the resolved action's
+    /// `cmd` doesn't decisively name itself as play (see `JiveDispatcher.decide`).
+    ///
+    /// Hints, in order of specificity:
+    /// - `style == "itemplay"` — explicit "this row plays on tap" flag.
+    ///   Verified live on Bandcamp leaf tracks.
+    /// - `params["touchToPlay"]` — Squeezebox-Touch carryover meaning the same.
+    ///   Verified live on Bandcamp leaf tracks.
+    /// - `type` in `{"audio", "track"}` — display hint that THIS time also
+    ///   carries control-flow signal (still subordinate to `cmd`-is-play).
+    ///
+    /// tvOS-consumed only — iOS code does not currently call this. `type` is
+    /// otherwise documented as display-only; the leaf-hint use here is
+    /// corroborating evidence, never sole control flow.
+    var hasLeafHint: Bool {
+        if style == "itemplay" { return true }
+        if params["touchToPlay"] != nil { return true }
+        if let t = type, t == "audio" || t == "track" { return true }
+        // Bandcamp Weekly pattern: leaf tracks have goAction:"playControl"
+        // (which resolves to a browse cmd, no other leaf hints) but DO carry
+        // presetParams with a streamable favorites_url. That's the server's
+        // "this is a playable favorite" tell.
+        if let preset = presetParams, preset["favorites_url"] != nil { return true }
+        return false
+    }
+
+    /// Absolute icon URL for this item, resolving a server-relative path
+    /// (e.g. `/imageproxy/...`) against the active LMS host.
+    func iconURL(settings: SettingsManager) -> URL? {
+        settings.absoluteServerURL(icon)
+    }
+
+    /// Resolve a named action into a `ResolvedJiveAction` ready to send as a
+    /// SlimBrowse JSON-RPC request. Returns nil when no usable action exists
+    /// for that name.
+    ///
+    /// The item's own action wins. Otherwise the section's `base` action is
+    /// the template and the per-item field named by its `itemsParams` merges
+    /// into the base params. Verified live: Bandcamp's base `play` action uses
+    /// `itemsParams: "params"` — the same per-item bag as `go` — so `play`
+    /// resolves correctly through this path.
+    func resolvedAction(named name: String,
+                        base: [String: JiveItemAction]) -> ResolvedJiveAction? {
+        let action: JiveItemAction
+        let resolvedParams: [String: Any]
+        if let own = actions[name] {
+            action = own
+            resolvedParams = own.params
+        } else if let template = base[name] {
+            action = template
+            var merged = template.params
+            // Live data shows `itemsParams: "params"` for `go`, `play`, and
+            // `add`. Other keys (e.g. "playControlParams") name sibling
+            // per-item bags we don't capture — base params still dispatch.
+            if template.itemsParams == "params" {
+                for (k, v) in params { merged[k] = v }
+            }
+            resolvedParams = merged
+        } else {
+            return nil
+        }
+        // Item-level nextWindow wins over the action's own.
+        let nw = (nextWindow ?? action.nextWindow)?.lowercased()
+        return ResolvedJiveAction(cmd: action.cmd, params: resolvedParams, nextWindow: nw)
+    }
+}
+
+extension JiveItem {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "JiveItem")
+
+    /// Parse a `material_home_<id>_obj` dict into the section's base
+    /// actions plus its items. Defensive — drops items missing `text`,
+    /// logs, and never throws.
+    static func parseObj(_ obj: [String: Any]) -> (base: [String: JiveItemAction], items: [JiveItem]) {
+        let baseActionsRaw = (obj["base"] as? [String: Any])?["actions"] as? [String: Any]
+        let base = parseActions(baseActionsRaw)
+        let loop = obj["item_loop"] as? [[String: Any]] ?? []
+        let items = loop.enumerated().compactMap { index, raw in
+            parseItem(raw, arrayIndex: index)
+        }
+        return (base, items)
+    }
+
+    private static func parseItem(_ raw: [String: Any], arrayIndex: Int) -> JiveItem? {
+        guard let text = raw["text"] as? String, !text.isEmpty else {
+            os_log(.error, log: parseLogger, "❌ Jive item missing 'text', dropping")
+            return nil
+        }
+        let explicitID = raw["id"].map { "\($0)" }
+        return JiveItem(
+            id: explicitID ?? "\(arrayIndex)|\(text)",
+            text: text,
+            subtitle: raw["textArea"] as? String ?? raw["subtitle"] as? String,
+            icon: raw["icon"] as? String,
+            actions: parseActions(raw["actions"] as? [String: Any]),
+            params: raw["params"] as? [String: Any] ?? [:],
+            goAction: raw["goAction"] as? String,
+            addAction: raw["addAction"] as? String,
+            nextWindow: raw["nextWindow"] as? String,
+            type: raw["type"] as? String,
+            style: raw["style"] as? String,
+            presetParams: raw["presetParams"] as? [String: Any]
+        )
+    }
+
+    private static func parseActions(_ raw: [String: Any]?) -> [String: JiveItemAction] {
+        guard let raw else { return [:] }
+        var out: [String: JiveItemAction] = [:]
+        for (name, value) in raw {
+            guard let dict = value as? [String: Any],
+                  let cmd = dict["cmd"] as? [String], !cmd.isEmpty else { continue }
+            out[name] = JiveItemAction(
+                cmd: cmd,
+                params: dict["params"] as? [String: Any] ?? [:],
+                itemsParams: dict["itemsParams"] as? String,
+                nextWindow: dict["nextWindow"] as? String
+            )
+        }
+        return out
+    }
+}
+
+
+// MARK: - Genre (BrowseLibraryView fallback)
+
+/// Genre list entry from `["genres", 0, N]`. Used by the tvOS Library tab's
+/// fallback view (when Material Skin is not installed) to render a list of
+/// genres that drill into albums-filtered-by-genre.
+struct Genre: Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
+// MARK: - Library Shelf Catalog (tvOS home-extra shelf selection)
+
+/// The catalog of home-extra shelves the tvOS Library tab can render. Single
+/// source of truth for: home-extra request params, Settings toggle labels,
+/// and persistence keys. `LibraryShelf.allCases` order defines on-screen
+/// shelf order — reorder by hand here.
+///
+/// User-configurable via tvOS Settings → Library Shelves (per `D7=B` decision
+/// 2026-05-15). Material stores its equivalent (`detailedHomeItems`) in
+/// browser localStorage, not on the LMS server, so tvOS keeps its own state.
+enum LibraryShelf: String, CaseIterable, Identifiable {
+    case new
+    case recentlyPlayed = "recentlyplayed"
+    case random
+    case popular
+    case playcount
+    case changed
+    case artistsNew = "artists_new"
+    case artistsRecentlyPlayed = "artists_recentlyplayed"
+    case artistsPopular = "artists_popular"
+    case artistsPlaycount = "artists_playcount"
+    case playlists
+    case radios
+    case favorites
+
+    var id: String { rawValue }
+
+    /// How LibraryView fetches the data for this shelf. Most shelves come
+    /// from the `home-extra` JSON-RPC; favorites is fetched separately
+    /// because its `material_home_favorites_obj` shape requires the v2
+    /// Jive base+commonParams merge parser we don't have yet.
+    var dataSource: DataSource {
+        switch self {
+        case .favorites: return .separateFetch
+        default:         return .homeExtra
+        }
+    }
+
+    enum DataSource {
+        /// Included as a `<rawValue>:1` param in the single home-extra request.
+        case homeExtra
+        /// Fetched via its own JSON-RPC request, results merged into the
+        /// shelf list (currently only used by favorites).
+        case separateFetch
+    }
+
+    /// Param appended to the `["material-skin", "home-extra", ...]` request
+    /// when this shelf is enabled. Only meaningful for `dataSource == .homeExtra`.
+    var requestParam: String { "\(rawValue):1" }
+
+    /// Localized title shown in the Settings toggle AND as the shelf header on
+    /// Library. `titleEN` is the String Catalog key; on a build with no
+    /// matching catalog (the iOS target ships none) `String(localized:)`
+    /// returns the key unchanged — so this stays safe for shared callers.
+    var title: String { String(localized: String.LocalizationValue(titleEN)) }
+
+    /// English source string for `title` — the String Catalog lookup key.
+    private var titleEN: String {
+        switch self {
+        case .new:                   return "New Music"
+        case .recentlyPlayed:        return "Recently Played"
+        case .random:                return "Random Albums"
+        case .popular:               return "Popular"
+        case .playcount:             return "Most Played"
+        case .changed:               return "Recently Updated"
+        case .artistsNew:            return "New Artists"
+        case .artistsRecentlyPlayed: return "Recently Heard Artists"
+        case .artistsPopular:        return "Popular Artists"
+        case .artistsPlaycount:      return "Most Played Artists"
+        case .playlists:             return "Playlists"
+        case .radios:                return "Radios"
+        case .favorites:             return "Favorites"
+        }
+    }
+
+    /// Localized one-line description shown under the title in the Settings
+    /// shelf picker. Disambiguates similar titles ("Popular" albums vs
+    /// "Popular Artists") at a glance. See `title` re: catalog safety.
+    var subtitle: String { String(localized: String.LocalizationValue(subtitleEN)) }
+
+    /// English source string for `subtitle` — the String Catalog lookup key.
+    private var subtitleEN: String {
+        switch self {
+        case .new:                   return "Recently added albums"
+        case .recentlyPlayed:        return "Albums you've heard recently"
+        case .random:                return "A random selection of albums"
+        case .popular:               return "Most-played albums on this server"
+        case .playcount:             return "Albums by total play count"
+        case .changed:               return "Albums updated by recent scans"
+        case .artistsNew:            return "Recently added artists"
+        case .artistsRecentlyPlayed: return "Artists you've heard recently"
+        case .artistsPopular:        return "Most-played artists on this server"
+        case .artistsPlaycount:      return "Artists by total play count"
+        case .playlists:             return "Your saved playlists"
+        case .radios:                return "Saved radio stations"
+        case .favorites:             return "Your saved favorites"
+        }
+    }
+
+    /// SF Symbol shown leading the row in the Settings shelf picker.
+    var iconSystemName: String {
+        switch self {
+        case .new:                   return "sparkles"
+        case .recentlyPlayed:        return "clock"
+        case .random:                return "shuffle"
+        case .popular:               return "chart.bar.fill"
+        case .playcount:             return "chart.line.uptrend.xyaxis"
+        case .changed:               return "arrow.triangle.2.circlepath"
+        case .artistsNew:            return "music.mic"
+        case .artistsRecentlyPlayed: return "clock.arrow.circlepath"
+        case .artistsPopular:        return "person.2.fill"
+        case .artistsPlaycount:      return "person.2.crop.square.stack.fill"
+        case .playlists:             return "music.note.list"
+        case .radios:                return "dot.radiowaves.left.and.right"
+        case .favorites:             return "heart.fill"
+        }
+    }
+
+    /// Whether this shelf is ON by default for first-run users. Picked to
+    /// match a reasonable Material iPhone home — albums, artists, playlists,
+    /// favorites, radios on; the more obscure sorts off. Users can toggle
+    /// in Settings.
+    var defaultEnabled: Bool {
+        switch self {
+        case .new, .recentlyPlayed, .random, .popular, .artistsNew,
+             .playlists, .favorites, .radios:
+            return true
+        case .playcount, .changed, .artistsRecentlyPlayed,
+             .artistsPopular, .artistsPlaycount:
+            return false
+        }
+    }
+}
+
+extension Genre {
+    private static let parseLogger = OSLog(subsystem: "com.lmsstream", category: "Genre")
+
+    /// Parses a `genres_loop` JSON array. id arrives as String OR Int; name
+    /// is the `genre` field. Skips entries missing either.
+    static func parseLoop(_ data: [[String: Any]]) -> [Genre] {
+        return data.compactMap { genreData -> Genre? in
+            let id: String
+            if let s = genreData["id"] as? String { id = s }
+            else if let n = genreData["id"] as? Int { id = String(n) }
+            else {
+                os_log(.error, log: parseLogger, "❌ Genre missing id, skipping")
+                return nil
+            }
+
+            guard let name = genreData["genre"] as? String, !name.isEmpty else {
+                os_log(.error, log: parseLogger, "❌ Genre %{public}s missing 'genre' field, skipping", id)
+                return nil
+            }
+
+            return Genre(id: id, name: name)
+        }
+    }
 }
 

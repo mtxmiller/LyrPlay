@@ -82,6 +82,20 @@ apt-get update -qq
 apt-get install --no-install-recommends -qy opus-tools
 ```
 
+### NOTE — Disable "Prioritize Native Format" in LMS:
+
+LMS ships with **Prioritize Native Format** enabled by default on some installs. When on, LMS keeps the source format (FLAC) and skips the Opus transcode rule — even when opus-tools is installed and the player advertises Opus support.
+
+**To disable:** LMS Web → **Settings → File Types** → under **File Format Conversion Setup**, uncheck **"Prefer native format (decoding on the player) whenever possible"** → Apply.
+
+If you'd rather flip it directly:
+```bash
+docker exec lms sed -i 's/^prioritizeNative: 1/prioritizeNative: 0/' /config/prefs/server.prefs
+docker restart lms
+```
+
+After this, the LMS log should show `Matched: flc->ops via: [flac] ... | [opusenc] ...` when playing FLAC tracks.
+
 ## Usage
 
 ### Material Skin Integration

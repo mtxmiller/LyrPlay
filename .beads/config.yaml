@@ -1,1 +1,3 @@
 sync-branch: beads-metadata
+
+dolt.auto-commit: "on"

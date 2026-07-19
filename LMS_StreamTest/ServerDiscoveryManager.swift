@@ -1,7 +1,19 @@
 // File: ServerDiscoveryManager.swift
 // Simple LMS server discovery using standard UDP broadcast protocol
 import Foundation
+import Combine
 import os.log
+
+struct DiscoveredServer: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let host: String
+    let port: Int
+
+    var displayName: String {
+        return "\(name) (\(host))"
+    }
+}
 
 class ServerDiscoveryManager: ObservableObject {
     

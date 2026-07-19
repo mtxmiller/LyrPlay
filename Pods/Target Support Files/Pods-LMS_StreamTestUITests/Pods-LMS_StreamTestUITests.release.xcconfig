@@ -1,7 +1,7 @@
 CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = NO
-FRAMEWORK_SEARCH_PATHS = $(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/CocoaAsyncSocket"
+FRAMEWORK_SEARCH_PATHS = $(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/CocoaAsyncSocket-iOS"
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) COCOAPODS=1
-HEADER_SEARCH_PATHS = $(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/CocoaAsyncSocket/CocoaAsyncSocket.framework/Headers"
+HEADER_SEARCH_PATHS = $(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/CocoaAsyncSocket-iOS/CocoaAsyncSocket.framework/Headers"
 OTHER_LDFLAGS = $(inherited) -framework "CFNetwork" -framework "CocoaAsyncSocket" -framework "Security"
 PODS_BUILD_DIR = ${BUILD_DIR}
 PODS_CONFIGURATION_BUILD_DIR = ${PODS_BUILD_DIR}/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)

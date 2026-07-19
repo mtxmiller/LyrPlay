@@ -1,11 +1,12 @@
 // File: SlimProtoCommandHandler.swift
-// UPDATED: Native FLAC support enabled with StreamingKit
+// SlimProto strm/audg/setd command processing; audio playback runs on BASS
 import Foundation
+import Combine
 import os.log
 
 protocol SlimProtoCommandHandlerDelegate: AnyObject {
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float)
-    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float) // NEW: For gapless push streams
+    func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) // NEW: For gapless push streams. autostart from SlimProto strm packet ('0'/'1' for direct, '0' = wait for u).
     func didPauseStream()
     func didResumeStream()
     func didStopStream()
@@ -22,13 +23,6 @@ class SlimProtoCommandHandler: ObservableObject {
     private var isStreamActive = false
     var isPausedByLockScreen = false
     private var lastKnownPosition: Double = 0.0
-    private var streamPosition: Double = 0.0
-    private var streamDuration: Double = 0.0
-    private var streamStartTime: Date?
-    private var isStreamPaused: Bool = false
-    private var lastStreamUpdate: Date = Date()
-    private var serverStartTime: Date?
-    private var serverStartPosition: Double = 0.0
     private var isManualSkipInProgress = false
     private var skipProtectionTimer: Timer?
     private var waitingForNextTrack = false  // True after STMd sent, waiting for server's response
@@ -100,11 +94,11 @@ class SlimProtoCommandHandler: ObservableObject {
                     os_log(.info, log: logger, "📛 Server setting player name to: '%{public}s'", trimmedName)
                     
                     // Update our settings with the server-provided name
-                    DispatchQueue.main.async {
-                        self.settings.playerName = trimmedName
-                        self.settings.saveSettings()
-                    }
-                    
+                    // (command processing runs on main — no hop needed)
+                    settings.playerName = trimmedName
+                    settings.saveSettings()
+
+
                     // Confirm the change back to server
                     sendSetdPlayerName(trimmedName)
                 } else {
@@ -150,6 +144,29 @@ class SlimProtoCommandHandler: ObservableObject {
         os_log(.info, log: logger, "✅ SETD player name sent: '%{public}s' (%d bytes)", playerName, setdData.count)
     }
     
+    // MARK: - Stream Format Validation
+    /// Map a strm 's' format byte to a display name; nil = unsupported format.
+    static func formatName(forStrmFormatByte format: UInt8) -> String? {
+        switch format {
+        case UInt8(ascii: "a"): return "AAC"
+        case UInt8(ascii: "A"): return "ALAC"
+        case UInt8(ascii: "m"): return "MP3"
+        case UInt8(ascii: "f"): return "FLAC"
+        case UInt8(ascii: "p"): return "PCM"
+        case UInt8(ascii: "w"): return "WAV"
+        case UInt8(ascii: "o"): return "OGG"
+        case UInt8(ascii: "u"): return "Opus"
+        default: return nil
+        }
+    }
+
+    /// Whether a strm frame must be rejected with STMn for its format byte.
+    /// Only 's' (start) carries a real format — every other command has a
+    /// filler byte there and must never be answered with a decode error.
+    static func rejectsFormat(streamCommand: UInt8, format: UInt8) -> Bool {
+        streamCommand == UInt8(ascii: "s") && formatName(forStrmFormatByte: format) == nil
+    }
+
     // MARK: - Stream Command Processing (UPDATED for FLAC)
     private func processServerCommand(_ command: String, payload: Data) {
         guard command == "strm" else { return }
@@ -181,87 +198,24 @@ class SlimProtoCommandHandler: ObservableObject {
                        commandChar, streamCommand, format, format, replayGainFloat)
             }
             
-            // UPDATED: Enhanced format handling with FLAC support
-            var formatName = "Unknown"
-            var shouldAccept = false
-            
-            switch format {
-            case 97:  // 'a' = AAC
-                formatName = "AAC"
-                shouldAccept = true
-                // OLD: Always logged
-                // os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
-                // NEW: Only log for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering AAC - perfect for iOS!")
-                }
-                
-            case 65:  // 'A' = ALAC
-                formatName = "ALAC"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering ALAC - excellent for iOS!")
-                }
-                
-            case 109: // 'm' = MP3
-                formatName = "MP3"
-                shouldAccept = true
-                // OLD: Always logged (causing spam)
-                // os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
-                // NEW: Only log for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering MP3 - acceptable fallback")
-                }
-                
-            case 102: // 'f' = FLAC
-                formatName = "FLAC"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering FLAC")
-                }
-                
-            case 112: // 'p' = PCM
-                formatName = "PCM"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering PCM")
-                }
+            // Format is only meaningful on 's' (start) — LMS packs a filler
+            // byte ('m') into every non-'s' frame, and squeezelite only parses
+            // format in its 's' handler. Rejecting a status poll ('t') or
+            // pause/unpause with STMn makes LMS treat the track as failed.
+            let formatName = Self.formatName(forStrmFormatByte: format) ?? "Unknown"
 
-            case 119: // 'w' = WAV
-                formatName = "WAV"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering WAV - native BASS support!")
-                }
-
-            case 111: // 'o' = OGG
-                formatName = "OGG"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering OGG - Bass native support!")
-                }
-                
-            case 117: // 'u' = Opus
-                formatName = "Opus"
-                shouldAccept = true
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.info, log: logger, "✅ Server offering Opus - Bass native support!")
-                }
-                
-            default:
-                // Only log unknown formats for non-status commands
-                if streamCommand != UInt8(ascii: "t") {
-                    os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
-                }
-                shouldAccept = false
-            }
-            
-            if !shouldAccept {
-                os_log(.info, log: logger, "🔄 Rejecting %{public}s format, requesting AAC transcode", formatName)
+            if Self.rejectsFormat(streamCommand: streamCommand, format: format) {
+                os_log(.error, log: logger, "❓ Unknown format: %d (0x%02x)", format, format)
+                os_log(.info, log: logger, "🔄 Rejecting unknown format, requesting transcode")
                 slimProtoClient?.sendStatus("STMn")
                 return
             }
-                        
+
+            if streamCommand == UInt8(ascii: "s") {
+                os_log(.info, log: logger, "✅ Server offering %{public}s", formatName)
+            }
+
+
             if payload.count > 24 {
                 let httpData = payload.subdata(in: 24..<payload.count)
                 if let httpRequest = String(data: httpData, encoding: .utf8) {
@@ -364,10 +318,7 @@ class SlimProtoCommandHandler: ObservableObject {
         slimProtoClient?.sendStatus("STMf")
 
         // Update state
-        serverStartTime = Date()
-        serverStartPosition = startTime
         lastKnownPosition = startTime
-        isStreamPaused = false
         isPausedByLockScreen = false
         isStreamActive = true
         waitingForNextTrack = false  // Server responded with new track - playlist NOT ended
@@ -380,7 +331,7 @@ class SlimProtoCommandHandler: ObservableObject {
         if isDirectStream {
             // Direct stream - use push stream for gapless (autostart 0 or 1)
             os_log(.info, log: logger, "📊 Routing to DIRECT stream (push stream for gapless)")
-            delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain)
+            delegate?.didStartDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain, autostart: autostart)
         } else {
             // HTTP URL stream - use traditional pull stream (autostart 2 or 3)
             os_log(.info, log: logger, "🌐 Routing to HTTP stream (traditional URL stream)")
@@ -418,7 +369,6 @@ class SlimProtoCommandHandler: ObservableObject {
             os_log(.info, log: logger, "⏸️ Server pause command (last known position: %.2f)", lastKnownPosition)
 
             // Don't track position - server knows where we are
-            isStreamPaused = true
             // DON'T automatically set isPausedByLockScreen - only SlimProtoCoordinator should set this
             // for actual lock screen pauses
 
@@ -439,7 +389,6 @@ class SlimProtoCommandHandler: ObservableObject {
                 os_log(.debug, log: logger, "✅ Timed pause initiated")
             } else {
                 os_log(.error, log: logger, "❌ Cannot access coordinator for timed pause - falling back to regular pause")
-                isStreamPaused = true
                 delegate?.didPauseStream()
             }
         }
@@ -465,10 +414,17 @@ class SlimProtoCommandHandler: ObservableObject {
     func getCurrentAudioTime() -> Double {
         // Access audio manager through the coordinator delegate
         if let coordinator = delegate as? SlimProtoCoordinator {
-            // We need to add a public method to get audio time from coordinator
             return coordinator.getCurrentAudioTime()
         }
         return lastKnownPosition
+    }
+
+    /// Real STAT buffer/byte telemetry (bd LMS_StreamTest-433.4.3).
+    func getStatTelemetry() -> SlimProtoStatTelemetry {
+        if let coordinator = delegate as? SlimProtoCoordinator {
+            return coordinator.getStatTelemetry()
+        }
+        return SlimProtoStatTelemetry()
     }
 
     // PHASE 2: Enhanced unpause command with synchronized start timing
@@ -487,7 +443,6 @@ class SlimProtoCommandHandler: ObservableObject {
                 coordinator.performPlaylistRecovery()
 
                 // Don't call didResumeStream() - wait for fresh stream from playlist jump
-                isStreamPaused = false
                 isPausedByLockScreen = false
                 return
             }
@@ -497,7 +452,6 @@ class SlimProtoCommandHandler: ObservableObject {
         if jiffies == 0 {
             // Immediate unpause - no synchronization needed
             os_log(.info, log: logger, "▶️ Immediate unpause (jiffies=0) - starting playback now")
-            isStreamPaused = false
             isPausedByLockScreen = false
             delegate?.didResumeStream()
         } else {
@@ -512,14 +466,12 @@ class SlimProtoCommandHandler: ObservableObject {
                 // Forward to coordinator which routes to AudioManager → AudioPlayer
                 coordinator.startAtJiffies(startAtJiffies)
 
-                isStreamPaused = false
                 isPausedByLockScreen = false
 
                 os_log(.debug, log: logger, "✅ Synchronized start initiated via coordinator")
             } else {
                 // Fallback if coordinator not available
                 os_log(.error, log: logger, "❌ Cannot access coordinator for synchronized start - falling back to immediate resume")
-                isStreamPaused = false
                 isPausedByLockScreen = false
                 delegate?.didResumeStream()
             }
@@ -549,28 +501,25 @@ class SlimProtoCommandHandler: ObservableObject {
         slimProtoClient?.sendStatus("STMf")
     }
     
+    /// Server timestamp to echo back in STAT for strm 't' — it lives in the
+    /// replay_gain field, bytes 14..<18 of the 'aaaaaaaCCCaCCCNnN' strm layout
+    /// (squeezelite slimproto.c: sendSTAT("STMt", strm->replay_gain)).
+    /// Bytes 20..<24 are server_ip, which is NOT the timestamp.
+    static func serverTimestamp(fromStrmPayload payload: Data) -> UInt32 {
+        guard payload.count >= 24 else { return 0 }
+        return payload.subdata(in: 14..<18).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+    }
+
     private func handleStatusRequest(_ payload: Data) {
-        // Extract server timestamp from strm 't' command
-        // In strm packets, the replay_gain field (bytes 20-23) contains the timestamp for 't' commands
-        var serverTimestamp: UInt32 = 0
+        let serverTimestamp = Self.serverTimestamp(fromStrmPayload: payload)
 
-        if payload.count >= 24 {
-            // Extract the replay_gain field which contains the server timestamp for 't' commands
-            let timestampBytes = payload.subdata(in: 20..<24)
-            serverTimestamp = timestampBytes.withUnsafeBytes { bytes in
-                bytes.load(as: UInt32.self).bigEndian
-            }
-        }
-
-        // Check if we're waiting for next track (after sending STMd)
-        if waitingForNextTrack {
-            // Server sent status request instead of new track → playlist ended
-            os_log(.info, log: logger, "🛑 End of playlist detected - server sent status request after STMd")
-            waitingForNextTrack = false
-            slimProtoClient?.sendStatus("STMu", serverTimestamp: serverTimestamp)
-            delegate?.didStopStream()
-            return
-        }
+        // NOTE: no "poll after STMd = playlist ended" heuristic here. The server's
+        // ~1Hz 't' polls run on an independent schedule from its STMd response, so a
+        // poll landing in the STMd → next-strm-'s' gap (transcoder spin-up, slow
+        // disk) is normal, not end-of-playlist — guessing from poll timing falsely
+        // stopped playback between tracks. squeezelite answers polls truthfully and
+        // lets the server drive; end-of-playback is reported via STMu when output
+        // actually drains (see notifyTrackEnded). bd LMS_StreamTest-433.4.1
 
         delegate?.didReceiveStatusRequest()
 
@@ -621,19 +570,26 @@ class SlimProtoCommandHandler: ObservableObject {
 
         // Reset all tracking state first
         isStreamActive = false
-        isStreamPaused = false
         isPausedByLockScreen = false
         lastKnownPosition = 0.0
-        serverStartTime = nil
-        serverStartPosition = 0.0
 
         // Send STMd (decoder ready)
         slimProtoClient?.sendStatus("STMd")
 
+        // Send STMu (output underrun / playback complete). BASS_SYNC_END on a URL
+        // stream means decode complete AND output drained AND stream disconnected
+        // simultaneously — squeezelite's exact STMu condition (slimproto.c:716:
+        // output_full == 0 && stream_state <= DISCONNECT && DECODE_STOPPED).
+        // The server's Stopped-event state table does the right thing with it:
+        // end of playlist (streaming IDLE) → clean stop; next track being prepared
+        // (TRACKWAIT/STREAMING) → buffer and continue. This replaces the removed
+        // poll-timing heuristic as the truthful end-of-playback signal.
+        slimProtoClient?.sendStatus("STMu")
+
         // Set flag to track that we're waiting for server's response
         waitingForNextTrack = true
 
-        os_log(.info, log: logger, "✅ STMd sent - waiting for server response (next track or playlist end)")
+        os_log(.info, log: logger, "✅ STMd+STMu sent - server drives next track or stop")
     }
 
     func startSkipProtection() {
@@ -676,6 +632,18 @@ class SlimProtoCommandHandler: ObservableObject {
     //   [10..13] new_gainL (u32, 16.16 fixed point; 65536 = unity)
     //   [14..17] new_gainR (u32, 16.16 fixed point)
     // Mirrors squeezelite's process_audg (slimproto.c): when dvc=0, apply unity gain.
+    /// Map audg gains to the single BASS volume. BASS_ATTRIB_VOLDSP is one
+    /// value for both channels, so true per-channel balance isn't representable
+    /// without a mixer matrix (overkill for a phone/TV player). We take
+    /// max(L, R): a hard-left/right balance in LMS keeps playing at the louder
+    /// channel's level instead of silently halving or dropping the setting.
+    /// dvc=0 (fixed volume) = unity, like squeezelite. bd LMS_StreamTest-433.4.4
+    static func volume(fromAudgDVC dvc: UInt8, gainL: UInt32, gainR: UInt32) -> Float {
+        guard dvc != 0 else { return 1.0 }
+        let gain = max(gainL, gainR)
+        return max(0.0, min(1.0, Float(gain) / 65536.0))
+    }
+
     private func processVolumeCommand(_ payload: Data) {
         guard payload.count >= 18 else {
             os_log(.error, log: logger, "Volume command payload too short: %d bytes", payload.count)
@@ -686,17 +654,19 @@ class SlimProtoCommandHandler: ObservableObject {
         let newGainL = payload.subdata(in: 10..<14).withUnsafeBytes {
             $0.load(as: UInt32.self).bigEndian
         }
+        let newGainR = payload.subdata(in: 14..<18).withUnsafeBytes {
+            $0.load(as: UInt32.self).bigEndian
+        }
 
-        let normalizedVolume: Float = (dvc == 0) ? 1.0 : Float(newGainL) / 65536.0
-        let clampedVolume = max(0.0, min(1.0, normalizedVolume))
+        let clampedVolume = Self.volume(fromAudgDVC: dvc, gainL: newGainL, gainR: newGainR)
 
         #if DEBUG
-        os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u → volume=%.3f", dvc, newGainL, clampedVolume)
+        os_log(.debug, log: logger, "🔊 audg dvc=%d gainL=%u gainR=%u → volume=%.3f", dvc, newGainL, newGainR, clampedVolume)
         #endif
 
         if let coordinator = delegate as? SlimProtoCoordinator {
             coordinator.setPlayerVolume(clampedVolume)
         }
     }
-    
+
 }

@@ -3,6 +3,7 @@
 // BASS API exposed via bridging header (LMS_StreamTest-Bridging-Header.h)
 import Foundation
 import AVFoundation
+import Combine
 import MediaPlayer
 import os.log
 
@@ -13,7 +14,6 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerDidReachEnd()
     func audioPlayerTimeDidUpdate(_ time: Double)
     func audioPlayerDidStall()
-    func audioPlayerDidReceiveMetadataUpdate()
     func audioPlayerRequestsSeek(_ timeOffset: Double)  // For transcoding pipeline fixes
     func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?))  // ICY metadata from radio streams
 }
@@ -34,12 +34,26 @@ class AudioPlayer: NSObject, ObservableObject {
         let sampleRate: Int
         let channels: Int
         let bitDepth: Int
-        let bitrate: Float
+        /// LMS-reported bitrate string (e.g. "850kbps", "320kbps VBR"). LMS
+        /// scans every file and reports this authoritatively; BASS's
+        /// BASS_ATTRIB_BITRATE for these decoder streams is unreliable — it
+        /// reads ~32kbps and never converges. Set via the JSON-RPC metadata
+        /// path, not BASS. nil until the first metadata poll lands, or for
+        /// sources LMS has no bitrate for.
+        let bitrateText: String?
 
         var displayString: String {
-            let channelStr = channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch"
-            let bitrateStr = bitrate > 0 ? " @ \(Int(bitrate)) kbps" : ""
-            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit • \(channelStr)\(bitrateStr)"
+            // Stereo is the common case — omit channel info to match iPhone
+            // Material's display (Elissen #2/#4 round 1). Mono and surround
+            // formats keep their channel callout.
+            let channelStr: String
+            switch channels {
+            case 1: channelStr = " • Mono"
+            case 2: channelStr = ""
+            default: channelStr = " • \(channels)ch"
+            }
+            let bitrateStr = bitrateText.map { " • \($0)" } ?? ""
+            return "\(format) • \(AudioPlayer.formatSampleRateKHz(sampleRate))kHz • \(bitDepth)-bit\(channelStr)\(bitrateStr)"
         }
     }
 
@@ -72,6 +86,38 @@ class AudioPlayer: NSObject, ObservableObject {
     // MARK: - Core Components (MINIMAL CBASS)
     private var currentStream: HSTREAM = 0
 
+    /// Read-only handle for FFT sampling (visualizer). Returns 0 when no URL stream
+    /// is active; visualizer falls back to the push-stream path in that case.
+    var activeBASSStream: HSTREAM { currentStream }
+
+    /// Real buffer/byte numbers for SlimProto STAT packets on the URL-stream
+    /// path (radio, transcoded-seek formats). Safe to query directly: the URL
+    /// stream is created/freed on the control plane, unlike the decoder-owned
+    /// push-path stream. bd LMS_StreamTest-433.4.3
+    func statTelemetry() -> SlimProtoStatTelemetry {
+        guard currentStream != 0 else { return SlimProtoStatTelemetry() }
+        let downloaded = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_DOWNLOAD))
+        let readPos = BASS_StreamGetFilePosition(currentStream, DWORD(BASS_FILEPOS_CURRENT))
+        let rawAvailable = BASS_ChannelGetData(currentStream, nil, DWORD(BASS_DATA_AVAILABLE))
+        let available = (rawAvailable == DWORD.max) ? 0 : UInt64(rawAvailable)
+        var buffered: UInt64 = 0
+        var received: UInt64 = 0
+        if downloaded != UInt64.max {
+            received = downloaded
+            if readPos != UInt64.max && downloaded > readPos {
+                buffered = downloaded - readPos
+            }
+        }
+        return SlimProtoStatTelemetry(
+            streamBufferedBytes: buffered,
+            outputBufferedBytes: available,
+            // BASS playback buffer default is 500ms; report a capacity that
+            // comfortably bounds it so fullness/size ratios stay sane.
+            outputBufferCapacity: max(available, 1_048_576),
+            bytesReceived: received
+        )
+    }
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AudioPlayer")
     private let settings = SettingsManager.shared
@@ -88,6 +134,10 @@ class AudioPlayer: NSObject, ObservableObject {
     // Synchronized playback state and monitoring
     private var playbackState: PlaybackState = .stopped
     private var startAtMonitorTimer: Timer?
+
+    // PauseForInterval for sync correction (Fix 2 in sync drift plan)
+    private var pendingResumeWorkItem: DispatchWorkItem?
+    private var pauseGeneration: Int = 0
     
     // MARK: - Delegation
     weak var delegate: AudioPlayerDelegate?
@@ -106,6 +156,15 @@ class AudioPlayer: NSObject, ObservableObject {
     /// When true, stream volume is set to 0 immediately upon creation
     var muteNextStream: Bool = false
 
+    /// Output-stage (BASS_ATTRIB_VOL) instant mute engaged (bd 34l pre-mute).
+    /// While true, setVolume stores but doesn't write, so a server volume
+    /// command can't unmute early. Cleared by restoreOutputVolume().
+    private var outputMuted: Bool = false
+
+    /// Last server volume (mirrors AudioStreamDecoder.currentVolume) — restore
+    /// target for restoreOutputVolume(). BASS_ATTRIB_VOL defaults to 1.0.
+    private var currentOutputVolume: Float = 1.0
+
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
 
@@ -116,12 +175,15 @@ class AudioPlayer: NSObject, ObservableObject {
     override init() {
         super.init()
         setupCBass()
+        #if os(iOS)
         setupRouteChangeObserver()
+        #endif
         #if DEBUG
         os_log(.info, log: logger, "AudioPlayer initialized with CBass")
         #endif
     }
 
+    #if os(iOS)
     private func setupRouteChangeObserver() {
         // Observe audio route changes to update output device info
         NotificationCenter.default.addObserver(
@@ -140,6 +202,7 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.info, log: self.logger, "🔀 Route changed - output device info updated")
         }
     }
+    #endif
     
     // MARK: - Core Setup (MINIMAL CBASS)
     private func setupCBass() {
@@ -177,6 +240,7 @@ class AudioPlayer: NSObject, ObservableObject {
                 os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
             }
 
+            #if os(iOS)
             // CRITICAL: Check for BASS vs iOS mismatch (LMS_StreamTest-yg4)
             // If BASS thinks 192kHz but iOS is at 48kHz, iOS will resample down
             let iosRate = AVAudioSession.sharedInstance().sampleRate
@@ -188,6 +252,7 @@ class AudioPlayer: NSObject, ObservableObject {
             } else {
                 os_log(.info, log: logger, "✅ BASS and iOS sample rates match - bit-perfect output")
             }
+            #endif
         } else {
             os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
         }
@@ -294,20 +359,30 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        // SILENT RECOVERY: Mute using DSP gain (like ReplayGain) instead of volume
-        // BASS_ATTRIB_VOLDSP applies gain to sample data - should actually work!
-        // Use 0.001 instead of 0.0 to avoid any potential edge cases (-60dB = effectively silent)
-        if muteNextStream {
-            BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
-            os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: DSP gain = 0.001 (sample-level muting, -60dB)")
-        }
-
         setupCallbacks()
 
         // Apply ReplayGain BEFORE starting playback if pending
         if pendingReplayGain > 0.0 {
             applyReplayGain(pendingReplayGain)
             pendingReplayGain = 0.0  // Clear after application
+        }
+
+        // SILENT RECOVERY: mute AFTER the ReplayGain write — both target VOLDSP,
+        // so gain-after-mute would overwrite the mute and the recovery stream
+        // would play at full gain (bd 34l). applyReplayGain stored the gain in
+        // currentReplayGain, which restoreDSPGain re-applies on unmute. Must be
+        // BEFORE ChannelPlay: VOLDSP changes during playback are delayed by the
+        // playback buffer, so a late mute lets the buffered head play audibly.
+        if muteNextStream {
+            applyMuting()
+            os_log(.info, log: logger, "🔇 APP OPEN RECOVERY: muted before play (legacy URL stream)")
+        }
+
+        // Instant mute engaged (bd 34l): this is a NEW handle — the VOL=0 written
+        // by applyInstantMute() died with the old stream, so re-assert it here or
+        // the new stream plays at BASS default VOL=1.0 during the mute window.
+        if outputMuted {
+            applyInstantMute()
         }
 
         let playResult = BASS_ChannelPlay(currentStream, 0)
@@ -400,10 +475,9 @@ class AudioPlayer: NSObject, ObservableObject {
         playbackState = .stopped
         stopStartAtMonitoring()
 
-        if currentStream != 0 {
-            BASS_ChannelStop(currentStream)
-            currentStream = 0
-        }
+        // Stop, free, and zero the stream (plus clear stream info) — reuse
+        // cleanup() so the BASS teardown sequence lives in one place.
+        cleanup()
 
         delegate?.audioPlayerDidStop()
         os_log(.debug, log: logger, "⏹️ CBass stopped playback")
@@ -493,33 +567,80 @@ class AudioPlayer: NSObject, ObservableObject {
 
     // MARK: - Sync Drift Corrections
 
-    /// Play silence for a duration (timed pause for sync drift correction)
-    /// Advances playback position without outputting audio
+    /// Pause the URL stream for `duration` seconds, then resume.
+    /// Server uses this (strm 'p' with non-zero interval) to slow down a player that's
+    /// ahead of the sync group. BASS_ChannelPause freezes BASS_POS_BYTE; after `duration`
+    /// wall time, BASS_ChannelStart resumes from the same music position.
+    ///
+    /// Replaces the previous BASS_ChannelSetPosition(currentPos + duration) approach
+    /// which was a forward seek (i.e. skipAhead) — the OPPOSITE of what the server
+    /// wanted, making drift compound instead of converge (Bug 2 in sync drift plan).
     func playSilence(duration: TimeInterval) {
         guard currentStream != 0 else {
             os_log(.error, log: logger, "❌ playSilence() called with no active stream")
             return
         }
+        guard duration > 0 else {
+            os_log(.info, log: logger, "🔇 Zero duration playSilence - skipping")
+            return
+        }
 
-        os_log(.info, log: logger, "⏸️🔇 Playing silence for %.3f seconds (drift correction)", duration)
+        // Supersede any existing pause window
+        pendingResumeWorkItem?.cancel()
 
-        // Get current position in bytes
-        let currentPosBytes = BASS_ChannelGetPosition(currentStream, DWORD(BASS_POS_BYTE))
+        // Treat PLAYING and PAUSED as both valid entry states for pauseForInterval:
+        // - PLAYING: pause now, schedule resume.
+        // - PAUSED: already paused (a prior pauseForInterval is still in window and
+        //   was just superseded by us cancelling its resume); skip the redundant
+        //   pause call but still schedule a new resume so the stream doesn't strand
+        //   paused forever. Without this branch, BASS_ChannelPause returns FALSE on
+        //   an already-paused stream and we'd bail without scheduling resume —
+        //   silent failure mode if the server rapid-fires sync corrections.
+        let state = BASS_ChannelIsActive(currentStream)
+        switch state {
+        case DWORD(BASS_ACTIVE_PLAYING):
+            BASS_ChannelPause(currentStream)
+            os_log(.info, log: logger, "⏸️🔇 BASS_ChannelPause for %.3f seconds (drift correction)", duration)
+        case DWORD(BASS_ACTIVE_PAUSED):
+            os_log(.info, log: logger, "⏸️🔇 Already paused — extending pause window for %.3f seconds (supersede)", duration)
+        default:
+            // STOPPED or STALLED — nothing to pause, nothing to schedule.
+            os_log(.info, log: logger, "playSilence: stream not playing/paused (state=%d), skipping", state)
+            return
+        }
 
-        // Convert duration to bytes
-        let durationBytes = BASS_ChannelSeconds2Bytes(currentStream, duration)
+        pauseGeneration += 1
+        let myGeneration = pauseGeneration
+        let myStream = currentStream
 
-        // Calculate new position
-        let newPosBytes = currentPosBytes + durationBytes
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Generation guard: cancellation invalidates the closure even if it already
+            // passed the cancel check (BASS handle reuse defense).
+            guard self.pauseGeneration == myGeneration else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — generation mismatch (cancelled)")
+                return
+            }
+            // Stream identity guard: handle may have been freed and reused.
+            guard self.currentStream != 0, self.currentStream == myStream else {
+                os_log(.info, log: self.logger, "⏸️→▶️ Resume skipped — stream handle changed")
+                return
+            }
+            BASS_ChannelStart(self.currentStream)
+            os_log(.info, log: self.logger, "▶️ Resumed after pauseForInterval")
+        }
+        pendingResumeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
+    }
 
-        // Set new position (effectively skips ahead, "playing" silence)
-        let result = BASS_ChannelSetPosition(currentStream, newPosBytes, DWORD(BASS_POS_BYTE))
-
-        if result != 0 {
-            os_log(.info, log: logger, "✅ Silence played - advanced %.3f seconds", duration)
-        } else {
-            let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Failed to play silence: %d", errorCode)
+    /// Cancel any pending resume scheduled by playSilence().
+    /// Called by stop/flush/skipAhead/unpause/freeStream paths.
+    func cancelPendingResume() {
+        if pendingResumeWorkItem != nil {
+            pendingResumeWorkItem?.cancel()
+            pendingResumeWorkItem = nil
+            pauseGeneration += 1
+            os_log(.debug, log: logger, "🚫 Cancelled pending resume work item")
         }
     }
 
@@ -593,18 +714,70 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Volume Control (MINIMAL CBASS)
     func setVolume(_ volume: Float) {
+        let clampedVolume = max(0.0, min(1.0, volume))
+        currentOutputVolume = clampedVolume
+
         guard currentStream != 0 else { return }
 
-        let clampedVolume = max(0.0, min(1.0, volume))
+        // Don't write while the instant mute is engaged (bd 34l) — the stored
+        // value is applied on restoreOutputVolume().
+        if outputMuted {
+            os_log(.info, log: logger, "🔊 Volume stored (instant mute engaged): %.2f", clampedVolume)
+            return
+        }
+
         BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), clampedVolume)
     }
 
     func getVolume() -> Float {
-        guard currentStream != 0 else { return 1.0 }
+        // While instant-muted the attribute reads 0; report the stored server
+        // volume so UI sync doesn't echo a transient 0 back to the server.
+        guard currentStream != 0, !outputMuted else { return currentOutputVolume }
 
         var volume: Float = 1.0
         BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), &volume)
         return volume
+    }
+
+    /// Instant output-stage mute for the app-foreground pre-mute (bd 34l).
+    /// See AudioStreamDecoder.applyInstantMute() — VOLDSP can't silence audio
+    /// already in the playback buffer; BASS_ATTRIB_VOL applies at the output
+    /// stage and takes effect immediately.
+    func applyInstantMute() {
+        outputMuted = true
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), 0.0)
+        os_log(.info, log: logger, "🔇 PRE-MUTE: URL stream output volume = 0 (instant)")
+    }
+
+    /// Undo applyInstantMute(). No-op when the instant mute isn't engaged,
+    /// so it's safe to call from every restore path unconditionally.
+    func restoreOutputVolume() {
+        guard outputMuted else { return }
+        outputMuted = false
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOL), currentOutputVolume)
+        os_log(.info, log: logger, "🔊 PRE-MUTE: URL stream output volume restored to %.2f", currentOutputVolume)
+    }
+
+    /// Pause the URL stream if it's stalled (BASS_ACTIVE_STALLED) so it can't
+    /// auto-resume at full volume when the network thaws after suspension (bd 34l).
+    func pauseIfStalled() {
+        guard currentStream != 0 else { return }
+        if BASS_ChannelIsActive(currentStream) == DWORD(BASS_ACTIVE_STALLED) {
+            BASS_ChannelPause(currentStream)
+            os_log(.info, log: logger, "⏸️ PRE-MUTE: paused stalled URL stream")
+        }
+    }
+
+    /// Mute the current stream immediately for silent recovery.
+    /// Mirrors AudioStreamDecoder.applyMuting() so an already-playing legacy URL stream
+    /// (FLAC/seek path) is silenced now, not just the next stream via muteNextStream.
+    /// 0.001 rather than true 0.0 (-60dB = effectively silent) to avoid any
+    /// potential BASS edge cases with a zero gain value.
+    func applyMuting() {
+        guard currentStream != 0 else { return }
+        BASS_ChannelSetAttribute(currentStream, DWORD(BASS_ATTRIB_VOLDSP), 0.001)
     }
 
     /// Restore DSP gain after silent recovery (respects active ReplayGain)
@@ -676,6 +849,10 @@ class AudioPlayer: NSObject, ObservableObject {
     
     private func cleanup() {
         if currentStream != 0 {
+            // Cancel any pending sync-correction resume before freeing.
+            // Generation counter inside cancelPendingResume defends against BASS
+            // handle reuse if the freed DWORD is allocated to a new stream.
+            cancelPendingResume()
             BASS_ChannelStop(currentStream)
             BASS_StreamFree(currentStream)
             currentStream = 0
@@ -683,6 +860,60 @@ class AudioPlayer: NSObject, ObservableObject {
         // Clear stream info when stream is cleaned up
         currentStreamInfo = nil
         // Note: Keep output device info - it's still valid even without an active stream
+    }
+
+    // MARK: - Bitrate (server-reported vs measured)
+
+    /// LMS-reported bitrate string for the current track (the `r` tag, e.g.
+    /// "850kbps"). Authoritative for non-transcoded streams; **wrong** for
+    /// transcoded streams because LMS reports the source file's bitrate, not
+    /// the actual stream rate (e.g. "2830kbps" for a FLAC transcoded down to
+    /// Opus). Used as the initial display and as a fallback.
+    private var serverBitrateText: String?
+
+    /// Wire-bitrate measured from `BASS_FILEPOS_DOWNLOAD` over a ~10s window
+    /// by AudioStreamDecoder. Codec-agnostic (works for FLAC, Opus, MP3,
+    /// AAC, etc) and reflects the *actual* stream — so it's correct even
+    /// when MobileTranscode is re-encoding on the server. Takes precedence
+    /// over `serverBitrateText` once stable (~3s after track start).
+    private var measuredBitrateText: String?
+
+    /// Effective bitrate text for display — prefer measured (real), fall back
+    /// to server (LMS's source-file value).
+    private var effectiveBitrateText: String? {
+        return measuredBitrateText ?? serverBitrateText
+    }
+
+    /// Value the BASS stream-info paths seed `StreamInfo.bitrateText` with, so a
+    /// BASS rebuild doesn't wipe the bitrate display.
+    var carryOverBitrateText: String? { effectiveBitrateText }
+
+    /// Applies an LMS-reported bitrate string. Called from the JSON-RPC
+    /// metadata path via `AudioManager.updateStreamBitrate(text:)`.
+    func applyServerBitrate(_ text: String?) {
+        if serverBitrateText == text { return }
+        serverBitrateText = text
+        rebuildStreamInfoWithCurrentBitrate()
+    }
+
+    /// Applies a measured wire-bitrate string. Called by SlimProtoCoordinator's
+    /// 1Hz heartbeat with the result of AudioStreamDecoder.sampleMeasuredBitrate.
+    /// Nil clears the measured override and `serverBitrateText` shows through.
+    func applyMeasuredBitrate(_ text: String?) {
+        if measuredBitrateText == text { return }
+        measuredBitrateText = text
+        rebuildStreamInfoWithCurrentBitrate()
+    }
+
+    private func rebuildStreamInfoWithCurrentBitrate() {
+        guard let info = currentStreamInfo else { return }
+        currentStreamInfo = StreamInfo(
+            format: info.format,
+            sampleRate: info.sampleRate,
+            channels: info.channels,
+            bitDepth: info.bitDepth,
+            bitrateText: effectiveBitrateText
+        )
     }
 
     // MARK: - Stream Info Retrieval
@@ -699,22 +930,19 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
-        // Get bitrate attribute
-        var bitrate: Float = 0.0
-        BASS_ChannelGetAttribute(currentStream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
-
         // Map ctype to human-readable format name
         let formatName = formatNameFromCType(info.ctype)
 
         // Extract bit depth from origres (LOWORD contains bits)
         let bitDepth = Int(info.origres & 0xFFFF)
 
+        // bitrate comes from LMS metadata, not BASS — see StreamInfo.bitrateText.
         let streamInfo = StreamInfo(
             format: formatName,
             sampleRate: Int(info.freq),
             channels: Int(info.chans),
             bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
-            bitrate: bitrate
+            bitrateText: carryOverBitrateText
         )
 
         currentStreamInfo = streamInfo
@@ -785,6 +1013,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
+        #if os(iOS)
         // On iOS, BASS uses the default device (-1) and routing is managed by iOS
         // Query AVAudioSession for the actual device name and type
         let audioSession = AVAudioSession.sharedInstance()
@@ -813,8 +1042,22 @@ class AudioPlayer: NSObject, ObservableObject {
         currentOutputInfo = outputInfo
         os_log(.info, log: logger, "🔊 Output device: %{public}s (port: %{public}s)",
                outputInfo.displayString, output.portType.rawValue)
+        #else
+        // tvOS: BASS info only — no AVAudioSession route querying. Apple TV outputs
+        // through HDMI/optical via the system; specific port names are not exposed.
+        let outputInfo = OutputDeviceInfo(
+            deviceName: "AppleTV/HDMI",
+            deviceType: "HDMI",
+            outputSampleRate: Int(info.freq),
+            outputChannels: Int(info.speakers),
+            latency: Int(info.latency)
+        )
+        currentOutputInfo = outputInfo
+        os_log(.info, log: logger, "🔊 Output device (tvOS): %{public}s", outputInfo.displayString)
+        #endif
     }
 
+    #if os(iOS)
     private func deviceTypeFromPortType(_ portType: AVAudioSession.Port) -> String {
         // Map iOS AVAudioSession port types to human-readable device types
         switch portType {
@@ -846,6 +1089,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return "Audio Output"
         }
     }
+    #endif
     
     // MARK: - BASS Callbacks (MINIMAL)
     private func setupCallbacks() {
@@ -853,24 +1097,35 @@ class AudioPlayer: NSObject, ObservableObject {
         
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         
-        // Track end detection with data parameter filtering - CRITICAL for SlimProto integration
+        // Track end detection - CRITICAL for SlimProto integration.
+        //
+        // NOTE (bd LMS_StreamTest-433.5.5): BASS_SYNC_END's data values are
+        // 1 = MOD-music backward jump, 2 = BASS_POS_END position sync,
+        // 3 = tail end — NONE occur for HTTP audio streams, and a dropped
+        // connection still ends with data=0. The old "data != 0 = network
+        // issue, ignore" filter here could never trigger and did NOT prevent
+        // premature track-end on cellular. Decision: premature ends (stream
+        // drop mid-track) are reported truthfully like squeezelite — the
+        // STMd/STMu flow lets the server (which knows the real duration)
+        // decide whether to restart or advance. Routing them to
+        // audioPlayerDidStall instead would silently halt playback (that
+        // handler is a no-op). We log short ends for field diagnosis.
         BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_END), 0, { handle, channel, data, user in
             guard let user = user else { return }
             let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
-            
+
             DispatchQueue.main.async {
-                // CRITICAL: Only treat data=0 as natural track completion (fixes cellular false positives)
-                if data == 0 && !player.isIntentionallyPaused && !player.isIntentionallyStopped {
-                    // Natural track end detected
-                    let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    let totalLength = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetLength(player.currentStream, DWORD(BASS_POS_BYTE)))
-                    
-                    os_log(.info, log: player.logger, "🎵 Track ended naturally (data=0, pos: %.2f, length: %.2f)", currentPos, totalLength)
-                    player.delegate?.audioPlayerDidReachEnd()
-                } else if data != 0 {
-                    // Network/stream issue - ignore (fixes cellular FLAC premature skipping)
-                    os_log(.info, log: player.logger, "⚠️ BASS_SYNC_END data=%d (ignoring - not natural track end)", data)
+                guard !player.isIntentionallyPaused && !player.isIntentionallyStopped else { return }
+
+                let currentPos = BASS_ChannelBytes2Seconds(player.currentStream, BASS_ChannelGetPosition(player.currentStream, DWORD(BASS_POS_BYTE)))
+                let expected = player.metadataDuration
+                if expected > 0, currentPos > 0, currentPos < expected - 5.0 {
+                    os_log(.error, log: player.logger, "⚠️ Track ended %.0fs short of expected duration (%.2f / %.2f) - likely dropped stream; reporting end, server drives recovery",
+                           expected - currentPos, currentPos, expected)
+                } else {
+                    os_log(.info, log: player.logger, "🎵 Track ended naturally (pos: %.2f)", currentPos)
                 }
+                player.delegate?.audioPlayerDidReachEnd()
             }
         }, selfPtr)
         

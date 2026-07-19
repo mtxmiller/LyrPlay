@@ -1,0 +1,41 @@
+# SwiftLint config for LyrPlay
+# Read-only quality signal. Nothing here auto-fixes; run `swiftlint lint`.
+
+included:
+  - LMS_StreamTest
+  - LMS_StreamTest-tvOS
+
+excluded:
+  - Pods
+  - _archive
+  - LMS_StreamTest.xcodeproj
+
+# Start lenient: opt-in analyzer rules are off, defaults on.
+# Tune thresholds once you've seen the first report.
+disabled_rules:
+  - trailing_whitespace
+  - todo
+
+line_length:
+  warning: 140
+  error: 250
+  ignores_comments: true
+
+file_length:
+  warning: 800
+  error: 2000
+
+type_body_length:
+  warning: 600
+  error: 1500
+
+function_body_length:
+  warning: 100
+  error: 250
+
+cyclomatic_complexity:
+  warning: 20
+  error: 40
+
+identifier_name:
+  min_length: 2

@@ -1,5 +1,6 @@
 import UIKit
 import CarPlay
+import Combine
 import os.log
 
 @objc(CarPlaySceneDelegate)
@@ -7,6 +8,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private let logger = OSLog(subsystem: "com.lmsstream", category: "CarPlay")
     var interfaceController: CPInterfaceController?
     private var browseTemplate: CPListTemplate?
+
+    /// CarPlay caps the navigation stack at 5 templates. Pushing past the cap
+    /// raises NSException (clientExceededHierarchyDepthLimit) and crashes, so
+    /// every push must go through pushTemplateSafely().
+    private static let maxTemplateDepth = 5
 
     // Cached data for fast template updates
     private var cachedNewMusic: [Album] = []
@@ -16,6 +22,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     // Connection observer for event-driven data loading
     private var connectionObserver: NSObjectProtocol?
     private var hasLoadedData = false
+
+    // Now Playing button row state. updateNowPlayingButtons() replaces the WHOLE
+    // array, so the row is rebuilt from this cached state in one place
+    // (rebuildNowPlayingButtons) — adding a button inline would be silently
+    // dropped on the next rebuild. See GH #85.
+    private var currentShuffleMode: Int = 0          // 0=off, 1=songs, 2=albums
+    private var dstmEnabled: Bool = false            // player has a DSTM provider set
+
+    // Favorite (star) button state for the current track (GH#92, option C — live
+    // filled/empty star). Synced from the server on connect, on Now Playing
+    // appear, and on every track change (via trackChangeCancellable) so the icon
+    // reflects reality before the user taps — a blind toggle could silently
+    // delete a curated favorite. `favoriteIndex` is the `index` field returned by
+    // `favorites exists` and is the `item_id` used to delete.
+    private var currentTrackFavoriteURL: String?
+    private var currentTrackFavoriteTitle: String?
+    private var currentTrackIsFavorited: Bool = false
+    private var currentTrackFavoriteIndex: String?
+    private var trackChangeCancellable: AnyCancellable?
 
 
     // MARK: - Services
@@ -41,26 +66,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         nowPlayingTemplate.isUpNextButtonEnabled = true
         nowPlayingTemplate.add(self)  // Add self as observer for up next button taps
 
-        // Add custom shuffle button with distinct icons for off/songs/albums
-        // Start with off state - will update icon when server state is synced
-        let shuffleConfig = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
-        let shuffleImage = UIImage(systemName: "shuffle", withConfiguration: shuffleConfig)!
-        let shuffleButton = CPNowPlayingImageButton(image: shuffleImage) { [weak self] button in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
+        // Build the Now Playing button row. Single source of truth — see
+        // rebuildNowPlayingButtons(). Starts with shuffle (off) and no Keep
+        // Playing button; both are refreshed once server shuffle state + DSTM
+        // availability are synced after connection.
+        rebuildNowPlayingButtons()
 
-            guard let coordinator = AudioManager.shared.slimClient else {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
-                return
-            }
-
-            // Toggle shuffle and update button icon
-            coordinator.toggleShuffleMode { newMode in
-                DispatchQueue.main.async {
-                    self?.updateShuffleButtonIcon(for: newMode)
-                }
-            }
-        }
-        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
+        // Re-sync the favorite star on every track change while CarPlay is up, so
+        // the filled/empty state is always current (GH#92 option C). Subscribes to
+        // NowPlayingManager's published title — keeps the hook CarPlay-local with no
+        // edits to shared/audio code. dropFirst skips the initial value (connect
+        // already syncs via resyncNowPlayingButtons).
+        setupTrackChangeObserver()
 
         // Set template immediately - user sees UI right away
         interfaceController.setRootTemplate(immediateTemplate, animated: false) { [weak self] success, error in
@@ -126,6 +143,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             NotificationCenter.default.removeObserver(observer)
             connectionObserver = nil
         }
+        trackChangeCancellable?.cancel()
+        trackChangeCancellable = nil
         hasLoadedData = false
         os_log(.info, log: logger, "  ✅ Interface controller cleared")
         os_log(.info, log: logger, "🚗 CARPLAY DISCONNECTED")
@@ -143,6 +162,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         refreshHomeTemplateData()
         syncShuffleButtonWithServer()
+        syncDSTMAvailability()
     }
 
     // MARK: - Browse Actions
@@ -216,20 +236,60 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         interfaceController.popToRootTemplate(animated: false) { [weak self] success, error in
             guard let self = self else { return }
 
-            interfaceController.pushTemplate(nowPlayingTemplate, animated: true) { success, error in
+            self.pushTemplateSafely(nowPlayingTemplate, animated: true) { success, error in
                 if let error = error {
                     os_log(.error, log: self.logger, "❌ Failed to push Now Playing template: %{public}s", error.localizedDescription)
                 } else if success {
                     os_log(.info, log: self.logger, "✅ Now Playing template displayed")
+                    // Refresh button state — shuffle mode / DSTM availability can
+                    // have changed since connect (the only other sync point).
+                    self.resyncNowPlayingButtons()
                 }
             }
         }
+    }
+
+    /// Push a template only when CarPlay's 5-template stack cap allows it.
+    /// Exceeding the cap raises NSException in CPInterfaceController
+    /// (clientExceededHierarchyDepthLimit) and crashes the app — refuse and
+    /// log instead. All pushTemplate calls must go through here.
+    private func pushTemplateSafely(_ template: CPTemplate, animated: Bool,
+                                    completion: ((Bool, Error?) -> Void)? = nil) {
+        guard let interfaceController = interfaceController else {
+            os_log(.error, log: logger, "❌ Cannot push template - no interface controller")
+            completion?(false, nil)
+            return
+        }
+        let stackDepth = interfaceController.templates.count
+        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
+            os_log(.error, log: logger, "⛔ Refusing template push — CarPlay stack at cap (%d)", stackDepth)
+            completion?(false, nil)
+            return
+        }
+        interfaceController.pushTemplate(template, animated: animated) { success, error in
+            completion?(success, error)
+        }
+    }
+
+    /// Re-pull server-driven Now Playing button state (shuffle mode + DSTM
+    /// availability). The connect-time sync in loadCarPlayData() runs once, so
+    /// without this the shuffle button goes stale whenever shuffle is changed
+    /// outside CarPlay or the user returns to Now Playing later. No-ops cleanly
+    /// when the coordinator isn't available yet.
+    private func resyncNowPlayingButtons() {
+        syncShuffleButtonWithServer()
+        syncDSTMAvailability()
+        syncFavoriteButtonWithServer()
     }
 
     // MARK: - Scene Lifecycle
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         os_log(.info, log: logger, "🚗 CARPLAY SCENE BECAME ACTIVE")
+        // Catches the "tapped Now Playing from the CarPlay dashboard" path,
+        // which never goes through our pushNowPlayingTemplate(). Keeps the
+        // shuffle button in sync with the actual player state.
+        resyncNowPlayingButtons()
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
@@ -283,7 +343,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             sections: [CPListSection(items: playlistItems)]
         )
 
-        interfaceController?.pushTemplate(playlistsTemplate, animated: true)
+        pushTemplateSafely(playlistsTemplate, animated: true)
         os_log(.info, log: logger, "✅ Displayed %d playlists", playlistItems.count)
     }
     
@@ -430,7 +490,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: trackItems)]
             )
 
-            self.interfaceController?.pushTemplate(tracksTemplate, animated: true)
+            self.pushTemplateSafely(tracksTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d tracks for playlist %{public}s", trackItems.count - 1, playlist.name)
         }
     }
@@ -611,8 +671,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 self.interfaceController?.popToRootTemplate(animated: false) { [weak self] _, _ in
                     guard let self = self else { return }
                     let nowPlaying = CPNowPlayingTemplate.shared
-                    self.interfaceController?.pushTemplate(nowPlaying, animated: false) { _, _ in
-                        self.interfaceController?.pushTemplate(upNextTemplate, animated: true)
+                    self.pushTemplateSafely(nowPlaying, animated: false) { _, _ in
+                        self.pushTemplateSafely(upNextTemplate, animated: true)
                     }
                 }
                 os_log(.info, log: self.logger, "✅ Displayed Up Next queue with %d tracks", queueItems.count)
@@ -688,18 +748,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 return try JSONDecoder().decode(Playlist.self, from: jsonData)
             } catch {
                 os_log(.error, log: logger, "❌ Failed to parse playlist: %{public}s", error.localizedDescription)
-                return nil
-            }
-        }
-    }
-
-    private func parsePlaylistTracks(_ data: [[String: Any]]) -> [PlaylistTrack] {
-        return data.compactMap { trackData in
-            do {
-                let jsonData = try JSONSerialization.data(withJSONObject: trackData)
-                return try JSONDecoder().decode(PlaylistTrack.self, from: jsonData)
-            } catch {
-                os_log(.error, log: logger, "❌ Failed to parse track: %{public}s", error.localizedDescription)
                 return nil
             }
         }
@@ -781,7 +829,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     return
                 }
 
-                let tracks = self.parsePlaylistTracks(tracksLoop)
+                let tracks = PlaylistTrack.parseLoop(tracksLoop)
                 os_log(.info, log: self.logger, "✅ Fetched %d tracks for playlist", tracks.count)
                 completion(tracks)
             }
@@ -823,6 +871,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     // MARK: - Artwork Loading
 
+    /// Shared image fetch core: 3s timeout + optional HTTP Basic auth header.
+    /// Callers build the URL (coverID thumbnail via `loadArtwork`, favorite icon
+    /// via `favoriteArtworkURL`, …). BASS callbacks aside, this runs on a
+    /// URLSession queue; callers marshal `completion` to main as needed.
+    private func fetchImage(url: URL, completion: @escaping (UIImage?) -> Void) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3.0
+
+        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
+        if let authHeader = SettingsManager.shared.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data = data, let image = UIImage(data: data) {
+                completion(image)
+            } else {
+                completion(nil)
+            }
+        }.resume()
+    }
+
     private func loadArtwork(coverID: String?, completion: @escaping (UIImage?) -> Void) {
         guard let coverID = coverID, !coverID.isEmpty else {
             completion(nil)
@@ -838,22 +908,58 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        // Create request with 3s timeout (matches other CarPlay artwork loading)
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3.0
+        fetchImage(url: url, completion: completion)
+    }
 
-        // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
-        if let authHeader = settings.generateAuthHeader() {
-            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+    /// Resolve a favorite's `icon`/`image` string into a loadable artwork URL.
+    /// Pure + unit-tested (`CarPlayArtworkTests`). iOS/CarPlay twin of tvOS
+    /// `LMSArtworkURL.favoriteIcon` — kept separate on purpose: auth differs
+    /// (header here vs URL-embedded credentials on tvOS) and CarPlay force-requests
+    /// a 200x200 thumbnail for local `/music/<id>` covers. Handles the three shapes
+    /// LMS returns (verified on 192.168.1.8):
+    ///   1. absolute "http(s)://…"           -> used as-is
+    ///   2. server-relative "/imageproxy/…"  -> host+port + path
+    ///   3. relative "music/<id>/cover.png"  -> host+port + "/" + path
+    /// For local `music/<id>/cover.*` art, rewrite to the `cover_200x200_o.*`
+    /// thumbnail variant. `/imageproxy/` and plugin icons pass through unresized
+    /// (server sends them small). Returns nil for nil/empty.
+    static func favoriteArtworkURL(from icon: String?, host: String, port: Int) -> URL? {
+        guard let raw = icon, !raw.isEmpty else { return nil }
+
+        // Absolute URL — use verbatim.
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            return URL(string: raw)
         }
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let data = data, let image = UIImage(data: data) {
-                completion(image)
-            } else {
-                completion(nil)
-            }
-        }.resume()
+        // Rewrite full-res local cover art to a CarPlay-sized thumbnail:
+        //   music/<id>/cover.png -> music/<id>/cover_200x200_o.png
+        var path = raw
+        if (path.hasPrefix("music/") || path.hasPrefix("/music/")),
+           !path.contains("_200x200_"),
+           let coverDot = path.range(of: "/cover.") {
+            path.replaceSubrange(coverDot, with: "/cover_200x200_o.")
+        }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        let prefixed = path.hasPrefix("/") ? path : "/" + path
+        // LMS sends these paths ALREADY percent-encoded — a URL-set favorite icon
+        // arrives as "/imageproxy/https%3A%2F%2F…/image.png". `components.path`
+        // re-encodes the '%' signs (%3A → %253A), and the server answers the
+        // mangled imageproxy request with its radio.png fallback — the "black
+        // antenna icon" on every URL-icon favorite (GH#92). Preserve existing
+        // escapes; the round-trip guard rejects malformed escapes, which would
+        // trap in the percentEncodedPath setter.
+        let allowed = CharacterSet.urlPathAllowed.union(CharacterSet(charactersIn: "%"))
+        if let encoded = prefixed.addingPercentEncoding(withAllowedCharacters: allowed),
+           encoded.removingPercentEncoding != nil {
+            components.percentEncodedPath = encoded
+        } else {
+            components.path = prefixed
+        }
+        return components.url
     }
 
     private func loadArtworkForTracks(_ tracks: [PlaylistTrack], completion: @escaping ([String: UIImage]) -> Void) {
@@ -894,6 +1000,193 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    // MARK: - Favorites (GH#92)
+
+    /// CarPlay Favorites entry point — fetch the user's starred list, then push
+    /// a CPListTemplate of top-level playable favorites. Mirrors the
+    /// showPlaylists → fetch → display skeleton.
+    private func showFavorites() {
+        os_log(.info, log: logger, "⭐ Showing favorites in CarPlay")
+        fetchFavorites { [weak self] favorites in
+            self?.displayFavorites(favorites)
+        }
+    }
+
+    /// System-scoped favorites LIST. Caps at 100 (matches tvOS FavoritesView).
+    ///
+    /// Do NOT pass "feedMode:1": it switches the response to OPML shape
+    /// (result.items, no per-item id) which breaks tap-to-play. Without it LMS
+    /// returns result.loop_loop with proper id values usable as item_id:N.
+    private func fetchFavorites(itemID: String? = nil, completion: @escaping ([FavoriteItem]) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available for favorites")
+            completion([])
+            return
+        }
+
+        // Top level passes no item_id; a folder drill appends item_id:<id> to
+        // fetch that folder's children (verified on 192.168.1.8: dotted child ids).
+        var favoritesQuery: [Any] = ["favorites", "items", 0, 100, "want_url:1"]
+        if let itemID = itemID {
+            favoritesQuery.append("item_id:\(itemID)")
+        }
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", favoritesQuery]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
+            guard let self = self else {
+                completion([])
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let result = response["result"] as? [String: Any] else {
+                    os_log(.error, log: self.logger, "❌ Invalid favorites response format")
+                    completion([])
+                    return
+                }
+                if let loop = result["loop_loop"] as? [[String: Any]] {
+                    completion(FavoriteItem.parseLoop(loop))
+                } else {
+                    completion([])
+                }
+            }
+        }
+    }
+
+    /// Render one level of favorites. `title` is "Favorites" at the top level,
+    /// or the folder name when drilling. Folders get a disclosure chevron and
+    /// drill; everything else plays on tap. Artwork loads async and fills rows
+    /// in after the push (capped — see below).
+    private func displayFavorites(_ favorites: [FavoriteItem], title: String = "Favorites") {
+        // Empty list: show an explicit row, not a blank template.
+        guard !favorites.isEmpty else {
+            let emptyItem = CPListItem(
+                text: "No favorites",
+                detailText: "Add favorites in LyrPlay to see them here",
+                image: nil,
+                accessoryImage: nil,
+                accessoryType: .none
+            )
+            let template = CPListTemplate(title: title, sections: [CPListSection(items: [emptyItem])])
+            pushTemplateSafely(template, animated: true)
+            os_log(.info, log: logger, "⭐ Favorites empty — showed placeholder (%{public}s)", title)
+            return
+        }
+
+        // Folders first, then everything else in insertion order (stable within
+        // each group). CarPlay truncates long lists — more aggressively while
+        // driving — and folders are the newest favorites (last in insertion
+        // order), so without this they fall off the bottom first.
+        let ordered = favorites.filter { $0.isFolder } + favorites.filter { !$0.isFolder }
+
+        // Clamp to the vehicle's item limit (same guard as the artist index).
+        let clamped = Array(ordered.prefix(CPListTemplate.maximumItemCount))
+
+        let placeholder = createMusicPlaceholderImage()
+        var favoriteItems: [CPListItem] = []
+        for favorite in clamped {
+            let item = CPListItem(
+                text: favorite.name,
+                detailText: favorite.isFolder ? "Folder" : nil,
+                image: placeholder,
+                accessoryImage: nil,
+                accessoryType: favorite.isFolder ? .disclosureIndicator : .none
+            )
+            item.handler = { [weak self] (_: CPSelectableListItem, completion: @escaping () -> Void) in
+                self?.handleFavoriteSelection(favorite)
+                completion()
+            }
+            favoriteItems.append(item)
+        }
+
+        let favoritesTemplate = CPListTemplate(
+            title: title,
+            sections: [CPListSection(items: favoriteItems)]
+        )
+        pushTemplateSafely(favoritesTemplate, animated: true)
+        os_log(.info, log: logger, "✅ Displayed %d favorites (%{public}s)", favoriteItems.count, title)
+
+        // Load artwork async and fill each row in as it arrives (CPListItem.setImage
+        // updates a row already on-screen). CarPlay has no lazy-load-on-scroll, so
+        // cap at the first 16 rows to bound concurrent fetches (matches
+        // loadArtworkForTracks). Rows beyond 16 keep the placeholder.
+        let settings = SettingsManager.shared
+        for (index, favorite) in clamped.prefix(16).enumerated() {
+            guard let url = CarPlaySceneDelegate.favoriteArtworkURL(
+                from: favorite.icon,
+                host: settings.activeServerHost,
+                port: settings.activeServerWebPort
+            ) else { continue }
+            fetchImage(url: url) { image in
+                guard let image = image else { return }
+                DispatchQueue.main.async {
+                    favoriteItems[index].setImage(image)
+                }
+            }
+        }
+    }
+
+    private func handleFavoriteSelection(_ favorite: FavoriteItem) {
+        // Folders drill; everything else (albums, tracks, radio, podcast
+        // episodes — anything isAudio or url-bearing) plays on tap.
+        if favorite.isFolder {
+            drillIntoFolder(favorite)
+            return
+        }
+
+        os_log(.info, log: logger, "▶️ Play favorite: %{public}s", favorite.name)
+
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ No coordinator available to play favorite")
+            showErrorMessage("No connection to LMS server")
+            return
+        }
+
+        // Player-targeted. `favorites playlist play item_id:N` per lms-material
+        // RADIOS_BASE_ACTIONS — keyed by FavoriteItem.id, NOT url.
+        let playerID = SettingsManager.shared.playerMACAddress
+        let jsonRPCCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["favorites", "playlist", "play", "item_id:\(favorite.id)"]]
+        ]
+        coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { _ in }
+
+        pushNowPlayingTemplate()
+    }
+
+    /// Drill into a favorites FOLDER (hasitems, non-audio) by fetching its
+    /// children and pushing a new list. Guards CarPlay's 5-template navigation
+    /// cap: `interfaceController.templates.count` is the WHOLE stack (root=1,
+    /// Favorites=2, …), so refuse the push once it would exceed the cap and show
+    /// a modal alert instead — there is no in-app deep-link to a nested favorite
+    /// (the app UI is a Material WebView).
+    private func drillIntoFolder(_ folder: FavoriteItem) {
+        os_log(.info, log: logger, "📂 Drill into favorites folder: %{public}s", folder.name)
+
+        let stackDepth = interfaceController?.templates.count ?? 0
+        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
+            // Present modally — a push here would itself exceed the cap and crash
+            let alert = CPAlertTemplate(
+                titleVariants: ["Can’t go deeper here — open this folder in the LyrPlay app"],
+                actions: [CPAlertAction(title: "OK", style: .default) { [weak self] _ in
+                    self?.interfaceController?.dismissTemplate(animated: true, completion: nil)
+                }]
+            )
+            interfaceController?.presentTemplate(alert, animated: true, completion: nil)
+            os_log(.info, log: logger, "⛔ Favorites folder too deep for CarPlay (%d templates)", stackDepth)
+            return
+        }
+
+        fetchFavorites(itemID: folder.id) { [weak self] items in
+            self?.displayFavorites(items, title: folder.name)
+        }
+    }
+
     // MARK: - Error Handling
 
     private func showErrorMessage(_ message: String) {
@@ -910,7 +1203,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             sections: [CPListSection(items: [errorItem])]
         )
 
-        interfaceController?.pushTemplate(errorTemplate, animated: true)
+        pushTemplateSafely(errorTemplate, animated: true)
         os_log(.error, log: logger, "🚗 CarPlay error: %{public}s", message)
     }
 
@@ -1172,6 +1465,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             items.append(randomRow)
         }
 
+        // Favorites (GH#92, k63) — user's starred list, placed under Random
+        // Releases. Drills into playable favorites; folder items (hasitems &&
+        // !isAudio) drill recursively into their children (guarded by CarPlay's
+        // template-depth cap). Album browse-then-play is out of scope by design.
+        let favoritesItem = CPListItem(
+            text: "★ Favorites",
+            detailText: "Your saved favorites",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        favoritesItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showFavorites()
+            completion()
+        }
+        items.append(favoritesItem)
+
         // Add Browse Artists item (alphabetical)
         let browseArtistsItem = CPListItem(
             text: "Artists",
@@ -1254,14 +1564,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         let sections = buildHomeTemplateSections()
-        let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
-        self.browseTemplate = updatedTemplate
 
-        interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
-            if let error = error {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to update template: %{public}s", error.localizedDescription)
-            } else if success {
-                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template set as root")
+        // Update the EXISTING root template's content in place. Calling
+        // setRootTemplate here resets the navigation stack and pops whatever the
+        // user navigated to — when the async home refresh lands a few seconds
+        // after connect, it bounces the user out of Now Playing back to home.
+        // updateSections refreshes the home content without touching the stack.
+        if let browseTemplate = browseTemplate {
+            browseTemplate.updateSections(sections)
+            os_log(.info, log: logger, "✅ Home template sections updated in place (stack preserved)")
+        } else {
+            // No existing root (shouldn't happen — connect sets it): set it now.
+            let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
+            self.browseTemplate = updatedTemplate
+            interfaceController.setRootTemplate(updatedTemplate, animated: true) { [weak self] success, error in
+                if let error = error {
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to set root template: %{public}s", error.localizedDescription)
+                } else if success {
+                    os_log(.info, log: self?.logger ?? OSLog.default, "✅ Home template set as root")
+                }
             }
         }
     }
@@ -1591,7 +1912,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: rangeItems)]
                 )
 
-                self.interfaceController?.pushTemplate(browseTemplate, animated: true)
+                self.pushTemplateSafely(browseTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed artist index with %d ranges", rangeItems.count)
             }
         }
@@ -1673,7 +1994,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: artistItems)]
                 )
 
-                self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+                self.pushTemplateSafely(artistsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d artists for %{public}s (%d remaining)",
                        artists.count, title, max(0, count - pageSize))
             }
@@ -1721,7 +2042,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: albumItems)]
                 )
 
-                self.interfaceController?.pushTemplate(albumsTemplate, animated: true)
+                self.pushTemplateSafely(albumsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d random albums", albumItems.count)
             }
         }
@@ -1802,7 +2123,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: artistItems)]
             )
 
-            self.interfaceController?.pushTemplate(artistsTemplate, animated: true)
+            self.pushTemplateSafely(artistsTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d random artists", artistItems.count)
         }
     }
@@ -1846,7 +2167,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: albumItems)]
                 )
 
-                self.interfaceController?.pushTemplate(albumsTemplate, animated: true)
+                self.pushTemplateSafely(albumsTemplate, animated: true)
                 os_log(.info, log: self.logger, "✅ Displayed %d albums for %{public}s", albumItems.count, artist.name)
             }
         }
@@ -2393,7 +2714,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 sections: [CPListSection(items: trackItems)]
             )
 
-            self.interfaceController?.pushTemplate(tracksTemplate, animated: true)
+            self.pushTemplateSafely(tracksTemplate, animated: true)
             os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
         }
     }
@@ -2461,56 +2782,75 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    // MARK: - Shuffle Button Icon Updates
+    // MARK: - Now Playing Button Row
 
-    /// Updates shuffle button icon based on LMS shuffle mode
-    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
-    private func updateShuffleButtonIcon(for mode: Int) {
-        // Use CPNowPlayingTemplate.shared directly - don't require it to be the top template
-        // The button was added to .shared on connect, so update it there regardless of
-        // which template is currently visible
-        let nowPlayingTemplate = CPNowPlayingTemplate.shared
+    /// Single source of truth for the Now Playing custom button row.
+    /// `updateNowPlayingButtons()` replaces the entire array, so EVERY change to
+    /// the row (shuffle icon update, DSTM availability) must route through here
+    /// — otherwise a separately-set button is dropped on the next update. Builds
+    /// from cached `currentShuffleMode` + `dstmEnabled`. Must be called on the
+    /// main thread (CPNowPlayingTemplate is UI).
+    private func rebuildNowPlayingButtons() {
+        var buttons: [CPNowPlayingButton] = [makeShuffleButton(for: currentShuffleMode)]
+        buttons.append(makeFavoriteButton())
+        if dstmEnabled {
+            buttons.append(makeKeepPlayingButton())
+        }
+        CPNowPlayingTemplate.shared.updateNowPlayingButtons(buttons)
+        os_log(.info, log: logger, "🎛️ Now Playing buttons rebuilt (shuffle mode %d, favorited %{public}s, keepPlaying %{public}s)",
+               currentShuffleMode, currentTrackIsFavorited ? "yes" : "no", dstmEnabled ? "on" : "off")
+    }
 
-        // Choose SF Symbol based on shuffle mode
+    /// Shuffle button with a distinct icon per LMS shuffle mode (0=off, 1=songs, 2=albums).
+    private func makeShuffleButton(for mode: Int) -> CPNowPlayingImageButton {
         let iconName: String
         switch mode {
-        case 1:
-            // Songs/tracks shuffle - filled circle (pressed/active look)
-            iconName = "shuffle.circle.fill"
-        case 2:
-            // Albums shuffle - outline circle
-            iconName = "shuffle.circle"
-        default:
-            // Off - normal shuffle icon
-            iconName = "shuffle"
+        case 1: iconName = "shuffle.circle.fill"   // songs — active look
+        case 2: iconName = "shuffle.circle"        // albums
+        default: iconName = "shuffle"              // off
         }
-
-        // Use large configuration for better visibility on CarPlay display
         let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
-        guard let image = UIImage(systemName: iconName, withConfiguration: config) else {
-            os_log(.error, log: logger, "❌ Failed to load shuffle icon: %{public}s", iconName)
-            return
-        }
-
-        // Create new button with updated icon
-        let shuffleButton = CPNowPlayingImageButton(image: image) { [weak self] button in
+        let image = UIImage(systemName: iconName, withConfiguration: config)
+            ?? UIImage(systemName: "shuffle")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
             os_log(.info, log: self?.logger ?? OSLog.default, "🔀 CarPlay shuffle button tapped")
-
             guard let coordinator = AudioManager.shared.slimClient else {
-                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable")
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for shuffle")
                 return
             }
-
             coordinator.toggleShuffleMode { newMode in
-                DispatchQueue.main.async {
-                    self?.updateShuffleButtonIcon(for: newMode)
-                }
+                DispatchQueue.main.async { self?.updateShuffleMode(newMode) }
             }
         }
+    }
 
-        nowPlayingTemplate.updateNowPlayingButtons([shuffleButton])
-        os_log(.info, log: logger, "🔀 Shuffle button icon updated: %{public}s (mode %d)",
-               iconName, mode)
+    /// "Keep Playing" button — triggers Don't Stop The Music from the current
+    /// track by clearing the upcoming queue, so the player's configured DSTM
+    /// provider (LastMix, Bliss, RandomPlay, …) continues seeded from here.
+    /// Shown only when `dstmEnabled`. The current track keeps playing; similar
+    /// tracks are appended by the server within a few seconds. See GH #85.
+    private func makeKeepPlayingButton() -> CPNowPlayingImageButton {
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let image = UIImage(systemName: "infinity", withConfiguration: config)
+            ?? UIImage(systemName: "infinity")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
+            os_log(.info, log: self?.logger ?? OSLog.default, "🎚️ CarPlay Keep Playing (DSTM) button tapped")
+            guard let coordinator = AudioManager.shared.slimClient else {
+                os_log(.error, log: self?.logger ?? OSLog.default, "❌ Coordinator unavailable for Keep Playing")
+                return
+            }
+            coordinator.startDSTMFromCurrentTrack { cleared in
+                os_log(.info, log: self?.logger ?? OSLog.default,
+                       "🎚️ Keep Playing %{public}s", cleared ? "— tail cleared, DSTM will continue" : "failed")
+            }
+        }
+    }
+
+    /// Cache the new shuffle mode and rebuild the button row.
+    /// - Parameter mode: LMS shuffle mode (0=off, 1=songs, 2=albums)
+    private func updateShuffleMode(_ mode: Int) {
+        currentShuffleMode = mode
+        rebuildNowPlayingButtons()
     }
 
     /// Syncs shuffle button icon with current server state
@@ -2545,20 +2885,168 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 os_log(.info, log: self.logger, "⚠️ Could not read server shuffle state, defaulting to 0")
             }
 
-            // Update button icon on main thread
+            // Update button row on main thread
             DispatchQueue.main.async {
-                self.updateShuffleButtonIcon(for: shuffleMode)
+                self.updateShuffleMode(shuffleMode)
+            }
+        }
+    }
+
+    /// Probe whether DSTM is enabled for this player and gate the Keep Playing
+    /// button on it. Server-driven: the button only appears when the user has a
+    /// DSTM provider configured, so it never strands them with a queue that just
+    /// stops. See GH #85.
+    private func syncDSTMAvailability() {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+        coordinator.probeDSTMEnabled { [weak self] enabled in
+            DispatchQueue.main.async {
+                guard let self = self, self.dstmEnabled != enabled else { return }
+                self.dstmEnabled = enabled
+                os_log(.info, log: self.logger, "🎚️ DSTM availability: %{public}s",
+                       enabled ? "enabled" : "disabled")
+                self.rebuildNowPlayingButtons()
+            }
+        }
+    }
+
+    // MARK: - Favorite (star) button (GH#92, option C)
+
+    /// Subscribe to track changes so the star reflects the *current* track. We
+    /// can't observe CarPlay's metadata directly, so we ride NowPlayingManager's
+    /// published title (the app updates it on every track boundary). Keeps the
+    /// hook CarPlay-local — no edits to shared/audio code.
+    private func setupTrackChangeObserver() {
+        trackChangeCancellable = AudioManager.shared.getNowPlayingManager()
+            .$currentTrackTitle
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncFavoriteButtonWithServer()
+            }
+    }
+
+    /// Read the current track's URL from the server, then ask whether it's a
+    /// favorite. Two cheap queries — only on connect / Now Playing appear / track
+    /// change, never polled. Caches URL+title (for add) and the favorite `index`
+    /// (for delete), then rebuilds the row so the star shows the right state.
+    private func syncFavoriteButtonWithServer() {
+        guard let coordinator = AudioManager.shared.slimClient else { return }
+        let playerID = SettingsManager.shared.playerMACAddress
+
+        // tag "u" = track URL; title is returned by default in playlist_loop.
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["status", "-", 1, "tags:u"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            guard let self = self else { return }
+
+            guard let result = response["result"] as? [String: Any],
+                  let loop = result["playlist_loop"] as? [[String: Any]],
+                  let current = loop.first,
+                  let url = current["url"] as? String, !url.isEmpty else {
+                // No track / no URL — clear favorite state and rebuild.
+                DispatchQueue.main.async {
+                    self.currentTrackFavoriteURL = nil
+                    self.currentTrackFavoriteTitle = nil
+                    self.currentTrackIsFavorited = false
+                    self.currentTrackFavoriteIndex = nil
+                    self.rebuildNowPlayingButtons()
+                }
+                return
+            }
+
+            let title = (current["title"] as? String) ?? "Unknown"
+
+            // favorites exists -> {exists:0} or {exists:1, index:"<item_id>"}.
+            // System-scoped (no player MAC). `index` is the delete item_id.
+            let existsCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "exists", url]]
+            ]
+
+            coordinator.sendJSONRPCCommandDirect(existsCommand) { [weak self] existsResponse in
+                guard let self = self else { return }
+
+                var favorited = false
+                var index: String? = nil
+                if let r = existsResponse["result"] as? [String: Any] {
+                    if let e = r["exists"] as? Int { favorited = (e == 1) }
+                    else if let e = r["exists"] as? String { favorited = (e == "1") }
+                    if let i = r["index"] as? String { index = i }
+                    else if let i = r["index"] as? Int { index = String(i) }
+                }
+
+                DispatchQueue.main.async {
+                    self.currentTrackFavoriteURL = url
+                    self.currentTrackFavoriteTitle = title
+                    self.currentTrackIsFavorited = favorited
+                    self.currentTrackFavoriteIndex = index
+                    self.rebuildNowPlayingButtons()
+                }
+            }
+        }
+    }
+
+    /// Star icon reflects cached state: filled when the current track is already a
+    /// favorite, outline when not. Tap toggles — informed, not blind.
+    private func makeFavoriteButton() -> CPNowPlayingImageButton {
+        let iconName = currentTrackIsFavorited ? "star.fill" : "star"
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        let image = UIImage(systemName: iconName, withConfiguration: config)
+            ?? UIImage(systemName: "star")!
+        return CPNowPlayingImageButton(image: image) { [weak self] _ in
+            self?.toggleCurrentTrackFavorite()
+        }
+    }
+
+    /// Toggle the current track's favorite state. Filled star -> delete by the
+    /// cached `index`; outline star -> add by URL+title, then re-sync to capture
+    /// the new `index` so a later un-tap can delete it.
+    private func toggleCurrentTrackFavorite() {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            os_log(.error, log: logger, "❌ Coordinator unavailable for favorite toggle")
+            return
+        }
+        guard let url = currentTrackFavoriteURL else {
+            os_log(.info, log: logger, "⭐ No current track URL yet — favorite toggle ignored")
+            return
+        }
+
+        if currentTrackIsFavorited, let index = currentTrackFavoriteIndex {
+            os_log(.info, log: logger, "☆ Removing favorite (item_id:%{public}s)", index)
+            let command: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "delete", "item_id:\(index)"]]
+            ]
+            coordinator.sendJSONRPCCommandDirect(command) { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.currentTrackIsFavorited = false
+                    self.currentTrackFavoriteIndex = nil
+                    self.rebuildNowPlayingButtons()
+                }
+            }
+        } else {
+            let title = currentTrackFavoriteTitle ?? "Unknown"
+            os_log(.info, log: logger, "★ Adding favorite: %{public}s", title)
+            let command: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": ["", ["favorites", "add", "url:\(url)", "title:\(title)"]]
+            ]
+            coordinator.sendJSONRPCCommandDirect(command) { [weak self] _ in
+                // Re-sync to capture the new favorite's index for a future delete.
+                DispatchQueue.main.async { self?.syncFavoriteButtonWithServer() }
             }
         }
     }
 }
 
-// MARK: - Supporting Models
-
-struct Album {
-    let id: String
-    let name: String
-    let artist: String
-    let artworkTrackId: String?  // LMS artwork_track_id field for cover art URLs
-    let artwork: UIImage?
-}
+// Album struct now lives in PlaylistModels.swift (shared with tvOS target). Existing CarPlay
+// `Album(id:name:artist:artworkTrackId:artwork:)` call sites resolve unchanged via target membership.

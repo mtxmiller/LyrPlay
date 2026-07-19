@@ -36,7 +36,9 @@ class SlimProtoConnectionManager {
     private var isNetworkExpensive = false
     
     // MARK: - Background Task Management
+    #if os(iOS)
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    #endif
     private var backgroundTimer: Timer?
     private var backgroundStartTime: Date?
     
@@ -53,7 +55,7 @@ class SlimProtoConnectionManager {
     
     
     // MARK: - Health Monitoring
-    private var healthCheckTimer: Timer?
+    private var healthCheckTimer: DispatchSourceTimer?
     private var lastHeartbeatResponse: Date?
     private let heartbeatTimeout: TimeInterval = 30.0
     
@@ -189,17 +191,31 @@ class SlimProtoConnectionManager {
     
     private func handleNetworkRestored() {
         os_log(.info, log: logger, "🌐 Network restored")
-        
-        // Update connection state if we were disconnected due to network
-        if connectionState == .networkUnavailable {
+
+        // Network restore is a user-visible trigger: clear failure caps so a prior
+        // long outage (8 per-server / 12 total failed attempts) can never leave
+        // reconnection permanently wedged.
+        reconnectionAttempts = 0
+        totalConsecutiveFailures = 0
+
+        // Act on ANY non-connected state, not just .networkUnavailable: the network
+        // can die while a connect is in flight (.connecting/.reconnecting), leaving
+        // the state stuck there — restoration must still reconnect. Any in-flight
+        // attempt was over the dead path, so superseding it is safe.
+        if Self.shouldReconnectOnNetworkRestore(state: connectionState,
+                                                hasEverConnected: lastSuccessfulConnection != nil) {
             connectionState = .disconnected
-            
-            // Attempt reconnection if we were previously connected
-            if lastSuccessfulConnection != nil {
-                os_log(.info, log: logger, "🔄 Network restored - attempting reconnection")
-                attemptReconnection()
-            }
+            os_log(.info, log: logger, "🔄 Network restored - attempting reconnection")
+            attemptReconnection()
         }
+    }
+
+    /// Pure decision: should a network-restore event trigger a reconnection attempt?
+    /// Reconnect from any non-connected state (including in-flight .connecting/
+    /// .reconnecting, which were racing a dead network path), but never auto-connect
+    /// on a device that has not connected before (cold launch, unconfigured server).
+    static func shouldReconnectOnNetworkRestore(state: ConnectionState, hasEverConnected: Bool) -> Bool {
+        return !state.isConnected && hasEverConnected
     }
     
     private func handleNetworkLost() {
@@ -243,11 +259,13 @@ class SlimProtoConnectionManager {
         backgroundStartTime = Date()
         lastDisconnectionReason = .appBackgrounded
         
+        #if os(iOS)
         // Start enhanced background task
         startEnhancedBackgroundTask()
-        
+
         // Start background timer to track remaining time
         startBackgroundTimer()
+        #endif
         
         // Adjust health check frequency for background
         if connectionState.isConnected {
@@ -264,9 +282,11 @@ class SlimProtoConnectionManager {
         os_log(.info, log: logger, "📱 App entering foreground")
         isInBackground = false
         
+        #if os(iOS)
         // End background task and timer
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()
+        #endif
         
         // Resume normal health check frequency
         if connectionState.isConnected {
@@ -291,11 +311,17 @@ class SlimProtoConnectionManager {
         if !isNetworkAvailable {
             os_log(.info, log: logger, "📱 App became active but network unavailable")
         } else if connectionState.canAttemptConnection {
+            // Foreground is a user-visible trigger: clear failure caps first, so an
+            // app foregrounded after a long server outage (8+ failed attempts) can
+            // actually reconnect instead of being wedged by shouldAttemptReconnection().
+            reconnectionAttempts = 0
+            totalConsecutiveFailures = 0
             os_log(.info, log: logger, "📱 App became active while disconnected - attempting reconnection")
             attemptReconnection()
         }
     }
     
+    #if os(iOS)
     // MARK: - Enhanced Background Task Management
     private func startEnhancedBackgroundTask() {
         guard backgroundTaskID == .invalid else {
@@ -359,27 +385,35 @@ class SlimProtoConnectionManager {
     
     private func prepareForBackgroundSuspension() {
         os_log(.info, log: logger, "📱 Background task expiring - preparing for suspension (keeping connection if audio playing)")
-        
+
         // DON'T force disconnect for audio apps - iOS gives extended background time for audio playback
         // Only stop health monitoring to reduce background activity
         stopHealthMonitoring()
-        
+
         os_log(.info, log: logger, "✅ Background suspension prepared - connection maintained for audio continuity")
     }
-    
+    #endif
+
     // MARK: - Health Monitoring
     private func startHealthMonitoring(interval: TimeInterval = 15.0) {
         stopHealthMonitoring()
         
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        // DispatchSourceTimer, not Timer — this runs from didConnect() on the
+        // socket delegate queue, which has no RunLoop for a Timer to fire on
+        // (same bug class scheduleReconnection already fixed).
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
             self?.performHealthCheck()
         }
-        
+        timer.resume()
+        healthCheckTimer = timer
+
         os_log(.info, log: logger, "💓 Health monitoring started (%.0f sec intervals)", interval)
     }
-    
+
     private func stopHealthMonitoring() {
-        healthCheckTimer?.invalidate()
+        healthCheckTimer?.cancel()
         healthCheckTimer = nil
     }
     
@@ -641,8 +675,10 @@ class SlimProtoConnectionManager {
         NotificationCenter.default.removeObserver(self)
         cancelScheduledReconnection()
         stopHealthMonitoring()
+        #if os(iOS)
         stopEnhancedBackgroundTask()
         stopBackgroundTimer()
+        #endif
         networkMonitor.cancel()
         os_log(.info, log: logger, "Enhanced SlimProtoConnectionManager deinitialized")
     }

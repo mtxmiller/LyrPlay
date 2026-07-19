@@ -1,6 +1,7 @@
 // File: SlimProtoClient.swift
 // Fixed to properly identify as LyrPlay app instead of AppleCoreMedia
 import Foundation
+import AVFoundation
 import CocoaAsyncSocket
 import os.log
 
@@ -34,6 +35,31 @@ struct SlimProtoCommand {
     }
 }
 
+// MARK: - Framing
+/// Decision logic for the 2-byte length-prefixed SlimProto server stream,
+/// extracted as a pure function so the invalid-length path is unit-testable.
+enum SlimProtoFraming {
+    /// Sanity cap — real server frames are far smaller. An over-cap frame is
+    /// treated as garbage, but its payload must still be consumed to keep the
+    /// TCP stream aligned on frame boundaries.
+    static let maxMessageLength: UInt16 = 10000
+
+    enum HeaderAction: Equatable {
+        case readMessage(length: UInt16)    // valid frame — read its payload
+        case discardPayload(length: UInt16) // over-cap frame — consume and drop payload
+        case readNextHeader                 // zero-length frame — nothing to consume
+    }
+
+    static func action(forHeader data: Data) -> HeaderAction {
+        guard data.count >= 2 else { return .readNextHeader }
+        let length = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
+        if length == 0 { return .readNextHeader }
+        return length < maxMessageLength
+            ? .readMessage(length: length)
+            : .discardPayload(length: length)
+    }
+}
+
 // MARK: - Core Protocol Handler
 class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     
@@ -49,12 +75,6 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var host: String = ""
     private var port: UInt16 = 3483
     private var hasRequestedInitialStatus = false
-    
-    // MARK: - Time Reporting State
-    private var isPaused: Bool = false
-    private var isStreamActive: Bool = false
-    
-    private var lastSuccessfulConnection: Date?
 
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
@@ -169,43 +189,51 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     }
     
     // MARK: - Socket Delegate Methods
+    // NOTE (single-threaded control plane, bd LMS_StreamTest-433.2.1):
+    // GCDAsyncSocket delivers these callbacks on the socket queue. Socket I/O
+    // (HELO send, read re-arm, framing) stays here, but connection state and
+    // every delegate notification hop to MAIN — the whole control plane
+    // (coordinator, command handler, timers) is main-thread-confined,
+    // matching squeezelite's single-threaded slimproto loop.
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
-        lastSuccessfulConnection = Date()  // ADD THIS LINE
-        isConnected = true
         os_log(.info, log: logger, "✅ Connected to LMS at %{public}s:%d", host, port)
-        
-        // Send HELO message
+
+        // Send HELO and arm the first header read immediately — the server
+        // replies to HELO right away.
         sendHelo()
-        
-        // Start reading server messages - they start with 2-byte length
         socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         os_log(.info, log: logger, "Read data initiated after connect - expecting 2-byte length header")
-        
-        // Request initial status after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if !self.hasRequestedInitialStatus {
-                self.hasRequestedInitialStatus = true
-                self.sendStatus("STMt")
-                os_log(.info, log: self.logger, "🔄 Requested initial status to detect existing streams")
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isConnected = true
+
+            // Request initial status after brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !self.hasRequestedInitialStatus {
+                    self.hasRequestedInitialStatus = true
+                    self.sendStatus("STMt")
+                    os_log(.info, log: self.logger, "🔄 Requested initial status to detect existing streams")
+                }
             }
+
+            self.delegate?.slimProtoDidConnect()
         }
-        
-        // Notify delegate
-        delegate?.slimProtoDidConnect()
     }
-    
+
     func socketDidDisconnect(_ sock: GCDAsyncSocket, withError err: Error?) {
-        isConnected = false
-        hasRequestedInitialStatus = false
-        
         if let error = err {
             os_log(.error, log: logger, "❌ Disconnected with error: %{public}s", error.localizedDescription)
         } else {
             os_log(.info, log: logger, "🔌 Disconnected gracefully")
         }
-        
-        // Notify delegate
-        delegate?.slimProtoDidDisconnect(error: err)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isConnected = false
+            self.hasRequestedInitialStatus = false
+            self.delegate?.slimProtoDidDisconnect(error: err)
+        }
     }
     
     func socket(_ sock: GCDAsyncSocket, didRead data: Data, withTag tag: Int) {
@@ -217,19 +245,23 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
                 return
             }
             
-            // Parse 2-byte length in network order
-            let messageLength = data.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-
             // Too spammy - uncomment only for debugging message parsing
             // os_log(.debug, log: logger, "Server message length: %d bytes", messageLength)
 
-            if messageLength > 0 && messageLength < 10000 {
-                socket.readData(toLength: UInt(messageLength), withTimeout: 30, tag: 1)
-            } else {
-                os_log(.error, log: logger, "Invalid message length: %d", messageLength)
+            switch SlimProtoFraming.action(forHeader: data) {
+            case .readMessage(let length):
+                socket.readData(toLength: UInt(length), withTimeout: 30, tag: 1)
+            case .discardPayload(let length):
+                // The oversized frame's payload is still in the TCP stream —
+                // it must be consumed before the next header read, or every
+                // subsequent "header" is actually message body (permanent desync).
+                os_log(.error, log: logger, "Invalid message length: %d — discarding payload to stay frame-aligned", length)
+                socket.readData(toLength: UInt(length), withTimeout: 30, tag: 2)
+            case .readNextHeader:
+                os_log(.error, log: logger, "Zero message length")
                 socket.readData(toLength: 2, withTimeout: 30, tag: 0)
             }
-            
+
         } else if tag == 1 {
             // Read complete message
             guard data.count >= 4 else {
@@ -253,10 +285,18 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             // Too spammy - uncomment only for debugging server commands
             // os_log(.debug, log: logger, "📨 Received: %{public}s (%d bytes)", commandString, payloadData.count)
 
-            // Notify delegate
-            delegate?.slimProtoDidReceiveCommand(command)
-            
+            // Command processing runs on main (single-threaded control plane).
+            // Main-queue FIFO preserves server command order.
+            DispatchQueue.main.async { [weak self] in
+                self?.delegate?.slimProtoDidReceiveCommand(command)
+            }
+
             // Continue reading
+            socket.readData(toLength: 2, withTimeout: 30, tag: 0)
+
+        } else if tag == 2 {
+            // Discarded payload of an invalid-length frame — stream is
+            // frame-aligned again, resume header reads.
             socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         }
     }
@@ -265,10 +305,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private func sendHelo() {
         os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
 
-        // *** CRITICAL FIX: Use correct device ID for iOS app identification ***
-        // Use device ID 9 (squeezelite) which is better recognized by LMS
-        // This prevents the "AppleCoreMedia" identification issue
-        let deviceID: UInt8 = 12   // squeezelite - well-supported by LMS
+        // Device ID 12 = squeezelite — well-recognized by LMS. Prevents the
+        // "AppleCoreMedia" identification issue.
+        let deviceID: UInt8 = 12
         let revision: UInt8 = 0   // Standard revision
 
         // Get MAC address from settings
@@ -279,7 +318,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
         var helloData = Data()
 
-        // Device ID (1 byte) - 9 = squeezelite for better LMS compatibility
+        // Device ID (1 byte) - 12 = squeezelite
         helloData.append(deviceID)
 
         // Revision (1 byte)
@@ -303,20 +342,21 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
 
         // *** FIXED: Enhanced capabilities string with user-configurable FLAC support ***
-        let capabilities = settings.capabilitiesString
+        var capabilities = settings.capabilitiesString
+
+        // Rejoin sync group across reconnects: the server regex-matches the TEXT
+        // "SyncgroupID=\d{10}" INSIDE the capabilities string (Slimproto.pm:985),
+        // and squeezelite appends ",SyncgroupID=<digits>" (slimproto.c:480). The
+        // old form — NUL + 10 raw bytes after the string — could never match.
+        // bd LMS_StreamTest-433.4.2
+        if let savedSyncGroup = settings.loadSyncGroupID() {
+            capabilities += ",SyncgroupID=\(savedSyncGroup)"
+            os_log(.info, log: logger, "🔗 Including saved sync group ID in HELO: %{public}s", savedSyncGroup)
+        }
+
         if let capabilitiesData = capabilities.data(using: .utf8) {
             helloData.append(capabilitiesData)
             os_log(.info, log: logger, "Added capabilities: %{public}s", capabilities)
-        }
-
-        // Include sync group ID if we have one from previous connection
-        if let savedSyncGroup = settings.loadSyncGroupID() {
-            // Add null terminator after capabilities string
-            helloData.append(0)
-            // Append 10-byte sync group ID
-            helloData.append(savedSyncGroup)
-            os_log(.info, log: logger, "🔗 Including saved sync group ID in HELO: %{public}s",
-                   savedSyncGroup.map { String(format: "%02x", $0) }.joined(separator: ":"))
         }
 
         // Create full message
@@ -335,6 +375,14 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
                settings.effectivePlayerName, settings.formattedMACAddress)
     }
     
+    /// System uptime in milliseconds as SlimProto jiffies, wrapping at
+    /// UInt32.max (~49.7 days of uptime) like squeezelite's gettime_ms.
+    /// A plain UInt32(Double) conversion traps past that uptime, crashing the
+    /// app on every STAT send until the phone is rebooted (bd LMS_StreamTest-7a8).
+    static func jiffies(uptimeSeconds: TimeInterval) -> UInt32 {
+        return UInt32(truncatingIfNeeded: Int64(uptimeSeconds * 1000))
+    }
+
     func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {
         guard isConnected else {
             os_log(.error, log: logger, "Cannot send status - not connected")
@@ -361,6 +409,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             statusData.append(0) // Playing/other
         }
         
+        // Real buffer/byte telemetry from the active stream path — the old code
+        // fabricated all three (fullness = size/2, bytesReceived = wall clock ×
+        // 40000). LMS uses them for rebuffer detection and display; squeezelite
+        // reports real values. bd LMS_StreamTest-433.4.3
+        let telemetry = commandHandler?.getStatTelemetry() ?? SlimProtoStatTelemetry()
+
         // Buffer info (8 bytes total)
         // Network buffer size in bytes (not playback buffer duration)
         let bufferSize = UInt32(settings.networkBufferKB * 1024)
@@ -370,18 +424,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             UInt8((bufferSize >> 8) & 0xff),
             UInt8(bufferSize & 0xff)
         ]))
-        
-        let bufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : bufferSize / 2
+
+        // Rcv buffer fullness: bytes downloaded but not yet decoded, clamped to
+        // the reported capacity.
+        let bufferFullness = UInt32(min(telemetry.streamBufferedBytes, UInt64(bufferSize)))
         statusData.append(Data([
             UInt8((bufferFullness >> 24) & 0xff),
             UInt8((bufferFullness >> 16) & 0xff),
             UInt8((bufferFullness >> 8) & 0xff),
             UInt8(bufferFullness & 0xff)
         ]))
-        
-        // Bytes received (8 bytes total)
-        let connectionDuration = lastSuccessfulConnection?.timeIntervalSinceNow ?? 0
-        let bytesReceived: UInt64 = UInt64(abs(connectionDuration) * 40000)
+
+        // Bytes received (8 bytes total): downloaded since the current stream
+        // started (squeezelite's per-stream counter, reset by each strm 's').
+        let bytesReceived = telemetry.bytesReceived
         statusData.append(Data([
             UInt8((bytesReceived >> 56) & 0xff),
             UInt8((bytesReceived >> 48) & 0xff),
@@ -400,7 +456,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // Server calculates player's jiffies epoch based on this value
         // Using wrong time source causes synchronized start to target far future
         // squeezelite: gettime_ms() = system uptime in milliseconds
-        let jiffies = UInt32(ProcessInfo.processInfo.systemUptime * 1000)
+        let jiffies = SlimProtoClient.jiffies(uptimeSeconds: ProcessInfo.processInfo.systemUptime)
         statusData.append(Data([
             UInt8((jiffies >> 24) & 0xff),
             UInt8((jiffies >> 16) & 0xff),
@@ -408,17 +464,20 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             UInt8(jiffies & 0xff)
         ]))
         
-        // Output buffer size (4 bytes)
-        let outputBufferSize: UInt32 = 8192
+        // Output buffer size (4 bytes): decoded-PCM capacity (decode loop's
+        // soft-throttle ceiling on the push path). Floor at the old constant so
+        // an idle player never reports a zero-size buffer (server-side ratios).
+        let outputBufferSize = max(UInt32(clamping: telemetry.outputBufferCapacity), 8192)
         statusData.append(Data([
             UInt8((outputBufferSize >> 24) & 0xff),
             UInt8((outputBufferSize >> 16) & 0xff),
             UInt8((outputBufferSize >> 8) & 0xff),
             UInt8(outputBufferSize & 0xff)
         ]))
-        
-        // Output buffer fullness (4 bytes)
-        let outputBufferFullness: UInt32 = (code == "STMp" || code == "STMu") ? 0 : 4096
+
+        // Output buffer fullness (4 bytes): decoded PCM awaiting playback
+        // (push-stream queue + BASS playback buffer), clamped to capacity.
+        let outputBufferFullness = UInt32(min(telemetry.outputBufferedBytes, UInt64(outputBufferSize)))
         statusData.append(Data([
             UInt8((outputBufferFullness >> 24) & 0xff),
             UInt8((outputBufferFullness >> 16) & 0xff),
@@ -428,16 +487,22 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         
         // CRITICAL: Always include ALL remaining fields for consistent packet structure
 
-        // Get current audio position for timing
+        // Get current audio position for timing.
+        // Subtract iOS output latency (AVAudioSession.outputLatency = iOS Audio Queue +
+        // hardware latency, ~15ms typical, equivalent to squeezelite's device_frames /
+        // sample_rate). Without this, BASS_ChannelGetPosition reports samples consumed
+        // by the BASS mixer — the iOS HAL ring buffer that sits between BASS and the
+        // speaker is invisible, so STAT elapsed_ms is consistently ahead of where
+        // audio has actually been heard. Fixes Bug 4 in the sync drift plan.
         let position: Double
         if let commandHandler = commandHandler {
             position = commandHandler.getCurrentAudioTime()
         } else {
             position = 0.0
         }
-        
-        // Clamp position to reasonable bounds
-        let clampedPosition = max(0, min(position, 86400)) // Max 24 hours
+        let outputLatency = AVAudioSession.sharedInstance().outputLatency
+        let adjusted = max(0, position - outputLatency)
+        let clampedPosition = min(adjusted, 86400) // Max 24 hours
         
         // NOTE: Don't update coordinator with audio player time - that's wrong!
         // The coordinator should get server time from JSON-RPC responses, not audio player time

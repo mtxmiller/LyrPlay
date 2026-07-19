@@ -1,6 +1,7 @@
 // File: SettingsManager.swift
 // UPDATED: Native FLAC support with StreamingKit
 import Foundation
+import Combine
 import Network
 import os.log
 import UIKit
@@ -27,9 +28,39 @@ class SettingsManager: ObservableObject {
     @Published var isBackupServerEnabled: Bool = false
     @Published var automaticFailoverEnabled: Bool = true
     @Published var currentActiveServer: ServerType = .primary
-    @Published var audioFormat: AudioFormat = .compressed
+    @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
-    @Published var keepScreenAwake: Bool = false  // Prevent screen sleep during playback
+    @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
+    @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
+    @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
+    @Published var hardwareVolumeButtonsEnabled: Bool = false  // iOS: forward hardware volume buttons to the selected external player (GH#75) — default OFF, opt-in while hardened
+    /// tvOS Library tab: set of `LibraryShelf` rawValues that the user has
+    /// enabled. Defaults to `LibraryShelf.defaultEnabled` on first run.
+    /// Persisted as a sorted comma-separated rawValue list in UserDefaults
+    /// so the on-disk shape stays human-readable.
+    @Published var enabledLibraryShelves: Set<String> = SettingsManager.defaultEnabledLibraryShelves
+    /// tvOS Library tab: plugin-contributed shelf registry from the LMS
+    /// server's `home-extra-3rdparty` call. In-memory only — re-fetched per
+    /// server. `pluginExtraRegistryToken` records which server-token it
+    /// belongs to so a server change invalidates it without an explicit clear.
+    @Published var pluginExtraRegistry: [PluginExtraRegistration] = []
+    /// Server-token the current `pluginExtraRegistry` was fetched under.
+    /// nil = never fetched. Mismatch with `serverToken` = stale, refetch.
+    var pluginExtraRegistryToken: String? = nil
+    /// tvOS Library tab: last `serverstatus.lastscan` value observed per
+    /// server-token. Drives the refresh-on-rescan check — unchanged lastscan
+    /// means the library hasn't been rescanned, so the cached shelves stand.
+    /// In-memory only (app restart re-fetches once, same as today).
+    var lastSeenLastScan: [String: Int64] = [:]
+    /// tvOS Library tab: timestamp of the last shelf fetch per server-token.
+    /// Plugin shelves (home-extra-3rdparty — 1001 Albums, Spotty rows) change
+    /// server-side without a rescan, so an unchanged lastscan alone must not
+    /// keep the cache alive forever (bd 3xn). In-memory only.
+    var lastShelfFetchDate: [String: Date] = [:]
+    /// Plugin shelf keys (`plugin:<id>`) the app has discovered before.
+    /// Used to apply first-run enable defaults only to genuinely-new plugin
+    /// shelves. Persisted alongside `enabledLibraryShelves`.
+    @Published var seenPluginShelfKeys: Set<String> = []
     @Published var maxSampleRate: Int = 192000  // Max sample rate for server transcoding (192000 = no limit)
     @Published var customFormatCodes: String = ""  // User-defined format codes (e.g., "flc,wav,mp3") - used when audioFormat == .custom
 
@@ -133,14 +164,84 @@ class SettingsManager: ObservableObject {
         static let audioFormat = "AudioFormat"
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
         static let keepScreenAwake = "KeepScreenAwake"
+        static let fixOutputAt100Percent = "FixOutputAt100Percent"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
         static let syncGroupID = "SyncGroupID"  // PHASE 5: Multi-room audio sync group
+        static let experimentalRateMatching = "ExperimentalRateMatching"
+        static let hardwareVolumeButtonsEnabled = "HardwareVolumeButtonsEnabled"
+        static let enabledLibraryShelves = "EnabledLibraryShelves"
+        static let seenPluginShelfKeys = "SeenPluginShelfKeys"
     }
     
     private let currentSettingsVersion = 3 // UPDATED: Increment for AudioFormat enum
-    
+
+    // MARK: - Platform-specific defaults
+
+    /// Default player name shown to LMS when the user hasn't set one. Differentiates
+    /// the iOS and tvOS apps so users with both can tell them apart in Material UI.
+    private static let defaultPlayerName: String = {
+        #if os(tvOS)
+        return "tvOS Player"
+        #else
+        return "iOS Player"
+        #endif
+    }()
+
+    /// Firmware token in the SlimProto HELO capabilities string. Tells LMS which
+    /// LyrPlay platform variant is connecting (useful in server logs / per-player
+    /// diagnostics). Same major.minor.patch on both platforms.
+    private var firmwareToken: String {
+        #if os(tvOS)
+        return "v1.0.0-tvOS"
+        #else
+        return "v1.0.0-iOS"
+        #endif
+    }
+
+    /// Default audio format for first-run users: lossless-first (FLAC →
+    /// flc,ops,ogg,alc,aac,mp3) on both platforms. FLAC advertises native lossless
+    /// with lossy fallbacks, so the server only transcodes when it actually needs
+    /// to — a fresh install plays lossless instead of silently transcoding
+    /// everything to MP3. Users who want the bandwidth-conservative path can still
+    /// pick `.compressed` (mp3,aac) in Settings → Audio Format.
+    private static let defaultAudioFormat: AudioFormat = .flac
+
+    /// Default for `keepScreenAwake`. tvOS defaults to ON because the Apple TV
+    /// is a plugged-in living-room display where users expect album art to stay
+    /// visible during playback (the 2-minute system screensaver is too aggressive
+    /// for a music app). iOS defaults to OFF — phones in pockets shouldn't burn
+    /// battery keeping the screen awake.
+    private static let keepScreenAwakeDefault: Bool = {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// Default for `fixOutputAt100Percent`. tvOS defaults to ON: the TV / AVR /
+    /// soundbar owns the volume axis, so the LMS player should run at fixed
+    /// 100% output (disables software volume attenuation via the
+    /// `digitalVolumeControl` per-client preference). iOS defaults to OFF —
+    /// phones expect software volume to match the hardware buttons.
+    private static let fixOutputAt100PercentDefault: Bool = {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// First-run default for `enabledLibraryShelves`. Pulled from the
+    /// `LibraryShelf.defaultEnabled` catalog so the catalog stays single-
+    /// source-of-truth. iOS reads this too but doesn't render shelves —
+    /// harmless.
+    private static let defaultEnabledLibraryShelves: Set<String> = {
+        Set(LibraryShelf.allCases.filter { $0.defaultEnabled }.map { $0.rawValue })
+    }()
+
     // MARK: - Singleton
     static let shared = SettingsManager()
 
@@ -150,7 +251,7 @@ class SettingsManager: ObservableObject {
             generateMACAddress()
         }
         if playerName.isEmpty {
-            playerName = "iOS Player"
+            playerName = Self.defaultPlayerName
         }
 
         // UPDATED: Set FLAC-first priority order with StreamingKit
@@ -159,15 +260,27 @@ class SettingsManager: ObservableObject {
     }
     
     // MARK: - User-Agent for Web Requests
+    /// User-Agent sent on JSON-RPC / CometD HTTP requests. LMS stores this as the player's
+    /// `controllerUA` and uses it to decide capability: the "Safari" token matches the server's
+    /// `WEBBROWSER_UA_RE` (Slim/Utils/Misc.pm), which makes `canFollowWeblinks()` true and gates
+    /// `weblink`-bearing menu items (e.g. the 1001 Albums shelf).
+    ///
+    /// iOS keeps "Safari": it renders web (its UI is a WebView) and follows weblinks via an in-app
+    /// Safari sheet. tvOS drops it: Apple TV has no web browser, so advertising web capability only
+    /// makes the server offer weblinks the tvOS client can't open.
     var customUserAgent: String {
+        #if os(tvOS)
+        return "LyrPlay"
+        #else
         return "LyrPlay Safari"
+        #endif
     }
     
     // MARK: - Dynamic Capabilities String
 
     /// The base capabilities (everything except format codes)
     private var baseCapabilities: String {
-        return "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=v1.0.0-iOS,ModelName=LyrPlay,MaxSampleRate=\(maxSampleRate)"
+        return "Model=LyrPlay,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=\(firmwareToken),ModelName=LyrPlay,MaxSampleRate=\(maxSampleRate)"
     }
 
     /// The format codes portion of capabilities (e.g., "flc,wav,mp3")
@@ -207,13 +320,36 @@ class SettingsManager: ObservableObject {
         automaticFailoverEnabled = UserDefaults.standard.object(forKey: Keys.automaticFailoverEnabled) as? Bool ?? true
         let activeServerRaw = UserDefaults.standard.integer(forKey: Keys.currentActiveServer)
         currentActiveServer = activeServerRaw == 1 ? .backup : .primary
-        let audioFormatRaw = UserDefaults.standard.integer(forKey: Keys.audioFormat)
-        audioFormat = AudioFormat(rawValue: audioFormatRaw) ?? .flac
+        // First-run users get the platform default (tvOS: .flac lossless,
+        // iOS: .compressed). Existing users keep whatever they had stored.
+        if let storedRaw = UserDefaults.standard.object(forKey: Keys.audioFormat) as? Int,
+           let stored = AudioFormat(rawValue: storedRaw) {
+            audioFormat = stored
+        } else {
+            audioFormat = Self.defaultAudioFormat
+        }
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
-        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? false
+        keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? Self.keepScreenAwakeDefault
+        fixOutputAt100Percent = UserDefaults.standard.object(forKey: Keys.fixOutputAt100Percent) as? Bool ?? Self.fixOutputAt100PercentDefault
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
+        experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
+        hardwareVolumeButtonsEnabled = UserDefaults.standard.object(forKey: Keys.hardwareVolumeButtonsEnabled) as? Bool ?? false
+
+        // Library shelves: stored as comma-separated rawValues so the on-disk
+        // value is greppable. Missing/empty → first-run defaults from the
+        // LibraryShelf catalog.
+        if let raw = UserDefaults.standard.string(forKey: Keys.enabledLibraryShelves), !raw.isEmpty {
+            enabledLibraryShelves = Set(raw.split(separator: ",").map(String.init))
+        } else {
+            enabledLibraryShelves = Self.defaultEnabledLibraryShelves
+        }
+        if let raw = UserDefaults.standard.string(forKey: Keys.seenPluginShelfKeys), !raw.isEmpty {
+            seenPluginShelfKeys = Set(raw.split(separator: ",").map(String.init))
+        } else {
+            seenPluginShelfKeys = []
+        }
 
         // Load credentials from Keychain
         if let primaryCreds = KeychainManager.shared.load(for: .primary) {
@@ -252,13 +388,21 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(automaticFailoverEnabled, forKey: Keys.automaticFailoverEnabled)
-        UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
+        // currentActiveServer is persisted explicitly via persistActiveServer() (user-initiated
+        // switches + full reset only), NOT here — so an automatic failover that changes it
+        // in-session is never written to disk and can't overwrite the saved preference. (bd 9iu)
         UserDefaults.standard.set(audioFormat.rawValue, forKey: Keys.audioFormat)
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
+        UserDefaults.standard.set(fixOutputAt100Percent, forKey: Keys.fixOutputAt100Percent)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
+        UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
+        UserDefaults.standard.set(hardwareVolumeButtonsEnabled, forKey: Keys.hardwareVolumeButtonsEnabled)
+        // Sorted to keep the on-disk value diff-stable when the set order changes.
+        UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
+        UserDefaults.standard.set(seenPluginShelfKeys.sorted().joined(separator: ","), forKey: Keys.seenPluginShelfKeys)
 
         // Save credentials to Keychain
         if !serverUsername.isEmpty {
@@ -279,9 +423,11 @@ class SettingsManager: ObservableObject {
 
         // Update BASS auth header when credentials change
         // Defer to next run loop to avoid initialization order issues
+        #if os(iOS)
         DispatchQueue.main.async {
             AudioManager.shared.audioPlayer.updateAuthHeader()
         }
+        #endif
 
         UserDefaults.standard.synchronize()
 
@@ -290,16 +436,18 @@ class SettingsManager: ObservableObject {
 
     // MARK: - PHASE 5: Sync Group Persistence
 
-    /// Save sync group ID to UserDefaults for reconnection persistence
-    func saveSyncGroupID(_ syncGroupID: Data) {
+    /// Save sync group ID (10 ASCII digits from the serv packet) for reconnection persistence
+    func saveSyncGroupID(_ syncGroupID: String) {
         UserDefaults.standard.set(syncGroupID, forKey: Keys.syncGroupID)
         UserDefaults.standard.synchronize()
         os_log(.info, log: logger, "🔗 Sync group ID saved to UserDefaults")
     }
 
-    /// Load saved sync group ID from UserDefaults
-    func loadSyncGroupID() -> Data? {
-        return UserDefaults.standard.data(forKey: Keys.syncGroupID)
+    /// Load saved sync group ID from UserDefaults.
+    /// string(forKey:) returns nil for the old (broken) raw-Data storage, so
+    /// stale pre-fix values are silently ignored rather than migrated.
+    func loadSyncGroupID() -> String? {
+        return UserDefaults.standard.string(forKey: Keys.syncGroupID)
     }
 
     /// Clear sync group ID (when player leaves sync group)
@@ -518,7 +666,7 @@ class SettingsManager: ObservableObject {
 
         // Reset primary server
         serverHost = ""
-        playerName = "iOS Player"
+        playerName = Self.defaultPlayerName
         isConfigured = false
         serverWebPort = 9000
         serverSlimProtoPort = 3483
@@ -538,6 +686,7 @@ class SettingsManager: ObservableObject {
 
         os_log(.info, log: logger, "✅ Reset complete: All server settings cleared, active server reset to primary")
         saveSettings()
+        persistActiveServer()  // saveSettings no longer writes this key — persist the reset explicitly
     }
     
     // MARK: - Computed Properties
@@ -558,6 +707,7 @@ class SettingsManager: ObservableObject {
             return playerName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
+        #if os(iOS)
         let deviceName = UIDevice.current.name
         let cleanName = deviceName
             .replacingOccurrences(of: "'s iPhone", with: "")
@@ -565,8 +715,13 @@ class SettingsManager: ObservableObject {
             .replacingOccurrences(of: " iPhone", with: "")
             .replacingOccurrences(of: " iPad", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         return cleanName.isEmpty ? "iOS Player" : cleanName
+        #elseif os(tvOS)
+        return ProcessInfo.processInfo.hostName.isEmpty ? "Apple TV" : "Apple TV"
+        #else
+        return "LyrPlay Player"
+        #endif
     }
     
     // MARK: - Active Server Properties
@@ -584,6 +739,59 @@ class SettingsManager: ObservableObject {
 
     var activeServerUsername: String {
         return currentActiveServer == .primary ? serverUsername : backupServerUsername
+    }
+
+    // MARK: - tvOS Library Shelf Registry
+
+    /// Identity of the currently-active server. tvOS keys the plugin-shelf
+    /// registry and per-server `lastscan` cache by this so a server change
+    /// (or failover) invalidates them without an explicit clear — a token
+    /// mismatch is simply a cache miss.
+    var serverToken: String {
+        "\(activeServerHost):\(activeServerWebPort):\(activeServerUsername)"
+    }
+
+    /// Resolve a server-relative path (plugin icon, artwork proxy URL, …)
+    /// into an absolute URL against the active LMS host. Already-absolute
+    /// http(s) URLs pass through unchanged. nil for empty/missing input or
+    /// when no server is configured.
+    func absoluteServerURL(_ path: String?) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+        if path.hasPrefix("http://") || path.hasPrefix("https://") {
+            return URL(string: path)
+        }
+        guard !activeServerHost.isEmpty else { return nil }
+        let p = path.hasPrefix("/") ? path : "/\(path)"
+        return URL(string: "http://\(activeServerHost):\(activeServerWebPort)\(p)")
+    }
+
+    /// Reconcile a freshly-fetched plugin-shelf registry against persisted
+    /// state: prune `plugin:` toggles for plugins no longer installed, then
+    /// enable newly-discovered shelves (default ON until 4 plugin shelves
+    /// are enabled, then OFF — so a heavy plugin install doesn't flood the
+    /// Library on first launch).
+    ///
+    /// Call ONLY after a successful registry fetch — an empty registry from
+    /// a network failure must not prune every plugin toggle.
+    func reconcilePluginRegistry(_ registry: [PluginExtraRegistration]) {
+        let liveKeys = Set(registry.map { $0.shelfKey })
+
+        // Orphan prune — drop plugin: entries no longer in the registry.
+        // Built-in keys (no "plugin:" prefix) are always kept.
+        enabledLibraryShelves = enabledLibraryShelves.filter {
+            !$0.hasPrefix("plugin:") || liveKeys.contains($0)
+        }
+        seenPluginShelfKeys.formIntersection(liveKeys)
+
+        // First-run defaults for newly-discovered plugin shelves.
+        for plugin in registry where !seenPluginShelfKeys.contains(plugin.shelfKey) {
+            let enabledPluginCount = enabledLibraryShelves.filter { $0.hasPrefix("plugin:") }.count
+            if enabledPluginCount < 4 {
+                enabledLibraryShelves.insert(plugin.shelfKey)
+            }
+            seenPluginShelfKeys.insert(plugin.shelfKey)
+        }
+        saveSettings()
     }
 
     var activeServerPassword: String {
@@ -640,15 +848,35 @@ class SettingsManager: ObservableObject {
     }
 
     // MARK: - Server Switching
+    // USER-initiated switches PERSIST the choice — this is the saved server preference.
     func switchToBackupServer() {
         guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
         currentActiveServer = .backup
-        saveSettings()
+        persistActiveServer()
     }
 
     func switchToPrimaryServer() {
         currentActiveServer = .primary
-        saveSettings()
+        persistActiveServer()
+    }
+
+    // Automatic-failover switches are SESSION-ONLY: they redirect the live connection (and
+    // the WebView, via the @Published change) but do NOT persist, so a transient connect
+    // failure to the chosen server can't overwrite the user's saved preference. The next
+    // launch starts from the manually-selected server. (bd LMS_StreamTest-9iu)
+    func failoverToBackupServer() {
+        guard isBackupServerEnabled && !backupServerHost.isEmpty else { return }
+        currentActiveServer = .backup
+    }
+
+    func failoverToPrimaryServer() {
+        currentActiveServer = .primary
+    }
+
+    /// Persist ONLY the active-server choice. Called by user-initiated switches and the
+    /// full-reset path — never by automatic failover, so failover stays session-only.
+    private func persistActiveServer() {
+        UserDefaults.standard.set(currentActiveServer == .backup ? 1 : 0, forKey: Keys.currentActiveServer)
     }
 
     func switchToOtherServer() {

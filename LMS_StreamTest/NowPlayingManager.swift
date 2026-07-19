@@ -1,21 +1,23 @@
 // File: NowPlayingManager.swift
 // Enhanced to use server time as primary source for lock screen accuracy
 import Foundation
+import Combine
 import MediaPlayer
 import UIKit
 import os.log
 
 class NowPlayingManager: ObservableObject {
-    
+
     // MARK: - Configuration
     private let logger = OSLog(subsystem: "com.lmsstream", category: "NowPlayingManager")
-    
+
     // MARK: - Track Metadata
-    private var currentTrackTitle: String = "LyrPlay"
-    private var currentArtist: String = "Unknown Artist"
-    private var currentAlbum: String = "Lyrion Music Server"
-    private var currentArtwork: UIImage?
-    private var metadataDuration: TimeInterval = 0.0
+    @Published private(set) var currentTrackTitle: String = "LyrPlay"
+    @Published private(set) var currentArtist: String = "Unknown Artist"
+    @Published private(set) var currentAlbum: String = "Lyrion Music Server"
+    @Published private(set) var currentArtwork: UIImage?
+    @Published private(set) var metadataDuration: TimeInterval = 0.0
+    @Published private(set) var hasTrackLoaded: Bool = false
 
     // MARK: - Time Sources
     private weak var audioManager: AudioManager?
@@ -25,7 +27,49 @@ class NowPlayingManager: ObservableObject {
 
     // MARK: - Deduplication State (prevent flooding MPNowPlayingInfoCenter)
     private var lastUpdatedTime: Double = -1.0
-    private var lastUpdatedPlayingState: Bool = false
+
+    // MARK: - Track Generation Guard (last-write-wins across the two async hops)
+    //
+    // A track change applies text (title/artist/album) synchronously, then kicks
+    // off a SECOND async hop to download the cover. Without a shared guard, an
+    // older fetch's response or a slower cover download can land after a newer
+    // one and overwrite the correct data — and worse, text and cover can end up
+    // pointing at DIFFERENT tracks. This is the intermittent "synced player shows
+    // the wrong/stale cover, then self-heals next track" bug.
+    //
+    //   updateTrackMetadata(B)  → bump generation to N, paint text(B)
+    //     └─ loadArtwork(B, gen=N) ── async download ──┐
+    //   updateTrackMetadata(C)  → bump generation to N+1, paint text(C)
+    //     └─ loadArtwork(C, gen=N+1) ─ async download ─┤
+    //                                                  ▼
+    //   applyArtwork(imageB, gen=N)  → N != N+1 → DROP (stale, never paints)
+    //   applyArtwork(imageC, gen=N+1)→ match     → paints
+    //
+    // Every mutation of currentArtwork goes through applyArtwork(_:forGeneration:)
+    // so text and cover can never desync. All reads/writes happen on the main
+    // thread (updateTrackMetadata is called on main; loadArtwork's completion
+    // hops to main before calling applyArtwork), so a plain Int is sufficient.
+    private var trackGeneration: Int = 0
+    private var artworkTask: URLSessionDataTask?
+
+    // URL of the cover that is currently PAINTED (latched only when a download
+    // succeeds and applies; cleared whenever a new artwork operation starts, so
+    // a URL flap mid-download can never dedupe against a cover that is about to
+    // be replaced). The 15s radio metadata poll re-sends identical metadata for
+    // the playing station; re-downloading the cover published a fresh UIImage
+    // every tick, and SwiftUI compares UIImage by reference — the tvOS Now
+    // Playing screen animated each "change" as a visible artwork blip
+    // (bd LMS_StreamTest-a7r, forum report). Matching URL → repaint text only.
+    private var lastLoadedArtworkURL: String?
+
+    #if DEBUG
+    /// Test-only read access to the current track generation so unit tests can
+    /// assert the last-write-wins artwork guard without driving real downloads.
+    var currentTrackGenerationForTesting: Int { trackGeneration }
+
+    /// Test-only read access to the radio-poll dedupe latch.
+    var lastLoadedArtworkURLForTesting: String? { lastLoadedArtworkURL }
+    #endif
 
     // Log throttling (only log lock screen updates every 10 seconds)
     private var lastLockScreenLogTime: Date?
@@ -33,7 +77,6 @@ class NowPlayingManager: ObservableObject {
     private var lockScreenStoredPosition: Double = 0.0
     private var lockScreenStoredTimestamp: Date?
     private var lockScreenWasPlaying: Bool = false
-    private var connectionLostTime: Date?
 
     // MARK: - Lock Screen Command Reference
     weak var slimClient: SlimProtoCoordinator?
@@ -41,11 +84,21 @@ class NowPlayingManager: ObservableObject {
     // MARK: - Update Timer
     private var updateTimer: Timer?
     private let updateInterval: TimeInterval = 1.0
-    
+
+    #if os(tvOS)
+    /// Most recently reported playback state — used by the tvOS idle-timer
+    /// hook so settings-toggle changes and lifecycle events can re-evaluate
+    /// the desired idle-timer state without re-deriving it from elsewhere.
+    private var lastReportedIsPlaying: Bool = false
+    #endif
+
     // MARK: - Initialization
     init() {
         setupNowPlayingInfo()
         startUpdateTimer()
+        #if os(tvOS)
+        registerIdleTimerObservers()
+        #endif
         //os_log(.info, log: logger, "Enhanced NowPlayingManager initialized with server time support")
     }
     
@@ -78,9 +131,8 @@ class NowPlayingManager: ObservableObject {
         // Update now playing info with current time (no throttling)
         updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
 
-        // Save last updated values (for other logic)
+        // Save last updated value (for other logic)
         lastUpdatedTime = currentTime
-        lastUpdatedPlayingState = isPlaying
 
         // Throttle logging to every 10 seconds to reduce spam
         let shouldLog: Bool
@@ -253,23 +305,76 @@ class NowPlayingManager: ObservableObject {
         currentTrackTitle = title
         currentArtist = artist
         currentAlbum = album
+        hasTrackLoaded = true
 
         // Reset deduplication state so next update goes through immediately
         lastUpdatedTime = -1.0
-        
+
+        // Radio-poll dedupe: the incoming cover URL is the one already painted —
+        // leave the image alone (no re-download, no new UIImage instance, no
+        // tvOS blip) and just push the possibly-updated text to now-playing.
+        if let artworkURL = artworkURL, artworkURL == lastLoadedArtworkURL {
+            let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
+            updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
+            return
+        }
+
+        // Open a new track generation. Text above is already painted; the cover
+        // (a second async hop) is gated on this same generation so text and cover
+        // can never end up showing different tracks.
+        trackGeneration += 1
+        let generation = trackGeneration
+        lastLoadedArtworkURL = nil  // new artwork op — latch re-set only on successful load
+
         // Load artwork if URL provided
         if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
-            loadArtwork(from: url)
+            loadArtwork(from: url, urlString: artworkURL, generation: generation)
         } else {
-            currentArtwork = nil
-            // Update immediately without artwork
+            // No artwork for this track — clear (guarded so a late stale load
+            // can't repaint), then refresh now-playing immediately.
+            applyArtwork(nil, forGeneration: generation)
             let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
         }
     }
-    
-    private func loadArtwork(from url: URL) {
-        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s", url.absoluteString)
+
+    /// Synchronous last-write-wins apply for cover art. The ONE place
+    /// `currentArtwork` is mutated. Returns `true` if applied, `false` if dropped
+    /// as stale. Factored out (no network, no async) so the generation guard is
+    /// directly unit-testable. Must be called on the main thread.
+    @discardableResult
+    func applyArtwork(_ image: UIImage?, forGeneration generation: Int) -> Bool {
+        guard generation == trackGeneration else {
+            os_log(.info, log: logger, "🖼️ Dropping stale artwork (gen %d != current %d)", generation, trackGeneration)
+            return false
+        }
+        currentArtwork = image
+        return true
+    }
+
+    /// Synchronous completion step of an artwork download: last-write-wins apply
+    /// plus the painted-URL latch for the radio-poll dedupe. A failed load (nil
+    /// image) applies the clear but does NOT latch, so the next poll retries.
+    /// Factored out (no network, no async) so the latch is unit-testable
+    /// alongside applyArtwork. Must be called on the main thread.
+    @discardableResult
+    func applyLoadedArtwork(_ image: UIImage?, from urlString: String, forGeneration generation: Int) -> Bool {
+        let applied = applyArtwork(image, forGeneration: generation)
+        if applied && image != nil {
+            lastLoadedArtworkURL = urlString
+        }
+        return applied
+    }
+
+    private func loadArtwork(from url: URL, urlString: String, generation: Int) {
+        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s (gen %d)", url.absoluteString, generation)
+
+        // Cancel any prior in-flight artwork download. On Apple TV covers can be
+        // 2048px; without this, superseded loads still download in full before
+        // being dropped by the generation guard. A cancelled task's completion
+        // fires with NSURLErrorCancelled and an older generation, so the guard
+        // drops it — cancellation never clears the current cover.
+        artworkTask?.cancel()
 
         // Add HTTP Basic Authentication if configured (for password-protected LMS servers)
         var request = URLRequest(url: url)
@@ -277,26 +382,37 @@ class NowPlayingManager: ObservableObject {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                let image: UIImage?
                 if let error = error {
-                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
-                    self?.currentArtwork = nil
-                } else if let data = data, let image = UIImage(data: data) {
-                    os_log(.info, log: self?.logger ?? OSLog.disabled, "✅ Artwork loaded successfully")
-                    self?.currentArtwork = image
+                    os_log(.error, log: self.logger, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
+                    image = nil
+                } else if let data = data, let decoded = UIImage(data: data) {
+                    os_log(.info, log: self.logger, "✅ Artwork loaded successfully")
+                    image = decoded
                 } else {
-                    os_log(.error, log: self?.logger ?? OSLog.disabled, "❌ Invalid artwork data")
-                    self?.currentArtwork = nil
+                    os_log(.error, log: self.logger, "❌ Invalid artwork data")
+                    image = nil
                 }
-                
-                // Update now playing info with or without artwork
-                if let self = self {
+
+                // Apply only if this is still the current track's load. A genuine
+                // current-track failure applies `nil` (clear to no-art) so the
+                // cover always matches the playing track — never the previous one.
+                let applied = self.applyLoadedArtwork(image, from: urlString, forGeneration: generation)
+
+                // Refresh now-playing only for the winning load; stale loads
+                // must not push an out-of-date now-playing snapshot.
+                if applied {
                     let (currentTime, isPlaying, _) = self.getCurrentPlaybackInfo()
                     self.updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
                 }
             }
-        }.resume()
+        }
+        artworkTask = task
+        task.resume()
     }
     
     // MARK: - Now Playing Info Updates
@@ -333,8 +449,12 @@ class NowPlayingManager: ObservableObject {
         }
         
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
+
+        #if os(tvOS)
+        reportPlaybackStateForIdleTimer(isPlaying)
+        #endif
     }
-    
+
     // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
         // SIMPLIFIED: Always update but with throttling
@@ -397,13 +517,20 @@ class NowPlayingManager: ObservableObject {
     func clearNowPlayingInfo() {
         let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
         nowPlayingInfoCenter.nowPlayingInfo = nil
-        
+
+        // Open a new generation and cancel any in-flight load so a download that
+        // completes after this teardown can't repaint a cover over the cleared state.
+        trackGeneration += 1
+        artworkTask?.cancel()
+
         // Reset to defaults
         currentTrackTitle = "LyrPlay"
         currentArtist = "Unknown Artist"
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
+        lastLoadedArtworkURL = nil
         metadataDuration = 0.0
+        hasTrackLoaded = false
         lastKnownServerTime = 0.0
         lastKnownAudioTime = 0.0
         
@@ -487,6 +614,63 @@ class NowPlayingManager: ObservableObject {
         stopUpdateTimer()
         clearNowPlayingInfo()
         enableRemoteCommands(false)
+        #if os(tvOS)
+        NotificationCenter.default.removeObserver(self)
+        #endif
         os_log(.info, log: logger, "Enhanced NowPlayingManager deinitialized")
     }
+
+    #if os(tvOS)
+    // MARK: - tvOS Idle Timer
+    //
+    // tvOS doesn't include PlaybackSessionController (iOS-only — CarPlay,
+    // MPRemoteCommandCenter, AVAudioSession interruption handling all live
+    // there). The Apple TV is a plugged-in living-room display where the
+    // 2-minute system screensaver is too aggressive for a music app, so we
+    // hook the idle timer here — at the single chokepoint that every play /
+    // pause transition routes through (`updateNowPlayingInfo`).
+
+    private func registerIdleTimerObservers() {
+        let center = NotificationCenter.default
+        center.addObserver(self,
+                           selector: #selector(handleAppDidEnterBackground),
+                           name: UIApplication.didEnterBackgroundNotification,
+                           object: nil)
+        center.addObserver(self,
+                           selector: #selector(handleAppWillEnterForeground),
+                           name: UIApplication.willEnterForegroundNotification,
+                           object: nil)
+    }
+
+    /// Called from `updateNowPlayingInfo` whenever the reported playback
+    /// state changes, and from the tvOS Settings toggle's `onChange`.
+    /// Mirrors the iOS gate (`keepScreenAwake && isPlaying`).
+    func applyIdleTimerSetting() {
+        let shouldDisable = SettingsManager.shared.keepScreenAwake && lastReportedIsPlaying
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = shouldDisable
+            os_log(.debug, log: self.logger, "💡 Idle timer disabled: %{public}s", shouldDisable ? "YES" : "NO")
+        }
+    }
+
+    @objc private func handleAppDidEnterBackground() {
+        // Always release the timer on background — Top Shelf / Home button
+        // shouldn't keep the screen awake even if playback is technically still
+        // running on the server side.
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    @objc private func handleAppWillEnterForeground() {
+        applyIdleTimerSetting()
+    }
+
+    fileprivate func reportPlaybackStateForIdleTimer(_ isPlaying: Bool) {
+        guard isPlaying != lastReportedIsPlaying else { return }
+        lastReportedIsPlaying = isPlaying
+        applyIdleTimerSetting()
+    }
+    #endif
 }
+

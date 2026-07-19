@@ -1,6 +1,7 @@
 // File: SettingsViews.swift
 import SwiftUI
 import os.log
+import OSLog
 import WebKit
 import UniformTypeIdentifiers
 import StoreKit
@@ -20,6 +21,9 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @State private var isReconnecting = false
 
+    // Diagnostic log export (bd 34l field debugging)
+    @State private var diagnosticLogStatus: String? = nil
+
     // App Icon state
     @ObservedObject private var purchaseManager = PurchaseManager.shared
     @ObservedObject private var appIconManager = AppIconManager.shared
@@ -30,7 +34,54 @@ struct SettingsView: View {
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
         return "\(version) (\(build))"
     }
-    
+
+    // MARK: - Diagnostic Log Export (bd 34l)
+    // Reads the app's own os_log entries back from the unified log (iOS 15+),
+    // so field issues can be captured without a tethered Mac. Note: OSLogStore
+    // with .currentProcessIdentifier only sees entries from THIS process launch,
+    // which is exactly the warm-resume window recovery debugging needs.
+
+    private func copyDiagnosticLog() {
+        diagnosticLogStatus = "Collecting…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = Self.collectDiagnosticLog()
+            DispatchQueue.main.async {
+                UIPasteboard.general.string = text
+                diagnosticLogStatus = "Copied!"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    diagnosticLogStatus = nil
+                }
+            }
+        }
+    }
+
+    private static func collectDiagnosticLog() -> String {
+        do {
+            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            let position = store.position(date: Date().addingTimeInterval(-30 * 60))
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss.SSS"
+            let lines = try store.getEntries(at: position)
+                .compactMap { $0 as? OSLogEntryLog }
+                .filter { $0.subsystem == "com.lmsstream" }
+                .map { "\(formatter.string(from: $0.date)) [\($0.category)] \($0.composedMessage)" }
+            guard !lines.isEmpty else {
+                return "No LyrPlay log entries found in the last 30 minutes of this app session."
+            }
+            let header = "LyrPlay diagnostic log — \(appDiagnosticVersion()) — exported \(Date())\n"
+            return header + lines.joined(separator: "\n")
+        } catch {
+            return "Log collection failed: \(error.localizedDescription)"
+        }
+    }
+
+    private static func appDiagnosticVersion() -> String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "v\(version) (\(build))"
+    }
+
+
     var body: some View {
         NavigationView {
             Form {
@@ -196,7 +247,7 @@ struct SettingsView: View {
                                     .foregroundColor(.green)
                                     .frame(width: 20)
 
-                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrate > 0 ? " • \(Int(streamInfo.bitrate)) kbps" : "")")
+                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrateText.map { " • \($0)" } ?? "")")
                                     .font(.subheadline)
                                     .foregroundColor(.primary)
                             }
@@ -280,6 +331,28 @@ struct SettingsView: View {
                         PlaybackSessionController.shared.applyIdleTimerSetting()
                     }
                     .padding(.vertical, 4)
+
+                    #if os(iOS)
+                    Toggle(isOn: $settings.hardwareVolumeButtonsEnabled) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "speaker.wave.2")
+                                    .foregroundColor(.orange)
+                                    .frame(width: 20)
+                                Text("Hardware Volume Buttons")
+                                    .font(.body)
+                            }
+                            Text("Experimental. Forward the phone's volume buttons to the selected player when it isn't this device. Off by default; leave off to use the buttons for the phone's own volume. Skipped automatically for fixed-volume players.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+                        }
+                    }
+                    .onChange(of: settings.hardwareVolumeButtonsEnabled) { _ in
+                        settings.saveSettings()
+                    }
+                    .padding(.vertical, 4)
+                    #endif
 
                     // Max Sample Rate Picker
                     VStack(alignment: .leading, spacing: 8) {
@@ -421,6 +494,34 @@ struct SettingsView: View {
                         value: appVersionDisplay,
                         valueColor: .secondary
                     )
+
+                    Button(action: copyDiagnosticLog) {
+                        SettingsRow(
+                            icon: "doc.text.magnifyingglass",
+                            title: "Copy Diagnostic Log",
+                            value: diagnosticLogStatus ?? "Last 30 min → clipboard",
+                            valueColor: diagnosticLogStatus == "Copied!" ? .green : .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    .disabled(diagnosticLogStatus == "Collecting…")
+
+                    #if DEBUG
+                    Button(action: {
+                        Phase2SyncControllerVerification.runFullTest(
+                            coordinator: coordinator,
+                            audioManager: AudioManager.shared
+                        )
+                    }) {
+                        SettingsRow(
+                            icon: "waveform.path.ecg",
+                            title: "Run Sync Controller Tests",
+                            value: "~35s, requires playing track",
+                            valueColor: .blue
+                        )
+                    }
+                    .foregroundColor(.primary)
+                    #endif
                 }
             }
             .navigationTitle("Settings")

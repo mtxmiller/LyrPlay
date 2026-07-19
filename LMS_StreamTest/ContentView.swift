@@ -4,6 +4,9 @@ import SwiftUI
 import WebKit
 import os.log
 import UIKit
+#if canImport(SafariServices)
+import SafariServices  // iOS-only; absent on tvOS (which has no in-app browser)
+#endif
 
 struct ContentView: View {
     @StateObject private var settings = SettingsManager.shared
@@ -22,6 +25,12 @@ struct ContentView: View {
     @State private var hasShownError = false
     @State private var previousActiveServer: SettingsManager.ServerType?
     @State private var coldLaunchRecoveryChecked = false
+    // True top safe-area inset, captured by a normally-placed GeometryReader (below).
+    // Drives reactive topPad injection in WebView.updateUIView: when this changes
+    // (cold launch / CarPlay foreground 0→59, rotation), updateUIView re-injects.
+    @State private var topInset: CGFloat = 0
+    /// GH#75: hardware volume rocker → external player forwarding
+    @StateObject private var volumeRocker = VolumeRockerForwarder()
 
     /// Detect if running as iPad app on Mac (no status bar, so ignore top safe area)
     private var isRunningOnMac: Bool {
@@ -145,30 +154,26 @@ struct ContentView: View {
             if let url = URL(string: materialWebURL), !hasConnectionError {
                 WebView(
                     url: url,
+                    topInset: topInset,
                     isLoading: $isLoading,
                     loadError: $loadError,
                     hasConnectionError: $hasConnectionError,
                     webViewReference: $webView,
                     onSettingsPressed: {
                         showingSettings = true
+                    },
+                    onMaterialPlayerChanged: { player in
+                        // Refresh the JS channel alongside every report — the
+                        // WebView reference may have been recreated (reload).
+                        volumeRocker.webView = webView
+                        volumeRocker.materialPlayerChanged(player)
                     }
                 )
-                // WebView fills edge-to-edge; Material's topPad query param handles status bar spacing
+                // WebView fills edge-to-edge; Material's topPad CSS var handles status bar spacing.
+                // The real top inset comes from the ZStack-level GeometryReader (.background below),
+                // NOT from here — a GeometryReader under .ignoresSafeArea reads 0. WebView reacts
+                // to topInset changes in updateUIView (rotation, cold launch / CarPlay foreground).
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
-                // Update Material topPad on rotation — portrait has ~59px (Dynamic Island),
-                // landscape has 0px. GeometryReader fires after layout commits with correct insets.
-                .background(
-                    GeometryReader { geometry in
-                        Color.clear
-                            .onChange(of: geometry.safeAreaInsets.top) { newTop in
-                                let inset = Int(newTop)
-                                webView?.evaluateJavaScript(
-                                    "(function(){document.documentElement.style.setProperty('--top-pad','\(inset)px');if(typeof queryParams!=='undefined'){queryParams.topPad=\(inset);}console.log('LyrPlay: topPad updated to \(inset)px after rotation');})()",
-                                    completionHandler: nil
-                                )
-                            }
-                    }
-                )
                 .opacity(isLoading ? 0 : 1) // Hide WebView while loading for smooth transition
                 .animation(.easeInOut(duration: 0.5), value: isLoading)
                 .onChange(of: webView) { newWebView in
@@ -185,8 +190,20 @@ struct ContentView: View {
             if loadError != nil {
                 errorOverlay
             }
-            
+
         }
+        // Capture the TRUE top safe-area inset. This GeometryReader is normally placed
+        // (the ZStack respects the safe area), so safeAreaInsets.top reports the real
+        // value (~59 portrait / 0 landscape / 0 on Mac). Seed on appear and track changes
+        // so WebView.updateUIView re-injects topPad on rotation and on the cold-launch /
+        // CarPlay foreground transition (where the WebView first loaded with a 0 inset).
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { topInset = geometry.safeAreaInsets.top }
+                    .onChange(of: geometry.safeAreaInsets.top) { topInset = $0 }
+            }
+        )
         .onAppear {
             // Cold-launch recovery: willEnterForegroundNotification doesn't fire on Not Running → Active,
             // so the warm-resume handler below misses cold launches after a process kill. Set the trigger
@@ -226,68 +243,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
 
-            // FIX (LMS_StreamTest-nzk): Force WKWebView scrollView contentSize recalculation on iPad resume
-            // Root cause: WKWebView caches scrollView.contentSize based on initial viewport
-            // When app resumes, WKWebView frame updates but scrollView contentSize stays cached
-            // Result: viewport=1080 but body=535 (exactly half) due to cached content size
+            // Warm-resume layout correction. The reactive updateUIView path only fires
+            // when topInset CHANGES; a same-orientation warm resume keeps the inset, so we
+            // still need this. Fixes the cached scrollView.contentSize "half-sized" bug
+            // (viewport=1080 but body=535) and re-injects topPad (the old code never did).
             if let webView = webView {
-                // Step 1: Force native UIView layout update
-                webView.setNeedsLayout()
-                webView.layoutIfNeeded()
-
-                // Step 2: Force scrollView to recalculate contentSize by manipulating scroll position
-                // This triggers WKWebView's internal content size calculation
-                let scrollView = webView.scrollView
-                let oldOffset = scrollView.contentOffset
-                let oldSize = scrollView.contentSize
-
-                // Temporarily adjust scroll offset to force contentSize recalculation
-                // (WKWebView internally recalculates when scrollView is scrolled)
-                scrollView.setContentOffset(CGPoint(x: oldOffset.x + 1, y: oldOffset.y), animated: false)
-                scrollView.setContentOffset(oldOffset, animated: false)
-
-                os_log(.info, log: self.logger, "📐 Forced WKWebView scrollView refresh: contentSize %.0fx%.0f -> waiting for recalc",
-                       oldSize.width, oldSize.height)
-
-                // Step 3: Trigger Material layout recalculation via JavaScript
-                let recalculateLayoutScript = """
-                (function() {
-                    // Force Material's layout recalculation
-                    if (window.lmsApp && window.lmsApp.checkLayout) {
-                        console.log('Material: Calling checkLayout() - window.innerWidth=' + window.innerWidth);
-                        window.lmsApp.checkLayout();
-                    }
-
-                    // Force CSS variable recalculation
-                    if (document.documentElement) {
-                        let vh = window.innerHeight * 0.01;
-                        document.documentElement.style.setProperty('--vh', vh + 'px');
-                    }
-
-                    // Force Vue re-render
-                    if (window.lmsApp && window.lmsApp.$forceUpdate) {
-                        window.lmsApp.$forceUpdate();
-                    }
-
-                    // Dispatch resize events
-                    window.dispatchEvent(new Event('resize'));
-                    window.dispatchEvent(new Event('orientationchange'));
-
-                    // Force browser reflow
-                    setTimeout(function() {
-                        void document.body.offsetWidth;
-                        window.dispatchEvent(new Event('resize'));
-                        console.log('Material: Layout complete - body.clientWidth=' + document.body.clientWidth);
-                    }, 50);
-                })();
-                """
-                webView.evaluateJavaScript(recalculateLayoutScript) { _, error in
-                    if let error = error {
-                        os_log(.error, log: self.logger, "❌ Material layout recalculation failed: %{public}s", error.localizedDescription)
-                    } else {
-                        os_log(.info, log: self.logger, "✅ Material layout recalculation triggered")
-                    }
-                }
+                recalcWebViewLayout(webView)
+                injectTopPad(into: webView,
+                             top: Int(webView.window?.safeAreaInsets.top ?? 0),
+                             source: "willEnterForeground")
 
                 // Check if Material's Cometd connection is still alive after backgrounding.
                 // If dead, trigger reconnect via Material's own bus event (same path as
@@ -311,6 +275,21 @@ struct ContentView: View {
                 }
             }
 
+            // bd 34l: t=0 pre-mute, synchronous. A stream that stalled during
+            // suspension auto-resumes at full volume the moment the thawed socket
+            // delivers data — inside the 0.5s window before the recovery check
+            // below runs — and VOLDSP muting can't silence samples already in the
+            // playback buffer. Instantly VOL-mute in-flight audio now; restored by
+            // the skip branches below, recovery's settle paths, or a 10s ceiling.
+            if settings.enableAppOpenRecovery,
+               !slimProtoCoordinator.isRecoveryActive,  // an in-flight (lock-screen) recovery owns the audio
+               let preDuration = slimProtoCoordinator.getBackgroundDuration(),
+               preDuration > 45,
+               audioManager.getPlayerState() != "Playing" {
+                os_log(.info, log: logger, "🔇 App Foreground: pre-muting in-flight audio (backgrounded %.1fs)", preDuration)
+                audioManager.preMuteForPossibleRecovery()
+            }
+
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -318,12 +297,14 @@ struct ContentView: View {
                 let currentState = audioManager.getPlayerState()
                 if currentState == "Playing" {
                     os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
+                    audioManager.cancelPreMute(reason: "already playing")
                     return
                 }
 
                 // Get background duration from coordinator (centralized tracking)
                 guard let duration = slimProtoCoordinator.getBackgroundDuration() else {
                     os_log(.info, log: logger, "📱 App Foreground: No background time tracked - skipping recovery")
+                    audioManager.cancelPreMute(reason: "no background time")
                     return
                 }
 
@@ -444,8 +425,10 @@ struct ContentView: View {
         // Use output device sample rate (actual hardware output) if available,
         // otherwise fall back to stream info sample rate
         let outputSampleRate = audioManager.audioPlayer.currentOutputInfo?.outputSampleRate ?? streamInfo.sampleRate
-        // Guard against NaN/infinity from BASS — neither is a valid JS numeric literal
-        let safeBitrate = streamInfo.bitrate.isNaN || streamInfo.bitrate.isInfinite ? 0.0 : streamInfo.bitrate
+        // LMS-reported bitrate string (e.g. "850kbps"). Sanitize for JS interpolation.
+        let safeBitrate = (streamInfo.bitrateText ?? "")
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
 
         let js = """
         (function() {
@@ -453,7 +436,7 @@ struct ContentView: View {
             parts.push('\(safeFormat)');
             parts.push('\(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz');
             parts.push('\(streamInfo.bitDepth)bit');
-            if (\(safeBitrate) > 0) parts.push(Math.round(\(safeBitrate)) + 'kbps');
+            if ('\(safeBitrate)'.length > 0) parts.push('\(safeBitrate)');
             window.lyrplayStreamText = parts.join(', ');
 
             // Start polling replacer if not already running
@@ -514,10 +497,17 @@ struct ContentView: View {
         // - appSettings: Custom iOS app settings integration
         // - player: Show only specified player when iOS Player Focus is enabled
         // - topPad: Extends Material toolbar background behind iOS status bar
+        // - nativePlayer=w: Material posts MATERIAL-PLAYER messages to the mskNative
+        //   handler on every player switch (GH#75 volume rocker). The VALUE must be
+        //   the letter 'w' (WebKit) — Material's parser maps w→3, c→2, anything
+        //   else→1 (Android NativeReceiver, which silently no-ops in WKWebView).
+        //   Verified against Material 6.4.2's served bundle. Must be in BOTH
+        //   branches; in Player Focus mode only LyrPlay is visible so the rocker
+        //   feature is intentionally inert there.
         if settings.iOSPlayerFocus {
-            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         } else {
-            return "\(baseURL)?hide=mediaControls\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
 
@@ -740,14 +730,79 @@ struct ContentView: View {
 }
 
 
+// MARK: - Shared WebView layout helpers
+// Single source of truth for the two operations that keep Material correctly
+// sized: topPad injection (status-bar spacing) and full layout recalculation
+// (cached viewport / scrollView.contentSize). Called from load callbacks
+// (didCommit/didFinish/verify), the reactive updateUIView path (inset change),
+// and willEnterForeground (warm resume). See LMS_StreamTest CarPlay mis-sizing fix.
+private let webViewLayoutLog = OSLog(subsystem: "com.lmsstream", category: "WebViewLayout")
+
+/// Tell Material to extend its toolbar background behind the iOS status bar while
+/// keeping interactive elements below it, via the --top-pad CSS var + queryParams.
+private func injectTopPad(into webView: WKWebView, top: Int, source: String) {
+    let script = """
+    (function() {
+        document.documentElement.style.setProperty('--top-pad', '\(top)px');
+        if (typeof queryParams !== 'undefined') { queryParams.topPad = \(top); }
+        console.log('LyrPlay: Set topPad to \(top)px via \(source)');
+    })();
+    """
+    webView.evaluateJavaScript(script, completionHandler: nil)
+}
+
+/// Force WKWebView + Material to recalculate layout after a viewport/inset change
+/// (background→foreground, cold launch, rotation). Fixes the cached
+/// scrollView.contentSize "half-sized" bug and Material's CSS layout.
+private func recalcWebViewLayout(_ webView: WKWebView) {
+    // Step 1: native UIView layout pass.
+    webView.setNeedsLayout()
+    webView.layoutIfNeeded()
+
+    // Step 2: nudge the scrollView so WKWebView recomputes contentSize
+    // (it caches contentSize against the initial viewport — stale after resume).
+    let scrollView = webView.scrollView
+    let oldOffset = scrollView.contentOffset
+    scrollView.setContentOffset(CGPoint(x: oldOffset.x + 1, y: oldOffset.y), animated: false)
+    scrollView.setContentOffset(oldOffset, animated: false)
+
+    // Step 3: Material/Vue layout recalculation + reflow.
+    let recalcScript = """
+    (function() {
+        if (window.lmsApp && window.lmsApp.checkLayout) { window.lmsApp.checkLayout(); }
+        if (document.documentElement) {
+            let vh = window.innerHeight * 0.01;
+            document.documentElement.style.setProperty('--vh', vh + 'px');
+        }
+        if (window.lmsApp && window.lmsApp.$forceUpdate) { window.lmsApp.$forceUpdate(); }
+        window.dispatchEvent(new Event('resize'));
+        window.dispatchEvent(new Event('orientationchange'));
+        setTimeout(function() {
+            void document.body.offsetWidth;
+            window.dispatchEvent(new Event('resize'));
+        }, 50);
+    })();
+    """
+    webView.evaluateJavaScript(recalcScript) { _, error in
+        if let error = error {
+            os_log(.error, log: webViewLayoutLog, "❌ Material layout recalculation failed: %{public}s", error.localizedDescription)
+        }
+    }
+}
+
 struct WebView: UIViewRepresentable {
     let url: URL
+    /// True top safe-area inset from ContentView. When this changes, updateUIView
+    /// re-injects topPad + recalculates layout (rotation, cold-launch/CarPlay foreground).
+    let topInset: CGFloat
     @Binding var isLoading: Bool
     @Binding var loadError: String?
     @Binding var hasConnectionError: Bool
     @Binding var webViewReference: WKWebView?
     let onSettingsPressed: () -> Void
-    
+    /// GH#75: Material's selected player changed (nil = unknown — reload/process kill).
+    let onMaterialPlayerChanged: (MaterialPlayerMessage?) -> Void
+
     private let logger = OSLog(subsystem: "com.lmsstream", category: "WebView")
     
     func makeUIView(context: Context) -> WKWebView {
@@ -763,6 +818,9 @@ struct WebView: UIViewRepresentable {
         // CRITICAL: Enable custom URL scheme handling for Material integration
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "lmsStreamHandler")
+        // GH#75: Material's native bridge — receives MATERIAL-PLAYER messages
+        // when loaded with nativePlayer=3 (lms-material utils.js emitNative dest 3)
+        contentController.add(context.coordinator, name: "mskNative")
         configuration.userContentController = contentController
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -816,6 +874,16 @@ struct WebView: UIViewRepresentable {
         uiView.setNeedsLayout()
         uiView.layoutIfNeeded()
 
+        // Reactive topPad + layout correction. SwiftUI re-invokes updateUIView (after
+        // layout) whenever topInset changes — this is what fixes the CarPlay/cold-launch
+        // case where the WebView first loaded with a 0 inset and willEnterForeground
+        // never fired. Keyed on lastInjectedTopInset so we only re-inject on real change.
+        if topInset != context.coordinator.lastInjectedTopInset {
+            context.coordinator.lastInjectedTopInset = topInset
+            injectTopPad(into: uiView, top: Int(topInset), source: "updateUIView(inset)")
+            recalcWebViewLayout(uiView)
+        }
+
         // Check if host changed - reload if server switched
         if let currentURL = uiView.url, currentURL.host != url.host {
             let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
@@ -833,6 +901,10 @@ struct WebView: UIViewRepresentable {
     
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         var parent: WebView
+        /// Last top inset we injected via updateUIView. -1 sentinel so the first real
+        /// value (including 0) always injects once. Prevents redundant JS on every
+        /// updateUIView call (which SwiftUI fires for many unrelated reasons).
+        var lastInjectedTopInset: CGFloat = -1
         private let logger = OSLog(subsystem: "com.lmsstream", category: "WebViewCoordinator")
         
         init(_ parent: WebView) {
@@ -846,7 +918,18 @@ struct WebView: UIViewRepresentable {
         // MARK: - Material Settings Integration Handler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             os_log(.info, log: logger, "📱 Received message from Material: %{public}s", message.name)
-            
+
+            // GH#75: player-switch reports from Material's native bridge
+            if message.name == "mskNative" {
+                if let body = message.body as? String {
+                    let player = MaterialPlayerMessage.parse(body)
+                    DispatchQueue.main.async {
+                        self.parent.onMaterialPlayerChanged(player)
+                    }
+                }
+                return
+            }
+
             if message.name == "lmsStreamHandler" {
                 if let body = message.body as? String {
                     os_log(.info, log: logger, "📱 Material message body: %{public}s", body)
@@ -866,6 +949,8 @@ struct WebView: UIViewRepresentable {
             os_log(.info, log: logger, "📡 WebView: Started loading Material interface")
             DispatchQueue.main.async {
                 self.parent.loadError = nil
+                // GH#75: selected player is unknown until Material re-reports it
+                self.parent.onMaterialPlayerChanged(nil)
             }
         }
         
@@ -881,15 +966,9 @@ struct WebView: UIViewRepresentable {
             // Inject topPad early — on slow connections, didFinish may be minutes away.
             // The DOM exists at didCommit so we can set the CSS variable before Material's
             // Vue created() reads it. This prevents overlapping icons in the status bar area.
-            let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
-            let topPadScript = """
-            (function() {
-                document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
-                if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
-                console.log('LyrPlay: Set topPad to \(topInset)px via didCommit (early injection)');
-            })();
-            """
-            webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+            injectTopPad(into: webView,
+                         top: Int(webView.window?.safeAreaInsets.top ?? 0),
+                         source: "didCommit")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -926,36 +1005,23 @@ struct WebView: UIViewRepresentable {
                 // launch (safe area not yet available), so we always set it here where
                 // the webView is in the view hierarchy and the window insets are known.
                 // Always inject (even when 0) to correct stale values from URL param or prior orientation.
-                let topInset = Int(webView.window?.safeAreaInsets.top ?? 0)
-                let topPadScript = """
-                (function() {
-                    document.documentElement.style.setProperty('--top-pad', '\(topInset)px');
-                    if (typeof queryParams !== 'undefined') { queryParams.topPad = \(topInset); }
-                    console.log('LyrPlay: Set topPad to \(topInset)px via didFinish injection');
-                })();
-                """
-                webView.evaluateJavaScript(topPadScript, completionHandler: nil)
+                injectTopPad(into: webView,
+                             top: Int(webView.window?.safeAreaInsets.top ?? 0),
+                             source: "didFinish")
 
                 // Verify topPad took effect after a short delay — Material's Vue may
-                // overwrite it during its own initialization. Retry once if mismatched.
+                // overwrite it during its own initialization. Read-only check; if it
+                // drifted, re-inject via the shared helper.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     let expectedInset = Int(webView.window?.safeAreaInsets.top ?? 0)
-                    let verifyScript = """
-                    (function() {
-                        var current = getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();
-                        var expected = '\(expectedInset)px';
-                        if (current !== expected) {
-                            document.documentElement.style.setProperty('--top-pad', expected);
-                            if (typeof queryParams !== 'undefined') { queryParams.topPad = \(expectedInset); }
-                            console.log('LyrPlay: topPad verification FIXED: was ' + current + ', set to ' + expected);
-                            return 'fixed:' + current + '->' + expected;
-                        }
-                        return 'ok:' + current;
-                    })();
-                    """
-                    webView.evaluateJavaScript(verifyScript) { result, _ in
-                        if let result = result as? String {
-                            os_log(.info, log: self.logger, "topPad verify: %{public}s", result)
+                    let readScript = "getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();"
+                    webView.evaluateJavaScript(readScript) { result, _ in
+                        let current = (result as? String) ?? ""
+                        if current != "\(expectedInset)px" {
+                            os_log(.info, log: self.logger, "topPad verify: drifted (was %{public}s, expected %dpx) — re-injecting", current, expectedInset)
+                            injectTopPad(into: webView, top: expectedInset, source: "didFinish-verify")
+                        } else {
+                            os_log(.info, log: self.logger, "topPad verify: ok (%{public}s)", current)
                         }
                     }
                 }
@@ -1050,6 +1116,8 @@ struct WebView: UIViewRepresentable {
             os_log(.error, log: logger, "WebView content process terminated by iOS - reloading Material interface")
             DispatchQueue.main.async {
                 self.parent.isLoading = true
+                // GH#75: JS state is gone — disengage the rocker until reload re-reports
+                self.parent.onMaterialPlayerChanged(nil)
             }
             webView.reload()
         }
@@ -1153,13 +1221,13 @@ struct WebView: UIViewRepresentable {
                     }
                 }
                 
-                // For external links, only open in Safari if it's a user-initiated link click
+                // For external links, open in an in-app Safari sheet on a user-initiated link click
                 if navigationAction.navigationType == .linkActivated {
-                    os_log(.info, log: logger, "🌐 Opening external link in Safari: %{public}s", urlString)
-                    
-                    // Open in Safari
-                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                    
+                    os_log(.info, log: logger, "🌐 Opening external link in in-app Safari sheet: %{public}s", urlString)
+
+                    // In-app Safari sheet (keeps player controls one Done-tap away)
+                    presentInAppBrowser(url, from: webView)
+
                     // Cancel the navigation in WebView
                     decisionHandler(.cancel)
                     return
@@ -1190,13 +1258,39 @@ struct WebView: UIViewRepresentable {
                     }
                 }
                 
-                // For external URLs, open in Safari
-                os_log(.info, log: logger, "🌐 Opening external URL in Safari: %{public}s", urlString)
-                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                // For external URLs (Material weblinks open via window.open, which routes here),
+                // present an in-app Safari sheet instead of ejecting to the system Safari app.
+                os_log(.info, log: logger, "🌐 Opening external URL in in-app Safari sheet: %{public}s", urlString)
+                presentInAppBrowser(url, from: webView)
             }
-            
+
             // Return nil to prevent creating a new WebView
             return nil
+        }
+
+        /// Present an external URL in an in-app Safari sheet (`SFSafariViewController`) rather than
+        /// bouncing to the system Safari app. The Done button always returns to the Material UI with
+        /// playback and screen state intact, so the user can't get stranded on a web page with no way
+        /// back to player controls. This whole file is iOS-only (it uses WKWebView); the
+        /// `canImport(SafariServices)` guard just keeps the new dependency honestly conditional.
+        private func presentInAppBrowser(_ url: URL, from webView: WKWebView) {
+            #if canImport(SafariServices)
+            // SFSafariViewController only supports http/https; anything else falls through to the system.
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                // Walk to the top-most presented controller so we don't present on one already presenting.
+                var top = webView.window?.rootViewController
+                while let presented = top?.presentedViewController {
+                    top = presented
+                }
+                if let presenter = top {
+                    presenter.present(SFSafariViewController(url: url), animated: true, completion: nil)
+                    return
+                }
+                os_log(.error, log: logger, "⚠️ No presenter for in-app Safari sheet; falling back to system Safari")
+            }
+            #endif
+            // Non-web scheme, no SafariServices, or no presenter → hand off to the system.
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
     }
 }
