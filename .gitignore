@@ -147,3 +147,4 @@ experimental/
 
 # Python bytecode (smoke harness)
 __pycache__/
+.beads/proxieddb/
