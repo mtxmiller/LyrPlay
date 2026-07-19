@@ -1,3 +1,4 @@
 sync-branch: beads-metadata
 
 dolt.auto-commit: "on"
+dolt.port: 52057
