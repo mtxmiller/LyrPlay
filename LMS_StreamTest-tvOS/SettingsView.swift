@@ -1,4 +1,5 @@
 import SwiftUI
+import StoreKit
 import os.log
 
 /// tvOS Settings — single-screen List wrapped in a NavigationStack so
@@ -40,6 +41,11 @@ struct SettingsView: View {
     @State private var showFormatPicker = false
     @State private var showLibraryShelves = false
 
+    @State private var isRestoringPurchases = false
+    @State private var showRestoreAlert = false
+    @State private var restoreAlertTitle = ""
+    @State private var restoreAlertMessage = ""
+
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
 
     var body: some View {
@@ -50,6 +56,7 @@ struct SettingsView: View {
                     playerSection
                     audioSection
                     librarySection
+                    purchasesSection
                     aboutSection
                 }
                 // No root navigationTitle — on a tvOS list root it renders as
@@ -73,6 +80,11 @@ struct SettingsView: View {
                     os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
                     settings.saveSettings()
                     onAudioFormatChanged()
+                }
+                .alert(restoreAlertTitle, isPresented: $showRestoreAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text(restoreAlertMessage)
                 }
             }
         }
@@ -171,6 +183,62 @@ struct SettingsView: View {
             .tvListRow()
         } header: {
             Text("Library").tvSectionHeader()
+        }
+    }
+
+    // MARK: - Purchases
+
+    /// App Review Guideline 3.1.1: the iOS and tvOS apps share one App Store
+    /// record (universal purchase), so the iOS icon-pack IAP is listed on the
+    /// tvOS product page and the tvOS app must offer an explicit "Restore
+    /// Purchases" action even though it sells nothing itself. `AppStore.sync()`
+    /// is StoreKit 2's restore: it re-syncs the signed-in account's
+    /// transactions onto this device.
+    private var purchasesSection: some View {
+        Section {
+            Button {
+                restorePurchases()
+            } label: {
+                HStack {
+                    Label(
+                        isRestoringPurchases ? "Restoring…" : "Restore Purchases",
+                        systemImage: "arrow.clockwise.circle"
+                    )
+                    if isRestoringPurchases {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .tvListRow()
+            .disabled(isRestoringPurchases)
+        } header: {
+            Text("Purchases").tvSectionHeader()
+        } footer: {
+            Text("Purchases made in LyrPlay on iPhone or iPad are shared with this Apple TV automatically.")
+        }
+    }
+
+    private func restorePurchases() {
+        guard !isRestoringPurchases else { return }
+        isRestoringPurchases = true
+        Task {
+            defer { isRestoringPurchases = false }
+            do {
+                try await AppStore.sync()
+                os_log(.info, log: logger, "Restore purchases: sync complete")
+                restoreAlertTitle = "Restore Complete"
+                restoreAlertMessage = "Your previous purchases have been restored to this Apple TV."
+                showRestoreAlert = true
+            } catch StoreKitError.userCancelled {
+                os_log(.info, log: logger, "Restore purchases: user cancelled")
+            } catch {
+                os_log(.error, log: logger, "Restore purchases failed: %{public}s", error.localizedDescription)
+                restoreAlertTitle = "Restore Failed"
+                restoreAlertMessage = error.localizedDescription
+                showRestoreAlert = true
+            }
         }
     }
 
