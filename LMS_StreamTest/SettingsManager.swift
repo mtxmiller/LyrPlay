@@ -533,6 +533,7 @@ class SettingsManager: ObservableObject {
             host: cleanHost,
             port: webPort,
             useHTTPS: false,
+            allowSelfSignedCert: false,
             authHeader: authHeader
         )
         switch webTestResult {
@@ -568,6 +569,7 @@ class SettingsManager: ObservableObject {
         host: String,
         port: Int,
         useHTTPS: Bool,
+        allowSelfSignedCert: Bool,
         authHeader: String?
     ) async -> PortTestResult {
         let urlString = LMSConnections.buildURLString(
@@ -591,7 +593,7 @@ class SettingsManager: ObservableObject {
         request.timeoutInterval = connectionTimeout
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.lms(host: host, allowSelfSignedCert: allowSelfSignedCert).data(for: request)
 
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode < 400 {

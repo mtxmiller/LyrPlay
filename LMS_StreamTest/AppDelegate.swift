@@ -196,7 +196,7 @@ class SiriMediaHandler: NSObject, INPlayMediaIntentHandling {
             return
         }
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.lms.dataTask(with: request) { data, _, error in
             guard let data = data, error == nil,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 completion(nil)

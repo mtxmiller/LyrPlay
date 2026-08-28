@@ -7,3 +7,13 @@ enum LMSConnections {
         return "\(scheme)://\(host):\(port)\(normalizedPath)"
     }
 }
+
+extension URLSession {
+    static func lms(host: String, allowSelfSignedCert: Bool) -> URLSession {
+        return URLSession.shared
+    }
+
+    static var lms: URLSession {
+        return URLSession.shared
+    }
+}

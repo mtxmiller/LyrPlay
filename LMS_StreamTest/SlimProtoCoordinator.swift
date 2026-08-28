@@ -1783,7 +1783,7 @@ extension SlimProtoCoordinator {
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        URLSession.lms.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 self?.parseServerTimeResponse(data: data, error: error)
             }
@@ -2123,7 +2123,7 @@ extension SlimProtoCoordinator {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.lms.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
                     os_log(.error, log: self.logger, "JSON-RPC %{public}s failed: %{public}s", command, error.localizedDescription)
@@ -2190,7 +2190,7 @@ extension SlimProtoCoordinator {
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.lms.dataTask(with: request) { data, response, error in
             if let error = error {
                 os_log(.error, log: self.logger, "❌ JSON-RPC request failed: %{public}s", error.localizedDescription)
                 completion([:])
@@ -2635,7 +2635,7 @@ extension SlimProtoCoordinator {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.lms.dataTask(with: request) { data, response, error in
             if let error = error {
                 os_log(.error, log: self.logger, "Enhanced metadata request failed: %{public}s", error.localizedDescription)
                 return

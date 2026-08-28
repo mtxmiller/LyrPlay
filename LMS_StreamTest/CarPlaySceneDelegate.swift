@@ -884,7 +884,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        URLSession.lms.dataTask(with: request) { data, _, _ in
             if let data = data, let image = UIImage(data: data) {
                 completion(image)
             } else {
@@ -2344,7 +2344,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var request = URLRequest(url: url)
         request.timeoutInterval = 4.0
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.lms.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 if let data = data, error == nil, let image = UIImage(data: data) {
                     completion(image)
@@ -2493,7 +2493,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             var request = URLRequest(url: url)
             request.timeoutInterval = 3.0
 
-            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            URLSession.lms.dataTask(with: request) { [weak self] data, response, error in
                 defer { group.leave() }
 
                 if let error = error {
