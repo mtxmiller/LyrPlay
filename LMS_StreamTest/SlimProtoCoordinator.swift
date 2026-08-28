@@ -1765,9 +1765,7 @@ extension SlimProtoCoordinator {
             return
         }
         
-        let webPort = settings.activeServerWebPort
-        let host = settings.activeServerHost
-        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
+        guard let url = URL(string: settings.buildURLString(path: "/jsonrpc.js")) else {
             return
         }
         
@@ -2108,9 +2106,7 @@ extension SlimProtoCoordinator {
             return
         }
         
-        let webPort = settings.activeServerWebPort
-        let host = settings.activeServerHost
-        guard let url = URL(string: "http://\(host):\(webPort)/jsonrpc.js") else {
+        guard let url = URL(string: settings.buildURLString(path: "/jsonrpc.js")) else {
             os_log(.error, log: logger, "Invalid server URL for JSON-RPC")
             return
         }
@@ -2171,7 +2167,7 @@ extension SlimProtoCoordinator {
         // CRITICAL FIX: Use direct LMS endpoint instead of Material's /material/jsonrpc.js
         // Material endpoint can apply commands to wrong player based on Material UI session state
         // Direct endpoint ensures player MAC in params[0] is always respected
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/jsonrpc.js"
+        let urlString = settings.buildURLString(path: "/jsonrpc.js")
         os_log(.debug, log: logger, "🌐 JSON-RPC URL: %{public}s", urlString)
         
         guard let url = URL(string: urlString) else {
@@ -2627,9 +2623,7 @@ extension SlimProtoCoordinator {
             return
         }
         
-        let webPort = settings.activeServerWebPort
-        let host = settings.activeServerHost
-        var request = URLRequest(url: URL(string: "http://\(host):\(webPort)/jsonrpc.js")!)
+        var request = URLRequest(url: URL(string: settings.buildURLString(path: "/jsonrpc.js"))!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
@@ -2698,9 +2692,9 @@ extension SlimProtoCoordinator {
                 // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
                 if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
-                    artworkURL = artwork.hasPrefix("http") ? artwork : "http://\(settings.activeServerHost):\(settings.activeServerWebPort)\(artwork)"
+                    artworkURL = artwork.hasPrefix("http") ? artwork : settings.buildURLString(path: artwork)
                 } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
-                    artworkURL = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverid)/cover.jpg"
+                    artworkURL = settings.buildURLString(path: "/music/\(coverid)/cover.jpg")
                 }
 
                 // Inject credentials for password-protected LMS servers

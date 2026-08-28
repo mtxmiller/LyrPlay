@@ -529,7 +529,12 @@ class SettingsManager: ObservableObject {
 
         // Note: Local network permission is triggered by server discovery UDP broadcasts
 
-        let webTestResult = await testHTTPConnection(host: cleanHost, port: webPort, authHeader: authHeader)
+        let webTestResult = await testHTTPConnection(
+            host: cleanHost,
+            port: webPort,
+            useHTTPS: false,
+            authHeader: authHeader
+        )
         switch webTestResult {
         case .offline(let msg):
             return .networkError(msg)
@@ -559,8 +564,18 @@ class SettingsManager: ObservableObject {
         case offline(String)
     }
 
-    private func testHTTPConnection(host: String, port: Int, authHeader: String?) async -> PortTestResult {
-        guard let url = URL(string: "http://\(host):\(port)/") else {
+    private func testHTTPConnection(
+        host: String,
+        port: Int,
+        useHTTPS: Bool,
+        authHeader: String?
+    ) async -> PortTestResult {
+        let urlString = LMSConnections.buildURLString(
+            useHTTPS: useHTTPS,
+            host: host,
+            port: port,
+            path: "/")
+        guard let url = URL(string: urlString) else {
             return .failure("Invalid URL format")
         }
 
@@ -691,7 +706,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Computed Properties
     var webURL: String {
-        let baseURL = "http://\(activeServerHost):\(activeServerWebPort)/material/"
+        let baseURL = buildURLString(path: "/material/")
         // Inject credentials for authenticated servers (Material's AJAX calls need them)
         return injectCredentialsIntoURL(baseURL)
     }
@@ -762,7 +777,11 @@ class SettingsManager: ObservableObject {
         }
         guard !activeServerHost.isEmpty else { return nil }
         let p = path.hasPrefix("/") ? path : "/\(path)"
-        return URL(string: "http://\(activeServerHost):\(activeServerWebPort)\(p)")
+        return URL(string: buildURLString(path: p))
+    }
+
+    func buildURLString(path: String) -> String {
+        LMSConnections.buildURLString(useHTTPS: false, host: activeServerHost, port: activeServerWebPort, path: path)
     }
 
     /// Reconcile a freshly-fetched plugin-shelf registry against persisted

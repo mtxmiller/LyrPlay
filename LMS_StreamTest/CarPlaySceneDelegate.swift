@@ -901,7 +901,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         let settings = SettingsManager.shared
         // Request 200x200 thumbnail for CarPlay list views — full-res is too slow
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverID)/cover_200x200_o.jpg"
+        let urlString = settings.buildURLString(path: "/music/\(coverID)/cover_200x200_o.jpg")
 
         guard let url = URL(string: urlString) else {
             completion(nil)
@@ -2335,7 +2335,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Request 100x100 thumbnail — CarPlay grid images are small.
         // Full-res cover art (1000x1000+) was causing 9s+ load times.
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
+        let urlString = settings.buildURLString(path: "/music/\(artworkId)/cover_200x200_o.jpg")
         guard let url = URL(string: urlString) else {
             completion(nil)
             return
@@ -2474,7 +2474,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 continue
             }
 
-            let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
+            let urlString = settings.buildURLString(path: "/music/\(artworkId)/cover_200x200_o.jpg")
 
             guard let url = URL(string: urlString) else {
                 os_log(.error, log: self.logger, "❌ Invalid artwork URL for album ID: %{public}s", album.id)
