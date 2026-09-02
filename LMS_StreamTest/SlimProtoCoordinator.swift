@@ -2692,9 +2692,9 @@ extension SlimProtoCoordinator {
                 // SIMPLIFIED: Basic artwork detection
                 var artworkURL: String? = nil
                 if let artwork = firstTrack["artwork_url"] as? String, !artwork.isEmpty {
-                    artworkURL = artwork.hasPrefix("http") ? artwork : settings.buildURLString(path: artwork)
+                    artworkURL = settings.absoluteServerURL(artwork)?.absoluteString
                 } else if let coverid = firstTrack["coverid"] as? String, !coverid.isEmpty, coverid != "0" {
-                    artworkURL = settings.buildURLString(path: "/music/\(coverid)/cover.jpg")
+                    artworkURL = settings.absoluteServerURL("/music/\(coverid)/cover.jpg")?.absoluteString
                 }
 
                 // Inject credentials for password-protected LMS servers

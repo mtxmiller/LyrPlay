@@ -382,7 +382,12 @@ class SettingsManager: ObservableObject {
     
     func saveSettings() {
         os_log(.info, log: logger, "Saving settings to UserDefaults")
-        
+
+        // Self-signed trust is meaningless without HTTPS; normalize here so no
+        // save path can persist a dormant cert bypass.
+        if !serverWebUseHTTPS { serverAllowSelfSignedCert = false }
+        if !backupServerWebUseHTTPS { backupServerAllowSelfSignedCert = false }
+
         UserDefaults.standard.set(serverHost, forKey: Keys.serverHost)
         UserDefaults.standard.set(serverWebPort, forKey: Keys.serverWebPort)
         UserDefaults.standard.set(serverWebUseHTTPS, forKey: Keys.serverWebUseHTTPS)

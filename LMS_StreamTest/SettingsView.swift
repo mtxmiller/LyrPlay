@@ -744,6 +744,8 @@ struct ServerConfigView: View {
             serverHost = settings.serverHost
             serverUsername = settings.serverUsername
             serverPassword = settings.serverPassword
+            webUseHTTPS = settings.serverWebUseHTTPS
+            allowSelfSignedCert = settings.serverAllowSelfSignedCert
         }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet(
@@ -754,8 +756,8 @@ struct ServerConfigView: View {
                         host: typed,
                         webPort: settings.serverWebPort,
                         slimProtoPort: settings.serverSlimProtoPort,
-                        webUseHTTPS: settings.serverWebUseHTTPS,
-                        allowSelfSignedCert: settings.serverAllowSelfSignedCert,
+                        webUseHTTPS: webUseHTTPS,
+                        allowSelfSignedCert: webUseHTTPS ? allowSelfSignedCert : false,
                         authHeader: auth
                     )
                     return (typed, settings.serverWebPort, settings.serverSlimProtoPort, r)

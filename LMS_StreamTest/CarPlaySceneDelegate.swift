@@ -923,7 +923,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// For local `music/<id>/cover.*` art, rewrite to the `cover_200x200_o.*`
     /// thumbnail variant. `/imageproxy/` and plugin icons pass through unresized
     /// (server sends them small). Returns nil for nil/empty.
-    static func favoriteArtworkURL(from icon: String?, host: String, port: Int) -> URL? {
+    static func favoriteArtworkURL(from icon: String?, host: String, port: Int, useHTTPS: Bool = false) -> URL? {
         guard let raw = icon, !raw.isEmpty else { return nil }
 
         // Absolute URL — use verbatim.
@@ -941,7 +941,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         var components = URLComponents()
-        components.scheme = "http"
+        components.scheme = useHTTPS ? "https" : "http"
         components.host = host
         components.port = port
         let prefixed = path.hasPrefix("/") ? path : "/" + path
@@ -1119,7 +1119,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             guard let url = CarPlaySceneDelegate.favoriteArtworkURL(
                 from: favorite.icon,
                 host: settings.activeServerHost,
-                port: settings.activeServerWebPort
+                port: settings.activeServerWebPort,
+                useHTTPS: settings.activeServerWebUseHTTPS
             ) else { continue }
             fetchImage(url: url) { image in
                 guard let image = image else { return }

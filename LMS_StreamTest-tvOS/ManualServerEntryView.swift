@@ -195,6 +195,8 @@ struct ManualServerEntryView: View {
                 host: host,
                 webPort: port,
                 slimProtoPort: 3483,
+                webUseHTTPS: false,
+                allowSelfSignedCert: false,
                 authHeader: nil
             )
 
