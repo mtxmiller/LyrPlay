@@ -12,6 +12,8 @@ class SettingsManager: ObservableObject {
     // MARK: - Published Properties
     @Published var serverHost: String = ""
     @Published var serverWebPort: Int = 9000
+    @Published var serverWebUseHTTPS: Bool = false
+    @Published var serverAllowSelfSignedCert: Bool = false
     @Published var serverSlimProtoPort: Int = 3483
     @Published var playerName: String = ""
     @Published var connectionTimeout: TimeInterval = 8.0
@@ -24,6 +26,8 @@ class SettingsManager: ObservableObject {
     @Published var shouldReloadWebView: Bool = false
     @Published var backupServerHost: String = ""
     @Published var backupServerWebPort: Int = 9000
+    @Published var backupServerWebUseHTTPS: Bool = false
+    @Published var backupServerAllowSelfSignedCert: Bool = false
     @Published var backupServerSlimProtoPort: Int = 3483
     @Published var isBackupServerEnabled: Bool = false
     @Published var automaticFailoverEnabled: Bool = true
@@ -145,6 +149,8 @@ class SettingsManager: ObservableObject {
     private enum Keys {
         static let serverHost = "ServerHost"
         static let serverWebPort = "ServerWebPort"
+        static let serverWebUseHTTPS = "ServerWebUseHTTPS"
+        static let serverAllowSelfSignedCert = "ServerAllowSelfSignedCert"
         static let serverSlimProtoPort = "ServerSlimProtoPort"
         static let playerName = "PlayerName"
         static let playerMACAddress = "PlayerMACAddress"
@@ -157,6 +163,8 @@ class SettingsManager: ObservableObject {
         static let showFallbackSettingsButton = "ShowFallbackSettingsButton"
         static let backupServerHost = "BackupServerHost"
         static let backupServerWebPort = "BackupServerWebPort"
+        static let backupServerWebUseHTTPS = "BackupServerWebUseHTTPS"
+        static let backupServerAllowSelfSignedCert = "BackupServerAllowSelfSignedCert"
         static let backupServerSlimProtoPort = "BackupServerSlimProtoPort"
         static let isBackupServerEnabled = "IsBackupServerEnabled"
         static let automaticFailoverEnabled = "AutomaticFailoverEnabled"
@@ -304,6 +312,8 @@ class SettingsManager: ObservableObject {
         
         serverHost = UserDefaults.standard.string(forKey: Keys.serverHost) ?? ""
         serverWebPort = UserDefaults.standard.object(forKey: Keys.serverWebPort) as? Int ?? 9000
+        serverWebUseHTTPS = UserDefaults.standard.object(forKey: Keys.serverWebUseHTTPS) as? Bool ?? false
+        serverAllowSelfSignedCert = UserDefaults.standard.object(forKey: Keys.serverAllowSelfSignedCert) as? Bool ?? false
         serverSlimProtoPort = UserDefaults.standard.object(forKey: Keys.serverSlimProtoPort) as? Int ?? 3483
         playerName = UserDefaults.standard.string(forKey: Keys.playerName) ?? ""
         playerMACAddress = UserDefaults.standard.string(forKey: Keys.playerMACAddress) ?? ""
@@ -315,6 +325,8 @@ class SettingsManager: ObservableObject {
         showFallbackSettingsButton = UserDefaults.standard.object(forKey: Keys.showFallbackSettingsButton) as? Bool ?? true
         backupServerHost = UserDefaults.standard.string(forKey: Keys.backupServerHost) ?? ""
         backupServerWebPort = UserDefaults.standard.object(forKey: Keys.backupServerWebPort) as? Int ?? 9000
+        backupServerWebUseHTTPS = UserDefaults.standard.object(forKey: Keys.backupServerWebUseHTTPS) as? Bool ?? false
+        backupServerAllowSelfSignedCert = UserDefaults.standard.object(forKey: Keys.backupServerAllowSelfSignedCert) as? Bool ?? false
         backupServerSlimProtoPort = UserDefaults.standard.object(forKey: Keys.backupServerSlimProtoPort) as? Int ?? 3483
         isBackupServerEnabled = UserDefaults.standard.bool(forKey: Keys.isBackupServerEnabled)
         automaticFailoverEnabled = UserDefaults.standard.object(forKey: Keys.automaticFailoverEnabled) as? Bool ?? true
@@ -370,9 +382,16 @@ class SettingsManager: ObservableObject {
     
     func saveSettings() {
         os_log(.info, log: logger, "Saving settings to UserDefaults")
-        
+
+        // Self-signed trust is meaningless without HTTPS; normalize here so no
+        // save path can persist a dormant cert bypass.
+        if !serverWebUseHTTPS { serverAllowSelfSignedCert = false }
+        if !backupServerWebUseHTTPS { backupServerAllowSelfSignedCert = false }
+
         UserDefaults.standard.set(serverHost, forKey: Keys.serverHost)
         UserDefaults.standard.set(serverWebPort, forKey: Keys.serverWebPort)
+        UserDefaults.standard.set(serverWebUseHTTPS, forKey: Keys.serverWebUseHTTPS)
+        UserDefaults.standard.set(serverAllowSelfSignedCert, forKey: Keys.serverAllowSelfSignedCert)
         UserDefaults.standard.set(serverSlimProtoPort, forKey: Keys.serverSlimProtoPort)
         UserDefaults.standard.set(playerName, forKey: Keys.playerName)
         UserDefaults.standard.set(playerMACAddress, forKey: Keys.playerMACAddress)
@@ -385,6 +404,8 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(showFallbackSettingsButton, forKey: Keys.showFallbackSettingsButton)
         UserDefaults.standard.set(backupServerHost, forKey: Keys.backupServerHost)
         UserDefaults.standard.set(backupServerWebPort, forKey: Keys.backupServerWebPort)
+        UserDefaults.standard.set(backupServerWebUseHTTPS, forKey: Keys.backupServerWebUseHTTPS)
+        UserDefaults.standard.set(backupServerAllowSelfSignedCert, forKey: Keys.backupServerAllowSelfSignedCert)
         UserDefaults.standard.set(backupServerSlimProtoPort, forKey: Keys.backupServerSlimProtoPort)
         UserDefaults.standard.set(isBackupServerEnabled, forKey: Keys.isBackupServerEnabled)
         UserDefaults.standard.set(automaticFailoverEnabled, forKey: Keys.automaticFailoverEnabled)
@@ -518,6 +539,8 @@ class SettingsManager: ObservableObject {
         host: String,
         webPort: Int,
         slimProtoPort: Int,
+        webUseHTTPS: Bool,
+        allowSelfSignedCert: Bool,
         authHeader: String?
     ) async -> ConnectionTestResult {
         os_log(.info, log: logger, "Testing connection to %{public}s", host)
@@ -529,7 +552,13 @@ class SettingsManager: ObservableObject {
 
         // Note: Local network permission is triggered by server discovery UDP broadcasts
 
-        let webTestResult = await testHTTPConnection(host: cleanHost, port: webPort, authHeader: authHeader)
+        let webTestResult = await testHTTPConnection(
+            host: cleanHost,
+            port: webPort,
+            useHTTPS: webUseHTTPS,
+            allowSelfSignedCert: allowSelfSignedCert,
+            authHeader: authHeader
+        )
         switch webTestResult {
         case .offline(let msg):
             return .networkError(msg)
@@ -559,8 +588,19 @@ class SettingsManager: ObservableObject {
         case offline(String)
     }
 
-    private func testHTTPConnection(host: String, port: Int, authHeader: String?) async -> PortTestResult {
-        guard let url = URL(string: "http://\(host):\(port)/") else {
+    private func testHTTPConnection(
+        host: String,
+        port: Int,
+        useHTTPS: Bool,
+        allowSelfSignedCert: Bool,
+        authHeader: String?
+    ) async -> PortTestResult {
+        let urlString = LMSConnections.buildURLString(
+            useHTTPS: useHTTPS,
+            host: host,
+            port: port,
+            path: "/")
+        guard let url = URL(string: urlString) else {
             return .failure("Invalid URL format")
         }
 
@@ -576,7 +616,7 @@ class SettingsManager: ObservableObject {
         request.timeoutInterval = connectionTimeout
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.lms(host: host, allowSelfSignedCert: allowSelfSignedCert).data(for: request)
 
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode < 400 {
@@ -669,12 +709,16 @@ class SettingsManager: ObservableObject {
         playerName = Self.defaultPlayerName
         isConfigured = false
         serverWebPort = 9000
+        serverWebUseHTTPS = false
+        serverAllowSelfSignedCert = false
         serverSlimProtoPort = 3483
         connectionTimeout = 10.0
 
         // CRITICAL FIX: Reset backup server settings
         backupServerHost = ""
         backupServerWebPort = 9000
+        backupServerWebUseHTTPS = false
+        backupServerAllowSelfSignedCert = false
         backupServerSlimProtoPort = 3483
         isBackupServerEnabled = false
         automaticFailoverEnabled = true
@@ -691,7 +735,7 @@ class SettingsManager: ObservableObject {
     
     // MARK: - Computed Properties
     var webURL: String {
-        let baseURL = "http://\(activeServerHost):\(activeServerWebPort)/material/"
+        let baseURL = buildURLString(path: "/material/")
         // Inject credentials for authenticated servers (Material's AJAX calls need them)
         return injectCredentialsIntoURL(baseURL)
     }
@@ -729,6 +773,14 @@ class SettingsManager: ObservableObject {
         return currentActiveServer == .primary ? serverHost : backupServerHost
     }
 
+    var activeServerWebUseHTTPS: Bool {
+        return currentActiveServer == .primary ? serverWebUseHTTPS : backupServerWebUseHTTPS
+    }
+
+    var activeServerAllowSelfSignedCert: Bool {
+        return currentActiveServer == .primary ? serverAllowSelfSignedCert : backupServerAllowSelfSignedCert
+    }
+
     var activeServerWebPort: Int {
         return currentActiveServer == .primary ? serverWebPort : backupServerWebPort
     }
@@ -762,7 +814,11 @@ class SettingsManager: ObservableObject {
         }
         guard !activeServerHost.isEmpty else { return nil }
         let p = path.hasPrefix("/") ? path : "/\(path)"
-        return URL(string: "http://\(activeServerHost):\(activeServerWebPort)\(p)")
+        return URL(string: buildURLString(path: p))
+    }
+
+    func buildURLString(path: String) -> String {
+        LMSConnections.buildURLString(useHTTPS: activeServerWebUseHTTPS, host: activeServerHost, port: activeServerWebPort, path: path)
     }
 
     /// Reconcile a freshly-fetched plugin-shelf registry against persisted

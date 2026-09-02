@@ -207,6 +207,8 @@ struct ServerSetupView: View {
     @State private var slimProtoPort = "3483"
     @State private var serverUsername = ""
     @State private var serverPassword = ""
+    @State private var webUseHTTPS = false
+    @State private var allowSelfSignedCert = false
     @State private var showAuthSection = false
     @State private var validationErrors: [String] = []
     @State private var isDiscovering = false
@@ -289,7 +291,7 @@ struct ServerSetupView: View {
                         )
                     }
 
-                    // Authentication (Optional)
+                    // Authentication + HTTPS (Optional)
                     DisclosureGroup(
                         isExpanded: $showAuthSection,
                         content: {
@@ -326,6 +328,19 @@ struct ServerSetupView: View {
                                     .buttonStyle(SecondaryButtonStyle())
                                     .font(.caption)
                                 }
+
+                                Toggle("Use HTTPS for web interface", isOn: $webUseHTTPS)
+                                    .toggleStyle(SwitchToggleStyle(tint: .blue))
+                                    .foregroundColor(.white)
+
+                                Toggle("Allow self-signed certificate", isOn: $allowSelfSignedCert)
+                                    .toggleStyle(SwitchToggleStyle(tint: .blue))
+                                    .foregroundColor(.white)
+                                    .disabled(!webUseHTTPS)
+
+                                Text("Warning: SlimProto stream/control port remains unencrypted even when HTTPS is enabled.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                             .padding(.top, 12)
                         },
@@ -335,7 +350,7 @@ struct ServerSetupView: View {
                                     .foregroundColor(.blue)
                                     .font(.system(size: 16))
 
-                                Text("Advanced: Authentication (Optional)")
+                                Text("Advanced: Authentication & HTTPS")
                                     .font(.subheadline)
                                     .foregroundColor(.white)
 
@@ -753,9 +768,11 @@ struct ServerSetupView: View {
         slimProtoPort = String(settings.activeServerSlimProtoPort)
         serverUsername = settings.serverUsername
         serverPassword = settings.serverPassword
+        webUseHTTPS = settings.serverWebUseHTTPS
+        allowSelfSignedCert = settings.serverAllowSelfSignedCert
 
         // Auto-expand auth section if credentials exist
-        showAuthSection = !serverUsername.isEmpty
+        showAuthSection = !serverUsername.isEmpty || webUseHTTPS || allowSelfSignedCert
     }
     
     private func validateAndProceed() {
@@ -786,6 +803,8 @@ struct ServerSetupView: View {
         settings.serverSlimProtoPort = slimPortInt
         settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.serverPassword = serverPassword
+        settings.serverWebUseHTTPS = webUseHTTPS
+        settings.serverAllowSelfSignedCert = webUseHTTPS ? allowSelfSignedCert : false
 
         // saveSettings() will automatically save credentials to Keychain
         settings.saveSettings()
@@ -924,6 +943,8 @@ struct ConnectionTestView: View {
                 host: settings.serverHost,
                 webPort: settings.serverWebPort,
                 slimProtoPort: settings.serverSlimProtoPort,
+                webUseHTTPS: settings.serverWebUseHTTPS,
+                allowSelfSignedCert: settings.serverAllowSelfSignedCert,
                 authHeader: auth
             )
 

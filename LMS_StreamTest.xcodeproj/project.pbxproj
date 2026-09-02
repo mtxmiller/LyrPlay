@@ -113,6 +113,7 @@
 				AudioManager.swift,
 				AudioPlayer.swift,
 				AudioStreamDecoder.swift,
+				Connections.swift,
 				KeychainManager.swift,
 				MonotonicGate.swift,
 				NowPlayingManager.swift,

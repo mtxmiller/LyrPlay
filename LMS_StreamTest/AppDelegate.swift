@@ -173,10 +173,8 @@ class SiriMediaHandler: NSObject, INPlayMediaIntentHandling {
 
     private func sendJSONRPC(_ command: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
         let settings = SettingsManager.shared
-        let host = settings.activeServerHost
-        let port = settings.activeServerWebPort
 
-        guard let url = URL(string: "http://\(host):\(port)/jsonrpc.js") else {
+        guard let url = URL(string: settings.buildURLString(path: "/jsonrpc.js")) else {
             completion(nil)
             return
         }
@@ -198,7 +196,7 @@ class SiriMediaHandler: NSObject, INPlayMediaIntentHandling {
             return
         }
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.lms.dataTask(with: request) { data, _, error in
             guard let data = data, error == nil,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 completion(nil)

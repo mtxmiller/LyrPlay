@@ -1179,6 +1179,18 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        func webView(
+            _ webView: WKWebView,
+            didReceive challenge: URLAuthenticationChallenge,
+            completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+        ) {
+            LMSConnections.handleWebViewChallenge(
+                settings: SettingsManager.shared,
+                challenge: challenge,
+                completionHandler: completionHandler
+            )
+        }
+
         // MARK: - Handle Direct URL Navigation (Alternative Method)
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             
