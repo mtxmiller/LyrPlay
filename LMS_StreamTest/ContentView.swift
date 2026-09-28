@@ -37,13 +37,6 @@ struct ContentView: View {
         ProcessInfo.processInfo.isiOSAppOnMac
     }
 
-    /// Get the device's top safe area inset (status bar / notch / Dynamic Island height)
-    private var topSafeAreaInset: CGFloat {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = windowScene.windows.first else { return 0 }
-        return window.safeAreaInsets.top
-    }
-
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
 
@@ -488,7 +481,12 @@ struct ContentView: View {
 
         // Material topPad: tells Material to extend toolbar background into the status bar area
         // while keeping interactive elements below it (toolbar icons, nav drawer items, etc.)
-        let topPad = Int(topSafeAreaInset)
+        // Use the GeometryReader-captured inset, NOT UIWindow.safeAreaInsets: reading the
+        // window inset during body evaluation makes UIKit query the hosting controller's
+        // status-bar preference, re-entering the view graph mid-update (AttributeGraph
+        // cycle) — the main screen then stops updating and stays on the loading screen.
+        // A 0 inset on first pass is fine: updateUIView/didCommit re-inject topPad via JS.
+        let topPad = Int(topInset)
         let topPadParam = topPad > 0 ? "&topPad=\(topPad)" : ""
 
         // Add Material skin query parameters:
