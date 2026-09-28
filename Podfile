@@ -1,5 +1,5 @@
 target 'LMS_StreamTest' do
-  platform :ios, '14.0'
+  platform :ios, '15.6'
   use_frameworks!
 
   pod 'CocoaAsyncSocket', '~> 7.6'
@@ -37,7 +37,7 @@ post_install do |installer|
       if target.platform_name.to_s == 'tvos'
         config.build_settings['TVOS_DEPLOYMENT_TARGET'] = '15.0'
       else
-        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.6'
       end
     end
   end
