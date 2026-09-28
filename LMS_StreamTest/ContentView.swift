@@ -1131,8 +1131,52 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        // MARK: - HTTP error responses (main frame)
+        /// Set when we cancel a main-frame load for an HTTP error status, so the
+        /// "frame load interrupted" failure WebKit reports next doesn't overwrite our message.
+        private var cancelledForHTTPError = false
+
+        // A 4xx/5xx main-frame response (e.g. a reverse proxy's "Client sent an HTTP request
+        // to an HTTPS server") otherwise commits like a normal page: the loading screen clears
+        // onto an error page with no Material UI and no route to Settings. Treat it as a
+        // failed connection so the error overlay + Check Settings appear.
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            guard navigationResponse.isForMainFrame,
+                  let httpResponse = navigationResponse.response as? HTTPURLResponse,
+                  httpResponse.statusCode >= 400 else {
+                decisionHandler(.allow)
+                return
+            }
+
+            let status = httpResponse.statusCode
+            os_log(.error, log: logger, "❌ Main frame HTTP %d - treating as connection failure", status)
+            cancelledForHTTPError = true
+            decisionHandler(.cancel)
+
+            let message: String
+            if status == 401 {
+                message = "Authentication failed - Wrong username or password"
+            } else if status == 400 && !SettingsManager.shared.activeServerWebUseHTTPS {
+                message = "Server rejected the request (HTTP 400). If it requires HTTPS, turn on \"Use HTTPS\" in Server Config."
+            } else {
+                message = "Server returned HTTP \(status)"
+            }
+
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
+                self.parent.loadError = message
+                self.parent.hasConnectionError = true
+                SettingsManager.shared.showFallbackSettingsButton = true
+            }
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed provisional navigation: %{public}s", error.localizedDescription)
+
+            if cancelledForHTTPError {
+                cancelledForHTTPError = false
+                return
+            }
 
             // Detect HTTP authentication errors (401) and other HTTP failures
             var isAuthError = false
