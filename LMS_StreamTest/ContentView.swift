@@ -37,13 +37,6 @@ struct ContentView: View {
         ProcessInfo.processInfo.isiOSAppOnMac
     }
 
-    /// Get the device's top safe area inset (status bar / notch / Dynamic Island height)
-    private var topSafeAreaInset: CGFloat {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = windowScene.windows.first else { return 0 }
-        return window.safeAreaInsets.top
-    }
-
     init() {
         os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"), "ContentView initializing with Material Settings Integration")
 
@@ -488,7 +481,12 @@ struct ContentView: View {
 
         // Material topPad: tells Material to extend toolbar background into the status bar area
         // while keeping interactive elements below it (toolbar icons, nav drawer items, etc.)
-        let topPad = Int(topSafeAreaInset)
+        // Use the GeometryReader-captured inset, NOT UIWindow.safeAreaInsets: reading the
+        // window inset during body evaluation makes UIKit query the hosting controller's
+        // status-bar preference, re-entering the view graph mid-update (AttributeGraph
+        // cycle) — the main screen then stops updating and stays on the loading screen.
+        // A 0 inset on first pass is fine: updateUIView/didCommit re-inject topPad via JS.
+        let topPad = Int(topInset)
         let topPadParam = topPad > 0 ? "&topPad=\(topPad)" : ""
 
         // Add Material skin query parameters:
@@ -1133,8 +1131,52 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        // MARK: - HTTP error responses (main frame)
+        /// Set when we cancel a main-frame load for an HTTP error status, so the
+        /// "frame load interrupted" failure WebKit reports next doesn't overwrite our message.
+        private var cancelledForHTTPError = false
+
+        // A 4xx/5xx main-frame response (e.g. a reverse proxy's "Client sent an HTTP request
+        // to an HTTPS server") otherwise commits like a normal page: the loading screen clears
+        // onto an error page with no Material UI and no route to Settings. Treat it as a
+        // failed connection so the error overlay + Check Settings appear.
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            guard navigationResponse.isForMainFrame,
+                  let httpResponse = navigationResponse.response as? HTTPURLResponse,
+                  httpResponse.statusCode >= 400 else {
+                decisionHandler(.allow)
+                return
+            }
+
+            let status = httpResponse.statusCode
+            os_log(.error, log: logger, "❌ Main frame HTTP %d - treating as connection failure", status)
+            cancelledForHTTPError = true
+            decisionHandler(.cancel)
+
+            let message: String
+            if status == 401 {
+                message = "Authentication failed - Wrong username or password"
+            } else if status == 400 && !SettingsManager.shared.activeServerWebUseHTTPS {
+                message = "Server rejected the request (HTTP 400). If it requires HTTPS, turn on \"Use HTTPS\" in Server Config."
+            } else {
+                message = "Server returned HTTP \(status)"
+            }
+
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
+                self.parent.loadError = message
+                self.parent.hasConnectionError = true
+                SettingsManager.shared.showFallbackSettingsButton = true
+            }
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed provisional navigation: %{public}s", error.localizedDescription)
+
+            if cancelledForHTTPError {
+                cancelledForHTTPError = false
+                return
+            }
 
             // Detect HTTP authentication errors (401) and other HTTP failures
             var isAuthError = false
@@ -1179,6 +1221,18 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        func webView(
+            _ webView: WKWebView,
+            didReceive challenge: URLAuthenticationChallenge,
+            completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+        ) {
+            LMSConnections.handleWebViewChallenge(
+                settings: SettingsManager.shared,
+                challenge: challenge,
+                completionHandler: completionHandler
+            )
+        }
+
         // MARK: - Handle Direct URL Navigation (Alternative Method)
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             

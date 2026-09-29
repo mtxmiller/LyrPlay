@@ -546,6 +546,8 @@ struct SettingsView: View {
                         host: settings.serverHost,
                         webPort: settings.serverWebPort,
                         slimProtoPort: settings.serverSlimProtoPort,
+                        webUseHTTPS: settings.serverWebUseHTTPS,
+                        allowSelfSignedCert: settings.serverAllowSelfSignedCert,
                         authHeader: auth
                     )
                     return (settings.serverHost, settings.serverWebPort, settings.serverSlimProtoPort, r)
@@ -556,6 +558,8 @@ struct SettingsView: View {
                         host: settings.backupServerHost,
                         webPort: settings.backupServerWebPort,
                         slimProtoPort: settings.backupServerSlimProtoPort,
+                        webUseHTTPS: settings.backupServerWebUseHTTPS,
+                        allowSelfSignedCert: settings.backupServerAllowSelfSignedCert,
                         authHeader: auth
                     )
                     return (settings.backupServerHost, settings.backupServerWebPort, settings.backupServerSlimProtoPort, r)
@@ -649,6 +653,8 @@ struct ServerConfigView: View {
     @State private var serverHost: String = ""
     @State private var serverUsername: String = ""
     @State private var serverPassword: String = ""
+    @State private var webUseHTTPS: Bool = false
+    @State private var allowSelfSignedCert: Bool = false
     @State private var validationErrors: [String] = []
     @State private var showingConnectionTest = false
     @State private var hasChanges = false
@@ -694,6 +700,19 @@ struct ServerConfigView: View {
                 }
             }
 
+            Section(header: Text("Web Security")) {
+                Toggle("Use HTTPS for web interface", isOn: $webUseHTTPS)
+                    .onChange(of: webUseHTTPS) { _ in hasChanges = true }
+
+                Toggle("Allow self-signed certificate", isOn: $allowSelfSignedCert)
+                    .disabled(!webUseHTTPS)
+                    .onChange(of: allowSelfSignedCert) { _ in hasChanges = true }
+
+                Text("Warning: SlimProto stream/control port remains unencrypted even when HTTPS is enabled.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             if !validationErrors.isEmpty {
                 Section(header: Text("Validation Errors")) {
                     ForEach(validationErrors, id: \.self) { error in
@@ -725,6 +744,8 @@ struct ServerConfigView: View {
             serverHost = settings.serverHost
             serverUsername = settings.serverUsername
             serverPassword = settings.serverPassword
+            webUseHTTPS = settings.serverWebUseHTTPS
+            allowSelfSignedCert = settings.serverAllowSelfSignedCert
         }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet(
@@ -735,6 +756,8 @@ struct ServerConfigView: View {
                         host: typed,
                         webPort: settings.serverWebPort,
                         slimProtoPort: settings.serverSlimProtoPort,
+                        webUseHTTPS: webUseHTTPS,
+                        allowSelfSignedCert: webUseHTTPS ? allowSelfSignedCert : false,
                         authHeader: auth
                     )
                     return (typed, settings.serverWebPort, settings.serverSlimProtoPort, r)
@@ -769,6 +792,8 @@ struct ServerConfigView: View {
         settings.serverHost = trimmedHost
         settings.serverUsername = serverUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.serverPassword = serverPassword
+        settings.serverWebUseHTTPS = webUseHTTPS
+        settings.serverAllowSelfSignedCert = webUseHTTPS ? allowSelfSignedCert : false
 
         settings.saveSettings()
         hasChanges = false
@@ -1325,6 +1350,8 @@ struct BackupServerConfigView: View {
     @State private var backupSlimPort: String = "3483"
     @State private var backupUsername: String = ""
     @State private var backupPassword: String = ""
+    @State private var backupWebUseHTTPS: Bool = false
+    @State private var backupAllowSelfSignedCert: Bool = false
     @State private var hasChanges = false
     @State private var validationErrors: [String] = []
     @State private var showingConnectionTest = false
@@ -1399,6 +1426,19 @@ struct BackupServerConfigView: View {
                 }
             }
 
+            Section(header: Text("Web Security")) {
+                Toggle("Use HTTPS for web interface", isOn: $backupWebUseHTTPS)
+                    .onChange(of: backupWebUseHTTPS) { _ in hasChanges = true }
+
+                Toggle("Allow self-signed certificate", isOn: $backupAllowSelfSignedCert)
+                    .disabled(!backupWebUseHTTPS)
+                    .onChange(of: backupAllowSelfSignedCert) { _ in hasChanges = true }
+
+                Text("Warning: SlimProto stream/control port remains unencrypted even when HTTPS is enabled.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             if !validationErrors.isEmpty {
                 Section(header: Text("Validation Errors")) {
                     ForEach(validationErrors, id: \.self) { error in
@@ -1442,6 +1482,8 @@ struct BackupServerConfigView: View {
                         host: host,
                         webPort: web,
                         slimProtoPort: slim,
+                        webUseHTTPS: backupWebUseHTTPS,
+                        allowSelfSignedCert: backupAllowSelfSignedCert,
                         authHeader: auth
                     )
                     return (host, web, slim, r)
@@ -1460,6 +1502,8 @@ struct BackupServerConfigView: View {
         backupSlimPort = String(settings.backupServerSlimProtoPort)
         backupUsername = settings.backupServerUsername
         backupPassword = settings.backupServerPassword
+        backupWebUseHTTPS = settings.backupServerWebUseHTTPS
+        backupAllowSelfSignedCert = settings.backupServerAllowSelfSignedCert
     }
     
     private func saveSettings() {
@@ -1487,6 +1531,8 @@ struct BackupServerConfigView: View {
         settings.backupServerSlimProtoPort = slimPortInt
         settings.backupServerUsername = backupUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         settings.backupServerPassword = backupPassword
+        settings.backupServerWebUseHTTPS = backupWebUseHTTPS
+        settings.backupServerAllowSelfSignedCert = backupAllowSelfSignedCert
         settings.saveSettings()
         hasChanges = false
         

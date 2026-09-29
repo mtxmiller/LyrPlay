@@ -884,7 +884,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        URLSession.lms.dataTask(with: request) { data, _, _ in
             if let data = data, let image = UIImage(data: data) {
                 completion(image)
             } else {
@@ -901,7 +901,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         let settings = SettingsManager.shared
         // Request 200x200 thumbnail for CarPlay list views — full-res is too slow
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(coverID)/cover_200x200_o.jpg"
+        let urlString = settings.buildURLString(path: "/music/\(coverID)/cover_200x200_o.jpg")
 
         guard let url = URL(string: urlString) else {
             completion(nil)
@@ -923,7 +923,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// For local `music/<id>/cover.*` art, rewrite to the `cover_200x200_o.*`
     /// thumbnail variant. `/imageproxy/` and plugin icons pass through unresized
     /// (server sends them small). Returns nil for nil/empty.
-    static func favoriteArtworkURL(from icon: String?, host: String, port: Int) -> URL? {
+    static func favoriteArtworkURL(from icon: String?, host: String, port: Int, useHTTPS: Bool = false) -> URL? {
         guard let raw = icon, !raw.isEmpty else { return nil }
 
         // Absolute URL — use verbatim.
@@ -941,7 +941,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
 
         var components = URLComponents()
-        components.scheme = "http"
+        components.scheme = useHTTPS ? "https" : "http"
         components.host = host
         components.port = port
         let prefixed = path.hasPrefix("/") ? path : "/" + path
@@ -1119,7 +1119,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             guard let url = CarPlaySceneDelegate.favoriteArtworkURL(
                 from: favorite.icon,
                 host: settings.activeServerHost,
-                port: settings.activeServerWebPort
+                port: settings.activeServerWebPort,
+                useHTTPS: settings.activeServerWebUseHTTPS
             ) else { continue }
             fetchImage(url: url) { image in
                 guard let image = image else { return }
@@ -2335,7 +2336,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Request 100x100 thumbnail — CarPlay grid images are small.
         // Full-res cover art (1000x1000+) was causing 9s+ load times.
-        let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
+        let urlString = settings.buildURLString(path: "/music/\(artworkId)/cover_200x200_o.jpg")
         guard let url = URL(string: urlString) else {
             completion(nil)
             return
@@ -2344,7 +2345,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         var request = URLRequest(url: url)
         request.timeoutInterval = 4.0
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.lms.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 if let data = data, error == nil, let image = UIImage(data: data) {
                     completion(image)
@@ -2474,7 +2475,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 continue
             }
 
-            let urlString = "http://\(settings.activeServerHost):\(settings.activeServerWebPort)/music/\(artworkId)/cover_200x200_o.jpg"
+            let urlString = settings.buildURLString(path: "/music/\(artworkId)/cover_200x200_o.jpg")
 
             guard let url = URL(string: urlString) else {
                 os_log(.error, log: self.logger, "❌ Invalid artwork URL for album ID: %{public}s", album.id)
@@ -2493,7 +2494,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             var request = URLRequest(url: url)
             request.timeoutInterval = 3.0
 
-            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            URLSession.lms.dataTask(with: request) { [weak self] data, response, error in
                 defer { group.leave() }
 
                 if let error = error {

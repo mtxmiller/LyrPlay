@@ -382,7 +382,7 @@ class NowPlayingManager: ObservableObject {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
-        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        let task = URLSession.lms.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
