@@ -14,12 +14,14 @@
 ## Build Commands
 
 ```bash
-pod install                          # Install dependencies (required after clone)
+# Pods/ is committed — run `pod install` only after changing the Podfile (CocoaPods may not be installed)
 xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest -configuration Debug build
 xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 ```
 
 **Always use `LMS_StreamTest.xcworkspace`**, never `.xcodeproj` (CocoaPods requirement).
+
+Xcode 27: tvOS builds need the Metal Toolchain for the visualizer shaders (`xcodebuild -downloadComponent MetalToolchain`).
 
 For the CLI build → install → launch loop on a connected iPhone, see the wiki at `Setup/iPhone Build Workflow.md`. Personal device IDs are kept in user-local Claude memory, not committed.
 
@@ -43,7 +45,7 @@ xcodebuild test -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest \
   -only-testing:LMS_StreamTestTests
 ```
 
-The full iOS unit suite passes. (The 3 `PlaybackSessionControllerTests` interruption/route-change tests that used to fail were stale assertions of pre-BASS-migration behavior — local pause/play + manual `setActive` — not an iOS 26 issue; rewritten to assert the current server-command behavior. bd `LMS_StreamTest-u91`, closed.) If unit tests fail, investigate — don't pre-attribute to a known-failing list.
+The full unit suites pass on both platforms. If a test fails, investigate — don't pre-attribute it to a known-failing list.
 
 Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) must be verified on **both** platforms.
 
@@ -56,6 +58,10 @@ Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) mu
 ## Issue Tracking
 
 This project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking. Use `bd` commands, not markdown TODOs. Run `bd ready --json` for available work, `bd create "title" -t bug|feature|task -p 0-4 --json` to file issues, `bd close <id>` to complete.
+
+## Commits & PRs
+
+**No Claude attribution** — no `Co-Authored-By: Claude` trailer, no `Claude-Session:` link, no "Generated with Claude Code" footer in commits, PR descriptions, GitHub comments, or release notes.
 
 ## Critical Rules
 
@@ -112,10 +118,12 @@ Atomic track+position recovery via JSON-RPC `playlist jump` with `timeOffset`. U
 - **Error handling**: Handle with recovery — this is a production app with real users. Don't just log errors.
 - **Audio formats**: FLAC, WAV, AAC, MP4A, MP3, Opus, OGG via BASS xcframeworks + bridging header
 - **IAP**: `PurchaseManager.swift` has StoreKit 2 with an icon pack product. Don't gate features behind IAP without explicit direction.
+- **Server requests**: build URLs with `settings.buildURLString(path:)` / `absoluteServerURL(_:)` (never hardcode `http://`) and send them through `URLSession.lms` (never `URLSession.shared`) so HTTPS and self-signed certificates work. See wiki `Architecture/HTTPS & Connections.md`.
+- **SwiftUI**: never read UIKit window/scene state (`UIWindow.safeAreaInsets`, `UIApplication.shared.connectedScenes`) inside `body` or properties it uses — it causes AttributeGraph cycles that freeze the view (the "stuck on Loading Material Interface" hang, twice). Use GeometryReader / environment values. Debug suspected cycles with `AG_TRAP_CYCLES=1`.
 
 ## Known Limitations
 
-- **FLAC seeking** — Was broken but now-functional with BASS push stream architecture. MP3, AAC, Opus, OGG, WAV seeking. Mitigation: [MobileTranscode](https://github.com/mtxmiller/MobileTranscode) LMS plugin provides server-side transcode rules for mobile clients — converts FLAC to seekable formats (AAC, MP3) and re-encodes FLAC with proper headers that enable seeking.
+- **FLAC seeking** — Works with the BASS push-stream architecture (MP3, AAC, Opus, OGG, WAV also seek). FLAC files with incomplete headers may still misbehave; the [MobileTranscode](https://github.com/mtxmiller/MobileTranscode) LMS plugin re-encodes FLAC with proper headers or transcodes to Opus/AAC/MP3.
 - **FLAC push stream data** — BASSFLAC 2.4.17.1 fixed `max_framesize=0` early termination via dedicated threading, but edge cases may remain.
 
 ## Reference Sources
@@ -145,85 +153,9 @@ Also: `Releases/` for shipped-feature changelogs, `Decisions/` for architectural
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+Skills are available for common workflows (e.g. `investigate` for bugs, `code-review` for reviews, `cut-build` for TestFlight builds). Use one when it clearly fits the request — don't force a skill onto a quick question or a simple push.
 
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+# Coding
 
-# Coding 
-
-## 1. Think Before Coding
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
----
-
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
-
+- **Surgical changes**: every changed line should trace to the request. Don't refactor or reformat adjacent code; mention unrelated dead code instead of deleting it. Remove only what your change made unused.
+- **Verify, don't assume**: for multi-step changes, state how each step will be verified (test, build on both platforms, or server-as-oracle check) and loop until it passes.

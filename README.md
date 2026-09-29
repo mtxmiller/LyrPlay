@@ -63,24 +63,9 @@ LyrPlay can play MP3/AAC/WAV and FLAC without additional plugins, but the Mobile
 - **Lower Data Usage** - Smaller file sizes for mobile streaming
 - **Full Seeking** - For manual seek and auto position reccovery on App-open
 
-### NOTE — Install Opus Tools (required for Opus transcoding):
+### NOTE — Opus Tools (required for Opus transcoding):
 
-```bash
-# Install opus-tools in your LMS container
-docker exec -it lms bash -c "apt-get update && apt-get install -y opus-tools"
-```
-
-### Enabling Opus on Docker Container startup
-
-- Create a script in your /"container folder"/config named **custom-init.sh** with below code
-- This will ensure Opus-tools are always enabled on your Lyrion Container
-
-```
-#!/bin/bash
-# Install opus-tools for Opus transcoding support
-apt-get update -qq
-apt-get install --no-install-recommends -qy opus-tools
-```
+The official Lyrion Docker image (`lmscommunity/lyrionmusicserver`) includes `opus-tools` since November 2025 — just use a current image. On older images or non-Docker installs, install `opus-tools` with your package manager (e.g. `apt-get install opus-tools`).
 
 ### NOTE — Disable "Prioritize Native Format" in LMS:
 
