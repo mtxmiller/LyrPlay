@@ -241,10 +241,14 @@ struct ContentView: View {
             // still need this. Fixes the cached scrollView.contentSize "half-sized" bug
             // (viewport=1080 but body=535) and re-injects topPad (the old code never did).
             if let webView = webView {
+                logWebViewViewport(webView, source: "foreground-before")
                 recalcWebViewLayout(webView)
                 injectTopPad(into: webView,
                              top: Int(webView.window?.safeAreaInsets.top ?? 0),
                              source: "willEnterForeground")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    logWebViewViewport(webView, source: "foreground+1s")
+                }
 
                 // Check if Material's Cometd connection is still alive after backgrounding.
                 // If dead, trigger reconnect via Material's own bus event (same path as
@@ -747,6 +751,40 @@ private func injectTopPad(into webView: WKWebView, top: Int, source: String) {
     })();
     """
     webView.evaluateJavaScript(script, completionHandler: nil)
+}
+
+/// Diagnostic only (bd LMS_StreamTest-8a3z): log whether Material's viewport
+/// matches the WKWebView. The "gray bottom half" bug shows the view's own gray
+/// background below the page — i.e. innerHeight stuck shorter than bounds.
+/// Mismatches log at .error so they survive into Copy Diagnostic Log.
+private func logWebViewViewport(_ webView: WKWebView, source: String) {
+    let bounds = webView.bounds
+    let sv = webView.scrollView
+    let native = String(format: "bounds=%.0fx%.0f contentSize=%.0fx%.0f adjInset(t%.0f b%.0f) window=%@",
+                        bounds.width, bounds.height, sv.contentSize.width, sv.contentSize.height,
+                        sv.adjustedContentInset.top, sv.adjustedContentInset.bottom,
+                        webView.window == nil ? "nil" : "ok")
+    let script = """
+    [window.innerWidth, window.innerHeight,
+     window.visualViewport ? window.visualViewport.height : -1,
+     document.documentElement ? document.documentElement.clientHeight : -1,
+     document.body ? document.body.scrollHeight : -1]
+    """
+    webView.evaluateJavaScript(script) { result, error in
+        guard let v = result as? [Double], v.count == 5 else {
+            os_log(.error, log: webViewLayoutLog, "📐 VIEWPORT (%{public}s): %{public}s js=unavailable (%{public}s)",
+                   source, native, error?.localizedDescription ?? "no result")
+            return
+        }
+        let page = String(format: "inner=%.0fx%.0f visual=%.0f client=%.0f body=%.0f", v[0], v[1], v[2], v[3], v[4])
+        if abs(v[1] - Double(bounds.height)) > 2 {
+            os_log(.error, log: webViewLayoutLog, "📐 VIEWPORT MISMATCH (%{public}s): %{public}s %{public}s",
+                   source, native, page)
+        } else {
+            os_log(.info, log: webViewLayoutLog, "📐 Viewport OK (%{public}s): %{public}s %{public}s",
+                   source, native, page)
+        }
+    }
 }
 
 /// Force WKWebView + Material to recalculate layout after a viewport/inset change
