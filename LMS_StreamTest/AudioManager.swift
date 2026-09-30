@@ -817,6 +817,12 @@ extension AudioManager: AudioStreamDecoderDelegate {
         slimClient?.sendTrackDecodeError()
     }
 
+    func audioStreamDecoderDidFailToOpenStream(_ decoder: AudioStreamDecoder, error: Int, wasGaplessStart: Bool) {
+        os_log(.error, log: logger, "❌ Stream open failed: %d (gapless start: %{public}s) - sending STMn to server",
+               error, wasGaplessStart ? "YES" : "NO")
+        slimClient?.sendTrackDecodeError(keepGaplessQueue: wasGaplessStart)
+    }
+
     func audioStreamDecoderDidStartDeferredTrack(_ decoder: AudioStreamDecoder) {
         os_log(.info, log: logger, "🎯 Deferred track started (format mismatch) - sending STMs!")
         // When deferred track starts after format mismatch, notify server
