@@ -1551,7 +1551,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     /// Send STMn message when decoder encounters error (like squeezelite DECODE_ERROR)
-    func sendTrackDecodeError() {
+    func sendTrackDecodeError(keepGaplessQueue: Bool = false) {
+        // A gapless start that failed to open pushed nothing: the previous
+        // track's tail is still playing. After STMn in PLAYING the server
+        // sends the replacement strm 's' with no 'q' first (_SyncStopNext),
+        // so re-arm the gapless flag (set BEFORE STMn, same race as STMd) —
+        // otherwise the replacement is treated as a manual skip and flushes
+        // the tail (GH #102). A real skip still sends 'q', which clears it.
+        if keepGaplessQueue {
+            expectingGaplessTransition = true
+            os_log(.error, log: logger, "🎵 Failed gapless start - keeping buffered audio for the server's replacement track")
+        }
         os_log(.error, log: logger, "❌ Track decode error - sending STMn to server")
         client.sendStatus("STMn")
     }

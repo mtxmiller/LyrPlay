@@ -1132,6 +1132,13 @@ class AudioStreamDecoder {
             return
         }
 
+        // Stream-open timeout for THIS thread only (decodeQueue): BASS's 5s
+        // default is shorter than a busy LMS can stall before answering
+        // /stream.mp3 (GH #102: 5.1s). squeezelite allows 10s to connect and
+        // then waits on the response; a gapless next-track open has the
+        // current track's buffered tail to spare. Thread-scoped so the legacy
+        // main-thread URL path keeps the 5s default.
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 15000)
         decoderStream = BASS_StreamCreateURL(
             urlCString,
             0,
@@ -1139,9 +1146,11 @@ class AudioStreamDecoder {
             nil,
             nil
         )
+        let createError = BASS_ErrorGetCode()  // read before the next BASS call overwrites it
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 0)  // back to global
 
         guard decoderStream != 0 else {
-            let error = BASS_ErrorGetCode()
+            let error = createError
             os_log(.error, log: logger, "❌ Decoder stream creation failed: %d", error)
             // Report to the server like the decode-loop error paths do (→ STMn,
             // squeezelite's DECODE_ERROR) — a bare return left the pipeline
@@ -1162,7 +1171,14 @@ class AudioStreamDecoder {
             if stillCurrent {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
-                    self.delegate?.audioStreamDecoderDidEncounterError(self, error: Int(error))
+                    // Re-check on main: a server 'q' queued ahead of this block
+                    // supersedes the start — reporting then would fail the
+                    // user's next track and re-arm gapless across the 'q'.
+                    self.stateLock.lock()
+                    let stillCurrentOnMain = (generation == self.decodeGeneration)
+                    self.stateLock.unlock()
+                    guard stillCurrentOnMain else { return }
+                    self.delegate?.audioStreamDecoderDidFailToOpenStream(self, error: Int(error), wasGaplessStart: isNewTrack)
                 }
             }
             return
@@ -2332,6 +2348,11 @@ protocol AudioStreamDecoderDelegate: AnyObject {
 
     /// Called when decoder encounters an error
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int)
+
+    /// Called when BASS_StreamCreateURL fails, before any of the track reached
+    /// the push stream. wasGaplessStart: the previous track's tail is still in
+    /// the buffer and must keep playing (GH #102, bd LMS_StreamTest-eiwd).
+    func audioStreamDecoderDidFailToOpenStream(_ decoder: AudioStreamDecoder, error: Int, wasGaplessStart: Bool)
 
     /// Called when a deferred track (from format mismatch) starts playing
     /// This allows coordinator to send STMs notification to server
