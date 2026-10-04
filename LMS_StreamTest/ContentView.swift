@@ -427,6 +427,15 @@ struct ContentView: View {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "'", with: "\\'")
 
+        // LMS player IDs are lowercase MACs; the replacer only touches the tech
+        // line while Material shows LyrPlay's own player.
+        let playerID = settings.playerMACAddress.lowercased()
+
+        // The replacer edits the nodes Vue owns (text node data / v-html
+        // innerHTML) instead of replacing children, so Vue's later patches still
+        // land in the visible DOM. When it backs off (other player selected,
+        // LMS 9.2+ where Material shows transcoded info itself, no stream) it
+        // puts Material's text back.
         let js = """
         (function() {
             var parts = [];
@@ -435,30 +444,71 @@ struct ContentView: View {
             parts.push('\(streamInfo.bitDepth)bit');
             if ('\(safeBitrate)'.length > 0) parts.push('\(safeBitrate)');
             window.lyrplayStreamText = parts.join(', ');
+            window.lyrplayPlayerId = '\(playerID)';
 
             // Start polling replacer if not already running
             if (!window.lyrplayTechReplacer) {
+                var shouldReplace = function() {
+                    if (!window.lyrplayStreamText) return false;
+                    // LMS 9.2+ reports transcoded tech info and Material (6.4.7+) shows it
+                    if (typeof LMS_VERSION !== 'undefined' && LMS_VERSION >= 90200) return false;
+                    if (typeof store === 'undefined' || !store.state || !store.state.player) return false;
+                    return String(store.state.player.id).toLowerCase() === window.lyrplayPlayerId;
+                };
+                // Write `ours(current)` into node[prop], remembering Material's value
+                var apply = function(node, prop, ours) {
+                    var cur = node[prop];
+                    var mark = node.__lyrplayTech;
+                    var orig = (mark && cur === mark.ours) ? mark.orig : cur;
+                    var target = ours(orig);
+                    if (cur !== target) node[prop] = target;
+                    node.__lyrplayTech = { orig: orig, ours: target, prop: prop };
+                };
+                var restore = function(node) {
+                    var mark = node && node.__lyrplayTech;
+                    if (!mark) return;
+                    if (node[mark.prop] === mark.ours) node[mark.prop] = mark.orig;
+                    delete node.__lyrplayTech;
+                };
                 window.lyrplayTechReplacer = setInterval(function() {
-                    if (!window.lyrplayStreamText) return;
+                    var active = shouldReplace();
+                    var text = window.lyrplayStreamText;
+
                     // Mobile/full now playing view
                     var npTech = document.querySelector('.np-tech');
                     if (npTech) {
-                        var text = npTech.textContent;
-                        // Preserve track count (" · 11 of 16") if present
-                        var trackCount = '';
-                        var sepIdx = text.indexOf(' \\u2022 ');
-                        
-                        if (sepIdx >= 0) trackCount = text.substring(sepIdx);
-                        var target = window.lyrplayStreamText + trackCount;
-                        if (npTech.textContent !== target) {
-                            npTech.textContent = target;
+                        // Material 6.4.7+: tech info in its own v-html element, track count after it
+                        var techObj = npTech.querySelector('obj.link-item');
+                        // Older Material: one text node "tech • 3 of 6"
+                        var textNode = techObj ? null : npTech.firstChild;
+                        if (textNode && textNode.nodeType !== 3) textNode = null;
+                        var node = techObj || textNode;
+                        if (node && active) {
+                            if (techObj) {
+                                apply(techObj, 'innerHTML', function() { return text; });
+                            } else {
+                                apply(textNode, 'data', function(orig) {
+                                    // Preserve track count (" • 11 of 16") if present
+                                    var sepIdx = orig.indexOf(' \\u2022 ');
+                                    return text + (sepIdx >= 0 ? orig.substring(sepIdx) : '');
+                                });
+                            }
+                        } else {
+                            restore(node);
                         }
                     }
-                    // Desktop bar view
-                    var npBar = document.querySelector('.np-bar-tech');
-                    if (npBar && npBar.textContent.length > 0) {
-                        if (npBar.textContent !== window.lyrplayStreamText) {
-                            npBar.textContent = window.lyrplayStreamText;
+
+                    // Desktop bar view: only the tech-info variant (has .ellipsis)
+                    var npBar = document.querySelector('.np-bar-tech.ellipsis');
+                    if (npBar) {
+                        var barText = npBar.firstChild && npBar.firstChild.nodeType === 3 && npBar.childNodes.length === 1;
+                        // Material 6.4.7+ renders it with v-html; older with a single text node
+                        var barNode = barText ? npBar.firstChild : npBar;
+                        var barProp = barText ? 'data' : 'innerHTML';
+                        if (active) {
+                            apply(barNode, barProp, function() { return text; });
+                        } else {
+                            restore(barNode);
                         }
                     }
                 }, 1000);
