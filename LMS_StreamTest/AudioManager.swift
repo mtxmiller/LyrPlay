@@ -495,6 +495,18 @@ class AudioManager: NSObject, ObservableObject {
         os_log(.info, log: logger, "🔊 PRE-MUTE: output volume restored (%{public}s)", reason)
     }
 
+    /// See `AudioPlayer.setOutputKeepAlive` (bd 6lvg).
+    func setOutputKeepAlive(_ enabled: Bool) {
+        audioPlayer.setOutputKeepAlive(enabled)
+    }
+
+    /// True when the push stream exists but is stalled waiting for data.
+    /// `getPlayerState()` can't say this: `hasValidStream()` excludes STALLED,
+    /// so a stalled push stream falls through to the URL player's "No Stream".
+    func isPushStreamStalled() -> Bool {
+        return streamDecoder.getPlayerState() == "Buffering"
+    }
+
     /// Enable silent mode for the next stream (for app foreground recovery)
     func enableSilentRecoveryMode() {
         audioPlayer.muteNextStream = true

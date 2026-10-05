@@ -198,6 +198,11 @@ private final class FakeSlimProtoCoordinator: SlimProtoControlling {
     func sendPauseWithConfirmation(maxRetries: Int, completion: ((Bool) -> Void)?) {
         completion?(true)
     }
+
+    var interruptionsReported: [Bool] = []
+    func outageHoldInterruptionBegan(isSiri: Bool) {
+        interruptionsReported.append(isSiri)
+    }
 }
 
 private final class FakePlaybackController: AudioPlaybackControlling {

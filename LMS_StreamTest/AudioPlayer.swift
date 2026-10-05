@@ -430,6 +430,27 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
+    /// Keep the output device running (feeding silence) while nothing plays.
+    ///
+    /// By default BASS stops feeding the device when nothing is playing
+    /// (BASS_CONFIG_DEV_NONSTOP off). On iOS a stopped output means the app is
+    /// no longer playing audio, so iOS suspends it ~30s later — and a suspended
+    /// app can't reconnect or resume after a network outage (bd 6lvg, 8tjj).
+    /// Turned on only while the coordinator is trying to resume playback the
+    /// user asked for, and off again once audio starts or the attempt ends.
+    func setOutputKeepAlive(_ enabled: Bool) {
+        BASS_SetConfig(DWORD(BASS_CONFIG_DEV_NONSTOP), enabled ? 1 : 0)
+        if enabled {
+            // The device may already be idle; restart it so silence flows now.
+            // Fails with BASS_ERROR_BUSY during an interruption (e.g. a call).
+            if BASS_Start() == 0 {
+                let error = BASS_ErrorGetCode()
+                os_log(.error, log: logger, "🔋 Output keep-alive: BASS_Start failed (%d)", error)
+            }
+        }
+        os_log(.info, log: logger, "🔋 Output keep-alive %{public}s", enabled ? "ON" : "OFF")
+    }
+
     // MARK: - Playback Control (MINIMAL CBASS)
     func play() {
         guard currentStream != 0 else {

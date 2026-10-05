@@ -86,6 +86,46 @@ class SlimProtoCoordinator: ObservableObject {
     private var wasPlayingBeforeDisconnect: Bool = false
     /// Was audio paused when connection was lost? (for networkRestored recovery)
     private var wasPausedBeforeDisconnect: Bool = false
+    /// Outage hold (bd 6lvg, 8tjj): on while we're trying to get back to
+    /// playback the user asked for (connection lost while playing, remote play,
+    /// audible recovery). Keeps the output device running so iOS doesn't
+    /// suspend the app, keeps reconnecting, and counts as "was playing" across
+    /// repeated disconnects. Ends when new playback actually starts, on a
+    /// pause, or after `outageHoldLimit`.
+    private var outageHoldActive = false
+    private var outageHoldGeneration = 0
+    private static let outageHoldLimit: TimeInterval = 600
+    /// Audible recovery retries after a failed jump / no playback (bd 6lvg).
+    private var audibleRecoveryRetries = 0
+    private static let maxAudibleRecoveryRetries = 3
+    /// When the SlimProto connection last came up, and when the server last
+    /// sent strm 's'. On reconnect LMS restarts a playing client by itself
+    /// (Squeezebox.pm reconnect → _Continue → _JumpToTime); a jump of ours on
+    /// top of that collides (LMS serves one stream per player) and can leave
+    /// the new stream waiting forever (bd 6lvg, captured in the outage rig).
+    private var lastConnectedAt: Date?
+    private var lastServerStreamStartAt: Date?
+    /// Last time any SlimProto frame arrived from the server.
+    private var lastServerMessageAt: Date?
+
+    /// True when the server has sent us something on the current connection
+    /// within the last 15s. A socket can "connect" on a half-dead path (or to a
+    /// local tunnel) without the server seeing us, or go half-dead later; a
+    /// recovery jump sent then makes LMS fail to stream to us and skip through
+    /// the whole queue in under a second ("only 0 of 1 players started
+    /// streaming", captured in the outage rig, bd 6lvg). LMS polls every player
+    /// with strm 't' every 5s (Slimproto.pm check_all_clients), so a healthy
+    /// connection is never quiet for 15s.
+    private var serverHeardRecently: Bool {
+        guard let connected = lastConnectedAt, let heard = lastServerMessageAt else { return false }
+        return heard >= connected && Date().timeIntervalSince(heard) < 15
+    }
+
+    /// True if the server has started a stream since we last (re)connected.
+    private var serverStartedStreamSinceConnect: Bool {
+        guard let connected = lastConnectedAt, let started = lastServerStreamStartAt else { return false }
+        return started >= connected
+    }
     /// Ignore server-time polls until this instant. Set when a playlist-jump
     /// recovery is issued: the server computes displayed time as
     /// startOffset + the client's last STAT elapsed, and STATs sent during the
@@ -220,6 +260,9 @@ class SlimProtoCoordinator: ObservableObject {
     
     func disconnect() {
         os_log(.info, log: logger, "🔌 Disconnecting from server with position save")
+        DispatchQueue.main.async { [weak self] in
+            self?.endOutageHold(reason: "user disconnect")
+        }
         connectionManager.userInitiatedDisconnection()
         client.disconnectWithPositionSave()
     }
@@ -489,7 +532,10 @@ class SlimProtoCoordinator: ObservableObject {
     // MARK: - Audio Player Event Handlers
     func handleAudioPlayerDidStartPlaying() {
         os_log(.info, log: logger, "🎵 Audio playback actually started - sending STMs")
-        
+        DispatchQueue.main.async { [weak self] in
+            self?.endOutageHold(reason: "playback started")
+        }
+
         // This is when we should send STMs (track started playing)
         // Only after RESP and STMc have been sent
         client.sendStatus("STMs")
@@ -691,13 +737,59 @@ class SlimProtoCoordinator: ObservableObject {
         isRecoveryInProgress = false
     }
 
-    func performPlaylistRecovery(shouldPlay: Bool = true) {
+    func performPlaylistRecovery(shouldPlay: Bool = true, serverWaitAttempt: Int = 0) {
         // Check-and-set must happen on the same queue that clears the lock (main).
         // The old recoveryQueue hop didn't serialize against main-thread clears, so
         // two near-simultaneous triggers could both pass the guard and interleave
         // (double playlist jump / double mute-unmute). bd LMS_StreamTest-433.3.2
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+
+            // Audible recovery = the user wants audio: stay awake until it
+            // actually starts (bd 6lvg, 8tjj).
+            if shouldPlay {
+                self.beginOutageHold(reason: "audible recovery")
+            }
+
+            // Only jump while the server is actually talking to us on this
+            // connection — otherwise LMS can't stream to us and runs through the
+            // whole queue (see serverHeardRecently).
+            if !self.serverHeardRecently {
+                if serverWaitAttempt < 5 {
+                    os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Server not heard on this connection yet - waiting (%d/5)", serverWaitAttempt + 1)
+                    let connectionStamp = self.lastConnectedAt
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        guard let self = self else { return }
+                        // A new connection runs its own recovery; and once audio
+                        // has started (hold ended) there is nothing left to do.
+                        guard self.lastConnectedAt == connectionStamp,
+                              !shouldPlay || self.outageHoldActive else {
+                            os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Dropping stale wait (connection changed or playback started)")
+                            return
+                        }
+                        self.performPlaylistRecovery(shouldPlay: shouldPlay, serverWaitAttempt: serverWaitAttempt + 1)
+                    }
+                    return
+                }
+                os_log(.error, log: self.logger, "[APP-RECOVERY] ⏳ Server still not heard - not sending recovery on this connection")
+                if shouldPlay {
+                    // Retried by the next reconnect (health check drops this one).
+                    self.pendingRecoveryTrigger = .networkRestored
+                } else {
+                    self.settleSilentRecoveryAudio(reason: "server not heard")
+                }
+                return
+            }
+
+            // LMS restarts a known playing client by itself on reconnect, and
+            // the wait above can outlast the first check in handlePendingRecovery.
+            // A jump on top of a stream the server just started collides (one
+            // stream per player); the hold watchdog retries if it fails.
+            if shouldPlay && self.serverStartedStreamRecently {
+                os_log(.info, log: self.logger, "[APP-RECOVERY] 🔄 Server started a stream recently - skipping jump")
+                self.liftPreMuteForAudibleRecovery()
+                return
+            }
 
             // Check if recovery is already in progress
             guard !self.isRecoveryInProgress else {
@@ -724,6 +816,18 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s, gen %d)", shouldPlay ? "YES" : "NO", self.recoveryGeneration)
 
             self.executePlaylistRecovery(shouldPlay: shouldPlay)
+        }
+    }
+
+    /// An audible recovery must not play silently. If a silent recovery's
+    /// mute is still engaged, this recovery superseded it (generation bump)
+    /// and its settle paths are all dead — fully unmute here. Otherwise
+    /// just lift the app-open pre-mute (bd 34l).
+    private func liftPreMuteForAudibleRecovery() {
+        if audioManager.isSilentRecoveryMuted {
+            audioManager.disableSilentRecoveryMode()
+        } else {
+            audioManager.cancelPreMute(reason: "audible recovery")
         }
     }
 
@@ -785,15 +889,7 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.error, log: logger, "[APP-RECOVERY] ✅ Silent recovery mode enabled - next stream will be muted")
         } else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔊 Normal recovery mode - no muting needed")
-            // An audible recovery must not play silently. If a silent recovery's
-            // mute is still engaged, this recovery superseded it (generation bump)
-            // and its settle paths are all dead — fully unmute here. Otherwise
-            // just lift the app-open pre-mute (bd 34l).
-            if audioManager.isSilentRecoveryMuted {
-                audioManager.disableSilentRecoveryMode()
-            } else {
-                audioManager.cancelPreMute(reason: "audible recovery")
-            }
+            liftPreMuteForAudibleRecovery()
         }
 
         // We chose the resume position, so display it immediately and hold it while
@@ -829,6 +925,22 @@ class SlimProtoCoordinator: ObservableObject {
                 // run the pause dance against its stream, or delete its recovery data.
                 guard self.recoveryGeneration == generation else {
                     os_log(.error, log: self.logger, "🔒 Ignoring stale playlist-jump completion (gen %d, current %d)", generation, self.recoveryGeneration)
+                    return
+                }
+
+                // sendJSONRPCCommandDirect reports a network failure / timeout as
+                // an empty response. Don't treat that as success: keep the saved
+                // position and try again (bd 6lvg — the old code deleted it, so a
+                // jump lost to an outage left nothing to recover to).
+                guard response["result"] != nil else {
+                    os_log(.error, log: self.logger, "[APP-RECOVERY] ❌ Playlist jump failed (no server response) - keeping recovery data")
+                    self.isRecoveryInProgress = false
+                    if shouldPlay {
+                        self.retryAudibleRecovery(reason: "jump failed")
+                    } else {
+                        self.awaitingSilentRecoveryUnmute = false
+                        self.settleSilentRecoveryAudio(reason: "jump failed")
+                    }
                     return
                 }
 
@@ -976,7 +1088,22 @@ class SlimProtoCoordinator: ObservableObject {
             let shouldPlay = wasPlayingBeforeDisconnect
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.performPlaylistRecovery(shouldPlay: shouldPlay)
+                guard let self = self else { return }
+                // LMS restarts a known playing client itself right after HELO.
+                // Jumping on top of that collides; let the server's restart run
+                // and the outage-hold watchdog retry if it doesn't produce audio.
+                if shouldPlay && self.serverStartedStreamSinceConnect {
+                    os_log(.info, log: self.logger, "🔄 Network restored: server already restarted the stream - skipping jump")
+                    self.liftPreMuteForAudibleRecovery()
+                    return
+                }
+                guard shouldPlay else {
+                    self.performPlaylistRecovery(shouldPlay: false)
+                    return
+                }
+                self.unlessPausedOnServer {
+                    self.performPlaylistRecovery(shouldPlay: true)
+                }
             }
 
         case .none:
@@ -991,6 +1118,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
+        lastConnectedAt = Date()
+        audibleRecoveryRetries = 0  // retry budget is per connection (bd 6lvg)
         connectionManager.didConnect()
         syncControllerReset(reason: "slimProtoDidConnect")
 
@@ -1019,10 +1148,18 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
         // UNIFIED RECOVERY: Capture playback state for networkRestored recovery (LMS_StreamTest-6lb)
         let playerState = audioManager.getPlayerState()
-        wasPlayingBeforeDisconnect = (playerState == "Playing")
-        wasPausedBeforeDisconnect = (playerState == "Paused")
-        os_log(.info, log: logger, "📊 Disconnect state: wasPlaying=%{public}s, wasPaused=%{public}s",
-               wasPlayingBeforeDisconnect ? "YES" : "NO", wasPausedBeforeDisconnect ? "YES" : "NO")
+        // "Buffering" = stalled waiting for data, still meant to be playing. An
+        // active outage hold means a previous drop interrupted playback we're
+        // still trying to resume (bd 6lvg).
+        wasPlayingBeforeDisconnect = (playerState == "Playing" || playerState == "Buffering"
+                                      || audioManager.isPushStreamStalled() || outageHoldActive)
+        wasPausedBeforeDisconnect = (playerState == "Paused") && !wasPlayingBeforeDisconnect
+        os_log(.info, log: logger, "📊 Disconnect state: wasPlaying=%{public}s, wasPaused=%{public}s (player: %{public}s, hold: %{public}s)",
+               wasPlayingBeforeDisconnect ? "YES" : "NO", wasPausedBeforeDisconnect ? "YES" : "NO",
+               playerState, outageHoldActive ? "ON" : "OFF")
+        if wasPlayingBeforeDisconnect && !connectionManager.isUserInitiatedDisconnect {
+            beginOutageHold(reason: "connection lost while playing")
+        }
 
         // UNIFIED RECOVERY: Save position immediately (don't wait for timer)
         // Use interpolated server time (not decoder position) for accurate recovery
@@ -1052,6 +1189,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {
         // Record that we received a command (shows connection is alive)
+        lastServerMessageAt = Date()
         connectionManager.recordHeartbeatResponse()
 
         // Handle serv packet for sync group persistence
@@ -1343,6 +1481,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
 extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
+        lastServerStreamStartAt = Date()
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
@@ -1378,6 +1517,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
+        lastServerStreamStartAt = Date()
         // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
         //   '0' (0x30) = WAIT for unpause ('u')                           — used for sync groups + fade-in transitions
         //   '1' (0x31) = autoplay immediately
@@ -1472,6 +1612,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
         syncControllerReset(reason: "didPauseStream")
+        endOutageHold(reason: "paused")
 
         // CRITICAL FIX: Update SimpleTimeTracker with pause state
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
@@ -2007,6 +2148,11 @@ extension SlimProtoCoordinator {
     func sendLockScreenCommand(_ command: String) {
         os_log(.info, log: logger, "🔒 Lock Screen command: %{public}s", command)
 
+        // A user pause/stop ends any attempt to resume playback (bd 6lvg).
+        if command.lowercased() == "pause" || command.lowercased() == "stop" {
+            endOutageHold(reason: "user \(command.lowercased())")
+        }
+
         // Save position on pause commands (creates save point for future recovery)
         if command.lowercased() == "pause" {
             // Local save first (instant, survives network transitions like CarPlay disconnect)
@@ -2043,6 +2189,10 @@ extension SlimProtoCoordinator {
 
                     // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
                     pendingRecoveryTrigger = .lockScreen
+
+                    // Stay awake until the reconnect + recovery gets audio going:
+                    // in the car the network may not be up yet (bd 8tjj).
+                    beginOutageHold(reason: "remote play after long background")
 
                     // Trust BASS to auto-manage stream state during reconnection
                     // BASS handles iOS audio session activation/deactivation automatically
@@ -2876,7 +3026,151 @@ extension SlimProtoCoordinator {
     /// (immediate, after startPlayback), autostart='0'/'2' jiffies=0 (after
     /// resumePlayback runs via didResumeStream), and autostart='0'/'2' jiffies>0
     /// (after sync-start timer fires BASS_ChannelPlay at the target time).
+    // MARK: - Outage Hold (bd 6lvg, 8tjj)
+
+    /// Start the outage hold. No-op if already on: the time limit counts from
+    /// the start of the outage, so repeated drops can't extend it. Main thread only.
+    private func beginOutageHold(reason: String) {
+        guard !outageHoldActive else { return }
+        outageHoldGeneration += 1
+        let generation = outageHoldGeneration
+        outageHoldActive = true
+        audibleRecoveryRetries = 0
+        audioManager.setOutputKeepAlive(true)
+        connectionManager.persistForPlayback = true
+        os_log(.info, log: logger, "🔋 Outage hold ON (%{public}s)", reason)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outageHoldLimit) { [weak self] in
+            guard let self = self, self.outageHoldGeneration == generation else { return }
+            self.endOutageHold(reason: "time limit")
+        }
+        scheduleOutageHoldWatchdog(generation: generation)
+        scheduleOutageHoldClock(generation: generation)
+    }
+
+    /// Every 1s while the hold is on: once local audio stops flowing (buffer
+    /// ran dry, stream stopped or failed), stop the time tracker. Otherwise it
+    /// keeps interpolating as "playing" and NowPlayingManager keeps saving that
+    /// advancing time as the recovery position, so recovery would land minutes
+    /// ahead of what the user last heard.
+    private func scheduleOutageHoldClock(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
+            let (time, playing) = self.simpleTimeTracker.getCurrentTime()
+            if playing && self.audioManager.getPlayerState() != "Playing" {
+                self.simpleTimeTracker.updateFromServer(time: time, playing: false)
+                os_log(.info, log: self.logger, "🔋 Outage hold: audio not flowing - holding position at %.2f", time)
+            }
+            self.scheduleOutageHoldClock(generation: generation)
+        }
+    }
+
+    /// Every 30s while the hold is on: connected but still no audio → retry.
+    /// (Disconnected drops are handled by the reconnect → .networkRestored path.)
+    private func scheduleOutageHoldWatchdog(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) { [weak self] in
+            guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
+            if self.connectionManager.connectionState.isConnected,
+               !self.isRecoveryInProgress,
+               !self.serverStartedStreamRecently {
+                self.retryAudibleRecovery(reason: "still no playback")
+            }
+            self.scheduleOutageHoldWatchdog(generation: generation)
+        }
+    }
+
+    /// A server stream start in the last 15s means a restart may still be
+    /// opening; a recovery jump now would collide with it.
+    private var serverStartedStreamRecently: Bool {
+        guard let started = lastServerStreamStartAt else { return false }
+        return Date().timeIntervalSince(started) < 15
+    }
+
+    /// End the outage hold. Main thread only; no-op when not active.
+    private func endOutageHold(reason: String) {
+        guard outageHoldActive else { return }
+        outageHoldActive = false
+        outageHoldGeneration += 1  // cancels the pending time limit
+        audioManager.setOutputKeepAlive(false)
+        connectionManager.persistForPlayback = false
+        // Nothing left to resume: a later reconnect must not start playback
+        // on its own (wasPlaying is recomputed at the next disconnect).
+        wasPlayingBeforeDisconnect = false
+        if case .networkRestored = pendingRecoveryTrigger {
+            pendingRecoveryTrigger = .none
+        }
+        os_log(.info, log: logger, "🔋 Outage hold OFF (%{public}s)", reason)
+    }
+
+    /// Automatic recoveries (reconnect, retries) must not override a pause
+    /// made elsewhere (Material, another controller) while we were away. Runs
+    /// `action` unless LMS says the player is paused; then ends the hold.
+    /// Proceeds if the status query fails (the jump would fail too, and retry).
+    private func unlessPausedOnServer(_ action: @escaping () -> Void) {
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, self.outageHoldActive else { return }
+                let mode = (response["result"] as? [String: Any])?["mode"] as? String
+                if mode == "pause" {
+                    self.endOutageHold(reason: "paused on server")
+                    return
+                }
+                action()
+            }
+        }
+    }
+
+    /// PlaybackSessionController: an audio interruption began (bd 6lvg). A
+    /// call or another app taking the audio ends any attempt to resume (we'd
+    /// otherwise jump-and-play into it); a quick Siri request doesn't.
+    func outageHoldInterruptionBegan(isSiri: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, !isSiri else { return }
+            self.endOutageHold(reason: "audio interruption")
+        }
+    }
+
+    /// An audible recovery didn't get playback going. Retry while the hold is
+    /// on: now if we're connected, otherwise on the next reconnect.
+    private func retryAudibleRecovery(reason: String) {
+        guard outageHoldActive else { return }
+        guard connectionManager.connectionState.isConnected else {
+            pendingRecoveryTrigger = .networkRestored
+            os_log(.info, log: logger, "🔁 Audible recovery %{public}s - will retry on reconnect", reason)
+            return
+        }
+        guard audibleRecoveryRetries < Self.maxAudibleRecoveryRetries else {
+            // Connected and nothing left to try: don't keep the app awake
+            // playing silence for the rest of the time limit.
+            os_log(.error, log: logger, "🔁 Audible recovery %{public}s - out of retries", reason)
+            endOutageHold(reason: "out of retries")
+            return
+        }
+        audibleRecoveryRetries += 1
+        os_log(.info, log: logger, "🔁 Audible recovery %{public}s - retry %d/%d in 5s",
+               reason, audibleRecoveryRetries, Self.maxAudibleRecoveryRetries)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self = self, self.outageHoldActive else { return }
+            // A timed-out jump may still have reached the server and started a
+            // stream; don't jump on top of it (the watchdog re-checks later).
+            guard !self.serverStartedStreamRecently else {
+                os_log(.info, log: self.logger, "🔁 Skipping retry - server started a stream recently")
+                return
+            }
+            self.unlessPausedOnServer {
+                self.performPlaylistRecovery(shouldPlay: true)
+            }
+        }
+    }
+
     func handleDecoderDidStartPlayback() {
+        DispatchQueue.main.async { [weak self] in
+            self?.endOutageHold(reason: "playback started")
+        }
         if pendingUnpauseSTMs {
             os_log(.info, log: logger, "🎵 Flushing deferred STMs (BASS playback started)")
             client.sendStatus("STMs")
