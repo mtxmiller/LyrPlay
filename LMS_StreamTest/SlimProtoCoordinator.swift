@@ -1003,6 +1003,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Disables LMS software volume attenuation and forces volume to 100%.
         applyFixedOutputPolicyIfNeeded()
 
+        // Radio: make LMS proxy internet streams for our player (GH #97).
+        applyProxiedStreamingPolicy()
+
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
@@ -1226,6 +1229,44 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     private func applyFixedOutputPolicyIfNeeded() {
         guard settings.fixOutputAt100Percent else { return }
         applyFixedOutputPolicy()
+    }
+
+    /// Sets LMS "Streaming Method" to Proxied Streaming (`mp3StreamingMethod=1`)
+    /// for our own player on every connect (GH #97, forum DI.fm report).
+    ///
+    /// With Direct Streaming (the LMS default), plain-http radio is sent as a
+    /// strm whose server IP/port is the radio station, and squeezelite connects
+    /// there. LyrPlay always fetches the strm path from the LMS host
+    /// (`extractURLFromHTTPRequest`), so direct streams fail and the server sits
+    /// at "play 0:00". Proxied makes LMS fetch the station and relay it, the same
+    /// path HTTPS radio already takes. Synced players are always proxied anyway.
+    ///
+    /// On a brand-new player the request can land before LMS has processed our
+    /// HELO; LMS then drops the connection with no reply, so retry a few times.
+    private func applyProxiedStreamingPolicy(attempt: Int = 1) {
+        let playerID = settings.playerMACAddress
+        guard !playerID.isEmpty else { return }
+
+        let prefCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [playerID, ["playerpref", "mp3StreamingMethod", "1"]]
+        ]
+
+        sendJSONRPCCommandDirect(prefCommand) { [weak self] result in
+            guard let self = self else { return }
+            if result["result"] != nil {
+                os_log(.info, log: self.logger, "📻 Streaming method set to proxied (attempt %d)", attempt)
+                return
+            }
+            guard attempt < 3 else {
+                os_log(.error, log: self.logger, "📻 Could not set proxied streaming after %d attempts - plain-http radio may not play", attempt)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.applyProxiedStreamingPolicy(attempt: attempt + 1)
+            }
+        }
     }
 
     // MARK: - Custom Position Banking (Server Preferences)
