@@ -43,6 +43,11 @@ class SettingsManager: ObservableObject {
     /// Persisted as a sorted comma-separated rawValue list in UserDefaults
     /// so the on-disk shape stays human-readable.
     @Published var enabledLibraryShelves: Set<String> = SettingsManager.defaultEnabledLibraryShelves
+    /// tvOS Library tab: show the Browse row (Albums / Artists / Genres /
+    /// New Music / Playlists) above the shelves (bd zxy7, GH #104). Its own
+    /// Bool, not an `enabledLibraryShelves` key, so it defaults ON for users
+    /// who already have a saved shelf selection.
+    @Published var showBrowseShelf: Bool = true
     /// tvOS Library tab: plugin-contributed shelf registry from the LMS
     /// server's `home-extra-3rdparty` call. In-memory only — re-fetched per
     /// server. `pluginExtraRegistryToken` records which server-token it
@@ -180,6 +185,7 @@ class SettingsManager: ObservableObject {
         static let experimentalRateMatching = "ExperimentalRateMatching"
         static let hardwareVolumeButtonsEnabled = "HardwareVolumeButtonsEnabled"
         static let enabledLibraryShelves = "EnabledLibraryShelves"
+        static let showBrowseShelf = "ShowBrowseShelf"
         static let seenPluginShelfKeys = "SeenPluginShelfKeys"
     }
     
@@ -348,6 +354,7 @@ class SettingsManager: ObservableObject {
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
         experimentalRateMatching = UserDefaults.standard.object(forKey: Keys.experimentalRateMatching) as? Bool ?? true
         hardwareVolumeButtonsEnabled = UserDefaults.standard.object(forKey: Keys.hardwareVolumeButtonsEnabled) as? Bool ?? false
+        showBrowseShelf = UserDefaults.standard.object(forKey: Keys.showBrowseShelf) as? Bool ?? true
 
         // Library shelves: stored as comma-separated rawValues so the on-disk
         // value is greppable. Missing/empty → first-run defaults from the
@@ -421,6 +428,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)
         UserDefaults.standard.set(experimentalRateMatching, forKey: Keys.experimentalRateMatching)
         UserDefaults.standard.set(hardwareVolumeButtonsEnabled, forKey: Keys.hardwareVolumeButtonsEnabled)
+        UserDefaults.standard.set(showBrowseShelf, forKey: Keys.showBrowseShelf)
         // Sorted to keep the on-disk value diff-stable when the set order changes.
         UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
         UserDefaults.standard.set(seenPluginShelfKeys.sorted().joined(separator: ","), forKey: Keys.seenPluginShelfKeys)

@@ -75,6 +75,11 @@ struct LibraryView: View {
             // so this bypasses the lastscan short-circuit.
             Task { await forceRefetch() }
         }
+        .onChange(of: settings.showBrowseShelf) { _, _ in
+            // Browse row toggled — refetch so an "empty" state (every shelf
+            // off) flips to the row-only shelves screen and back.
+            Task { await forceRefetch() }
+        }
         .onChange(of: scenePhase) { _, phase in
             // Wake with Library already frontmost doesn't refire onAppear —
             // without this, an app left on this tab overnight keeps stale
@@ -195,8 +200,17 @@ struct LibraryView: View {
         // 2. home-extra ∥ favorites (independent — fire concurrently).
         async let homeExtraResult = fetchHomeExtra()
         async let favSection: HomeExtraSection? = wantsFavoritesShelf ? fetchFavorites() : nil
-        let result = await homeExtraResult
+        var result = await homeExtraResult
         let favs = await favSection
+
+        // One retry before the no-Material fallback: a slow first request
+        // (server waking, first connect) used to drop a Material server into
+        // the fallback until the next refetch (GH #104).
+        if result == nil, token == settings.serverToken {
+            os_log(.info, log: logger, "🔁 home-extra: no response — retrying once before fallback")
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            result = await fetchHomeExtra()
+        }
 
         guard token == settings.serverToken else {
             os_log(.info, log: logger, "🚫 Library: server changed during home-extra fetch — dropping")
@@ -236,7 +250,10 @@ struct LibraryView: View {
 
     /// Settle `state` after merging all shelf sections.
     private func applyShelfState(sections: [HomeExtraSection]) {
-        if sections.isEmpty {
+        // With the Browse row on there is always something to show — and an
+        // empty selection usually means every shelf was toggled off, not an
+        // empty library.
+        if sections.isEmpty && !settings.showBrowseShelf {
             os_log(.info, log: logger, "ℹ️ Library empty (Material installed, all enabled shelves returned no items)")
             state = .emptyLibrary
         } else {

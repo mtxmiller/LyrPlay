@@ -172,7 +172,7 @@ struct SettingsView: View {
                 HStack {
                     Label("Shelves", systemImage: "rectangle.stack.fill")
                     Spacer()
-                    Text("\(settings.enabledLibraryShelves.count) on")
+                    Text("\(settings.enabledLibraryShelves.count + (settings.showBrowseShelf ? 1 : 0)) on")
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.right")
                         .foregroundStyle(.secondary)

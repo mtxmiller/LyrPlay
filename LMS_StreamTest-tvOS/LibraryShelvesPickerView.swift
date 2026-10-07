@@ -34,6 +34,27 @@ struct LibraryShelvesPickerView: View {
 
     private var builtInSection: some View {
         Section {
+            // Browse row (bd zxy7) — always first on the Library tab, so it
+            // leads the list. Its own setting, not a LibraryShelf case: it
+            // is not a home-extra sort and needs no server request.
+            ShelfPickerRow(
+                title: String(localized: "Browse"),
+                subtitle: String(localized: "Albums, artists, genres and playlists"),
+                isOn: Binding(
+                    get: { settings.showBrowseShelf },
+                    set: { isOn in
+                        settings.showBrowseShelf = isOn
+                        settings.saveSettings()
+                    }
+                )
+            ) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 48)
+            }
+            .tvListRow()
+
             ForEach(LibraryShelf.allCases) { shelf in
                 ShelfPickerRow(
                     title: shelf.title,
