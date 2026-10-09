@@ -141,6 +141,17 @@
         }
       }
     },
+    "Albums, artists, genres and playlists" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alben, Interpreten, Stilrichtungen und Wiedergabelisten"
+          }
+        }
+      }
+    },
     "Albums" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -247,6 +258,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Integrierte Regale"
+          }
+        }
+      }
+    },
+    "Browse" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Durchsuchen"
           }
         }
       }

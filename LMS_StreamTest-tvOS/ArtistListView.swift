@@ -5,8 +5,11 @@ import os.log
 /// (Material absent). Tap an artist → push `ArtistDetailView`, which wraps
 /// `AlbumListView(sort: .byArtist)` and lists that artist's albums.
 ///
-/// Fetches `["artists", 0, 200, "tags:s"]` (the `s` tag adds sortable_name
+/// Fetches `["artists", start, 200, "tags:s"]` (the `s` tag adds sortable_name
 /// which the server uses for proper alpha ordering across "The X" variants).
+/// Pages in 200 at a time as the user scrolls near the end, up to the
+/// server's `count` (bd zxy7 — the full list is reachable from the Material
+/// shelves screen's Browse row now, so it must not stop at 200).
 struct ArtistListView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
@@ -15,6 +18,14 @@ struct ArtistListView: View {
     @State private var isLoading: Bool = false
     @State private var hasFetched: Bool = false
     @State private var selectedArtist: Artist? = nil
+    /// Server-reported total (`count`). nil until the first page lands.
+    @State private var total: Int? = nil
+    @State private var isLoadingMore: Bool = false
+
+    private static let pageSize = 200
+    /// Start the next page this many rows before the end, so it usually
+    /// lands before focus reaches the last row.
+    private static let prefetchMargin = 40
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ArtistListView")
 
@@ -30,8 +41,9 @@ struct ArtistListView: View {
                 listView
             }
         }
-        .navigationTitle("Artists")
-        .onAppear { if !hasFetched { fetch() } }
+        // No navigationTitle — on a tvOS List root it renders as a large
+        // title floating over the scrolled rows (same as BuiltinTrackListView).
+        .onAppear { if !hasFetched { fetch(start: 0) } }
         .navigationDestination(item: $selectedArtist) { artist in
             ArtistDetailView(
                 artist: artist,
@@ -62,7 +74,7 @@ struct ArtistListView: View {
 
     private var listView: some View {
         TVList {
-            ForEach(artists, id: \.id) { artist in
+            ForEach(Array(artists.enumerated()), id: \.element.id) { index, artist in
                 Button {
                     selectedArtist = artist
                 } label: {
@@ -75,35 +87,46 @@ struct ArtistListView: View {
                 }
                 .buttonStyle(.plain)
                 .tvListRow()
+                .onAppear { loadMoreIfNeeded(at: index) }
             }
         }
     }
 
     // MARK: - Fetch
 
-    private func fetch() {
-        isLoading = true
+    private func loadMoreIfNeeded(at index: Int) {
+        guard let total, artists.count < total, !isLoadingMore,
+              index >= artists.count - Self.prefetchMargin else { return }
+        fetch(start: artists.count)
+    }
+
+    private func fetch(start: Int) {
+        if start == 0 { isLoading = true } else { isLoadingMore = true }
         // tags:s adds sortable_name — server-side LMS uses it for alpha sort
         // (handles "The Beatles" → "Beatles" correctly).
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["artists", 0, 200, "tags:s"]]
+            "params": ["", ["artists", start, Self.pageSize, "tags:s"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { response in
             DispatchQueue.main.async {
                 isLoading = false
+                isLoadingMore = false
                 hasFetched = true
                 guard let result = response["result"] as? [String: Any] else {
-                    os_log(.error, log: logger, "❌ Artists fetch: invalid response")
+                    // A failed later page leaves `total` as-is, so scrolling
+                    // near the end again retries it.
+                    os_log(.error, log: logger, "❌ Artists fetch (start %d): invalid response", start)
                     return
                 }
-                if let loop = result["artists_loop"] as? [[String: Any]] {
-                    artists = Artist.parseLoop(loop)
-                } else {
-                    artists = []
-                }
-                os_log(.info, log: logger, "✅ Artists: %d items", artists.count)
+                // Drop a page that no longer lines up (a retry raced it).
+                guard start == artists.count || start == 0 else { return }
+                let page = (result["artists_loop"] as? [[String: Any]]).map(Artist.parseLoop) ?? []
+                artists = start == 0 ? page : artists + page
+                // Stop paging on a short page even if `count` says more.
+                total = page.count < Self.pageSize ? artists.count : ((result["count"] as? Int) ?? Int(result["count"] as? String ?? "") ?? artists.count)
+                os_log(.info, log: logger, "✅ Artists: %d of %d", artists.count, total ?? 0)
             }
         }
     }

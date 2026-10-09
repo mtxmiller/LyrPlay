@@ -29,10 +29,22 @@ struct HomeExtraShelvesView: View {
     /// / `.playlistTracks`) drills on the same stack — one navigation
     /// contract, one Back semantics.
     @State private var jivePath: [BrowseDestination] = []
+    /// Browse-row tap (bd zxy7). Pushed on the Library tab's own
+    /// NavigationStack, not the cover: the list views drill with
+    /// `navigationDestination(item:)`, which the cover's path-gated Back
+    /// handler can't see, so Back would close the whole cover from a
+    /// nested level. The tab stack pops one level per Back natively —
+    /// the same behavior as the no-Material `BrowseLibraryView`.
+    @State private var selectedCategory: BrowseLibraryView.Category? = nil
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 32) {
+                if settings.showBrowseShelf {
+                    BrowseShelf { category in
+                        selectedCategory = category
+                    }
+                }
                 ForEach(sections) { section in
                     HomeExtraShelf(
                         section: section,
@@ -49,6 +61,9 @@ struct HomeExtraShelvesView: View {
             }
             .padding(.top, 24)
             .padding(.bottom, 48)
+        }
+        .navigationDestination(item: $selectedCategory) { category in
+            BrowseCategoryView(category: category, coordinator: coordinator, settings: settings)
         }
         .fullScreenCover(item: $selectedArtist) { artist in
             NavigationStack {

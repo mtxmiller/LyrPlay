@@ -29,7 +29,8 @@ struct GenreListView: View {
                 listView
             }
         }
-        .navigationTitle("Genres")
+        // No navigationTitle — on a tvOS List root it renders as a large
+        // title floating over the scrolled rows (same as BuiltinTrackListView).
         .onAppear { if !hasFetched { fetch() } }
         .navigationDestination(item: $selectedGenre) { genre in
             AlbumListView(
@@ -37,7 +38,6 @@ struct GenreListView: View {
                 settings: settings,
                 sort: .byGenre(id: genre.id, name: genre.name)
             )
-            .navigationTitle(genre.name)
         }
     }
 

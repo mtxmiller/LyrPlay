@@ -27,7 +27,12 @@ struct BrowseLibraryView: View {
 
         var id: String { rawValue }
 
-        var title: String {
+        /// Localized via the String Catalog (same keys as the list screens'
+        /// navigation titles). A plain String reaches `Text` verbatim, so it
+        /// must be looked up here.
+        var title: String { String(localized: String.LocalizationValue(titleEN)) }
+
+        private var titleEN: String {
             switch self {
             case .albums:    return "Albums"
             case .artists:   return "Artists"
@@ -41,7 +46,7 @@ struct BrowseLibraryView: View {
             switch self {
             case .albums:    return "opticaldisc"
             case .artists:   return "person.2.fill"
-            case .genres:    return "music.note.list"
+            case .genres:    return "guitars.fill"
             case .newMusic:  return "sparkles"
             case .playlists: return "music.note.list"
             }
@@ -67,14 +72,24 @@ struct BrowseLibraryView: View {
                 .tvListRow()
             }
         }
-        .navigationTitle("Library")
         .navigationDestination(item: $selectedCategory) { category in
-            destination(for: category)
+            BrowseCategoryView(category: category, coordinator: coordinator, settings: settings)
         }
     }
+}
 
-    @ViewBuilder
-    private func destination(for category: Category) -> some View {
+/// The list screen for one `BrowseLibraryView.Category`. Shared by the
+/// no-Material menu above and the Browse row on the Material shelves
+/// screen (`HomeExtraShelvesView`, bd zxy7), so both open the same lists.
+struct BrowseCategoryView: View {
+    let category: BrowseLibraryView.Category
+    let coordinator: SlimProtoCoordinator
+    @ObservedObject var settings: SettingsManager
+
+    // No navigationTitle on these lists — on a tvOS List root it renders
+    // as a large title floating over the scrolled rows (same as
+    // BuiltinTrackListView). The user just picked the category.
+    var body: some View {
         switch category {
         case .albums:
             AlbumListView(
@@ -82,7 +97,6 @@ struct BrowseLibraryView: View {
                 settings: settings,
                 sort: .alphabetical
             )
-            .navigationTitle("Albums")
         case .artists:
             ArtistListView(coordinator: coordinator, settings: settings)
         case .genres:
@@ -93,10 +107,8 @@ struct BrowseLibraryView: View {
                 settings: settings,
                 sort: .new
             )
-            .navigationTitle("New Music")
         case .playlists:
             PlaylistsView(coordinator: coordinator, settings: settings)
-                .navigationTitle("Playlists")
         }
     }
 }

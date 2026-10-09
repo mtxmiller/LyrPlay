@@ -36,6 +36,16 @@ struct AlbumListView: View {
             }
         }
 
+        /// Full-library lists page through everything (bd zxy7). Recently
+        /// Played and New Music stay a single 50-album page — they are
+        /// "latest" lists, not the whole library.
+        var isPaged: Bool {
+            switch self {
+            case .alphabetical, .byArtist, .byGenre: return true
+            case .recentlyPlayed, .new: return false
+            }
+        }
+
         var emptyIcon: String {
             switch self {
             case .recentlyPlayed: return "clock"
@@ -80,6 +90,16 @@ struct AlbumListView: View {
     /// Stored as `BuiltinTrackListView.Source` (Hashable) — Album itself is
     /// not Hashable (carries a UIImage), and the .playlist case is unused here.
     @State private var selectedDrill: BuiltinTrackListView.Source? = nil
+    /// Server-reported total (`count`) for paged sorts. nil until the first
+    /// page lands.
+    @State private var total: Int? = nil
+    @State private var isLoadingMore: Bool = false
+
+    /// Page size. 100 for paged sorts (artwork per row — keeps each page's
+    /// image burst modest); 50 for the single-page "latest" lists.
+    private var pageSize: Int { sort.isPaged ? 100 : 50 }
+    /// Start the next page this many rows before the end.
+    private static let prefetchMargin = 30
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "AlbumListView")
 
@@ -95,7 +115,7 @@ struct AlbumListView: View {
                 listView
             }
         }
-        .onAppear { if !hasFetched { fetch() } }
+        .onAppear { if !hasFetched { fetch(start: 0) } }
         .navigationDestination(item: $selectedDrill) { source in
             BuiltinTrackListView(
                 source: source,
@@ -128,7 +148,7 @@ struct AlbumListView: View {
         // Identity by album.id: stable across re-fetches so SwiftUI diffs rows correctly
         // when the server reorders RP. Avoids row remount + AsyncImage refetch on every refresh.
         TVList {
-            ForEach(albums, id: \.id) { album in
+            ForEach(Array(albums.enumerated()), id: \.element.id) { index, album in
                 Button {
                     // E1 revised: Select drills into the album's tracks so the
                     // user can start from a song. "Play all" lives in the
@@ -148,6 +168,7 @@ struct AlbumListView: View {
                 .buttonStyle(.plain)
                 .contextMenu { albumContextMenu(for: album) }
                 .tvListRow()
+                .onAppear { loadMoreIfNeeded(at: index) }
             }
         }
     }
@@ -182,29 +203,42 @@ struct AlbumListView: View {
 
     // MARK: - Fetch
 
-    private func fetch() {
-        isLoading = true
-        // System-scoped query. Cap at 50 — per learning ppz-deferred, AsyncImage has no shared
-        // cache so long lists re-download artwork on tab toggle. 50 keeps render snappy.
+    private func loadMoreIfNeeded(at index: Int) {
+        guard sort.isPaged, let total, albums.count < total, !isLoadingMore,
+              index >= albums.count - Self.prefetchMargin else { return }
+        fetch(start: albums.count)
+    }
+
+    private func fetch(start: Int) {
+        if start == 0 { isLoading = true } else { isLoadingMore = true }
+        // System-scoped query. Unpaged sorts cap at 50 — per learning ppz-deferred, AsyncImage
+        // has no shared cache so long lists re-download artwork on tab toggle. Paged sorts
+        // load 100 at a time as the user scrolls (bd zxy7).
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 50, sort.paramValue, "tags:ajly"]]
+            "params": ["", ["albums", start, pageSize, sort.paramValue, "tags:ajly"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { response in
             DispatchQueue.main.async {
                 isLoading = false
+                isLoadingMore = false
                 hasFetched = true
                 guard let result = response["result"] as? [String: Any] else {
-                    os_log(.error, log: logger, "❌ Albums fetch (%{public}s): invalid response", sort.paramValue)
+                    // A failed later page leaves `total` as-is, so scrolling
+                    // near the end again retries it.
+                    os_log(.error, log: logger, "❌ Albums fetch (%{public}s, start %d): invalid response", sort.paramValue, start)
                     return
                 }
-                if let loop = result["albums_loop"] as? [[String: Any]] {
-                    albums = Album.parseLoop(loop)
-                } else {
-                    albums = []
-                }
-                os_log(.info, log: logger, "✅ Albums (%{public}s): %d items", sort.paramValue, albums.count)
+                // Drop a page that no longer lines up (a retry raced it).
+                guard start == albums.count || start == 0 else { return }
+                let page = (result["albums_loop"] as? [[String: Any]]).map(Album.parseLoop) ?? []
+                albums = start == 0 ? page : albums + page
+                // Stop paging on a short page even if `count` says more.
+                total = page.count < pageSize
+                    ? albums.count
+                    : ((result["count"] as? Int) ?? Int(result["count"] as? String ?? "") ?? albums.count)
+                os_log(.info, log: logger, "✅ Albums (%{public}s): %d of %d", sort.paramValue, albums.count, total ?? 0)
             }
         }
     }
