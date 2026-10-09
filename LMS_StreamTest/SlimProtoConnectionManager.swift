@@ -51,6 +51,16 @@ class SlimProtoConnectionManager {
     private var lastSuccessfulConnection: Date?
     private var lastDisconnectionReason: DisconnectionReason = .unknown
 
+    /// Set by the coordinator while it holds the app awake to resume playback
+    /// the user asked for after an outage (bd 6lvg). Lifts the background /
+    /// expensive-network / attempt caps — they'd otherwise stop retrying after
+    /// a few seconds on cellular in the car — and backs off to 10s instead.
+    /// The coordinator bounds the hold (10 min), so this can't retry forever.
+    var persistForPlayback = false
+
+    /// True between `userInitiatedDisconnection()` and the resulting disconnect.
+    var isUserInitiatedDisconnect: Bool { lastDisconnectionReason == .userInitiated }
+
     private var wasConnectedBeforeTimeout: Bool = false
     
     
@@ -461,6 +471,9 @@ class SlimProtoConnectionManager {
         os_log(.info, log: logger, "✅ Connection established")
         connectionState = .connected
         lastSuccessfulConnection = Date()
+        // A user disconnect is over once we're connected again; a stale value
+        // would stop the next real drop from starting an outage hold (bd 6lvg).
+        lastDisconnectionReason = .unknown
         reconnectionAttempts = 0
         totalConsecutiveFailures = 0  // CRITICAL: Reset total failures on successful connection
         cancelScheduledReconnection()
@@ -566,6 +579,12 @@ class SlimProtoConnectionManager {
     }
 
     private func shouldAttemptReconnection() -> Bool {
+        // Resuming playback the user asked for: keep trying while the network
+        // is up (the delay backs off in scheduleReconnection).
+        if persistForPlayback && isNetworkAvailable && lastDisconnectionReason != .userInitiated {
+            return true
+        }
+
         // CRITICAL: Stop if both servers have been tried and failed multiple times
         if totalConsecutiveFailures >= maxTotalFailuresBeforeError {
             os_log(.error, log: logger, "❌ Total failures (%d) exceeded limit - both servers unreachable", totalConsecutiveFailures)
@@ -606,7 +625,9 @@ class SlimProtoConnectionManager {
     private func scheduleReconnection() {
         cancelScheduledReconnection()
 
-        let delay: TimeInterval = 2.0  // Fast retry for responsive failover to backup server
+        // Fast retry for responsive failover to backup server; back off when
+        // persisting through a long outage (bd 6lvg).
+        let delay: TimeInterval = (persistForPlayback && totalConsecutiveFailures >= 4) ? 10.0 : 2.0
 
         os_log(.info, log: logger, "🔄 Scheduling reconnection in %.0f seconds", delay)
 

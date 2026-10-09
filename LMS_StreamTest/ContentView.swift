@@ -243,11 +243,17 @@ struct ContentView: View {
             if let webView = webView {
                 logWebViewViewport(webView, source: "foreground-before")
                 recalcWebViewLayout(webView)
-                injectTopPad(into: webView,
-                             top: Int(webView.window?.safeAreaInsets.top ?? 0),
-                             source: "willEnterForeground")
+                // bd p2dj: use the GeometryReader inset, not UIWindow.safeAreaInsets. The
+                // window can still report 0 during the foreground transition (seen with
+                // CarPlay connected); injecting that put Material's toolbar under the
+                // notch, and updateUIView never corrected it because topInset itself
+                // hadn't changed.
+                os_log(.info, log: webViewLayoutLog, "📐 topPad on foreground: %dpx (window reports %dpx)",
+                       Int(topInset), Int(webView.window?.safeAreaInsets.top ?? -1))
+                injectTopPad(into: webView, top: Int(topInset), source: "willEnterForeground")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     logWebViewViewport(webView, source: "foreground+1s")
+                    verifyTopPad(in: webView, expected: Int(topInset), source: "foreground+1s")
                 }
 
                 // Check if Material's Cometd connection is still alive after backgrounding.
@@ -833,6 +839,22 @@ private func logWebViewViewport(_ webView: WKWebView, source: String) {
         } else {
             os_log(.info, log: webViewLayoutLog, "📐 Viewport OK (%{public}s): %{public}s %{public}s",
                    source, native, page)
+        }
+    }
+}
+
+/// Read Material's `--top-pad` back and re-inject if it doesn't match `expected`
+/// (bd p2dj). Logs either way, so Copy Diagnostic Log shows the value in effect.
+private func verifyTopPad(in webView: WKWebView, expected: Int, source: String) {
+    let readScript = "getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();"
+    webView.evaluateJavaScript(readScript) { result, _ in
+        let current = (result as? String) ?? ""
+        if current != "\(expected)px" {
+            os_log(.error, log: webViewLayoutLog, "📐 topPad drifted (%{public}s): was '%{public}s', expected %dpx — re-injecting",
+                   source, current, expected)
+            injectTopPad(into: webView, top: expected, source: "\(source)-verify")
+        } else {
+            os_log(.info, log: webViewLayoutLog, "📐 topPad OK (%{public}s): %{public}s", source, current)
         }
     }
 }

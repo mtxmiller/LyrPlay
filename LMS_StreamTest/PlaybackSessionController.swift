@@ -41,6 +41,7 @@ protocol SlimProtoControlling: AnyObject {
     func sendJSONRPCCommandDirect(_ command: [String: Any], completion: @escaping ([String: Any]) -> Void)
     func toggleShuffleMode(completion: ((Int) -> Void)?)
     func sendPauseWithConfirmation(maxRetries: Int, completion: ((Bool) -> Void)?)
+    func outageHoldInterruptionBegan(isSiri: Bool)
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -350,6 +351,9 @@ final class PlaybackSessionController {
 
             os_log(.info, log: logger, "🚫 Interruption began (%{public}s, autoResume=%{public}s)",
                    interruptionKind.rawValue, shouldResume ? "YES" : "NO")
+            // A call or another app's audio ends any outage-recovery attempt,
+            // even when nothing is playing right now (bd 6lvg).
+            slimProtoProvider?()?.outageHoldInterruptionBegan(isSiri: interruptionKind == .siri)
             if wasPlaying {
                 // Send server pause command instead of local CBass pause
                 slimProtoProvider?()?.sendLockScreenCommand("pause")
