@@ -148,3 +148,6 @@ experimental/
 # Python bytecode (smoke harness)
 __pycache__/
 .beads/proxieddb/
+
+# Dev wiki (Obsidian vault) — private notes, never commit to this public repo
+wiki/

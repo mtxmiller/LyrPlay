@@ -4,7 +4,7 @@
 
 **LyrPlay** is an iOS SwiftUI app that implements a SlimProto client for streaming audio from Logitech Media Server (LMS). It's essentially a **Swift version of squeezelite** — a Squeezebox player replacement with native FLAC support, CarPlay, Siri, and gapless playback.
 
-- **Version state**: build/version live in `LMS_StreamTest.xcodeproj/project.pbxproj` (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`). Per-release status (in dev / submitted / live) tracked in the Obsidian wiki under `Releases/`.
+- **Version state**: build/version live in `LMS_StreamTest.xcodeproj/project.pbxproj` (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`). Per-release status (in dev / submitted / live) tracked in the wiki under `wiki/Releases/`.
 - **Bundle ID**: `elm.LMS-StreamTest` (preserved for App Store continuity — never change this)
 - **Display Name**: LyrPlay
 - **Local Folder**: `LMS_StreamTest` (intentional — don't rename)
@@ -147,7 +147,7 @@ For open work and what's in flight: run `bd ready` for the issue queue and read 
 
 **Read the matching `Architecture/*.md` BEFORE grepping Swift source for any debug or design task in an architecture-touching area.** It gives you the trigger taxonomy, gating logic, and flow diagrams without having to reconstruct them.
 
-The wiki lives in a local Obsidian vault outside the repo (path stored in user-local Claude memory, not committed). Architecture topics: Audio Pipeline, CarPlay, Gapless Playback, Position Recovery, SlimProto Protocol, Material WebView Injection, Server Failover, Reconnection.
+The wiki is an Obsidian vault at `wiki/` in the main checkout. It is gitignored (private notes, never commit it), so it does not exist in worktrees — use the main checkout's absolute path there. Architecture topics: Audio Pipeline, CarPlay, Gapless Playback, Position Recovery, SlimProto Protocol, Material WebView Injection, Server Failover, Reconnection.
 
 Also: `Releases/` for shipped-feature changelogs, `Decisions/` for architectural decision records.
 
