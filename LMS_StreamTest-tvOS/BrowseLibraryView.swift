@@ -72,7 +72,6 @@ struct BrowseLibraryView: View {
                 .tvListRow()
             }
         }
-        .navigationTitle("Library")
         .navigationDestination(item: $selectedCategory) { category in
             BrowseCategoryView(category: category, coordinator: coordinator, settings: settings)
         }
@@ -87,6 +86,9 @@ struct BrowseCategoryView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
 
+    // No navigationTitle on these lists — on a tvOS List root it renders
+    // as a large title floating over the scrolled rows (same as
+    // BuiltinTrackListView). The user just picked the category.
     var body: some View {
         switch category {
         case .albums:
@@ -95,7 +97,6 @@ struct BrowseCategoryView: View {
                 settings: settings,
                 sort: .alphabetical
             )
-            .navigationTitle("Albums")
         case .artists:
             ArtistListView(coordinator: coordinator, settings: settings)
         case .genres:
@@ -106,10 +107,8 @@ struct BrowseCategoryView: View {
                 settings: settings,
                 sort: .new
             )
-            .navigationTitle("New Music")
         case .playlists:
             PlaylistsView(coordinator: coordinator, settings: settings)
-                .navigationTitle("Playlists")
         }
     }
 }

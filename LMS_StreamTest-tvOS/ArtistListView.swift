@@ -41,7 +41,8 @@ struct ArtistListView: View {
                 listView
             }
         }
-        .navigationTitle("Artists")
+        // No navigationTitle — on a tvOS List root it renders as a large
+        // title floating over the scrolled rows (same as BuiltinTrackListView).
         .onAppear { if !hasFetched { fetch(start: 0) } }
         .navigationDestination(item: $selectedArtist) { artist in
             ArtistDetailView(
