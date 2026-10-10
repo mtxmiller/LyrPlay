@@ -97,6 +97,32 @@ struct PlayerAudioPrefsTests {
         #expect(model.replayGainMode == .track)
     }
 
+    // MARK: Signal Path badge
+
+    @Test func nativeOnlyWhenNothingAltersSamples() {
+        #expect(SignalPathStatus.evaluate(rateMatches: true, fixedOutput: true, replayGain: .off) == .native)
+    }
+
+    @Test func replayGainDowngradesToNativeRate() {
+        #expect(SignalPathStatus.evaluate(rateMatches: true, fixedOutput: true, replayGain: .album)
+                == .nativeRate(["ReplayGain Album"]))
+    }
+
+    @Test func softwareVolumeDowngradesToNativeRate() {
+        #expect(SignalPathStatus.evaluate(rateMatches: true, fixedOutput: false, replayGain: .off)
+                == .nativeRate(["Software volume"]))
+    }
+
+    @Test func unknownReplayGainIsNeverClaimedClean() {
+        #expect(SignalPathStatus.evaluate(rateMatches: true, fixedOutput: true, replayGain: nil)
+                == .nativeRate([]))
+    }
+
+    @Test func rateMismatchIsResampledWithAlterations() {
+        #expect(SignalPathStatus.evaluate(rateMatches: false, fixedOutput: false, replayGain: .smart)
+                == .resampled(["ReplayGain Smart", "Software volume"]))
+    }
+
     @Test @MainActor func noPlayerIDSendsNothing() async {
         let runner = MockRunner()
         let model = PlayerAudioPrefsModel(runner: runner, playerID: "")

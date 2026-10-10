@@ -350,33 +350,45 @@ struct SettingsView: View {
     }
 
     private func signalPathRow(stream: AudioPlayer.StreamInfo, output: AudioPlayer.OutputDeviceInfo) -> some View {
-        let isNative = abs(stream.sampleRate - output.outputSampleRate) < 100
+        let status = SignalPathStatus.evaluate(
+            rateMatches: abs(stream.sampleRate - output.outputSampleRate) < 100,
+            fixedOutput: audioPrefs.fixedOutput ?? settings.fixOutputAt100Percent,
+            replayGain: audioPrefs.replayGainMode
+        )
+        let alterations: [String]
+        switch status {
+        case .native: alterations = []
+        case .nativeRate(let a), .resampled(let a): alterations = a
+        }
+        let path = "\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
         return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text("Signal Path")
                 Spacer()
-                if isNative {
-                    Label("Native", systemImage: "checkmark")
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.green)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.green.opacity(0.15)))
-                } else {
-                    Text("Resampled")
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                switch status {
+                case .native:
+                    signalBadge(Label("Native", systemImage: "checkmark"), color: .green)
+                case .nativeRate:
+                    signalBadge(Text("Native rate"), color: .secondary)
+                case .resampled:
+                    signalBadge(Text("Resampled"), color: .secondary)
                 }
             }
-            Text("\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz")
+            Text(([path] + alterations).joined(separator: " · "))
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
+    }
+
+    private func signalBadge<Content: View>(_ content: Content, color: Color) -> some View {
+        content
+            .font(.caption.weight(.semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.15)))
     }
 
     // MARK: - Interface

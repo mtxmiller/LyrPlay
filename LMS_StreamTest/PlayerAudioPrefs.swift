@@ -22,6 +22,30 @@ enum ReplayGainMode: Int, CaseIterable, Identifiable {
     }
 }
 
+/// Settings' Signal Path badge. Green "Native" only when nothing alters the
+/// samples: output runs at the track's rate, software volume is off (Fixed
+/// Output) and ReplayGain is Off. ReplayGain reflects the *setting* — an
+/// untagged track gets 0 dB even in Album mode.
+enum SignalPathStatus: Equatable {
+    case native              // rate match, nothing altering the samples
+    case nativeRate([String]) // rate match, but these alter the samples
+    case resampled([String])
+
+    static func evaluate(rateMatches: Bool, fixedOutput: Bool, replayGain: ReplayGainMode?) -> SignalPathStatus {
+        var alterations: [String] = []
+        if let replayGain, replayGain != .off {
+            alterations.append("ReplayGain \(replayGain.displayName)")
+        }
+        if !fixedOutput {
+            alterations.append("Software volume")
+        }
+        if !rateMatches { return .resampled(alterations) }
+        // Unknown ReplayGain (server didn't answer) can't be claimed clean.
+        if alterations.isEmpty && replayGain != nil { return .native }
+        return .nativeRate(alterations)
+    }
+}
+
 /// Reads and writes the LMS player prefs behind Fixed Output and ReplayGain.
 /// The server owns these — Material edits the same prefs — so Settings loads
 /// them on open and writes through JSON-RPC instead of trusting a local copy.
