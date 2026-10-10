@@ -98,6 +98,25 @@ class SlimProtoCoordinator: ObservableObject {
     /// Audible recovery retries after a failed jump / no playback (bd 6lvg).
     private var audibleRecoveryRetries = 0
     private static let maxAudibleRecoveryRetries = 3
+
+    struct RecoveryTarget: Equatable {
+        let index: Int
+        let position: Double
+    }
+    /// Where this outage hold's audible recovery jumped to (bd fykj). The saved
+    /// recovery data can't be trusted for retries: it's deleted once LMS accepts
+    /// the jump, and if LMS then can't stream to us it skips through the queue
+    /// and the 3s poll copies that new index in. Retries reuse this target
+    /// until the hold ends (playback started, paused, gave up).
+    private var audibleRecoveryTarget: RecoveryTarget?
+
+    /// Which target a recovery jumps to. A retry within the same outage hold
+    /// keeps the original target: nothing has played since, so the user is
+    /// still where it was.
+    static func resolveRecoveryTarget(saved: RecoveryTarget?, kept: RecoveryTarget?, isAudibleRetry: Bool) -> RecoveryTarget? {
+        if isAudibleRetry, let kept = kept { return kept }
+        return saved
+    }
     /// When the SlimProto connection last came up, and when the server last
     /// sent strm 's'. On reconnect LMS restarts a playing client by itself
     /// (Squeezebox.pm reconnect → _Continue → _JumpToTime); a jump of ours on
@@ -864,19 +883,32 @@ class SlimProtoCoordinator: ObservableObject {
         // which supports seeking via server-side transcoding. Playlist jump recovery works for all formats.
 
         // Check if we have recovery data (no time limit - like other music players)
-        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+        var saved: RecoveryTarget?
+        if UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil {
+            saved = RecoveryTarget(index: UserDefaults.standard.integer(forKey: "lyrplay_recovery_index"),
+                                   position: UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+        }
+        let isAudibleRetry = shouldPlay && outageHoldActive && audibleRecoveryTarget != nil
+        guard let target = Self.resolveRecoveryTarget(saved: saved, kept: audibleRecoveryTarget, isAudibleRetry: isAudibleRetry) else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
             finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
         }
+        if isAudibleRetry {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔁 Retrying this outage's jump target: track %d at %.2f", target.index, target.position)
+        }
 
-        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        let savedIndex = target.index
+        let savedPosition = target.position
 
         guard savedPosition > 0 else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
             finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
+        }
+
+        if shouldPlay && outageHoldActive {
+            audibleRecoveryTarget = target
         }
 
         os_log(.error, log: logger, "[APP-RECOVERY] 🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
@@ -3090,6 +3122,7 @@ extension SlimProtoCoordinator {
         guard outageHoldActive else { return }
         outageHoldActive = false
         outageHoldGeneration += 1  // cancels the pending time limit
+        audibleRecoveryTarget = nil
         audioManager.setOutputKeepAlive(false)
         connectionManager.persistForPlayback = false
         // Nothing left to resume: a later reconnect must not start playback
