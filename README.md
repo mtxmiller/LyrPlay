@@ -21,7 +21,7 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Siri Voice Commands** - "Hey Siri, play [artist/album/song] on LyrPlay" with automatic LMS search
 - **Player Synchronization** - Sync playback across multiple LMS players
 - **HTTP Authentication** - Support for password-protected LMS servers
-- **Bit-Perfect USB DAC** - Sample rate matching for external audio interfaces
+- **Native Sample Rate Output for USB DACs** - Switches the DAC to each track's sample rate (no resampling). For an unaltered signal, turn on Fixed Output and set ReplayGain to Off in Settings → Audio, and control volume on your DAC
 - **Premium Icon Pack** - 11 alternate app icons available as optional in-app purchase
 
 ## Audio Format Support

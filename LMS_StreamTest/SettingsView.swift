@@ -13,13 +13,21 @@ struct SettingsView: View {
     @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @EnvironmentObject private var coordinator: SlimProtoCoordinator
     @Environment(\.presentationMode) var presentationMode
-    @State private var showingConnectionTest = false
     @State private var showingResetAlert = false
-    @State private var showingMACInfo = false
     //cache clear
     @State private var showingCacheClearAlert = false
     @State private var isClearingCache = false
-    @State private var isReconnecting = false
+
+    // Status card (bd x19i)
+    @State private var isConnectedNow = false
+    @State private var connectionStateText = ""
+    private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    // Server-side Fixed Output + ReplayGain prefs (bd x19i)
+    @StateObject private var audioPrefs = PlayerAudioPrefsModel(
+        runner: AudioManager.shared.slimClient,
+        playerID: SettingsManager.shared.playerMACAddress
+    )
 
     // Diagnostic log export (bd 34l field debugging)
     @State private var diagnosticLogStatus: String? = nil
@@ -85,443 +93,92 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                // Server Configuration Section
-                Section(header: Text("Server Configuration")) {
-                    NavigationLink(destination: ServerConfigView()) {
-                        SettingsRow(
-                            icon: "server.rack",
-                            title: "Server Address",
-                            value: settings.serverHost.isEmpty ? "Not Set" : settings.serverHost,
-                            valueColor: settings.serverHost.isEmpty ? .red : .secondary
-                        )
-                    }
-                    
-                    NavigationLink(destination: ServerDiscoverySettingsView()) {
-                        SettingsRow(
-                            icon: "magnifyingglass",
-                            title: "Discover Servers",
-                            value: "Find LMS servers",
-                            valueColor: .blue
-                        )
-                    }
-                    
-                    Button(action: { showingConnectionTest = true }) {
-                        SettingsRow(
-                            icon: "network",
-                            title: "Test Connection",
-                            value: "Tap to test",
-                            valueColor: .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
-                }
-                
-                // Backup Server Section
+                // Status card — tap for server, backup and player identity
                 Section {
-                    Toggle(isOn: $settings.isBackupServerEnabled) {
-                        SettingsRow(
-                            icon: "server.rack",
-                            title: "Enable Backup Server",
-                            value: settings.isBackupServerEnabled ? "Enabled" : "Disabled",
-                            valueColor: settings.isBackupServerEnabled ? .green : .secondary
-                        )
+                    NavigationLink(destination: ServerSettingsView()) {
+                        statusCard
                     }
-                    .onChange(of: settings.isBackupServerEnabled) { _ in
-                        settings.saveSettings()
-                    }
+                }
 
-                    if settings.isBackupServerEnabled {
-                        NavigationLink(destination: BackupServerConfigView()) {
-                            SettingsRow(
-                                icon: "server.rack",
-                                title: "Backup Server Address",
-                                value: settings.backupServerHost.isEmpty ? "Not Set" : settings.backupServerHost,
-                                valueColor: settings.backupServerHost.isEmpty ? .red : .secondary
-                            )
-                        }
+                audioSection
 
-                        Toggle(isOn: $settings.automaticFailoverEnabled) {
-                            SettingsRow(
-                                icon: "arrow.triangle.2.circlepath",
-                                title: "Automatic Failover",
-                                value: settings.automaticFailoverEnabled ? "On" : "Off",
-                                valueColor: settings.automaticFailoverEnabled ? .green : .secondary
-                            )
-                        }
-                        .disabled(settings.backupServerHost.isEmpty)
-                        .onChange(of: settings.automaticFailoverEnabled) { _ in
+                Section {
+                    Toggle("Resume on App Open", isOn: $settings.enableAppOpenRecovery)
+                        .onChange(of: settings.enableAppOpenRecovery) { _ in
                             settings.saveSettings()
                         }
 
-                        HStack {
-                            SettingsRow(
-                                icon: "switch.2",
-                                title: "Active Server",
-                                value: settings.currentActiveServer.displayName,
-                                valueColor: .blue
-                            )
-
-                            Spacer()
-
-                            Button("Switch") {
-                                settings.switchToOtherServer()
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(!settings.isBackupServerEnabled || settings.backupServerHost.isEmpty)
+                    Toggle("Keep Screen Awake", isOn: $settings.keepScreenAwake)
+                        .onChange(of: settings.keepScreenAwake) { _ in
+                            settings.saveSettings()
+                            PlaybackSessionController.shared.applyIdleTimerSetting()
                         }
-                    }
-                } header: {
-                    Text("Backup Server")
-                } footer: {
-                    if settings.isBackupServerEnabled {
-                        Text("When off, the app won't switch servers for you. If your active server goes unreachable, playback stops until you tap Switch or connectivity returns.")
-                    }
-                }
-                
-                // Player Identity Section
-                Section(header: Text("Player Identity")) {
-                    NavigationLink(destination: PlayerConfigView()) {
-                        SettingsRow(
-                            icon: "hifispeaker",
-                            title: "Player Name",
-                            value: settings.playerName.isEmpty ? "Not Set" : settings.playerName,
-                            valueColor: settings.playerName.isEmpty ? .red : .secondary
-                        )
-                    }
-                    
-                    Button(action: { showingMACInfo = true }) {
-                        SettingsRow(
-                            icon: "barcode",
-                            title: "Player ID",
-                            value: settings.formattedMACAddress,
-                            valueColor: .secondary
-                        )
-                    }
-                    .foregroundColor(.primary)
-                }
-                
-                // Audio Settings Section
-                Section(header: Text("Audio Settings")) {
-                    // Audio Format Picker
-                    NavigationLink(destination: AudioFormatConfigView()) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: "music.note")
-                                    .foregroundColor(.blue)
-                                    .frame(width: 20)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Audio Format")
-                                        .font(.body)
-                                    Text(settings.audioFormat.displayName)
-                                        .font(.caption)
-                                        .foregroundColor(.blue)
-                                }
-
-                                Spacer()
-
-                                if isReconnecting {
-                                    ProgressView()
-                                        .scaleEffect(0.8)
-                                }
-                            }
-
-                            Text(settings.audioFormat.description)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
-                        }
-                    }
-                    .disabled(isReconnecting)
-                    .padding(.vertical, 2)
-                }
-
-                // Audio Stream & Output Info (Combined)
-                if let streamInfo = audioPlayer.currentStreamInfo,
-                   let outputInfo = audioPlayer.currentOutputInfo {
-                    Section(header: Text("Audio Stream & Output")) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            // Stream info line
-                            HStack {
-                                Image(systemName: "waveform")
-                                    .foregroundColor(.green)
-                                    .frame(width: 20)
-
-                                Text("\(streamInfo.format) • \(AudioPlayer.formatSampleRateKHz(streamInfo.sampleRate))kHz • \(streamInfo.bitDepth)-bit • \(streamInfo.channels == 2 ? "Stereo" : "Mono")\(streamInfo.bitrateText.map { " • \($0)" } ?? "")")
-                                    .font(.subheadline)
-                                    .foregroundColor(.primary)
-                            }
-
-                            // Output device line
-                            HStack {
-                                Image(systemName: "speaker.wave.3")
-                                    .foregroundColor(.blue)
-                                    .frame(width: 20)
-
-                                Text("\(outputInfo.deviceName) → \(AudioPlayer.formatSampleRateKHz(outputInfo.outputSampleRate))kHz")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-
-                // Playback Settings Section
-                Section(header: Text("Playback Settings")) {
-                    Toggle(isOn: $settings.enableAppOpenRecovery) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: "arrow.clockwise")
-                                    .foregroundColor(.green)
-                                    .frame(width: 20)
-                                Text("Resume Position on App Open")
-                                    .font(.body)
-                            }
-                            Text("Automatically restore playback position when returning to app after 45+ seconds in background")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
-                        }
-                    }
-                    .onChange(of: settings.enableAppOpenRecovery) { _ in
-                        settings.saveSettings()
-                    }
-                    .padding(.vertical, 4)
-
-                    Toggle(isOn: $settings.iOSPlayerFocus) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: "iphone")
-                                    .foregroundColor(.blue)
-                                    .frame(width: 20)
-                                Text("iOS Player Focus")
-                                    .font(.body)
-                            }
-                            Text("Show only LyrPlay player in Material web interface, hide other Squeezebox players")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
-                        }
-                    }
-                    .onChange(of: settings.iOSPlayerFocus) { _ in
-                        settings.saveSettings()
-                        // Trigger WebView reload when setting changes
-                        settings.shouldReloadWebView = true
-                    }
-                    .padding(.vertical, 4)
-
-                    Toggle(isOn: $settings.keepScreenAwake) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: "moon.zzz")
-                                    .foregroundColor(.indigo)
-                                    .frame(width: 20)
-                                Text("Keep Screen Awake")
-                                    .font(.body)
-                            }
-                            Text("Prevent screen from sleeping while audio is playing")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
-                        }
-                    }
-                    .onChange(of: settings.keepScreenAwake) { _ in
-                        settings.saveSettings()
-                        PlaybackSessionController.shared.applyIdleTimerSetting()
-                    }
-                    .padding(.vertical, 4)
 
                     #if os(iOS)
-                    Toggle(isOn: $settings.hardwareVolumeButtonsEnabled) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: "speaker.wave.2")
-                                    .foregroundColor(.orange)
-                                    .frame(width: 20)
-                                Text("Hardware Volume Buttons")
-                                    .font(.body)
-                            }
-                            Text("Experimental. Forward the phone's volume buttons to the selected player when it isn't this device. Off by default; leave off to use the buttons for the phone's own volume. Skipped automatically for fixed-volume players.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 28)
+                    Toggle("Volume Buttons Control Player", isOn: $settings.hardwareVolumeButtonsEnabled)
+                        .onChange(of: settings.hardwareVolumeButtonsEnabled) { _ in
+                            settings.saveSettings()
                         }
-                    }
-                    .onChange(of: settings.hardwareVolumeButtonsEnabled) { _ in
-                        settings.saveSettings()
-                    }
-                    .padding(.vertical, 4)
                     #endif
-
-                    // Max Sample Rate Picker
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "waveform")
-                                .foregroundColor(.purple)
-                                .frame(width: 20)
-                            Text("Max Sample Rate")
-                                .font(.body)
-                            Spacer()
-                            Picker("", selection: $settings.maxSampleRate) {
-                                Text("44.1 kHz").tag(44100)
-                                Text("48 kHz").tag(48000)
-                                Text("96 kHz").tag(96000)
-                                Text("192 kHz").tag(192000)
-                            }
-                            .pickerStyle(.menu)
-                        }
-                        Text("Server will downsample high-res audio above this rate. Lower values save mobile data.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 28)
-                    }
-                    .padding(.vertical, 4)
-                    .onChange(of: settings.maxSampleRate) { _ in
-                        settings.saveSettings()
-                        // Restart connection to apply new capabilities
-                        if coordinator.isConnected {
-                            Task {
-                                await coordinator.restartConnection()
-                            }
-                        }
-                    }
+                } header: {
+                    Text("Playback")
+                } footer: {
+                    Text("Resume restores your place after 45+ seconds in the background. Volume Buttons (experimental) sends the phone's buttons to the selected player when it isn't this device; fixed-volume players are skipped.")
                 }
 
-                // App Icon Section
-                Section(header: Text("Appearance")) {
-                    if purchaseManager.hasIconPack {
-                        // Icon Pack unlocked - show picker
-                        NavigationLink(destination: IconPickerView()) {
-                            HStack {
-                                Image(systemName: "app.badge")
-                                    .foregroundColor(.purple)
-                                    .frame(width: 20)
-
-                                Text("App Icon")
-                                    .font(.body)
-
-                                Spacer()
-
-                                Text(appIconManager.currentIcon.displayName)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                Section {
+                    Toggle("Show Only This Player", isOn: $settings.iOSPlayerFocus)
+                        .onChange(of: settings.iOSPlayerFocus) { _ in
+                            settings.saveSettings()
+                            // Trigger WebView reload when setting changes
+                            settings.shouldReloadWebView = true
                         }
-                    } else {
-                        // Icon Pack locked - subtle navigation to preview
-                        NavigationLink(destination: IconPreviewView(
-                            onPurchaseError: { error in
-                                purchaseErrorMessage = error.localizedDescription
-                                showingPurchaseError = true
-                            }
-                        )) {
-                            HStack {
-                                Image(systemName: "app.badge")
-                                    .foregroundColor(.purple)
-                                    .frame(width: 20)
 
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("App Icon")
-                                        .font(.body)
-                                    Text("11 premium designs available")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
+                    appIconRow
 
-                                Spacer()
+                    Button(isClearingCache ? "Clearing Material Cache…" : "Clear Material Cache") {
+                        showingCacheClearAlert = true
+                    }
+                    .disabled(isClearingCache)
+                } header: {
+                    Text("Interface")
+                } footer: {
+                    Text("Show Only This Player hides other Squeezebox players in the Material interface.")
+                }
 
-                                Text(purchaseManager.iconPackPrice)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                Section {
+                    valueRow("Version", appVersionDisplay)
+
+                    Button(action: copyDiagnosticLog) {
+                        HStack {
+                            Text("Copy Diagnostic Log")
+                            Spacer()
+                            Text(diagnosticLogStatus ?? "Last 30 min")
+                                .foregroundColor(diagnosticLogStatus == "Copied!" ? .green : .secondary)
                         }
                     }
+                    .disabled(diagnosticLogStatus == "Collecting…")
 
-                    // Restore Purchases button
-                    Button(action: {
+                    Button("Restore Purchases") {
                         Task {
                             await purchaseManager.restorePurchases()
                         }
-                    }) {
-                        HStack {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundColor(.blue)
-                                .frame(width: 20)
-
-                            Text("Restore Purchases")
-                                .font(.body)
-                        }
                     }
-                    .foregroundColor(.primary)
+
+                    NavigationLink(destination: AdvancedConfigView()) {
+                        valueRow("Advanced", "Ports, Timeouts")
+                    }
+                } header: {
+                    Text("About")
                 }
 
-                // Advanced & About Section (Combined)
-                Section(header: Text("Advanced & About")) {
-                    NavigationLink(destination: AdvancedConfigView()) {
-                        SettingsRow(
-                            icon: "gearshape.2",
-                            title: "Advanced Settings",
-                            value: "Ports, Timeouts",
-                            valueColor: .secondary
-                        )
+                Section {
+                    Button(role: .destructive) {
+                        showingResetAlert = true
+                    } label: {
+                        Text("Reset All Settings")
+                            .frame(maxWidth: .infinity)
                     }
-
-                    Button(action: { showingCacheClearAlert = true }) {
-                        SettingsRow(
-                            icon: "trash.slash",
-                            title: "Clear Material Cache",
-                            value: isClearingCache ? "Clearing..." : "Tap to clear",
-                            valueColor: isClearingCache ? .orange : .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
-                    .disabled(isClearingCache)
-
-                    Button(action: { showingResetAlert = true }) {
-                        SettingsRow(
-                            icon: "arrow.clockwise",
-                            title: "Reset All Settings",
-                            value: "Start over",
-                            valueColor: .red
-                        )
-                    }
-                    .foregroundColor(.red)
-
-                    SettingsRow(
-                        icon: "info.circle",
-                        title: "Version",
-                        value: appVersionDisplay,
-                        valueColor: .secondary
-                    )
-
-                    Button(action: copyDiagnosticLog) {
-                        SettingsRow(
-                            icon: "doc.text.magnifyingglass",
-                            title: "Copy Diagnostic Log",
-                            value: diagnosticLogStatus ?? "Last 30 min → clipboard",
-                            valueColor: diagnosticLogStatus == "Copied!" ? .green : .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
-                    .disabled(diagnosticLogStatus == "Collecting…")
-
-                    #if DEBUG
-                    Button(action: {
-                        Phase2SyncControllerVerification.runFullTest(
-                            coordinator: coordinator,
-                            audioManager: AudioManager.shared
-                        )
-                    }) {
-                        SettingsRow(
-                            icon: "waveform.path.ecg",
-                            title: "Run Sync Controller Tests",
-                            value: "~35s, requires playing track",
-                            valueColor: .blue
-                        )
-                    }
-                    .foregroundColor(.primary)
-                    #endif
                 }
             }
             .navigationTitle("Settings")
@@ -537,7 +194,340 @@ struct SettingsView: View {
         .onAppear {
             // Refresh output device info when settings view appears
             audioPlayer.updateOutputDeviceInfo()
+            refreshConnectionStatus()
+            audioPrefs.load()
         }
+        // Connection state isn't @Published on the coordinator; poll it while
+        // Settings is open rather than touching the connection manager.
+        .onReceive(connectionPoll) { _ in
+            refreshConnectionStatus()
+        }
+        // Keep the local mirror (re-applied on every connect) in step with the
+        // server, so a change made in Material isn't undone on reconnect.
+        .onChange(of: audioPrefs.fixedOutput) { serverValue in
+            guard let serverValue, serverValue != settings.fixOutputAt100Percent else { return }
+            settings.fixOutputAt100Percent = serverValue
+            settings.saveSettings()
+        }
+        .alert("Reset All Settings?", isPresented: $showingResetAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                settings.resetConfiguration()
+            }
+        } message: {
+            Text("This will reset all settings to defaults and mark the app as unconfigured. You'll need to go through setup again.")
+        }
+        .alert("Clear Material Cache?", isPresented: $showingCacheClearAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear Cache") {
+                clearMaterialCache()
+            }
+        } message: {
+            Text("This will clear Material's web cache and reload the interface. This often fixes UI display issues.")
+        }
+        .alert("Purchase Error", isPresented: $showingPurchaseError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(purchaseErrorMessage)
+        }
+    }
+
+    // MARK: - Status Card
+
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(settings.playerName.isEmpty ? "Player name not set" : settings.playerName)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(statusText)
+                    .foregroundColor(statusColor)
+                Text("· \(settings.activeServerHost.isEmpty ? "No server set" : settings.activeServerHost)")
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            .font(.footnote)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var statusText: String {
+        if isConnectedNow {
+            return settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
+        }
+        switch connectionStateText {
+        case "Connecting", "Reconnecting": return "\(connectionStateText)…"
+        default: return connectionStateText
+        }
+    }
+
+    private var statusColor: Color {
+        if isConnectedNow {
+            return settings.currentActiveServer == .backup ? .orange : .green
+        }
+        switch connectionStateText {
+        case "Connecting", "Reconnecting": return .secondary
+        default: return .red
+        }
+    }
+
+    private func refreshConnectionStatus() {
+        isConnectedNow = coordinator.isConnected
+        connectionStateText = coordinator.connectionState
+    }
+
+    // MARK: - Audio
+
+    private var audioSection: some View {
+        Section {
+            NavigationLink(destination: AudioFormatConfigView()) {
+                valueRow("Format", settings.audioFormat.displayName)
+            }
+
+            Picker("Max Sample Rate", selection: $settings.maxSampleRate) {
+                Text("44.1 kHz").tag(44100)
+                Text("48 kHz").tag(48000)
+                Text("96 kHz").tag(96000)
+                Text("192 kHz").tag(192000)
+            }
+            .pickerStyle(.menu)
+            .onChange(of: settings.maxSampleRate) { _ in
+                settings.saveSettings()
+                // Restart connection to apply new capabilities
+                if coordinator.isConnected {
+                    Task {
+                        await coordinator.restartConnection()
+                    }
+                }
+            }
+
+            Toggle("Fixed Output (100%)", isOn: fixedOutputBinding)
+
+            if audioPrefs.replayGainMode != nil {
+                Picker("ReplayGain", selection: replayGainBinding) {
+                    ForEach(ReplayGainMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+            } else {
+                valueRow("ReplayGain", "—")
+            }
+
+            if let stream = audioPlayer.currentStreamInfo,
+               let output = audioPlayer.currentOutputInfo {
+                signalPathRow(stream: stream, output: output)
+            }
+        } header: {
+            Text("Audio")
+        } footer: {
+            Text("Fixed Output turns off software volume, for a DAC or amp with its own volume control. With ReplayGain also Off, audio is sent unaltered.")
+        }
+    }
+
+    private var fixedOutputBinding: Binding<Bool> {
+        Binding(
+            get: { audioPrefs.fixedOutput ?? settings.fixOutputAt100Percent },
+            set: { newValue in
+                settings.fixOutputAt100Percent = newValue
+                settings.saveSettings()
+                if newValue {
+                    coordinator.applyFixedOutputPolicy()
+                } else {
+                    coordinator.restoreSoftwareVolumeControl()
+                }
+                audioPrefs.noteFixedOutputChanged(newValue)
+            }
+        )
+    }
+
+    private var replayGainBinding: Binding<ReplayGainMode> {
+        Binding(
+            get: { audioPrefs.replayGainMode ?? .off },
+            set: { audioPrefs.setReplayGainMode($0) }
+        )
+    }
+
+    private func signalPathRow(stream: AudioPlayer.StreamInfo, output: AudioPlayer.OutputDeviceInfo) -> some View {
+        let status = SignalPathStatus.evaluate(
+            rateMatches: abs(stream.sampleRate - output.outputSampleRate) < 100,
+            fixedOutput: audioPrefs.fixedOutput ?? settings.fixOutputAt100Percent,
+            replayGain: audioPrefs.replayGainMode
+        )
+        let alterations: [String]
+        switch status {
+        case .native: alterations = []
+        case .nativeRate(let a), .resampled(let a): alterations = a
+        }
+        let path = "\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("Signal Path")
+                Spacer()
+                switch status {
+                case .native:
+                    signalBadge(Label("Native", systemImage: "checkmark"), color: .green)
+                case .nativeRate:
+                    signalBadge(Text("Native rate"), color: .secondary)
+                case .resampled:
+                    signalBadge(Text("Resampled"), color: .secondary)
+                }
+            }
+            Text(([path] + alterations).joined(separator: " · "))
+                .font(.footnote)
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func signalBadge<Content: View>(_ content: Content, color: Color) -> some View {
+        content
+            .font(.caption.weight(.semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.15)))
+    }
+
+    // MARK: - Interface
+
+    @ViewBuilder
+    private var appIconRow: some View {
+        if purchaseManager.hasIconPack {
+            NavigationLink(destination: IconPickerView()) {
+                valueRow("App Icon", appIconManager.currentIcon.displayName)
+            }
+        } else {
+            NavigationLink(destination: IconPreviewView(
+                onPurchaseError: { error in
+                    purchaseErrorMessage = error.localizedDescription
+                    showingPurchaseError = true
+                }
+            )) {
+                valueRow("App Icon", purchaseManager.iconPackPrice)
+            }
+        }
+    }
+
+    private func valueRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundColor(.primary)
+            Spacer()
+            Text(value)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+    }
+    
+    // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
+    
+    private func clearMaterialCache() {
+        print("🗑️ Starting cache clear...")
+        isClearingCache = true
+        
+        let websiteDataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        let date = Date(timeIntervalSince1970: 0)
+        
+        WKWebsiteDataStore.default().removeData(ofTypes: websiteDataTypes, modifiedSince: date) {
+            DispatchQueue.main.async {
+                print("🗑️ Cache cleared, setting reload trigger...")
+                self.isClearingCache = false
+                
+                // Trigger WebView reload
+                self.settings.shouldReloadWebView = true
+                print("🗑️ shouldReloadWebView set to true")
+                
+                // Dismiss settings - WebView will reload when we return
+                self.presentationMode.wrappedValue.dismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Server Settings View
+// Server, backup/failover and player identity — reached from the status card.
+struct ServerSettingsView: View {
+    @StateObject private var settings = SettingsManager.shared
+    @State private var showingConnectionTest = false
+    @State private var showingMACInfo = false
+
+    var body: some View {
+        Form {
+            Section {
+                NavigationLink(destination: ServerConfigView()) {
+                    valueRow("Server Address", settings.serverHost.isEmpty ? "Not Set" : settings.serverHost,
+                             valueColor: settings.serverHost.isEmpty ? .red : .secondary)
+                }
+
+                NavigationLink(destination: ServerDiscoverySettingsView()) {
+                    Text("Discover Servers")
+                }
+
+                Button("Test Connection") {
+                    showingConnectionTest = true
+                }
+            } header: {
+                Text("Server")
+            }
+
+            Section {
+                Toggle("Use Backup Server", isOn: $settings.isBackupServerEnabled)
+                    .onChange(of: settings.isBackupServerEnabled) { _ in
+                        settings.saveSettings()
+                    }
+
+                if settings.isBackupServerEnabled {
+                    NavigationLink(destination: BackupServerConfigView()) {
+                        valueRow("Backup Address", settings.backupServerHost.isEmpty ? "Not Set" : settings.backupServerHost,
+                                 valueColor: settings.backupServerHost.isEmpty ? .red : .secondary)
+                    }
+
+                    Toggle("Automatic Failover", isOn: $settings.automaticFailoverEnabled)
+                        .disabled(settings.backupServerHost.isEmpty)
+                        .onChange(of: settings.automaticFailoverEnabled) { _ in
+                            settings.saveSettings()
+                        }
+
+                    HStack {
+                        Text("Active Server")
+                        Spacer()
+                        Text(settings.currentActiveServer.displayName)
+                            .foregroundColor(.secondary)
+                        Button("Switch") {
+                            settings.switchToOtherServer()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(settings.backupServerHost.isEmpty)
+                    }
+                }
+            } header: {
+                Text("Backup Server")
+            } footer: {
+                if settings.isBackupServerEnabled {
+                    Text("When Automatic Failover is off, the app won't switch servers for you. If your active server goes unreachable, playback stops until you tap Switch or connectivity returns.")
+                }
+            }
+
+            Section {
+                NavigationLink(destination: PlayerConfigView()) {
+                    valueRow("Player Name", settings.playerName.isEmpty ? "Not Set" : settings.playerName,
+                             valueColor: settings.playerName.isEmpty ? .red : .secondary)
+                }
+
+                Button {
+                    showingMACInfo = true
+                } label: {
+                    valueRow("Player ID", settings.formattedMACAddress)
+                }
+            } header: {
+                Text("Player")
+            }
+        }
+        .navigationTitle("Server")
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet(
                 testPrimary: {
@@ -572,75 +562,16 @@ struct SettingsView: View {
         .sheet(isPresented: $showingMACInfo) {
             MACInfoSheet()
         }
-        .alert("Reset All Settings?", isPresented: $showingResetAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Reset", role: .destructive) {
-                settings.resetConfiguration()
-            }
-        } message: {
-            Text("This will reset all settings to defaults and mark the app as unconfigured. You'll need to go through setup again.")
-        }
-        .alert("Clear Material Cache?", isPresented: $showingCacheClearAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Clear Cache") {
-                clearMaterialCache()
-            }
-        } message: {
-            Text("This will clear Material's web cache and reload the interface. This often fixes UI display issues.")
-        }
-        .alert("Purchase Error", isPresented: $showingPurchaseError) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(purchaseErrorMessage)
-        }
     }
-    
-    // REMOVED: formatsSummary - no longer used since capabilities are hardcoded
-    
-    private func clearMaterialCache() {
-        print("🗑️ Starting cache clear...")
-        isClearingCache = true
-        
-        let websiteDataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
-        let date = Date(timeIntervalSince1970: 0)
-        
-        WKWebsiteDataStore.default().removeData(ofTypes: websiteDataTypes, modifiedSince: date) {
-            DispatchQueue.main.async {
-                print("🗑️ Cache cleared, setting reload trigger...")
-                self.isClearingCache = false
-                
-                // Trigger WebView reload
-                self.settings.shouldReloadWebView = true
-                print("🗑️ shouldReloadWebView set to true")
-                
-                // Dismiss settings - WebView will reload when we return
-                self.presentationMode.wrappedValue.dismiss()
-            }
-        }
-    }
-}
 
-// MARK: - Settings Row Component
-struct SettingsRow: View {
-    let icon: String
-    let title: String
-    let value: String
-    let valueColor: Color
-    
-    var body: some View {
+    private func valueRow(_ title: String, _ value: String, valueColor: Color = .secondary) -> some View {
         HStack {
-            Image(systemName: icon)
-                .foregroundColor(.blue)
-                .frame(width: 25)
-            
             Text(title)
                 .foregroundColor(.primary)
-            
             Spacer()
-            
             Text(value)
                 .foregroundColor(valueColor)
-                .font(.caption)
+                .lineLimit(1)
         }
     }
 }
