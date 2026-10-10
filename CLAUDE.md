@@ -23,6 +23,8 @@ xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 
 Xcode 27: tvOS builds need the Metal Toolchain for the visualizer shaders (`xcodebuild -downloadComponent MetalToolchain`).
 
+TestFlight: `scripts/testflight/upload.sh ios|tvos` archives, uploads and distributes to the TestFlight groups (setup in `scripts/testflight/README.md`); `/cut-build` runs it last.
+
 For the CLI build → install → launch loop on a connected iPhone, see the wiki at `Setup/iPhone Build Workflow.md`. Personal device IDs are kept in user-local Claude memory, not committed.
 
 **Test LMS server**: `192.168.1.8` (default ports — 9000 JSON-RPC, 3483 SlimProto) is available on-network for debugging and exercising new features.
