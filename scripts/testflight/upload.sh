@@ -66,6 +66,8 @@ BUILD="$(setting CURRENT_PROJECT_VERSION)"
 [ -n "$VERSION" ] && [ -n "$BUILD" ] || { echo "Couldn't read version/build from build settings" >&2; exit 1; }
 echo "==> $PLATFORM $VERSION ($BUILD) from $(git rev-parse --short HEAD) on $(git branch --show-current)"
 
+python3 "$HERE/asc.py" check-build --platform "$PLATFORM" --version "$VERSION" --build "$BUILD"
+
 OUT="$REPO/build/testflight/$PLATFORM-$VERSION-$BUILD"
 rm -rf "$OUT"
 mkdir -p "$OUT"

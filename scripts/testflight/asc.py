@@ -124,6 +124,24 @@ def cmd_groups(cfg, _args):
         print(f"{a['name']}  [{kind}]{extra}")
 
 
+def cmd_check_build(cfg, args):
+    """Refuse a build number App Store Connect already has, or one older
+    than its newest build of this version (an old checkout, not a new cut)."""
+    app = app_id(cfg)
+    found = api(cfg, "GET", f"/builds?filter[app]={app}"
+                f"&filter[preReleaseVersion.version]={args.version}"
+                f"&filter[preReleaseVersion.platform]={PLATFORMS[args.platform]}"
+                f"&limit=200&fields[builds]=version")["data"]
+    existing = sorted(int(b["attributes"]["version"]) for b in found if b["attributes"]["version"].isdigit())
+    build = int(args.build)
+    if build in existing:
+        sys.exit(f"Build {args.version} ({build}) is already in App Store Connect")
+    if existing and build < existing[-1]:
+        sys.exit(f"Build {build} is older than the newest uploaded build ({existing[-1]}) — "
+                 f"wrong branch? Cut a new build number first")
+    print(f"Build number OK ({args.version}: newest uploaded is {existing[-1] if existing else 'none'})")
+
+
 def wait_for_build(cfg, app, platform, version, build, timeout):
     query = (f"/builds?filter[app]={app}&filter[version]={build}"
              f"&filter[preReleaseVersion.version]={version}"
@@ -204,6 +222,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("groups")
+    c = sub.add_parser("check-build")
+    c.add_argument("--platform", choices=PLATFORMS, required=True)
+    c.add_argument("--version", required=True)
+    c.add_argument("--build", required=True)
     d = sub.add_parser("distribute")
     d.add_argument("--platform", choices=PLATFORMS, required=True)
     d.add_argument("--version", required=True)
@@ -214,7 +236,7 @@ def main():
     args = p.parse_args()
     cfg = load_config()
     try:
-        {"groups": cmd_groups, "distribute": cmd_distribute}[args.cmd](cfg, args)
+        {"groups": cmd_groups, "check-build": cmd_check_build, "distribute": cmd_distribute}[args.cmd](cfg, args)
     except APIError as e:
         sys.exit(f"App Store Connect API error: {e}")
 
