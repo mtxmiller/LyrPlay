@@ -62,7 +62,6 @@ Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) mu
 - Workers that edit code get their own git worktree.
 - Never answer a worker's approval or question prompt without asking the maintainer. Never close panes or tabs you didn't create.
 - Workers never merge, push to `main`, run `scripts/testflight/upload.sh`, or touch App Store Connect. The coordinator reports; the maintainer decides.
-- No herdr-synapse; plain `herdr` commands only.
 
 ## Issue Tracking
 
