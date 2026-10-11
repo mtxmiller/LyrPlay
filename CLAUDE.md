@@ -57,6 +57,13 @@ Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) mu
 
 **Autonomous pilot loop**: `/pilot` (`.claude/commands/pilot.md`) runs one bd-issue → draft-PR iteration scoped to tvOS/UI work (audio pipeline and recovery files are off-limits to it); `/loop /pilot` keeps it running. It never merges, never closes bd issues, and caps at 3 open draft PRs.
 
+**Herdr coordination**: when `HERDR_ENV=1`, the session runs inside [Herdr](https://herdr.dev) and the `herdr` CLI reaches its socket (`$HERDR_SOCKET_PATH`). The maintainer may ask you to coordinate worker agents for LyrPlay: split panes, start named workers, prompt them, wait, read their output, and review their results. Run `herdr --skill` for the command reference before the first command. Rules:
+- LyrPlay only: never prompt, read or control agents in other workspaces.
+- Workers that edit code get their own git worktree.
+- Never answer a worker's approval or question prompt without asking the maintainer. Never close panes or tabs you didn't create.
+- Workers never merge, push to `main`, run `scripts/testflight/upload.sh`, or touch App Store Connect. The coordinator reports; the maintainer decides.
+- No herdr-synapse; plain `herdr` commands only.
+
 ## Issue Tracking
 
 This project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking. Use `bd` commands, not markdown TODOs. Run `bd ready --json` for available work, `bd create "title" -t bug|feature|task -p 0-4 --json` to file issues, `bd close <id>` to complete.
