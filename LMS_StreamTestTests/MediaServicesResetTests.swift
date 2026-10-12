@@ -51,3 +51,53 @@ struct MediaServicesResetTests {
         #expect(action(Snapshot(silentRecoveryInProgress: true), silent) == .reinitialize)
     }
 }
+
+// Round 2 review fixes (bd 27ye).
+struct MediaServicesResetReviewTests {
+    private typealias Coordinator = SlimProtoCoordinator
+
+    @Test func silentRecoveryStreamPlayingDoesNotResume() {
+        // The muted app-open stream counts as "playing"; resuming it audibly breaks rule 12.
+        let silent = Coordinator.MediaServicesSnapshot(audioPlaying: true, silentRecoveryInProgress: true)
+        #expect(Coordinator.mediaServicesResetAction(atLoss: silent, atReset: Coordinator.MediaServicesSnapshot()) == .reinitialize)
+        #expect(Coordinator.mediaServicesResetAction(atLoss: nil, atReset: silent) == .reinitialize)
+    }
+
+    @Test func missingIndexIsNotTrackZero() {
+        // A save that wrote only position + timestamp right after a jump deleted the index.
+        #expect(Coordinator.savedRecoveryTarget(hasTimestamp: true, index: nil, position: 94.94) == nil)
+        #expect(Coordinator.savedRecoveryTarget(hasTimestamp: true, index: 47, position: 94.94)
+                == Coordinator.RecoveryTarget(index: 47, position: 94.94))
+        #expect(Coordinator.savedRecoveryTarget(hasTimestamp: false, index: 47, position: 94.94) == nil)
+    }
+
+    @Test func playlistIndexFromServerStatus() {
+        // LMS sends playlist_cur_index as a string (checked against the test server).
+        #expect(Coordinator.playlistIndex(fromStatus: ["playlist_cur_index": "47"]) == 47)
+        #expect(Coordinator.playlistIndex(fromStatus: ["playlist_cur_index": 47]) == 47)
+        #expect(Coordinator.playlistIndex(fromStatus: ["mode": "play"]) == nil)
+        #expect(Coordinator.playlistIndex(fromStatus: nil) == nil)
+    }
+
+    @Test func bassFreeAndInitErrorHandling() {
+        // Codes from bass.h: BASS_ERROR_INIT 8, BASS_ERROR_ALREADY 14, BASS_ERROR_BUSY 46.
+        #expect(AudioPlayer.freeFailureNeedsRetryLater(46))
+        #expect(!AudioPlayer.freeFailureNeedsRetryLater(8))
+        #expect(AudioPlayer.initFailureNeedsFreeFirst(14))
+        #expect(!AudioPlayer.initFailureNeedsFreeFirst(46))
+    }
+
+    @Test func uninitializedBassIsNotATrackError() {
+        // BASS_ERROR_INIT (8) must not send STMn: LMS would skip track after track.
+        #expect(!AudioStreamDecoder.openFailureIsTrackError(8))
+        #expect(AudioStreamDecoder.openFailureIsTrackError(40))  // BASS_ERROR_TIMEOUT
+    }
+
+    @Test func duplicateResetIsIgnored() {
+        #expect(Coordinator.isDuplicateReset(secondsSinceResetReinit: 2, lostSinceReinit: false))
+        #expect(!Coordinator.isDuplicateReset(secondsSinceResetReinit: 2, lostSinceReinit: true))
+        #expect(!Coordinator.isDuplicateReset(secondsSinceResetReinit: 30, lostSinceReinit: false))
+        // Last re-init came from the 10s no-reset fallback, not a reset: the real reset still re-inits.
+        #expect(!Coordinator.isDuplicateReset(secondsSinceResetReinit: nil, lostSinceReinit: false))
+    }
+}

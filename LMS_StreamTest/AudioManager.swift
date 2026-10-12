@@ -3,6 +3,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import UIKit
 import os.log
 
 class AudioManager: NSObject, ObservableObject {
@@ -113,6 +114,11 @@ class AudioManager: NSObject, ObservableObject {
         activateAudioSession()
         observeMediaServicesTVOS()
         #endif
+
+        // Retry a failed media-services re-init when the user comes back (bd 27ye).
+        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.retryFailedOutputReinitIfNeeded(reason: "foreground")
+        }
 
         #if DEBUG
         os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
@@ -543,9 +549,36 @@ class AudioManager: NSObject, ObservableObject {
     /// coordinator reads this at the reset to decide whether to resume.
     private(set) var startDroppedWhileSuspended = false
 
+    /// Every re-init try failed: BASS is not initialized. Output stays
+    /// suspended so no start reaches BASS (it would fail with BASS_ERROR_INIT
+    /// → STMn → LMS skips to the next track, over and over). The next start,
+    /// play or foreground tries the re-init again.
+    private(set) var outputReinitFailed = false
+
+    /// Called from the socket queue as well as main.
     private func dropWhileOutputSuspended(_ what: String) {
-        startDroppedWhileSuspended = true
-        os_log(.error, log: logger, "🔄 Media services down - ignoring %{public}s", what)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.startDroppedWhileSuspended = true
+            if self.outputReinitFailed {
+                os_log(.error, log: self.logger, "🔄 BASS not initialized (media services re-init failed) - ignoring %{public}s, retrying re-init", what)
+                self.retryFailedOutputReinitIfNeeded(reason: what)
+            } else {
+                os_log(.error, log: self.logger, "🔄 Media services down - ignoring %{public}s", what)
+            }
+        }
+    }
+
+    /// Main thread. Clears the flag first so overlapping triggers start one try.
+    private func retryFailedOutputReinitIfNeeded(reason: String) {
+        guard outputReinitFailed else { return }
+        outputReinitFailed = false
+        os_log(.error, log: logger, "🔄 Retrying failed BASS re-init (%{public}s)", reason)
+        if let coordinator = slimClient {
+            coordinator.retryFailedOutputReinit()
+        } else {
+            reinitializeOutputAfterMediaServicesReset { _ in }
+        }
     }
 
     /// Media services lost: free our streams and hold off output until the
@@ -581,8 +614,12 @@ class AudioManager: NSObject, ObservableObject {
                         self.reinitializeOutputAfterMediaServicesReset(attempt: attempt + 1, completion: completion)
                     }
                 } else {
-                    os_log(.error, log: self.logger, "🔄 BASS re-init failed %d times - giving up", attempt)
-                    self.isOutputSuspended = false
+                    // Stay suspended: with BASS uninitialized every start
+                    // would fail and skip a track. Only a start, play or
+                    // foreground after this point counts as a request to play.
+                    os_log(.error, log: self.logger, "🔄 BASS re-init failed %d times - output stays suspended, will retry on next start, play or foreground", attempt)
+                    self.outputReinitFailed = true
+                    self.startDroppedWhileSuspended = false
                     completion(false)
                 }
                 return
@@ -591,6 +628,7 @@ class AudioManager: NSObject, ObservableObject {
             // tvOS: BASS doesn't manage the session; same order as init().
             self.activateAudioSession()
             #endif
+            self.outputReinitFailed = false
             self.isOutputSuspended = false
             completion(true)
         }

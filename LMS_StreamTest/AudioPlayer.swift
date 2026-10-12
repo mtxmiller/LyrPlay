@@ -213,7 +213,7 @@ class AudioPlayer: NSObject, ObservableObject {
         // 48kHz is the base of high-res family (48→96→192kHz clean multiples)
         // Prevents upsampling while allowing DAC to negotiate up for high-res content
         // BASS_DEVICE_FREQ flag enables DAC to output at higher rates when content matches
-        guard initOutputDevice() else { return }
+        guard initOutputDevice() == BASS_OK else { return }
 
         // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
         // Use BASS defaults instead: VERIFY=16KB, VERIFY_NET=4KB (25% of VERIFY)
@@ -253,14 +253,15 @@ class AudioPlayer: NSObject, ObservableObject {
 
     /// BASS_Init on the default device, then log the rate the hardware gave us.
     /// Shared by first setup and the media services reset path (bd 27ye).
-    private func initOutputDevice() -> Bool {
+    /// Returns BASS_OK or the BASS_Init error code.
+    private func initOutputDevice() -> Int32 {
         let targetRate: DWORD = 48000  // 48kHz family base for high-res compatibility
         let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
 
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
-            return false
+            return errorCode
         }
 
         // Query what sample rate we actually got from the hardware
@@ -297,7 +298,7 @@ class AudioPlayer: NSObject, ObservableObject {
         } else {
             os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
         }
-        return true
+        return BASS_OK
     }
 
     /// Media services reset (bd 27ye): iOS rebuilt the audio session with
@@ -309,13 +310,38 @@ class AudioPlayer: NSObject, ObservableObject {
     func reinitializeOutputDevice() -> Bool {
         cleanup()
         if BASS_Free() == 0 {
-            // BASS_ERROR_INIT: the device was never initialized; init it now.
-            os_log(.error, log: logger, "🔄 BASS_Free failed: %d", BASS_ErrorGetCode())
+            let code = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "🔄 BASS_Free failed: %d", code)
+            if Self.freeFailureNeedsRetryLater(code) {
+                // Device is being reinitialized; the caller retries after a delay.
+                return false
+            }
         }
-        guard initOutputDevice() else { return false }
+        var code = initOutputDevice()
+        if code != BASS_OK && Self.initFailureNeedsFreeFirst(code) {
+            os_log(.error, log: logger, "🔄 BASS_Init: device still initialized - freeing and retrying once")
+            if BASS_Free() == 0 {
+                os_log(.error, log: logger, "🔄 BASS_Free (retry) failed: %d", BASS_ErrorGetCode())
+            }
+            code = initOutputDevice()
+        }
+        guard code == BASS_OK else { return false }
         updateOutputDeviceInfo()
         os_log(.info, log: logger, "🔄 BASS output device re-initialized")
         return true
+    }
+
+    /// BASS_Free failed with BASS_ERROR_BUSY ("the device is currently being
+    /// reinitialized", BASS_Free docs): try the whole re-init again later.
+    /// BASS_ERROR_INIT (never initialized) or anything else: go on to BASS_Init.
+    static func freeFailureNeedsRetryLater(_ code: Int32) -> Bool {
+        code == BASS_ERROR_BUSY
+    }
+
+    /// BASS_Init failed with BASS_ERROR_ALREADY ("already been initialized",
+    /// BASS_Init docs), e.g. after a busy BASS_Free: free it and init again.
+    static func initFailureNeedsFreeFirst(_ code: Int32) -> Bool {
+        code == BASS_ERROR_ALREADY
     }
 
     /// Legacy auth header update - no longer used with URL-embedded credentials

@@ -757,7 +757,11 @@ class AudioStreamDecoder {
 
         guard pushStream != 0 else {
             let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Push stream creation failed: %d", error)
+            if error == BASS_ERROR_INIT {
+                os_log(.error, log: logger, "❌ Push stream creation failed: BASS not initialized (media services re-init failed?)")
+            } else {
+                os_log(.error, log: logger, "❌ Push stream creation failed: %d", error)
+            }
             return
         }
 
@@ -1152,6 +1156,13 @@ class AudioStreamDecoder {
         guard decoderStream != 0 else {
             let error = createError
             os_log(.error, log: logger, "❌ Decoder stream creation failed: %d", error)
+            // BASS not initialized (a media services re-init failed, bd 27ye):
+            // the track is fine, our output isn't. STMn would make LMS fail
+            // the track and skip to the next one, which fails the same way.
+            guard Self.openFailureIsTrackError(error) else {
+                os_log(.error, log: logger, "❌ BASS not initialized - not reporting STMn (track is not at fault)")
+                return
+            }
             // Report to the server like the decode-loop error paths do (→ STMn,
             // squeezelite's DECODE_ERROR) — a bare return left the pipeline
             // silently dead: the current track drained its buffer and playback
@@ -1928,6 +1939,12 @@ class AudioStreamDecoder {
         stallSync = 0  // Reset STALL sync handle (already freed by BASS_StreamFree)
 
         os_log(.info, log: logger, "✅ Cleanup complete")
+    }
+
+    /// Whether a BASS_StreamCreateURL failure is the track's fault (→ STMn).
+    /// BASS_ERROR_INIT means our output isn't initialized (bd 27ye).
+    static func openFailureIsTrackError(_ code: Int32) -> Bool {
+        code != BASS_ERROR_INIT
     }
 
     /// Run `work` on main once everything already queued on decodeQueue has
