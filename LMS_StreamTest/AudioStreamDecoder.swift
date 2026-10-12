@@ -1930,6 +1930,17 @@ class AudioStreamDecoder {
         os_log(.info, log: logger, "✅ Cleanup complete")
     }
 
+    /// Run `work` on main once everything already queued on decodeQueue has
+    /// finished. After cleanup() the running decode loop exits within one
+    /// iteration and frees its own decoder stream; waiting for it keeps that
+    /// free from landing after BASS_Free + BASS_Init, where the handle value
+    /// could belong to a new stream (bd 27ye).
+    func afterQueuedDecodeWork(_ work: @escaping () -> Void) {
+        decodeQueue.async {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
     /// Mark current buffer position as track boundary for gapless transition
     private func markTrackBoundary() {
         // SQUEEZELITE-STYLE: Use totalBytesPushed as the boundary position.

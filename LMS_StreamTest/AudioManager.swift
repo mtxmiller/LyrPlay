@@ -111,6 +111,7 @@ class AudioManager: NSObject, ObservableObject {
         // UIBackgroundModes audio keep playback alive on home screen).
         // Lazy callers in sendLockScreenCommand re-call this for transient-failure retry.
         activateAudioSession()
+        observeMediaServicesTVOS()
         #endif
 
         #if DEBUG
@@ -150,6 +151,7 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
@@ -159,6 +161,7 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
@@ -169,6 +172,7 @@ class AudioManager: NSObject, ObservableObject {
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
     func startPushStreamPlayback(url: String, format: String, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("push stream start"); return }
         os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s (gapless: %d, waitForSync: %{public}s)", format, isGapless, waitForUnpause ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
@@ -239,6 +243,7 @@ class AudioManager: NSObject, ObservableObject {
 
     // Playback control
     func play() {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("play"); return }
         activateAudioSession()
 
         // Cancel any in-flight sync-correction resume — user/server play overrides it.
@@ -289,6 +294,7 @@ class AudioManager: NSObject, ObservableObject {
     /// Start playback at a specific jiffies time (for player synchronization)
     /// Buffers audio but delays playback until target jiffies time is reached
     func startAtJiffies(_ targetJiffies: TimeInterval) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("synchronized start"); return }
         os_log(.info, log: logger, "🎯 AudioManager routing synchronized start")
 
         // Cancel any in-flight sync-correction resume — synchronized start overrides it.
@@ -497,7 +503,97 @@ class AudioManager: NSObject, ObservableObject {
 
     /// See `AudioPlayer.setOutputKeepAlive` (bd 6lvg).
     func setOutputKeepAlive(_ enabled: Bool) {
-        audioPlayer.setOutputKeepAlive(enabled)
+        // While suspended, only record the setting: BASS_Init starts the
+        // device again at the reset, and the setting carries over.
+        audioPlayer.setOutputKeepAlive(enabled, startDevice: !isOutputSuspended)
+    }
+
+    // MARK: - Media Services Reset (bd 27ye)
+
+    #if os(tvOS)
+    /// iOS gets these via PlaybackSessionController (iOS-only). Apple TV can
+    /// lose its media services too; route them to the same coordinator path.
+    private func observeMediaServicesTVOS() {
+        let center = NotificationCenter.default
+        center.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if let coordinator = self.slimClient {
+                coordinator.mediaServicesWereLost()
+            } else {
+                self.suspendOutputForMediaServicesLoss()
+            }
+        }
+        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if let coordinator = self.slimClient {
+                coordinator.mediaServicesWereReset()
+            } else {
+                self.reinitializeOutputAfterMediaServicesReset { _ in }
+            }
+        }
+    }
+    #endif
+
+    /// True from media services loss until BASS is re-initialized. While set,
+    /// nothing starts BASS output: there is no usable audio session, and any
+    /// stream made now dies with BASS_Free at the reset. Main thread.
+    private(set) var isOutputSuspended = false
+
+    /// A start or play arrived while suspended and was dropped. The
+    /// coordinator reads this at the reset to decide whether to resume.
+    private(set) var startDroppedWhileSuspended = false
+
+    private func dropWhileOutputSuspended(_ what: String) {
+        startDroppedWhileSuspended = true
+        os_log(.error, log: logger, "🔄 Media services down - ignoring %{public}s", what)
+    }
+
+    /// Media services lost: free our streams and hold off output until the
+    /// reset. Main thread.
+    func suspendOutputForMediaServicesLoss() {
+        if !isOutputSuspended {
+            isOutputSuspended = true
+            startDroppedWhileSuspended = false
+        }
+        cancelPendingResumeAll()
+        streamDecoder.cleanup()
+        os_log(.error, log: logger, "🔄 Media services lost - output suspended until reset")
+    }
+
+    /// Media services reset: free and re-init BASS so it sets up the audio
+    /// session again, as at launch (the reset left iOS's default category,
+    /// which may not play in the background). Push and URL streams are freed;
+    /// the next server STRM rebuilds them. Retries BASS_Init a few times.
+    /// `completion(success)` runs on main. Main thread.
+    func reinitializeOutputAfterMediaServicesReset(attempt: Int = 1, completion: @escaping (Bool) -> Void) {
+        if !isOutputSuspended {
+            isOutputSuspended = true
+            startDroppedWhileSuspended = false
+        }
+        cancelPendingResumeAll()
+        streamDecoder.cleanup()
+        streamDecoder.afterQueuedDecodeWork { [weak self] in
+            guard let self = self else { return }
+            guard self.audioPlayer.reinitializeOutputDevice() else {
+                if attempt < 3 {
+                    os_log(.error, log: self.logger, "🔄 BASS re-init attempt %d failed - retrying in 1s", attempt)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.reinitializeOutputAfterMediaServicesReset(attempt: attempt + 1, completion: completion)
+                    }
+                } else {
+                    os_log(.error, log: self.logger, "🔄 BASS re-init failed %d times - giving up", attempt)
+                    self.isOutputSuspended = false
+                    completion(false)
+                }
+                return
+            }
+            #if os(tvOS)
+            // tvOS: BASS doesn't manage the session; same order as init().
+            self.activateAudioSession()
+            #endif
+            self.isOutputSuspended = false
+            completion(true)
+        }
     }
 
     /// True when the push stream exists but is stalled waiting for data.

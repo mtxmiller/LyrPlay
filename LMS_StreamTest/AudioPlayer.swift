@@ -213,13 +213,54 @@ class AudioPlayer: NSObject, ObservableObject {
         // 48kHz is the base of high-res family (48→96→192kHz clean multiples)
         // Prevents upsampling while allowing DAC to negotiate up for high-res content
         // BASS_DEVICE_FREQ flag enables DAC to output at higher rates when content matches
+        guard initOutputDevice() else { return }
+
+        // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
+        // Use BASS defaults instead: VERIFY=16KB, VERIFY_NET=4KB (25% of VERIFY)
+        // let verifyBytes = DWORD(1024 * 1024)
+        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
+        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
+        os_log(.info, log: logger, "✅ Using BASS default verification (16KB local, 4KB network)")
+
+        // BASS PLUGIN LOADING (per Ian@un4seen recommendation)
+        // Load FLAC and Opus plugins so BASS_StreamCreateURL can handle all formats
+        let flacPlugin = BASS_PluginLoad("bassflac", 0)
+        let opusPlugin = BASS_PluginLoad("bassopus", 0)
+
+        if flacPlugin != 0 {
+            os_log(.info, log: logger, "✅ BASSFLAC plugin loaded: handle=%d", flacPlugin)
+        } else {
+            os_log(.error, log: logger, "❌ Failed to load BASSFLAC plugin: %d", BASS_ErrorGetCode())
+        }
+
+        if opusPlugin != 0 {
+            os_log(.info, log: logger, "✅ BASSOPUS plugin loaded: handle=%d", opusPlugin)
+        } else {
+            os_log(.error, log: logger, "❌ Failed to load BASSOPUS plugin: %d", BASS_ErrorGetCode())
+        }
+
+        // Enable ICY metadata for radio streams
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
+
+        // Network buffer configuration - optimized for both LAN and mobile streaming
+        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
+        //os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
+        #if DEBUG
+        os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
+        os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
+        #endif
+    }
+
+    /// BASS_Init on the default device, then log the rate the hardware gave us.
+    /// Shared by first setup and the media services reset path (bd 27ye).
+    private func initOutputDevice() -> Bool {
         let targetRate: DWORD = 48000  // 48kHz family base for high-res compatibility
         let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
 
         if result == 0 {
             let errorCode = BASS_ErrorGetCode()
             os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
-            return
+            return false
         }
 
         // Query what sample rate we actually got from the hardware
@@ -256,41 +297,25 @@ class AudioPlayer: NSObject, ObservableObject {
         } else {
             os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
         }
+        return true
+    }
 
-        // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
-        // Use BASS defaults instead: VERIFY=16KB, VERIFY_NET=4KB (25% of VERIFY)
-        // let verifyBytes = DWORD(1024 * 1024)
-        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY), verifyBytes)
-        // BASS_SetConfig(DWORD(BASS_CONFIG_VERIFY_NET), verifyBytes)
-        os_log(.info, log: logger, "✅ Using BASS default verification (16KB local, 4KB network)")
-
-        // BASS PLUGIN LOADING (per Ian@un4seen recommendation)
-        // Load FLAC and Opus plugins so BASS_StreamCreateURL can handle all formats
-        let flacPlugin = BASS_PluginLoad("bassflac", 0)
-        let opusPlugin = BASS_PluginLoad("bassopus", 0)
-
-        if flacPlugin != 0 {
-            os_log(.info, log: logger, "✅ BASSFLAC plugin loaded: handle=%d", flacPlugin)
-        } else {
-            os_log(.error, log: logger, "❌ Failed to load BASSFLAC plugin: %d", BASS_ErrorGetCode())
+    /// Media services reset (bd 27ye): iOS rebuilt the audio session with
+    /// the default category, so the app can't play until BASS sets it up
+    /// again. Free and re-init the device, as a fresh launch does. All
+    /// stream handles die with BASS_Free; callers rebuild streams afterwards.
+    /// Loaded plugins and BASS_SetConfig options are independent of the
+    /// device (BASS_SetConfig docs) and carry over. Main thread.
+    func reinitializeOutputDevice() -> Bool {
+        cleanup()
+        if BASS_Free() == 0 {
+            // BASS_ERROR_INIT: the device was never initialized; init it now.
+            os_log(.error, log: logger, "🔄 BASS_Free failed: %d", BASS_ErrorGetCode())
         }
-
-        if opusPlugin != 0 {
-            os_log(.info, log: logger, "✅ BASSOPUS plugin loaded: handle=%d", opusPlugin)
-        } else {
-            os_log(.error, log: logger, "❌ Failed to load BASSOPUS plugin: %d", BASS_ErrorGetCode())
-        }
-
-        // Enable ICY metadata for radio streams
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
-
-        // Network buffer configuration - optimized for both LAN and mobile streaming
-        //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
-        //os_log(.info, log: logger, "📡 Network buffer: 10s (balanced for LAN/mobile streaming)")
-        #if DEBUG
-        os_log(.info, log: logger, "✅ BASS configured with automatic iOS session management")
-        os_log(.info, log: logger, "✅ CBass configured - Version: %08X", BASS_GetVersion())
-        #endif
+        guard initOutputDevice() else { return false }
+        updateOutputDeviceInfo()
+        os_log(.info, log: logger, "🔄 BASS output device re-initialized")
+        return true
     }
 
     /// Legacy auth header update - no longer used with URL-embedded credentials
@@ -438,9 +463,9 @@ class AudioPlayer: NSObject, ObservableObject {
     /// app can't reconnect or resume after a network outage (bd 6lvg, 8tjj).
     /// Turned on only while the coordinator is trying to resume playback the
     /// user asked for, and off again once audio starts or the attempt ends.
-    func setOutputKeepAlive(_ enabled: Bool) {
+    func setOutputKeepAlive(_ enabled: Bool, startDevice: Bool = true) {
         BASS_SetConfig(DWORD(BASS_CONFIG_DEV_NONSTOP), enabled ? 1 : 0)
-        if enabled {
+        if enabled && startDevice {
             // The device may already be idle; restart it so silence flows now.
             // Fails with BASS_ERROR_BUSY during an interruption (e.g. a call).
             if BASS_Start() == 0 {

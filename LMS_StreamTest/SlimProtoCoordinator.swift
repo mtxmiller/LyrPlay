@@ -117,6 +117,37 @@ class SlimProtoCoordinator: ObservableObject {
         if isAudibleRetry, let kept = kept { return kept }
         return saved
     }
+
+    /// Media services reset (bd 27ye): what playback looked like at the loss
+    /// and at the reset. iOS can post the reset without a loss first.
+    struct MediaServicesSnapshot: Equatable {
+        var audioPlaying = false              // playing, or stalled waiting for data
+        var outageHoldActive = false
+        var audibleRecoveryInProgress = false
+        var silentRecoveryInProgress = false  // app-open recovery: mute, jump, pause
+        var startDroppedWhileSuspended = false
+
+        var wantsPlayback: Bool {
+            // A start dropped during a silent recovery is that recovery's
+            // muted stream, not a request to play.
+            audioPlaying || outageHoldActive || audibleRecoveryInProgress
+                || (startDroppedWhileSuspended && !silentRecoveryInProgress)
+        }
+    }
+
+    enum MediaServicesResetAction: Equatable {
+        case reinitialize           // paused or idle: re-init BASS, start no audio
+        case reinitializeAndResume  // then resume via playlist-jump recovery
+    }
+
+    static func mediaServicesResetAction(atLoss: MediaServicesSnapshot?, atReset: MediaServicesSnapshot) -> MediaServicesResetAction {
+        let wanted = (atLoss?.wantsPlayback ?? false) || atReset.wantsPlayback
+        return wanted ? .reinitializeAndResume : .reinitialize
+    }
+
+    private var mediaServicesLossSnapshot: MediaServicesSnapshot?
+    private var mediaServicesGeneration = 0
+    private var mediaServicesReinitInFlight = false
     /// When the SlimProto connection last came up, and when the server last
     /// sent strm 's'. On reconnect LMS restarts a playing client by itself
     /// (Squeezebox.pm reconnect → _Continue → _JumpToTime); a jump of ours on
@@ -3194,6 +3225,107 @@ extension SlimProtoCoordinator {
                 os_log(.info, log: self.logger, "🔁 Skipping retry - server started a stream recently")
                 return
             }
+            self.unlessPausedOnServer {
+                self.performPlaylistRecovery(shouldPlay: true)
+            }
+        }
+    }
+
+    // MARK: - Media Services Reset (bd 27ye)
+
+    private func currentMediaServicesSnapshot() -> MediaServicesSnapshot {
+        let state = audioManager.getPlayerState()
+        return MediaServicesSnapshot(
+            audioPlaying: state == "Playing" || state == "Buffering" || audioManager.isPushStreamStalled(),
+            outageHoldActive: outageHoldActive,
+            audibleRecoveryInProgress: isRecoveryInProgress && !currentRecoveryIsSilent,
+            silentRecoveryInProgress: audioManager.isSilentRecoveryMuted,
+            startDroppedWhileSuspended: audioManager.startDroppedWhileSuspended)
+    }
+
+    /// AVAudioSession media services were lost: the app has no audio session
+    /// until iOS posts the reset. Note what we were doing and stop using BASS
+    /// output until then.
+    func mediaServicesWereLost() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.mediaServicesLossSnapshot == nil {
+                self.mediaServicesLossSnapshot = self.currentMediaServicesSnapshot()
+            }
+            os_log(.error, log: self.logger, "🔄 Media services lost (wants playback: %{public}s)",
+                   self.mediaServicesLossSnapshot?.wantsPlayback == true ? "YES" : "NO")
+            // No audio flows until the reset; stop the clock so the saved
+            // recovery position doesn't run ahead of what the user heard.
+            let (time, playing) = self.simpleTimeTracker.getCurrentTime()
+            if playing {
+                self.simpleTimeTracker.updateFromServer(time: time, playing: false)
+            }
+            self.audioManager.suspendOutputForMediaServicesLoss()
+
+            // iOS should follow with a reset. If it doesn't, try anyway rather
+            // than leave the output suspended for good.
+            self.mediaServicesGeneration += 1
+            let generation = self.mediaServicesGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                guard let self = self, self.mediaServicesGeneration == generation else { return }
+                os_log(.error, log: self.logger, "🔄 No media services reset 10s after loss - re-initializing anyway")
+                self.recoverFromMediaServicesReset()
+            }
+        }
+    }
+
+    /// AVAudioSession media services were reset. The new session has iOS's
+    /// default category, which audiomxd refuses for background playback
+    /// (error -16980, captured 2026-10-12). Re-init BASS so it sets the
+    /// session up again, then resume if we were playing.
+    func mediaServicesWereReset() {
+        DispatchQueue.main.async { [weak self] in
+            self?.recoverFromMediaServicesReset()
+        }
+    }
+
+    private func recoverFromMediaServicesReset() {
+        mediaServicesGeneration += 1  // cancels the loss fallback
+        guard !mediaServicesReinitInFlight else {
+            os_log(.info, log: logger, "🔄 Media services reset - re-init already in progress")
+            return
+        }
+        mediaServicesReinitInFlight = true
+        let atLoss = mediaServicesLossSnapshot
+        mediaServicesLossSnapshot = nil
+        // Read before re-init frees the streams (covers a reset with no loss).
+        let audioPlayingAtReset = currentMediaServicesSnapshot().audioPlaying
+        let (time, playing) = simpleTimeTracker.getCurrentTime()
+        if playing {
+            simpleTimeTracker.updateFromServer(time: time, playing: false)
+        }
+
+        audioManager.reinitializeOutputAfterMediaServicesReset { [weak self] success in
+            guard let self = self else { return }
+            self.mediaServicesReinitInFlight = false
+            guard success else {
+                // No output device: nothing can play, so don't hold on to the
+                // keep-alive and retries.
+                self.endOutageHold(reason: "audio re-init failed")
+                return
+            }
+            var atReset = self.currentMediaServicesSnapshot()
+            atReset.audioPlaying = audioPlayingAtReset
+            let action = Self.mediaServicesResetAction(atLoss: atLoss, atReset: atReset)
+            os_log(.error, log: self.logger, "🔄 Media services reset handled: BASS re-initialized, %{public}s",
+                   action == .reinitializeAndResume ? "resuming via playlist jump" : "not resuming (paused or idle)")
+            guard action == .reinitializeAndResume else { return }
+
+            // The re-init freed any stream the server started for us, so the
+            // "server started a stream recently" guard must not skip our jump.
+            self.lastServerStreamStartAt = nil
+            let position = self.getCurrentTimeForSaving()
+            if position > 0 {
+                UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+                os_log(.info, log: self.logger, "💾 Saved recovery state on media services reset: %.2f seconds", position)
+            }
+            self.beginOutageHold(reason: "media services reset")
             self.unlessPausedOnServer {
                 self.performPlaylistRecovery(shouldPlay: true)
             }
