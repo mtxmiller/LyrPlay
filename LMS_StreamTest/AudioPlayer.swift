@@ -352,8 +352,21 @@ class AudioPlayer: NSObject, ObservableObject {
         // WebView and JSON-RPC use Authorization headers
     }
 
+    /// What to do with a URL stream once its (lock-free, possibly slow) open
+    /// returns, given a media services re-init may have run meanwhile (bd 27ye).
+    enum OpenedStreamAction: Equatable {
+        case keep    // nothing happened: play it
+        case free    // output suspended since: BASS_StreamFree it
+        case forget  // BASS_Free ran since: already freed, don't touch the handle
+    }
+
+    static func openedStreamAction(epochAtStart: Int, epochNow: Int, suspendedNow: Bool) -> OpenedStreamAction {
+        if epochNow != epochAtStart { return .forget }
+        return suspendedNow ? .free : .keep
+    }
+
     // MARK: - Stream Playback (MINIMAL CBASS)
-    func playStream(urlString: String) {
+    func playStream(urlString: String, afterOpen: (() -> OpenedStreamAction)? = nil) {
         guard !urlString.isEmpty else {
             os_log(.error, log: logger, "Empty URL provided")
             return
@@ -410,6 +423,21 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
+        switch afterOpen?() ?? .keep {
+        case .keep:
+            break
+        case .free:
+            os_log(.error, log: logger, "🔄 Media services lost during stream open - freeing the new stream")
+            BASS_StreamFree(currentStream)
+            currentStream = 0
+            return
+        case .forget:
+            // BASS_Free already freed it; the handle value may be reused by now.
+            os_log(.error, log: logger, "🔄 BASS re-initialized during stream open - dropping the stale handle")
+            currentStream = 0
+            return
+        }
+
         setupCallbacks()
 
         // Apply ReplayGain BEFORE starting playback if pending
@@ -457,7 +485,8 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
+    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0,
+                              afterOpen: (() -> OpenedStreamAction)? = nil) {
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s with replayGain %.4f", format, urlString, replayGain)
 
         // CRITICAL: Store format for plugin-specific stream creation
@@ -470,11 +499,12 @@ class AudioPlayer: NSObject, ObservableObject {
         configureForFormat(format)
 
         // Use the main playStream method (which will apply replayGain after stream creation)
-        playStream(urlString: urlString)
+        playStream(urlString: urlString, afterOpen: afterOpen)
     }
 
-    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
-        playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
+    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0,
+                                        afterOpen: (() -> OpenedStreamAction)? = nil) {
+        playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain, afterOpen: afterOpen)
 
         if startTime > 0 {
             seekToPosition(startTime)

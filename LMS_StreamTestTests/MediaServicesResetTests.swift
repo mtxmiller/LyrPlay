@@ -142,3 +142,22 @@ struct MissingRecoveryIndexTests {
         #expect(Coordinator.indexAfterBoundary(46) == 47)
     }
 }
+
+// Round 4 (bd 27ye): URL stream opens run without the lock and are
+// re-checked against the re-init epoch afterwards.
+struct OpenedStreamActionTests {
+    @Test func nothingChangedKeepsTheStream() {
+        #expect(AudioPlayer.openedStreamAction(epochAtStart: 3, epochNow: 3, suspendedNow: false) == .keep)
+    }
+
+    @Test func suspendedDuringOpenFreesIt() {
+        // Loss arrived mid-open but BASS_Free hasn't run: the handle is still ours.
+        #expect(AudioPlayer.openedStreamAction(epochAtStart: 3, epochNow: 3, suspendedNow: true) == .free)
+    }
+
+    @Test func reinitDuringOpenForgetsWithoutTouchingBass() {
+        // BASS_Free already freed it; the handle value may belong to a new stream.
+        #expect(AudioPlayer.openedStreamAction(epochAtStart: 3, epochNow: 4, suspendedNow: false) == .forget)
+        #expect(AudioPlayer.openedStreamAction(epochAtStart: 3, epochNow: 4, suspendedNow: true) == .forget)
+    }
+}

@@ -157,27 +157,25 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
-        // Held across the stream open so BASS_Free/BASS_Init can't run mid-create (bd 27ye).
-        outputLock.lock(); defer { outputLock.unlock() }
-        guard !outputSuspendedLocked else { dropWhileOutputSuspended("URL stream start"); return }
+        guard let epoch = beginURLStreamOpen() else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
+        audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain,
+                                         afterOpen: { [weak self] in self?.openedURLStreamAction(epoch: epoch) ?? .keep })
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
-        // Held across the stream open so BASS_Free/BASS_Init can't run mid-create (bd 27ye).
-        outputLock.lock(); defer { outputLock.unlock() }
-        guard !outputSuspendedLocked else { dropWhileOutputSuspended("URL stream start"); return }
+        guard let epoch = beginURLStreamOpen() else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
+        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain,
+                                                   afterOpen: { [weak self] in self?.openedURLStreamAction(epoch: epoch) ?? .keep })
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
@@ -547,16 +545,35 @@ class AudioManager: NSObject, ObservableObject {
     /// True from media services loss until BASS is re-initialized. While set,
     /// nothing starts BASS output: there is no usable audio session, and any
     /// stream made now dies with BASS_Free at the reset. Written on main, read
-    /// from the socket queue too, so it lives behind outputLock. The push
-    /// path re-checks it on decodeQueue right before creating the stream
-    /// (AudioStreamDecoder.setOutputSuspended); URL starts hold the lock
-    /// across the open, and BASS_Free/BASS_Init take it too.
+    /// from the socket queue too, so it lives behind outputLock (only ever
+    /// held briefly). The push path re-checks it on decodeQueue right before
+    /// creating the stream (AudioStreamDecoder.setOutputSuspended); URL
+    /// starts use the epoch check below.
     var isOutputSuspended: Bool {
         outputLock.lock(); defer { outputLock.unlock() }
         return outputSuspendedLocked
     }
-    private let outputLock = NSRecursiveLock()  // URL start → delegate callbacks may re-enter
+    private let outputLock = NSLock()
     private var outputSuspendedLocked = false
+    /// Bumped right before each BASS_Free. A URL stream opened across a bump
+    /// was freed by that BASS_Free, and its handle value may now belong to a
+    /// new stream.
+    private var outputEpoch = 0
+
+    /// Socket queue: nil if suspended, else the epoch to re-check after the
+    /// open. The open itself runs with no lock held (it can block for 5s+).
+    private func beginURLStreamOpen() -> Int? {
+        outputLock.lock(); defer { outputLock.unlock() }
+        return outputSuspendedLocked ? nil : outputEpoch
+    }
+
+    private func openedURLStreamAction(epoch: Int) -> AudioPlayer.OpenedStreamAction {
+        outputLock.lock()
+        let action = AudioPlayer.openedStreamAction(epochAtStart: epoch, epochNow: outputEpoch,
+                                                    suspendedNow: outputSuspendedLocked)
+        outputLock.unlock()
+        return action
+    }
 
     private func setOutputSuspended(_ suspended: Bool) {
         outputLock.lock()
@@ -628,8 +645,9 @@ class AudioManager: NSObject, ObservableObject {
         streamDecoder.afterQueuedDecodeWork { [weak self] in
             guard let self = self else { return }
             self.outputLock.lock()
-            let reinitialized = self.audioPlayer.reinitializeOutputDevice()
+            self.outputEpoch += 1
             self.outputLock.unlock()
+            let reinitialized = self.audioPlayer.reinitializeOutputDevice()
             guard reinitialized else {
                 if attempt < 3 {
                     os_log(.error, log: self.logger, "🔄 BASS re-init attempt %d failed - retrying in 1s", attempt)
