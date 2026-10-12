@@ -157,7 +157,9 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
-        guard !isOutputSuspended else { dropWhileOutputSuspended("URL stream start"); return }
+        // Held across the stream open so BASS_Free/BASS_Init can't run mid-create (bd 27ye).
+        outputLock.lock(); defer { outputLock.unlock() }
+        guard !outputSuspendedLocked else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
@@ -167,7 +169,9 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
-        guard !isOutputSuspended else { dropWhileOutputSuspended("URL stream start"); return }
+        // Held across the stream open so BASS_Free/BASS_Init can't run mid-create (bd 27ye).
+        outputLock.lock(); defer { outputLock.unlock() }
+        guard !outputSuspendedLocked else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
@@ -542,8 +546,24 @@ class AudioManager: NSObject, ObservableObject {
 
     /// True from media services loss until BASS is re-initialized. While set,
     /// nothing starts BASS output: there is no usable audio session, and any
-    /// stream made now dies with BASS_Free at the reset. Main thread.
-    private(set) var isOutputSuspended = false
+    /// stream made now dies with BASS_Free at the reset. Written on main, read
+    /// from the socket queue too, so it lives behind outputLock. The push
+    /// path re-checks it on decodeQueue right before creating the stream
+    /// (AudioStreamDecoder.setOutputSuspended); URL starts hold the lock
+    /// across the open, and BASS_Free/BASS_Init take it too.
+    var isOutputSuspended: Bool {
+        outputLock.lock(); defer { outputLock.unlock() }
+        return outputSuspendedLocked
+    }
+    private let outputLock = NSRecursiveLock()  // URL start → delegate callbacks may re-enter
+    private var outputSuspendedLocked = false
+
+    private func setOutputSuspended(_ suspended: Bool) {
+        outputLock.lock()
+        outputSuspendedLocked = suspended
+        outputLock.unlock()
+        streamDecoder.setOutputSuspended(suspended)
+    }
 
     /// A start or play arrived while suspended and was dropped. The
     /// coordinator reads this at the reset to decide whether to resume.
@@ -585,7 +605,7 @@ class AudioManager: NSObject, ObservableObject {
     /// reset. Main thread.
     func suspendOutputForMediaServicesLoss() {
         if !isOutputSuspended {
-            isOutputSuspended = true
+            setOutputSuspended(true)
             startDroppedWhileSuspended = false
         }
         cancelPendingResumeAll()
@@ -600,14 +620,17 @@ class AudioManager: NSObject, ObservableObject {
     /// `completion(success)` runs on main. Main thread.
     func reinitializeOutputAfterMediaServicesReset(attempt: Int = 1, completion: @escaping (Bool) -> Void) {
         if !isOutputSuspended {
-            isOutputSuspended = true
+            setOutputSuspended(true)
             startDroppedWhileSuspended = false
         }
         cancelPendingResumeAll()
         streamDecoder.cleanup()
         streamDecoder.afterQueuedDecodeWork { [weak self] in
             guard let self = self else { return }
-            guard self.audioPlayer.reinitializeOutputDevice() else {
+            self.outputLock.lock()
+            let reinitialized = self.audioPlayer.reinitializeOutputDevice()
+            self.outputLock.unlock()
+            guard reinitialized else {
                 if attempt < 3 {
                     os_log(.error, log: self.logger, "🔄 BASS re-init attempt %d failed - retrying in 1s", attempt)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -629,7 +652,7 @@ class AudioManager: NSObject, ObservableObject {
             self.activateAudioSession()
             #endif
             self.outputReinitFailed = false
-            self.isOutputSuspended = false
+            self.setOutputSuspended(false)
             completion(true)
         }
     }

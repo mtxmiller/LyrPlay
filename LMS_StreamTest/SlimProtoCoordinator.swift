@@ -715,10 +715,20 @@ class SlimProtoCoordinator: ObservableObject {
 
     /// Local increment at a gapless track boundary — always wins, stamps its time.
     func bumpRecoveryIndexAtBoundary() {
-        let bumped = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index") + 1
+        // Missing index: bumping would invent track 1, a valid jump target.
+        // Leave it missing; the 3s poll or recovery's status query fills it in (bd 27ye).
+        guard let bumped = Self.indexAfterBoundary(UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int) else {
+            os_log(.info, log: logger, "📍 Track boundary: no recovery index saved - not bumping")
+            return
+        }
         UserDefaults.standard.set(bumped, forKey: "lyrplay_recovery_index")
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.recoveryIndexBumpStampKey)
         os_log(.info, log: logger, "📍 Track boundary: recovery index incremented to %d", bumped)
+    }
+
+    /// Index after a gapless boundary, or nil when none is saved.
+    static func indexAfterBoundary(_ saved: Int?) -> Int? {
+        saved.map { $0 + 1 }
     }
 
     /// Server-derived index (status poll / position-save roundtrip), stale-guarded.
@@ -942,11 +952,63 @@ class SlimProtoCoordinator: ObservableObject {
         // which supports seeking via server-side transcoding. Playlist jump recovery works for all formats.
 
         // Check if we have recovery data (no time limit - like other music players)
-        let saved = Self.savedRecoveryTarget(
-            hasTimestamp: UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil,
-            index: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
-            position: UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+        let hasTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil
+        let savedIndex = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
         let isAudibleRetry = shouldPlay && outageHoldActive && audibleRecoveryTarget != nil
+
+        // Position saved but the index is gone (a jump that just succeeded
+        // deletes all three keys; later saves write only position +
+        // timestamp). A plain play/pause would lose the position: on a
+        // stopped player play starts the track at 0:00, and on a player LMS
+        // thinks is playing it does nothing (Commands.pm playcontrolCommand).
+        // Ask LMS which track it's on and jump there (bd 27ye).
+        if Self.needsServerRecoveryIndex(hasTimestamp: hasTimestamp, hasIndex: savedIndex != nil,
+                                         position: savedPosition, isAudibleRetry: isAudibleRetry) {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔍 Recovery index missing - asking server for the current track")
+            let statusCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.recoveryGeneration == generation, self.isRecoveryInProgress else { return }
+                    let index = Self.serverRecoveryIndex(fromStatus: response["result"] as? [String: Any])
+                    if let index = index {
+                        self.setRecoveryIndexFromServer(index)
+                    } else {
+                        os_log(.error, log: self.logger, "[APP-RECOVERY] 🔍 No server index (status failed or empty playlist)")
+                    }
+                    self.continuePlaylistRecovery(
+                        saved: index.map { RecoveryTarget(index: $0, position: savedPosition) },
+                        shouldPlay: shouldPlay, isAudibleRetry: isAudibleRetry, generation: generation)
+                }
+            }
+            return
+        }
+
+        let saved = Self.savedRecoveryTarget(hasTimestamp: hasTimestamp, index: savedIndex, position: savedPosition)
+        continuePlaylistRecovery(saved: saved, shouldPlay: shouldPlay, isAudibleRetry: isAudibleRetry, generation: generation)
+    }
+
+    /// Ask LMS for the track index only when there's a position to resume
+    /// but no index, and no kept outage target (build 9) to use instead.
+    static func needsServerRecoveryIndex(hasTimestamp: Bool, hasIndex: Bool, position: Double, isAudibleRetry: Bool) -> Bool {
+        hasTimestamp && !hasIndex && position > 0 && !isAudibleRetry
+    }
+
+    /// LMS's current track index from a status result, or nil when the query
+    /// failed or the playlist is empty.
+    static func serverRecoveryIndex(fromStatus result: [String: Any]?) -> Int? {
+        guard let result = result else { return nil }
+        let tracks = (result["playlist_tracks"] as? Int) ?? Int(result["playlist_tracks"] as? String ?? "") ?? 0
+        guard tracks > 0 else { return nil }
+        return playlistIndex(fromStatus: result)
+    }
+
+    /// The rest of executePlaylistRecovery, once the saved target is known.
+    private func continuePlaylistRecovery(saved: RecoveryTarget?, shouldPlay: Bool, isAudibleRetry: Bool, generation: Int) {
         guard let target = Self.resolveRecoveryTarget(saved: saved, kept: audibleRecoveryTarget, isAudibleRetry: isAudibleRetry) else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
             finishRecoveryWithoutJump(shouldPlay: shouldPlay)

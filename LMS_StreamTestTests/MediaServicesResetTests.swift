@@ -101,3 +101,44 @@ struct MediaServicesResetReviewTests {
         #expect(!Coordinator.isDuplicateReset(secondsSinceResetReinit: nil, lostSinceReinit: false))
     }
 }
+
+// Round 3 review fixes (bd 27ye): a missing recovery index is looked up on
+// the server instead of falling back to a plain play/pause.
+struct MissingRecoveryIndexTests {
+    private typealias Coordinator = SlimProtoCoordinator
+
+    @Test func missingIndexWithPositionAsksServer() {
+        #expect(Coordinator.needsServerRecoveryIndex(hasTimestamp: true, hasIndex: false, position: 94.94, isAudibleRetry: false))
+    }
+
+    @Test func noServerLookupWhenNotNeeded() {
+        // Index present, nothing saved, no position, or the outage's kept target wins (build 9).
+        #expect(!Coordinator.needsServerRecoveryIndex(hasTimestamp: true, hasIndex: true, position: 94.94, isAudibleRetry: false))
+        #expect(!Coordinator.needsServerRecoveryIndex(hasTimestamp: false, hasIndex: false, position: 94.94, isAudibleRetry: false))
+        #expect(!Coordinator.needsServerRecoveryIndex(hasTimestamp: true, hasIndex: false, position: 0, isAudibleRetry: false))
+        #expect(!Coordinator.needsServerRecoveryIndex(hasTimestamp: true, hasIndex: false, position: 94.94, isAudibleRetry: true))
+    }
+
+    @Test func serverIndexBecomesTheJumpTarget() {
+        // LMS sends both fields as strings or numbers depending on version.
+        let status: [String: Any] = ["mode": "stop", "playlist_cur_index": "47", "playlist_tracks": 120]
+        let index = Coordinator.serverRecoveryIndex(fromStatus: status)
+        #expect(index == 47)
+        #expect(Coordinator.resolveRecoveryTarget(
+            saved: index.map { Coordinator.RecoveryTarget(index: $0, position: 94.94) },
+            kept: nil, isAudibleRetry: false) == Coordinator.RecoveryTarget(index: 47, position: 94.94))
+        #expect(Coordinator.serverRecoveryIndex(fromStatus: ["playlist_cur_index": 3, "playlist_tracks": "5"]) == 3)
+    }
+
+    @Test func failedOrEmptyStatusFallsBackToPlainCommand() {
+        // nil target → finishRecoveryWithoutJump (plain play/pause).
+        #expect(Coordinator.serverRecoveryIndex(fromStatus: nil) == nil)
+        #expect(Coordinator.serverRecoveryIndex(fromStatus: ["mode": "stop", "playlist_tracks": 0]) == nil)
+        #expect(Coordinator.resolveRecoveryTarget(saved: nil, kept: nil, isAudibleRetry: false) == nil)
+    }
+
+    @Test func boundaryDoesNotInventAnIndex() {
+        #expect(Coordinator.indexAfterBoundary(nil) == nil)
+        #expect(Coordinator.indexAfterBoundary(46) == 47)
+    }
+}

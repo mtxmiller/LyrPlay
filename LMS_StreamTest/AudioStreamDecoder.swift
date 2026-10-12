@@ -1095,6 +1095,15 @@ class AudioStreamDecoder {
             os_log(.info, log: logger, "⏭️ Skipping superseded decode start for %{public}s", url)
             return
         }
+        // A start can pass AudioManager's check just before a media services
+        // loss; re-check here, before any BASS stream is created (bd 27ye).
+        stateLock.lock()
+        let suspended = outputSuspended
+        stateLock.unlock()
+        guard !suspended else {
+            os_log(.error, log: logger, "🔄 Media services down - skipping decode start for %{public}s", url)
+            return
+        }
 
         os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
 
@@ -1939,6 +1948,16 @@ class AudioStreamDecoder {
         stallSync = 0  // Reset STALL sync handle (already freed by BASS_StreamFree)
 
         os_log(.info, log: logger, "✅ Cleanup complete")
+    }
+
+    /// Mirrors AudioManager's media services suspension (bd 27ye). Guarded
+    /// by stateLock: set on main, read on decodeQueue.
+    private var outputSuspended = false
+
+    func setOutputSuspended(_ suspended: Bool) {
+        stateLock.lock()
+        outputSuspended = suspended
+        stateLock.unlock()
     }
 
     /// Whether a BASS_StreamCreateURL failure is the track's fault (→ STMn).
