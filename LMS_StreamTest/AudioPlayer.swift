@@ -432,8 +432,18 @@ class AudioPlayer: NSObject, ObservableObject {
             currentStream = 0
             return
         case .forget:
-            // BASS_Free already freed it; the handle value may be reused by now.
+            // BASS_Free usually freed it already. If the open finished after the
+            // new BASS_Init, the stream is alive on the new device and would leak
+            // (idle HTTP connection + buffer), so free it anyway: a freed handle
+            // just fails with BASS_ERROR_HANDLE. Reuse of the value by a third
+            // stream is ruled out because STRMs are serialized on this queue.
             os_log(.error, log: logger, "🔄 BASS re-initialized during stream open - dropping the stale handle")
+            if BASS_StreamFree(currentStream) == 0 {
+                let error = BASS_ErrorGetCode()
+                if error != BASS_ERROR_HANDLE {
+                    os_log(.error, log: logger, "⚠️ Freeing the stale handle failed: %d", error)
+                }
+            }
             currentStream = 0
             return
         }
