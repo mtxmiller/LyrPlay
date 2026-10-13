@@ -172,6 +172,10 @@ class SlimProtoCoordinator: ObservableObject {
     }
 
     private var mediaServicesLossSnapshot: MediaServicesSnapshot?
+    /// Playback position when the loss arrived. Once the stream is freed our
+    /// STATs report 0 elapsed, LMS's time follows, and the 3s server poll
+    /// copies that into the tracker before the reset — so read it here.
+    private var mediaServicesLossPosition: Double?
     private var mediaServicesGeneration = 0
     private var mediaServicesReinitInFlight = false
     private var lastResetReinitAt: Date?
@@ -3345,14 +3349,16 @@ extension SlimProtoCoordinator {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.mediaServicesLostSinceReinit = true
+            let (time, playing) = self.simpleTimeTracker.getCurrentTime()
             if self.mediaServicesLossSnapshot == nil {
                 self.mediaServicesLossSnapshot = self.currentMediaServicesSnapshot()
+                self.mediaServicesLossPosition = time
             }
-            os_log(.error, log: self.logger, "🔄 Media services lost (wants playback: %{public}s)",
-                   self.mediaServicesLossSnapshot?.wantsPlayback == true ? "YES" : "NO")
+            os_log(.error, log: self.logger, "🔄 Media services lost (wants playback: %{public}s, at %.2f seconds)",
+                   self.mediaServicesLossSnapshot?.wantsPlayback == true ? "YES" : "NO",
+                   self.mediaServicesLossPosition ?? time)
             // No audio flows until the reset; stop the clock so the saved
             // recovery position doesn't run ahead of what the user heard.
-            let (time, playing) = self.simpleTimeTracker.getCurrentTime()
             if playing {
                 self.simpleTimeTracker.updateFromServer(time: time, playing: false)
             }
@@ -3413,6 +3419,7 @@ extension SlimProtoCoordinator {
         if playing {
             simpleTimeTracker.updateFromServer(time: time, playing: false)
         }
+        let resumePosition = mediaServicesLossPosition ?? time
 
         audioManager.reinitializeOutputAfterMediaServicesReset { [weak self] success in
             guard let self = self else { return }
@@ -3425,6 +3432,7 @@ extension SlimProtoCoordinator {
                 return
             }
             self.mediaServicesLostSinceReinit = false
+            self.mediaServicesLossPosition = nil
             self.lastResetReinitAt = trigger == .resetNotification ? Date() : nil
             var atReset = self.currentMediaServicesSnapshot()
             atReset.audioPlaying = audioPlayingAtReset
@@ -3445,8 +3453,14 @@ extension SlimProtoCoordinator {
                 if let index = Self.playlistIndex(fromStatus: status) {
                     self.setRecoveryIndexFromServer(index)
                 }
-                let position = self.getCurrentTimeForSaving()
+                // Not the tracker: polls since the loss carry LMS's time
+                // from our 0-elapsed STATs (device test 2026-10-12: 0.69s
+                // instead of 2:09).
+                let position = resumePosition
                 if position > 0 {
+                    // Seed the tracker too, so NowPlayingManager's periodic
+                    // save doesn't write the poisoned time back.
+                    self.simpleTimeTracker.updateFromServer(time: position, playing: false)
                     UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
                     UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
                     os_log(.info, log: self.logger, "💾 Saved recovery state on media services reset: track %{public}s at %.2f seconds",
