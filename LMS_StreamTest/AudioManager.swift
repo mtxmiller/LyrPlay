@@ -668,6 +668,21 @@ class AudioManager: NSObject, ObservableObject {
             #if os(tvOS)
             // tvOS: BASS doesn't manage the session; same order as init().
             self.activateAudioSession()
+            #else
+            // BASS_Init applies its default session config, which includes
+            // MixWithOthers, and a mixable session can't be the Now Playing
+            // app (no Dynamic Island, lock screen or CarPlay Now Playing;
+            // device log 2026-10-13). At launch PlaybackSessionController's
+            // configureRemoteCommands sets non-mixable playback after
+            // BASS_Init; re-apply the same here.
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default, options: [])
+                try session.setActive(true, options: [])
+                os_log(.error, log: self.logger, "🔄 Audio session set to non-mixable playback after BASS re-init")
+            } catch {
+                os_log(.error, log: self.logger, "❌ Audio session setup after BASS re-init failed: %{public}s", error.localizedDescription)
+            }
             #endif
             self.outputReinitFailed = false
             self.setOutputSuspended(false)
