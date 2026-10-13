@@ -135,6 +135,14 @@ final class PlaybackSessionControllerTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
+
+    func testMediaServicesLostAndResetForwardToCoordinator() {
+        // bd 27ye: the reset used to be log-only; BASS must be re-initialized.
+        notificationCenter.post(name: AVAudioSession.mediaServicesWereLostNotification, object: nil)
+        notificationCenter.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+        XCTAssertEqual(fakeSlimProto.mediaServicesEvents, ["lost", "reset"])
+        XCTAssertEqual(fakeSlimProto.commandsSent, [], "no playback commands from the controller itself")
+    }
 }
 
 // MARK: - Fakes
@@ -202,6 +210,14 @@ private final class FakeSlimProtoCoordinator: SlimProtoControlling {
     var interruptionsReported: [Bool] = []
     func outageHoldInterruptionBegan(isSiri: Bool) {
         interruptionsReported.append(isSiri)
+    }
+
+    var mediaServicesEvents: [String] = []
+    func mediaServicesWereLost() {
+        mediaServicesEvents.append("lost")
+    }
+    func mediaServicesWereReset() {
+        mediaServicesEvents.append("reset")
     }
 }
 

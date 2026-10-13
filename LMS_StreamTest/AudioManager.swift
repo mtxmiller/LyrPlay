@@ -3,6 +3,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import UIKit
 import os.log
 
 class AudioManager: NSObject, ObservableObject {
@@ -111,7 +112,13 @@ class AudioManager: NSObject, ObservableObject {
         // UIBackgroundModes audio keep playback alive on home screen).
         // Lazy callers in sendLockScreenCommand re-call this for transient-failure retry.
         activateAudioSession()
+        observeMediaServicesTVOS()
         #endif
+
+        // Retry a failed media-services re-init when the user comes back (bd 27ye).
+        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.retryFailedOutputReinitIfNeeded(reason: "foreground")
+        }
 
         #if DEBUG
         os_log(.info, log: logger, "✅ AudioManager initialized with lock screen controls ready")
@@ -150,25 +157,30 @@ class AudioManager: NSObject, ObservableObject {
     
     // Stream playback methods
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
+        guard let epoch = beginURLStreamOpen() else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
+        audioPlayer.playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain,
+                                         afterOpen: { [weak self] in self?.openedURLStreamAction(epoch: epoch) ?? .keep })
     }
 
     func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
+        guard let epoch = beginURLStreamOpen() else { dropWhileOutputSuspended("URL stream start"); return }
         // Configure audio session based on format
         configureAudioSessionForFormat(format)
 
         // Start playback
         activateAudioSession()
-        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain)
+        audioPlayer.playStreamAtPositionWithFormat(urlString: urlString, startTime: startTime, format: format, replayGain: replayGain,
+                                                   afterOpen: { [weak self] in self?.openedURLStreamAction(epoch: epoch) ?? .keep })
     }
 
     // NEW: Push stream playback for gapless (matches squeezelite architecture)
     func startPushStreamPlayback(url: String, format: String, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("push stream start"); return }
         os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s (gapless: %d, waitForSync: %{public}s)", format, isGapless, waitForUnpause ? "YES" : "NO")
         os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
 
@@ -239,6 +251,7 @@ class AudioManager: NSObject, ObservableObject {
 
     // Playback control
     func play() {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("play"); return }
         activateAudioSession()
 
         // Cancel any in-flight sync-correction resume — user/server play overrides it.
@@ -289,6 +302,7 @@ class AudioManager: NSObject, ObservableObject {
     /// Start playback at a specific jiffies time (for player synchronization)
     /// Buffers audio but delays playback until target jiffies time is reached
     func startAtJiffies(_ targetJiffies: TimeInterval) {
+        guard !isOutputSuspended else { dropWhileOutputSuspended("synchronized start"); return }
         os_log(.info, log: logger, "🎯 AudioManager routing synchronized start")
 
         // Cancel any in-flight sync-correction resume — synchronized start overrides it.
@@ -497,7 +511,183 @@ class AudioManager: NSObject, ObservableObject {
 
     /// See `AudioPlayer.setOutputKeepAlive` (bd 6lvg).
     func setOutputKeepAlive(_ enabled: Bool) {
-        audioPlayer.setOutputKeepAlive(enabled)
+        // While suspended, only record the setting: BASS_Init starts the
+        // device again at the reset, and the setting carries over.
+        audioPlayer.setOutputKeepAlive(enabled, startDevice: !isOutputSuspended)
+    }
+
+    // MARK: - Media Services Reset (bd 27ye)
+
+    #if os(tvOS)
+    /// iOS gets these via PlaybackSessionController (iOS-only). Apple TV can
+    /// lose its media services too; route them to the same coordinator path.
+    private func observeMediaServicesTVOS() {
+        let center = NotificationCenter.default
+        center.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if let coordinator = self.slimClient {
+                coordinator.mediaServicesWereLost()
+            } else {
+                self.suspendOutputForMediaServicesLoss()
+            }
+        }
+        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if let coordinator = self.slimClient {
+                coordinator.mediaServicesWereReset()
+            } else {
+                self.reinitializeOutputAfterMediaServicesReset { _ in }
+            }
+        }
+    }
+    #endif
+
+    /// True from media services loss until BASS is re-initialized. While set,
+    /// nothing starts BASS output: there is no usable audio session, and any
+    /// stream made now dies with BASS_Free at the reset. Written on main, read
+    /// from the socket queue too, so it lives behind outputLock (only ever
+    /// held briefly). The push path re-checks it on decodeQueue right before
+    /// creating the stream (AudioStreamDecoder.setOutputSuspended); URL
+    /// starts use the epoch check below.
+    var isOutputSuspended: Bool {
+        outputLock.lock(); defer { outputLock.unlock() }
+        return outputSuspendedLocked
+    }
+    private let outputLock = NSLock()
+    private var outputSuspendedLocked = false
+    /// Bumped right before each BASS_Free. A URL stream opened across a bump
+    /// was freed by that BASS_Free, and its handle value may now belong to a
+    /// new stream.
+    private var outputEpoch = 0
+
+    /// Socket queue: nil if suspended, else the epoch to re-check after the
+    /// open. The open itself runs with no lock held (it can block for 5s+).
+    private func beginURLStreamOpen() -> Int? {
+        outputLock.lock(); defer { outputLock.unlock() }
+        return outputSuspendedLocked ? nil : outputEpoch
+    }
+
+    private func openedURLStreamAction(epoch: Int) -> AudioPlayer.OpenedStreamAction {
+        outputLock.lock()
+        let action = AudioPlayer.openedStreamAction(epochAtStart: epoch, epochNow: outputEpoch,
+                                                    suspendedNow: outputSuspendedLocked)
+        outputLock.unlock()
+        return action
+    }
+
+    private func setOutputSuspended(_ suspended: Bool) {
+        outputLock.lock()
+        outputSuspendedLocked = suspended
+        outputLock.unlock()
+        streamDecoder.setOutputSuspended(suspended)
+    }
+
+    /// A start or play arrived while suspended and was dropped. The
+    /// coordinator reads this at the reset to decide whether to resume.
+    private(set) var startDroppedWhileSuspended = false
+
+    /// Every re-init try failed: BASS is not initialized. Output stays
+    /// suspended so no start reaches BASS (it would fail with BASS_ERROR_INIT
+    /// → STMn → LMS skips to the next track, over and over). The next start,
+    /// play or foreground tries the re-init again.
+    private(set) var outputReinitFailed = false
+
+    /// Called from the socket queue as well as main.
+    private func dropWhileOutputSuspended(_ what: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.startDroppedWhileSuspended = true
+            if self.outputReinitFailed {
+                os_log(.error, log: self.logger, "🔄 BASS not initialized (media services re-init failed) - ignoring %{public}s, retrying re-init", what)
+                self.retryFailedOutputReinitIfNeeded(reason: what)
+            } else {
+                os_log(.error, log: self.logger, "🔄 Media services down - ignoring %{public}s", what)
+            }
+        }
+    }
+
+    /// Main thread. Clears the flag first so overlapping triggers start one try.
+    private func retryFailedOutputReinitIfNeeded(reason: String) {
+        guard outputReinitFailed else { return }
+        outputReinitFailed = false
+        os_log(.error, log: logger, "🔄 Retrying failed BASS re-init (%{public}s)", reason)
+        if let coordinator = slimClient {
+            coordinator.retryFailedOutputReinit()
+        } else {
+            reinitializeOutputAfterMediaServicesReset { _ in }
+        }
+    }
+
+    /// Media services lost: free our streams and hold off output until the
+    /// reset. Main thread.
+    func suspendOutputForMediaServicesLoss() {
+        if !isOutputSuspended {
+            setOutputSuspended(true)
+            startDroppedWhileSuspended = false
+        }
+        cancelPendingResumeAll()
+        streamDecoder.cleanup()
+        os_log(.error, log: logger, "🔄 Media services lost - output suspended until reset")
+    }
+
+    /// Media services reset: free and re-init BASS so it sets up the audio
+    /// session again, as at launch (the reset left iOS's default category,
+    /// which may not play in the background). Push and URL streams are freed;
+    /// the next server STRM rebuilds them. Retries BASS_Init a few times.
+    /// `completion(success)` runs on main. Main thread.
+    func reinitializeOutputAfterMediaServicesReset(attempt: Int = 1, completion: @escaping (Bool) -> Void) {
+        if !isOutputSuspended {
+            setOutputSuspended(true)
+            startDroppedWhileSuspended = false
+        }
+        cancelPendingResumeAll()
+        streamDecoder.cleanup()
+        streamDecoder.afterQueuedDecodeWork { [weak self] in
+            guard let self = self else { return }
+            self.outputLock.lock()
+            self.outputEpoch += 1
+            self.outputLock.unlock()
+            let reinitialized = self.audioPlayer.reinitializeOutputDevice()
+            guard reinitialized else {
+                if attempt < 3 {
+                    os_log(.error, log: self.logger, "🔄 BASS re-init attempt %d failed - retrying in 1s", attempt)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.reinitializeOutputAfterMediaServicesReset(attempt: attempt + 1, completion: completion)
+                    }
+                } else {
+                    // Stay suspended: with BASS uninitialized every start
+                    // would fail and skip a track. Only a start, play or
+                    // foreground after this point counts as a request to play.
+                    os_log(.error, log: self.logger, "🔄 BASS re-init failed %d times - output stays suspended, will retry on next start, play or foreground", attempt)
+                    self.outputReinitFailed = true
+                    self.startDroppedWhileSuspended = false
+                    completion(false)
+                }
+                return
+            }
+            #if os(tvOS)
+            // tvOS: BASS doesn't manage the session; same order as init().
+            self.activateAudioSession()
+            #else
+            // BASS_Init applies its default session config, which includes
+            // MixWithOthers, and a mixable session can't be the Now Playing
+            // app (no Dynamic Island, lock screen or CarPlay Now Playing;
+            // device log 2026-10-13). At launch PlaybackSessionController's
+            // configureRemoteCommands sets non-mixable playback after
+            // BASS_Init; re-apply the same here.
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default, options: [])
+                try session.setActive(true, options: [])
+                os_log(.error, log: self.logger, "🔄 Audio session set to non-mixable playback after BASS re-init")
+            } catch {
+                os_log(.error, log: self.logger, "❌ Audio session setup after BASS re-init failed: %{public}s", error.localizedDescription)
+            }
+            #endif
+            self.outputReinitFailed = false
+            self.setOutputSuspended(false)
+            completion(true)
+        }
     }
 
     /// True when the push stream exists but is stalled waiting for data.

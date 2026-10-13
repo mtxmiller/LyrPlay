@@ -98,6 +98,88 @@ class SlimProtoCoordinator: ObservableObject {
     /// Audible recovery retries after a failed jump / no playback (bd 6lvg).
     private var audibleRecoveryRetries = 0
     private static let maxAudibleRecoveryRetries = 3
+
+    struct RecoveryTarget: Equatable {
+        let index: Int
+        let position: Double
+    }
+    /// Where this outage hold's audible recovery jumped to (bd fykj). The saved
+    /// recovery data can't be trusted for retries: it's deleted once LMS accepts
+    /// the jump, and if LMS then can't stream to us it skips through the queue
+    /// and the 3s poll copies that new index in. Retries reuse this target
+    /// until the hold ends (playback started, paused, gave up).
+    private var audibleRecoveryTarget: RecoveryTarget?
+
+    /// Which target a recovery jumps to. A retry within the same outage hold
+    /// keeps the original target: nothing has played since, so the user is
+    /// still where it was.
+    static func resolveRecoveryTarget(saved: RecoveryTarget?, kept: RecoveryTarget?, isAudibleRetry: Bool) -> RecoveryTarget? {
+        if isAudibleRetry, let kept = kept { return kept }
+        return saved
+    }
+
+    /// Media services reset (bd 27ye): what playback looked like at the loss
+    /// and at the reset. iOS can post the reset without a loss first.
+    struct MediaServicesSnapshot: Equatable {
+        var audioPlaying = false              // playing, or stalled waiting for data
+        var outageHoldActive = false
+        var audibleRecoveryInProgress = false
+        var silentRecoveryInProgress = false  // app-open recovery: mute, jump, pause
+        var startDroppedWhileSuspended = false
+
+        var wantsPlayback: Bool {
+            // During a silent (app-open) recovery the muted stream "plays" and
+            // its start may be dropped; neither is a request to play (rule 12).
+            outageHoldActive || audibleRecoveryInProgress
+                || ((audioPlaying || startDroppedWhileSuspended) && !silentRecoveryInProgress)
+        }
+    }
+
+    enum MediaServicesResetAction: Equatable {
+        case reinitialize           // paused or idle: re-init BASS, start no audio
+        case reinitializeAndResume  // then resume via playlist-jump recovery
+    }
+
+    static func mediaServicesResetAction(atLoss: MediaServicesSnapshot?, atReset: MediaServicesSnapshot) -> MediaServicesResetAction {
+        let wanted = (atLoss?.wantsPlayback ?? false) || atReset.wantsPlayback
+        return wanted ? .reinitializeAndResume : .reinitialize
+    }
+
+    /// playlist_cur_index from an LMS status result (LMS sends it as a string).
+    static func playlistIndex(fromStatus result: [String: Any]?) -> Int? {
+        if let index = result?["playlist_cur_index"] as? Int { return index }
+        if let text = result?["playlist_cur_index"] as? String { return Int(text) }
+        return nil
+    }
+
+    /// The saved recovery target, or nil when there's nothing complete to
+    /// jump to. A missing index must not become 0: saves that write only
+    /// position + timestamp (disconnect, pause, media services reset) can run
+    /// right after a jump deleted all three keys (bd 27ye).
+    static func savedRecoveryTarget(hasTimestamp: Bool, index: Int?, position: Double) -> RecoveryTarget? {
+        guard hasTimestamp, let index = index else { return nil }
+        return RecoveryTarget(index: index, position: position)
+    }
+
+    /// A second reset notification right after one we already handled, with
+    /// no loss in between, is the same event: re-initializing again would free
+    /// the stream we just started and jump twice. A re-init done by the
+    /// no-reset fallback doesn't count — it ran before the services were back,
+    /// so the real reset still needs its own re-init.
+    static func isDuplicateReset(secondsSinceResetReinit: TimeInterval?, lostSinceReinit: Bool) -> Bool {
+        guard let seconds = secondsSinceResetReinit, !lostSinceReinit else { return false }
+        return seconds < 5
+    }
+
+    private var mediaServicesLossSnapshot: MediaServicesSnapshot?
+    /// Playback position when the loss arrived. Once the stream is freed our
+    /// STATs report 0 elapsed, LMS's time follows, and the 3s server poll
+    /// copies that into the tracker before the reset — so read it here.
+    private var mediaServicesLossPosition: Double?
+    private var mediaServicesGeneration = 0
+    private var mediaServicesReinitInFlight = false
+    private var lastResetReinitAt: Date?
+    private var mediaServicesLostSinceReinit = false
     /// When the SlimProto connection last came up, and when the server last
     /// sent strm 's'. On reconnect LMS restarts a playing client by itself
     /// (Squeezebox.pm reconnect → _Continue → _JumpToTime); a jump of ours on
@@ -637,10 +719,20 @@ class SlimProtoCoordinator: ObservableObject {
 
     /// Local increment at a gapless track boundary — always wins, stamps its time.
     func bumpRecoveryIndexAtBoundary() {
-        let bumped = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index") + 1
+        // Missing index: bumping would invent track 1, a valid jump target.
+        // Leave it missing; the 3s poll or recovery's status query fills it in (bd 27ye).
+        guard let bumped = Self.indexAfterBoundary(UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int) else {
+            os_log(.info, log: logger, "📍 Track boundary: no recovery index saved - not bumping")
+            return
+        }
         UserDefaults.standard.set(bumped, forKey: "lyrplay_recovery_index")
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.recoveryIndexBumpStampKey)
         os_log(.info, log: logger, "📍 Track boundary: recovery index incremented to %d", bumped)
+    }
+
+    /// Index after a gapless boundary, or nil when none is saved.
+    static func indexAfterBoundary(_ saved: Int?) -> Int? {
+        saved.map { $0 + 1 }
     }
 
     /// Server-derived index (status poll / position-save roundtrip), stale-guarded.
@@ -864,19 +956,83 @@ class SlimProtoCoordinator: ObservableObject {
         // which supports seeking via server-side transcoding. Playlist jump recovery works for all formats.
 
         // Check if we have recovery data (no time limit - like other music players)
-        guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+        let hasTimestamp = UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil
+        let savedIndex = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        let isAudibleRetry = shouldPlay && outageHoldActive && audibleRecoveryTarget != nil
+
+        // Position saved but the index is gone (a jump that just succeeded
+        // deletes all three keys; later saves write only position +
+        // timestamp). A plain play/pause would lose the position: on a
+        // stopped player play starts the track at 0:00, and on a player LMS
+        // thinks is playing it does nothing (Commands.pm playcontrolCommand).
+        // Ask LMS which track it's on and jump there (bd 27ye).
+        if Self.needsServerRecoveryIndex(hasTimestamp: hasTimestamp, hasIndex: savedIndex != nil,
+                                         position: savedPosition, isAudibleRetry: isAudibleRetry) {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔍 Recovery index missing - asking server for the current track")
+            let statusCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.recoveryGeneration == generation, self.isRecoveryInProgress else { return }
+                    let index = Self.serverRecoveryIndex(fromStatus: response["result"] as? [String: Any])
+                    if let index = index {
+                        self.setRecoveryIndexFromServer(index)
+                    } else {
+                        os_log(.error, log: self.logger, "[APP-RECOVERY] 🔍 No server index (status failed or empty playlist)")
+                    }
+                    self.continuePlaylistRecovery(
+                        saved: index.map { RecoveryTarget(index: $0, position: savedPosition) },
+                        shouldPlay: shouldPlay, isAudibleRetry: isAudibleRetry, generation: generation)
+                }
+            }
+            return
+        }
+
+        let saved = Self.savedRecoveryTarget(hasTimestamp: hasTimestamp, index: savedIndex, position: savedPosition)
+        continuePlaylistRecovery(saved: saved, shouldPlay: shouldPlay, isAudibleRetry: isAudibleRetry, generation: generation)
+    }
+
+    /// Ask LMS for the track index only when there's a position to resume
+    /// but no index, and no kept outage target (build 9) to use instead.
+    static func needsServerRecoveryIndex(hasTimestamp: Bool, hasIndex: Bool, position: Double, isAudibleRetry: Bool) -> Bool {
+        hasTimestamp && !hasIndex && position > 0 && !isAudibleRetry
+    }
+
+    /// LMS's current track index from a status result, or nil when the query
+    /// failed or the playlist is empty.
+    static func serverRecoveryIndex(fromStatus result: [String: Any]?) -> Int? {
+        guard let result = result else { return nil }
+        let tracks = (result["playlist_tracks"] as? Int) ?? Int(result["playlist_tracks"] as? String ?? "") ?? 0
+        guard tracks > 0 else { return nil }
+        return playlistIndex(fromStatus: result)
+    }
+
+    /// The rest of executePlaylistRecovery, once the saved target is known.
+    private func continuePlaylistRecovery(saved: RecoveryTarget?, shouldPlay: Bool, isAudibleRetry: Bool, generation: Int) {
+        guard let target = Self.resolveRecoveryTarget(saved: saved, kept: audibleRecoveryTarget, isAudibleRetry: isAudibleRetry) else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No recovery data - using simple %{public}s command", shouldPlay ? "play" : "pause")
             finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
         }
+        if isAudibleRetry {
+            os_log(.error, log: logger, "[APP-RECOVERY] 🔁 Retrying this outage's jump target: track %d at %.2f", target.index, target.position)
+        }
 
-        let savedIndex = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
-        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        let savedIndex = target.index
+        let savedPosition = target.position
 
         guard savedPosition > 0 else {
             os_log(.error, log: logger, "[APP-RECOVERY] 🔄 No saved position - using simple %{public}s command", shouldPlay ? "play" : "pause")
             finishRecoveryWithoutJump(shouldPlay: shouldPlay)
             return
+        }
+
+        if shouldPlay && outageHoldActive {
+            audibleRecoveryTarget = target
         }
 
         os_log(.error, log: logger, "[APP-RECOVERY] 🎯 Performing playlist recovery: jump to track %d at %.2f seconds (shouldPlay: %{public}s)",
@@ -3090,6 +3246,7 @@ extension SlimProtoCoordinator {
         guard outageHoldActive else { return }
         outageHoldActive = false
         outageHoldGeneration += 1  // cancels the pending time limit
+        audibleRecoveryTarget = nil
         audioManager.setOutputKeepAlive(false)
         connectionManager.persistForPlayback = false
         // Nothing left to resume: a later reconnect must not start playback
@@ -3106,6 +3263,11 @@ extension SlimProtoCoordinator {
     /// `action` unless LMS says the player is paused; then ends the hold.
     /// Proceeds if the status query fails (the jump would fail too, and retry).
     private func unlessPausedOnServer(_ action: @escaping () -> Void) {
+        unlessPausedOnServer(withStatus: { _ in action() })
+    }
+
+    /// Same, passing LMS's status result (nil if the query failed) to `action`.
+    private func unlessPausedOnServer(withStatus action: @escaping ([String: Any]?) -> Void) {
         let statusCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
@@ -3114,12 +3276,13 @@ extension SlimProtoCoordinator {
         sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
             DispatchQueue.main.async {
                 guard let self = self, self.outageHoldActive else { return }
-                let mode = (response["result"] as? [String: Any])?["mode"] as? String
+                let result = response["result"] as? [String: Any]
+                let mode = result?["mode"] as? String
                 if mode == "pause" {
                     self.endOutageHold(reason: "paused on server")
                     return
                 }
-                action()
+                action(result)
             }
         }
     }
@@ -3164,6 +3327,147 @@ extension SlimProtoCoordinator {
             self.unlessPausedOnServer {
                 self.performPlaylistRecovery(shouldPlay: true)
             }
+        }
+    }
+
+    // MARK: - Media Services Reset (bd 27ye)
+
+    private func currentMediaServicesSnapshot() -> MediaServicesSnapshot {
+        let state = audioManager.getPlayerState()
+        return MediaServicesSnapshot(
+            audioPlaying: state == "Playing" || state == "Buffering" || audioManager.isPushStreamStalled(),
+            outageHoldActive: outageHoldActive,
+            audibleRecoveryInProgress: isRecoveryInProgress && !currentRecoveryIsSilent,
+            silentRecoveryInProgress: audioManager.isSilentRecoveryMuted,
+            startDroppedWhileSuspended: audioManager.startDroppedWhileSuspended)
+    }
+
+    /// AVAudioSession media services were lost: the app has no audio session
+    /// until iOS posts the reset. Note what we were doing and stop using BASS
+    /// output until then.
+    func mediaServicesWereLost() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.mediaServicesLostSinceReinit = true
+            let (time, playing) = self.simpleTimeTracker.getCurrentTime()
+            if self.mediaServicesLossSnapshot == nil {
+                self.mediaServicesLossSnapshot = self.currentMediaServicesSnapshot()
+                self.mediaServicesLossPosition = time
+            }
+            os_log(.error, log: self.logger, "🔄 Media services lost (wants playback: %{public}s, at %.2f seconds)",
+                   self.mediaServicesLossSnapshot?.wantsPlayback == true ? "YES" : "NO",
+                   self.mediaServicesLossPosition ?? time)
+            // No audio flows until the reset; stop the clock so the saved
+            // recovery position doesn't run ahead of what the user heard.
+            if playing {
+                self.simpleTimeTracker.updateFromServer(time: time, playing: false)
+            }
+            self.audioManager.suspendOutputForMediaServicesLoss()
+
+            // iOS should follow with a reset. If it doesn't, try anyway rather
+            // than leave the output suspended for good.
+            self.mediaServicesGeneration += 1
+            let generation = self.mediaServicesGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                guard let self = self, self.mediaServicesGeneration == generation else { return }
+                os_log(.error, log: self.logger, "🔄 No media services reset 10s after loss - re-initializing anyway")
+                self.recoverFromMediaServicesReset(trigger: .lossFallback)
+            }
+        }
+    }
+
+    /// AVAudioSession media services were reset. The new session has iOS's
+    /// default category, which audiomxd refuses for background playback
+    /// (error -16980, captured 2026-10-12). Re-init BASS so it sets the
+    /// session up again, then resume if we were playing.
+    func mediaServicesWereReset() {
+        DispatchQueue.main.async { [weak self] in
+            self?.recoverFromMediaServicesReset(trigger: .resetNotification)
+        }
+    }
+
+    /// AudioManager: BASS re-init failed earlier and a start, play or
+    /// foreground arrived; try again (lazily, not on a timer).
+    func retryFailedOutputReinit() {
+        DispatchQueue.main.async { [weak self] in
+            self?.recoverFromMediaServicesReset(trigger: .lazyRetry)
+        }
+    }
+
+    private enum MediaServicesReinitTrigger {
+        case resetNotification, lossFallback, lazyRetry
+    }
+
+    private func recoverFromMediaServicesReset(trigger: MediaServicesReinitTrigger) {
+        if trigger == .resetNotification,
+           Self.isDuplicateReset(secondsSinceResetReinit: lastResetReinitAt.map { Date().timeIntervalSince($0) },
+                                 lostSinceReinit: mediaServicesLostSinceReinit) {
+            os_log(.info, log: logger, "🔄 Media services reset - duplicate of the one just handled, ignoring")
+            return
+        }
+        mediaServicesGeneration += 1  // cancels the loss fallback
+        guard !mediaServicesReinitInFlight else {
+            os_log(.info, log: logger, "🔄 Media services reset - re-init already in progress")
+            return
+        }
+        mediaServicesReinitInFlight = true
+        let atLoss = mediaServicesLossSnapshot
+        mediaServicesLossSnapshot = nil
+        // Read before re-init frees the streams (covers a reset with no loss).
+        let audioPlayingAtReset = currentMediaServicesSnapshot().audioPlaying
+        let (time, playing) = simpleTimeTracker.getCurrentTime()
+        if playing {
+            simpleTimeTracker.updateFromServer(time: time, playing: false)
+        }
+        let resumePosition = mediaServicesLossPosition ?? time
+
+        audioManager.reinitializeOutputAfterMediaServicesReset { [weak self] success in
+            guard let self = self else { return }
+            self.mediaServicesReinitInFlight = false
+            guard success else {
+                // No output device: nothing can play, so don't hold on to the
+                // keep-alive and retries. AudioManager stays suspended and
+                // retries on the next start, play or foreground.
+                self.endOutageHold(reason: "audio re-init failed")
+                return
+            }
+            self.mediaServicesLostSinceReinit = false
+            self.mediaServicesLossPosition = nil
+            self.lastResetReinitAt = trigger == .resetNotification ? Date() : nil
+            var atReset = self.currentMediaServicesSnapshot()
+            atReset.audioPlaying = audioPlayingAtReset
+            let action = Self.mediaServicesResetAction(atLoss: atLoss, atReset: atReset)
+            os_log(.error, log: self.logger, "🔄 Media services reset handled: BASS re-initialized, %{public}s",
+                   action == .reinitializeAndResume ? "resuming via playlist jump" : "not resuming (paused or idle)")
+            guard action == .reinitializeAndResume else { return }
+
+            // The re-init freed any stream the server started for us, so the
+            // "server started a stream recently" guard must not skip our jump.
+            self.lastServerStreamStartAt = nil
+            self.beginOutageHold(reason: "media services reset")
+            self.unlessPausedOnServer(withStatus: { status in
+                // Jump to the track LMS is on now. The saved index may be
+                // gone: a jump that just succeeded deletes all three keys,
+                // and the 3s poll that rewrites it is held off after a jump.
+                // Without an index the recovery sends a plain play instead.
+                if let index = Self.playlistIndex(fromStatus: status) {
+                    self.setRecoveryIndexFromServer(index)
+                }
+                // Not the tracker: polls since the loss carry LMS's time
+                // from our 0-elapsed STATs (device test 2026-10-12: 0.69s
+                // instead of 2:09).
+                let position = resumePosition
+                if position > 0 {
+                    // Seed the tracker too, so NowPlayingManager's periodic
+                    // save doesn't write the poisoned time back.
+                    self.simpleTimeTracker.updateFromServer(time: position, playing: false)
+                    UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                    UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+                    os_log(.info, log: self.logger, "💾 Saved recovery state on media services reset: track %{public}s at %.2f seconds",
+                           (UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int).map(String.init) ?? "unknown", position)
+                }
+                self.performPlaylistRecovery(shouldPlay: true)
+            })
         }
     }
 

@@ -757,7 +757,11 @@ class AudioStreamDecoder {
 
         guard pushStream != 0 else {
             let error = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ Push stream creation failed: %d", error)
+            if error == BASS_ERROR_INIT {
+                os_log(.error, log: logger, "❌ Push stream creation failed: BASS not initialized (media services re-init failed?)")
+            } else {
+                os_log(.error, log: logger, "❌ Push stream creation failed: %d", error)
+            }
             return
         }
 
@@ -1091,6 +1095,15 @@ class AudioStreamDecoder {
             os_log(.info, log: logger, "⏭️ Skipping superseded decode start for %{public}s", url)
             return
         }
+        // A start can pass AudioManager's check just before a media services
+        // loss; re-check here, before any BASS stream is created (bd 27ye).
+        stateLock.lock()
+        let suspended = outputSuspended
+        stateLock.unlock()
+        guard !suspended else {
+            os_log(.error, log: logger, "🔄 Media services down - skipping decode start for %{public}s", url)
+            return
+        }
 
         os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
 
@@ -1152,6 +1165,13 @@ class AudioStreamDecoder {
         guard decoderStream != 0 else {
             let error = createError
             os_log(.error, log: logger, "❌ Decoder stream creation failed: %d", error)
+            // BASS not initialized (a media services re-init failed, bd 27ye):
+            // the track is fine, our output isn't. STMn would make LMS fail
+            // the track and skip to the next one, which fails the same way.
+            guard Self.openFailureIsTrackError(error) else {
+                os_log(.error, log: logger, "❌ BASS not initialized - not reporting STMn (track is not at fault)")
+                return
+            }
             // Report to the server like the decode-loop error paths do (→ STMn,
             // squeezelite's DECODE_ERROR) — a bare return left the pipeline
             // silently dead: the current track drained its buffer and playback
@@ -1928,6 +1948,33 @@ class AudioStreamDecoder {
         stallSync = 0  // Reset STALL sync handle (already freed by BASS_StreamFree)
 
         os_log(.info, log: logger, "✅ Cleanup complete")
+    }
+
+    /// Mirrors AudioManager's media services suspension (bd 27ye). Guarded
+    /// by stateLock: set on main, read on decodeQueue.
+    private var outputSuspended = false
+
+    func setOutputSuspended(_ suspended: Bool) {
+        stateLock.lock()
+        outputSuspended = suspended
+        stateLock.unlock()
+    }
+
+    /// Whether a BASS_StreamCreateURL failure is the track's fault (→ STMn).
+    /// BASS_ERROR_INIT means our output isn't initialized (bd 27ye).
+    static func openFailureIsTrackError(_ code: Int32) -> Bool {
+        code != BASS_ERROR_INIT
+    }
+
+    /// Run `work` on main once everything already queued on decodeQueue has
+    /// finished. After cleanup() the running decode loop exits within one
+    /// iteration and frees its own decoder stream; waiting for it keeps that
+    /// free from landing after BASS_Free + BASS_Init, where the handle value
+    /// could belong to a new stream (bd 27ye).
+    func afterQueuedDecodeWork(_ work: @escaping () -> Void) {
+        decodeQueue.async {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     /// Mark current buffer position as track boundary for gapless transition

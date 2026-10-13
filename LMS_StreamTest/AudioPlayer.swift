@@ -213,49 +213,7 @@ class AudioPlayer: NSObject, ObservableObject {
         // 48kHz is the base of high-res family (48→96→192kHz clean multiples)
         // Prevents upsampling while allowing DAC to negotiate up for high-res content
         // BASS_DEVICE_FREQ flag enables DAC to output at higher rates when content matches
-        let targetRate: DWORD = 48000  // 48kHz family base for high-res compatibility
-        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
-
-        if result == 0 {
-            let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
-            return
-        }
-
-        // Query what sample rate we actually got from the hardware
-        var info = BASS_INFO()
-        if BASS_GetInfo(&info) != 0 {
-            let actualRate = info.freq
-            os_log(.info, log: logger, "🎵 BASS Audio Output: Requested %dHz → Hardware provided %dHz",
-                   Int(targetRate), actualRate)
-
-            // Log device type based on actual rate for debugging
-            if actualRate >= 192000 {
-                os_log(.info, log: logger, "✅ High-end external DAC detected (192kHz+)")
-            } else if actualRate >= 96000 {
-                os_log(.info, log: logger, "✅ External DAC detected (96kHz)")
-            } else if actualRate == 48000 {
-                os_log(.info, log: logger, "📱 Standard iOS output (48kHz - built-in/AirPods)")
-            } else if actualRate == 44100 {
-                os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
-            }
-
-            #if os(iOS)
-            // CRITICAL: Check for BASS vs iOS mismatch (LMS_StreamTest-yg4)
-            // If BASS thinks 192kHz but iOS is at 48kHz, iOS will resample down
-            let iosRate = AVAudioSession.sharedInstance().sampleRate
-            os_log(.info, log: logger, "🔍 Sample Rate Verification: BASS=%dHz, iOS=%.0fHz", actualRate, iosRate)
-
-            if abs(Double(actualRate) - iosRate) > 100 {
-                os_log(.error, log: logger, "⚠️ MISMATCH DETECTED: BASS reports %dHz but iOS session is %.0fHz - audio will be resampled!", actualRate, iosRate)
-                os_log(.error, log: logger, "⚠️ This means high-res audio will be downsampled to %.0fHz by iOS", iosRate)
-            } else {
-                os_log(.info, log: logger, "✅ BASS and iOS sample rates match - bit-perfect output")
-            }
-            #endif
-        } else {
-            os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
-        }
+        guard initOutputDevice() == BASS_OK else { return }
 
         // REMOVED: Excessive 1MB verification window was potentially blocking transcoded streams
         // Use BASS defaults instead: VERIFY=16KB, VERIFY_NET=4KB (25% of VERIFY)
@@ -293,6 +251,99 @@ class AudioPlayer: NSObject, ObservableObject {
         #endif
     }
 
+    /// BASS_Init on the default device, then log the rate the hardware gave us.
+    /// Shared by first setup and the media services reset path (bd 27ye).
+    /// Returns BASS_OK or the BASS_Init error code.
+    private func initOutputDevice() -> Int32 {
+        let targetRate: DWORD = 48000  // 48kHz family base for high-res compatibility
+        let result = BASS_Init(-1, targetRate, DWORD(BASS_DEVICE_FREQ), nil, nil)
+
+        if result == 0 {
+            let errorCode = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "❌ BASS initialization failed: %d", errorCode)
+            return errorCode
+        }
+
+        // Query what sample rate we actually got from the hardware
+        var info = BASS_INFO()
+        if BASS_GetInfo(&info) != 0 {
+            let actualRate = info.freq
+            os_log(.info, log: logger, "🎵 BASS Audio Output: Requested %dHz → Hardware provided %dHz",
+                   Int(targetRate), actualRate)
+
+            // Log device type based on actual rate for debugging
+            if actualRate >= 192000 {
+                os_log(.info, log: logger, "✅ High-end external DAC detected (192kHz+)")
+            } else if actualRate >= 96000 {
+                os_log(.info, log: logger, "✅ External DAC detected (96kHz)")
+            } else if actualRate == 48000 {
+                os_log(.info, log: logger, "📱 Standard iOS output (48kHz - built-in/AirPods)")
+            } else if actualRate == 44100 {
+                os_log(.info, log: logger, "📱 Standard iOS output (44.1kHz - built-in speaker)")
+            }
+
+            #if os(iOS)
+            // CRITICAL: Check for BASS vs iOS mismatch (LMS_StreamTest-yg4)
+            // If BASS thinks 192kHz but iOS is at 48kHz, iOS will resample down
+            let iosRate = AVAudioSession.sharedInstance().sampleRate
+            os_log(.info, log: logger, "🔍 Sample Rate Verification: BASS=%dHz, iOS=%.0fHz", actualRate, iosRate)
+
+            if abs(Double(actualRate) - iosRate) > 100 {
+                os_log(.error, log: logger, "⚠️ MISMATCH DETECTED: BASS reports %dHz but iOS session is %.0fHz - audio will be resampled!", actualRate, iosRate)
+                os_log(.error, log: logger, "⚠️ This means high-res audio will be downsampled to %.0fHz by iOS", iosRate)
+            } else {
+                os_log(.info, log: logger, "✅ BASS and iOS sample rates match - bit-perfect output")
+            }
+            #endif
+        } else {
+            os_log(.error, log: logger, "❌ Failed to get BASS device info: %d", BASS_ErrorGetCode())
+        }
+        return BASS_OK
+    }
+
+    /// Media services reset (bd 27ye): iOS rebuilt the audio session with
+    /// the default category, so the app can't play until BASS sets it up
+    /// again. Free and re-init the device, as a fresh launch does. All
+    /// stream handles die with BASS_Free; callers rebuild streams afterwards.
+    /// Loaded plugins and BASS_SetConfig options are independent of the
+    /// device (BASS_SetConfig docs) and carry over. Main thread.
+    func reinitializeOutputDevice() -> Bool {
+        cleanup()
+        if BASS_Free() == 0 {
+            let code = BASS_ErrorGetCode()
+            os_log(.error, log: logger, "🔄 BASS_Free failed: %d", code)
+            if Self.freeFailureNeedsRetryLater(code) {
+                // Device is being reinitialized; the caller retries after a delay.
+                return false
+            }
+        }
+        var code = initOutputDevice()
+        if code != BASS_OK && Self.initFailureNeedsFreeFirst(code) {
+            os_log(.error, log: logger, "🔄 BASS_Init: device still initialized - freeing and retrying once")
+            if BASS_Free() == 0 {
+                os_log(.error, log: logger, "🔄 BASS_Free (retry) failed: %d", BASS_ErrorGetCode())
+            }
+            code = initOutputDevice()
+        }
+        guard code == BASS_OK else { return false }
+        updateOutputDeviceInfo()
+        os_log(.info, log: logger, "🔄 BASS output device re-initialized")
+        return true
+    }
+
+    /// BASS_Free failed with BASS_ERROR_BUSY ("the device is currently being
+    /// reinitialized", BASS_Free docs): try the whole re-init again later.
+    /// BASS_ERROR_INIT (never initialized) or anything else: go on to BASS_Init.
+    static func freeFailureNeedsRetryLater(_ code: Int32) -> Bool {
+        code == BASS_ERROR_BUSY
+    }
+
+    /// BASS_Init failed with BASS_ERROR_ALREADY ("already been initialized",
+    /// BASS_Init docs), e.g. after a busy BASS_Free: free it and init again.
+    static func initFailureNeedsFreeFirst(_ code: Int32) -> Bool {
+        code == BASS_ERROR_ALREADY
+    }
+
     /// Legacy auth header update - no longer used with URL-embedded credentials
     /// Kept for compatibility with SettingsManager.saveSettings()
     func updateAuthHeader() {
@@ -301,8 +352,21 @@ class AudioPlayer: NSObject, ObservableObject {
         // WebView and JSON-RPC use Authorization headers
     }
 
+    /// What to do with a URL stream once its (lock-free, possibly slow) open
+    /// returns, given a media services re-init may have run meanwhile (bd 27ye).
+    enum OpenedStreamAction: Equatable {
+        case keep    // nothing happened: play it
+        case free    // output suspended since: BASS_StreamFree it
+        case forget  // BASS_Free ran since: already freed, don't touch the handle
+    }
+
+    static func openedStreamAction(epochAtStart: Int, epochNow: Int, suspendedNow: Bool) -> OpenedStreamAction {
+        if epochNow != epochAtStart { return .forget }
+        return suspendedNow ? .free : .keep
+    }
+
     // MARK: - Stream Playback (MINIMAL CBASS)
-    func playStream(urlString: String) {
+    func playStream(urlString: String, afterOpen: (() -> OpenedStreamAction)? = nil) {
         guard !urlString.isEmpty else {
             os_log(.error, log: logger, "Empty URL provided")
             return
@@ -359,6 +423,31 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
 
+        switch afterOpen?() ?? .keep {
+        case .keep:
+            break
+        case .free:
+            os_log(.error, log: logger, "🔄 Media services lost during stream open - freeing the new stream")
+            BASS_StreamFree(currentStream)
+            currentStream = 0
+            return
+        case .forget:
+            // BASS_Free usually freed it already. If the open finished after the
+            // new BASS_Init, the stream is alive on the new device and would leak
+            // (idle HTTP connection + buffer), so free it anyway: a freed handle
+            // just fails with BASS_ERROR_HANDLE. Reuse of the value by a third
+            // stream is ruled out because STRMs are serialized on this queue.
+            os_log(.error, log: logger, "🔄 BASS re-initialized during stream open - dropping the stale handle")
+            if BASS_StreamFree(currentStream) == 0 {
+                let error = BASS_ErrorGetCode()
+                if error != BASS_ERROR_HANDLE {
+                    os_log(.error, log: logger, "⚠️ Freeing the stale handle failed: %d", error)
+                }
+            }
+            currentStream = 0
+            return
+        }
+
         setupCallbacks()
 
         // Apply ReplayGain BEFORE starting playback if pending
@@ -406,7 +495,8 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0) {
+    func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0,
+                              afterOpen: (() -> OpenedStreamAction)? = nil) {
         os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s with replayGain %.4f", format, urlString, replayGain)
 
         // CRITICAL: Store format for plugin-specific stream creation
@@ -419,11 +509,12 @@ class AudioPlayer: NSObject, ObservableObject {
         configureForFormat(format)
 
         // Use the main playStream method (which will apply replayGain after stream creation)
-        playStream(urlString: urlString)
+        playStream(urlString: urlString, afterOpen: afterOpen)
     }
 
-    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0) {
-        playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain)
+    func playStreamAtPositionWithFormat(urlString: String, startTime: Double, format: String, replayGain: Float = 0.0,
+                                        afterOpen: (() -> OpenedStreamAction)? = nil) {
+        playStreamWithFormat(urlString: urlString, format: format, replayGain: replayGain, afterOpen: afterOpen)
 
         if startTime > 0 {
             seekToPosition(startTime)
@@ -438,9 +529,9 @@ class AudioPlayer: NSObject, ObservableObject {
     /// app can't reconnect or resume after a network outage (bd 6lvg, 8tjj).
     /// Turned on only while the coordinator is trying to resume playback the
     /// user asked for, and off again once audio starts or the attempt ends.
-    func setOutputKeepAlive(_ enabled: Bool) {
+    func setOutputKeepAlive(_ enabled: Bool, startDevice: Bool = true) {
         BASS_SetConfig(DWORD(BASS_CONFIG_DEV_NONSTOP), enabled ? 1 : 0)
-        if enabled {
+        if enabled && startDevice {
             // The device may already be idle; restart it so silence flows now.
             // Fails with BASS_ERROR_BUSY during an interruption (e.g. a call).
             if BASS_Start() == 0 {

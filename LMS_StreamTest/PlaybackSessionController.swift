@@ -42,6 +42,8 @@ protocol SlimProtoControlling: AnyObject {
     func toggleShuffleMode(completion: ((Int) -> Void)?)
     func sendPauseWithConfirmation(maxRetries: Int, completion: ((Bool) -> Void)?)
     func outageHoldInterruptionBegan(isSiri: Bool)
+    func mediaServicesWereLost()
+    func mediaServicesWereReset()
 }
 
 extension SlimProtoCoordinator: SlimProtoControlling {}
@@ -283,6 +285,11 @@ final class PlaybackSessionController {
                            object: nil)
 
         center.addObserver(self,
+                           selector: #selector(handleMediaServicesLost(_:)),
+                           name: AVAudioSession.mediaServicesWereLostNotification,
+                           object: nil)
+
+        center.addObserver(self,
                            selector: #selector(handleMediaServicesReset(_:)),
                            name: AVAudioSession.mediaServicesWereResetNotification,
                            object: nil)
@@ -488,9 +495,25 @@ final class PlaybackSessionController {
         }
     }
 
+    // Media services (bd 27ye): BASS does NOT recover on its own. After the
+    // reset the session has iOS's default category and can't play in the
+    // background; the coordinator re-inits BASS so BASS sets it up again.
+    @objc private func handleMediaServicesLost(_ notification: Notification) {
+        os_log(.error, log: logger, "🔄 Media services lost")
+        guard let coordinator = slimProtoProvider?() else {
+            os_log(.error, log: logger, "🔄 Media services lost - no coordinator")
+            return
+        }
+        coordinator.mediaServicesWereLost()
+    }
+
     @objc private func handleMediaServicesReset(_ notification: Notification) {
-        os_log(.error, log: logger, "🔄 Media services reset detected - BASS will auto-reinitialize")
-        // BASS automatically handles media services reset - no manual intervention needed
+        os_log(.error, log: logger, "🔄 Media services reset detected")
+        guard let coordinator = slimProtoProvider?() else {
+            os_log(.error, log: logger, "🔄 Media services reset - no coordinator, BASS not re-initialized")
+            return
+        }
+        coordinator.mediaServicesWereReset()
     }
 
     // MARK: - CarPlay Handling
