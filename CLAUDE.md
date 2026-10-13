@@ -23,6 +23,8 @@ xcodebuild -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest clean
 
 Xcode 27: tvOS builds need the Metal Toolchain for the visualizer shaders (`xcodebuild -downloadComponent MetalToolchain`).
 
+TestFlight: `scripts/testflight/upload.sh ios|tvos` archives, uploads and distributes to the TestFlight groups (setup in `scripts/testflight/README.md`); `/cut-build` runs it last.
+
 For the CLI build → install → launch loop on a connected iPhone, see the wiki at `Setup/iPhone Build Workflow.md`. Personal device IDs are kept in user-local Claude memory, not committed.
 
 **Test LMS server**: `192.168.1.8` (default ports — 9000 JSON-RPC, 3483 SlimProto) is available on-network for debugging and exercising new features.
@@ -54,6 +56,12 @@ Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) mu
 **Still human-only**: audible quality (gapless seams, audio bursts, clicks), CarPlay hardware behavior, real phone-call interruptions, lock-screen timing. Don't claim these verified from a simulator.
 
 **Autonomous pilot loop**: `/pilot` (`.claude/commands/pilot.md`) runs one bd-issue → draft-PR iteration scoped to tvOS/UI work (audio pipeline and recovery files are off-limits to it); `/loop /pilot` keeps it running. It never merges, never closes bd issues, and caps at 3 open draft PRs.
+
+**Herdr coordination**: when `HERDR_ENV=1`, the session runs inside [Herdr](https://herdr.dev) and the `herdr` CLI reaches its socket (`$HERDR_SOCKET_PATH`). The maintainer may ask you to coordinate worker agents for LyrPlay: split panes, start named workers, prompt them, wait, read their output, and review their results. Run `herdr --skill` for the command reference before the first command. Rules:
+- LyrPlay only: never prompt, read or control agents in other workspaces.
+- Workers that edit code get their own git worktree.
+- Never answer a worker's approval or question prompt without asking the maintainer. Never close panes or tabs you didn't create.
+- Workers never merge, push to `main`, run `scripts/testflight/upload.sh`, or touch App Store Connect. The coordinator reports; the maintainer decides.
 
 ## Issue Tracking
 
