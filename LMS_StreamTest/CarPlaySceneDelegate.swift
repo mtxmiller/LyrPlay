@@ -2129,13 +2129,29 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    private func showArtistAlbums(artist: Artist) {
+    private func showArtistAlbums(artist: Artist, replacingTop: Bool = false) {
         os_log(.info, log: logger, "🎤 Fetching albums for artist: %{public}s", artist.name)
 
-        fetchArtistAlbums(artistId: artist.id) { [weak self] albums in
+        // Albums and the HitsPlaylist check run side by side; the screen waits for both.
+        let group = DispatchGroup()
+        var albums: [Album] = []
+        var hitsAvailable = false
+
+        group.enter()
+        fetchArtistAlbums(artistId: artist.id) { result in
+            albums = result
+            group.leave()
+        }
+        group.enter()
+        checkHitsPluginAvailable { available in
+            hitsAvailable = available
+            group.leave()
+        }
+
+        group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
 
-            if albums.isEmpty {
+            if albums.isEmpty && !hitsAvailable {
                 os_log(.error, log: self.logger, "❌ No albums found for artist: %{public}s", artist.name)
                 return
             }
@@ -2163,13 +2179,254 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     albumItems.append(item)
                 }
 
+                var sections: [CPListSection] = []
+                if hitsAvailable {
+                    sections.append(CPListSection(items: self.hitsItems(for: artist)))
+                }
+                if !albumItems.isEmpty {
+                    sections.append(CPListSection(items: albumItems))
+                }
+
                 let albumsTemplate = CPListTemplate(
                     title: artist.name,
-                    sections: [CPListSection(items: albumItems)]
+                    sections: sections
                 )
 
-                self.pushTemplateSafely(albumsTemplate, animated: true)
-                os_log(.info, log: self.logger, "✅ Displayed %d albums for %{public}s", albumItems.count, artist.name)
+                if replacingTop, let interfaceController = self.interfaceController,
+                   interfaceController.templates.count > 1 {
+                    // "Go to Artist" swaps the album screen for the artist screen,
+                    // so the jump never runs into CarPlay's template depth cap.
+                    interfaceController.popTemplate(animated: false) { [weak self] _, _ in
+                        self?.pushTemplateSafely(albumsTemplate, animated: true)
+                    }
+                } else {
+                    self.pushTemplateSafely(albumsTemplate, animated: true)
+                }
+                os_log(.info, log: self.logger, "✅ Displayed %d albums for %{public}s (hits: %{public}s)",
+                       albumItems.count, artist.name, hitsAvailable ? "yes" : "no")
+            }
+        }
+    }
+
+    // MARK: - HitsPlaylist plugin
+
+    /// True when the server has the HitsPlaylist plugin (its `hitsplaylist playhits`
+    /// command is registered). Without it the Hits rows are not shown.
+    private func checkHitsPluginAvailable(completion: @escaping (Bool) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion(false)
+            return
+        }
+
+        let canCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["can", "hitsplaylist", "playhits", "?"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(canCommand) { response in
+            let result = response["result"] as? [String: Any]
+            let can = Self.intValue(result?["_can"]) ?? 0
+            DispatchQueue.main.async {
+                completion(can == 1)
+            }
+        }
+    }
+
+    private func hitsItems(for artist: Artist) -> [CPListItem] {
+        let hitsItem = CPListItem(
+            text: "Play Hits",
+            detailText: "This artist's top tracks in your library",
+            image: UIImage(systemName: "flame"),
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        hitsItem.handler = { [weak self] item, completion in
+            self?.playHits(artist: artist, item: item as? CPListItem, completion: completion)
+        }
+
+        let similarItem = CPListItem(
+            text: "Play Hits + Similar",
+            detailText: "Top tracks from this artist and similar artists",
+            image: UIImage(systemName: "person.2.wave.2"),
+            accessoryImage: nil,
+            accessoryType: .none
+        )
+        similarItem.handler = { [weak self] item, completion in
+            self?.playHitsWithSimilar(artist: artist, item: item as? CPListItem, completion: completion)
+        }
+
+        return [hitsItem, similarItem]
+    }
+
+    /// The plugin asks Last.fm before it answers, so these requests can take
+    /// several seconds. The row's completion is held until then, which keeps
+    /// CarPlay's spinner on the row.
+    private static let hitsRequestTimeout: TimeInterval = 45
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+
+    private func playHits(artist: Artist, item: CPListItem?, completion: @escaping () -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion()
+            return
+        }
+        os_log(.info, log: logger, "🔥 Play Hits for %{public}s", artist.name)
+
+        let command: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [SettingsManager.shared.playerMACAddress, ["hitsplaylist", "playhits", "artist_id:\(artist.id)"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(command, timeout: Self.hitsRequestTimeout) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                completion()
+
+                guard let result = response["result"] as? [String: Any] else {
+                    os_log(.error, log: self.logger, "❌ Play Hits failed for %{public}s (no response)", artist.name)
+                    item?.setDetailText("Couldn't build hits. Try again.")
+                    return
+                }
+                let count = Self.intValue(result["count"]) ?? 0
+                guard count > 0 else {
+                    os_log(.info, log: self.logger, "🔥 No hits in library for %{public}s", artist.name)
+                    item?.setDetailText("No hits found in your library")
+                    return
+                }
+
+                os_log(.info, log: self.logger, "✅ Playing %d hits for %{public}s", count, artist.name)
+                self.pushNowPlayingTemplate()
+            }
+        }
+    }
+
+    /// Hits + similar has no one-shot command in the plugin; it lives in the
+    /// plugin's artist menu (Hits > Expand with similar artists > Play all), the
+    /// same rows Material shows. Walk that menu by label. Item ids are positional
+    /// and depend on which other plugins add artist menu rows, so never hardcode them.
+    private func playHitsWithSimilar(artist: Artist, item: CPListItem?, completion: @escaping () -> Void) {
+        os_log(.info, log: logger, "🔥 Play Hits + Similar for %{public}s", artist.name)
+
+        let steps: [(String) -> Bool] = [
+            { $0 == "Hits" },
+            { $0 == "Expand with similar artists" },
+            { $0.hasPrefix("Play all") }
+        ]
+
+        func fail(_ reason: String, detail: String) {
+            os_log(.error, log: logger, "❌ Play Hits + Similar failed for %{public}s: %{public}s", artist.name, reason)
+            item?.setDetailText(detail)
+            completion()
+        }
+
+        func walk(step: Int, itemID: String?) {
+            artistInfoItems(artistID: artist.id, itemID: itemID) { [weak self] items in
+                guard let self = self else { return }
+                guard let items = items else {
+                    fail("no response at step \(step)", detail: "Couldn't build hits. Try again.")
+                    return
+                }
+
+                if step == steps.count {
+                    // Opening "Play all" is what starts playback.
+                    completion()
+                    os_log(.info, log: self.logger, "✅ Playing hits + similar for %{public}s", artist.name)
+                    self.pushNowPlayingTemplate()
+                    return
+                }
+
+                guard let row = items.first(where: { steps[step](($0["text"] as? String) ?? "") }),
+                      let nextID = Self.goItemID(row) else {
+                    if step == steps.count - 1 {
+                        fail("no Play all row", detail: "No hits found in your library")
+                    } else {
+                        fail("menu row \(step) not found", detail: "Couldn't find Hits on the server")
+                    }
+                    return
+                }
+                walk(step: step + 1, itemID: nextID)
+            }
+        }
+
+        walk(step: 0, itemID: nil)
+    }
+
+    /// One level of the server's artist info menu (`artistinfo items`), run for
+    /// LyrPlay's player. nil means the request failed.
+    private func artistInfoItems(artistID: String, itemID: String?,
+                                 completion: @escaping ([[String: Any]]?) -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion(nil)
+            return
+        }
+
+        var params: [Any] = ["artistinfo", "items", 0, 100, "artist_id:\(artistID)", "menu:1"]
+        if let itemID = itemID {
+            params.append("item_id:\(itemID)")
+        }
+        let command: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [SettingsManager.shared.playerMACAddress, params]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(command, timeout: Self.hitsRequestTimeout) { response in
+            let result = response["result"] as? [String: Any]
+            let items = result.map { ($0["item_loop"] as? [[String: Any]]) ?? [] }
+            DispatchQueue.main.async {
+                completion(items)
+            }
+        }
+    }
+
+    /// The `item_id` a menu row's "go" action opens.
+    private static func goItemID(_ row: [String: Any]) -> String? {
+        guard let actions = row["actions"] as? [String: Any],
+              let go = actions["go"] as? [String: Any],
+              let params = go["params"] as? [String: Any] else {
+            return nil
+        }
+        if let id = params["item_id"] as? String { return id }
+        if let id = params["item_id"] as? Int { return String(id) }
+        return nil
+    }
+
+    /// Opens the album's artist. Looks the artist up from the album, since the
+    /// album lists don't carry an artist id.
+    private func goToArtist(album: Album, completion: @escaping () -> Void) {
+        guard let coordinator = AudioManager.shared.slimClient else {
+            completion()
+            return
+        }
+
+        let command: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": ["", ["albums", 0, 1, "album_id:\(album.id)", "tags:aS"]]
+        ]
+
+        coordinator.sendJSONRPCCommandDirect(command) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                completion()
+
+                guard let result = response["result"] as? [String: Any],
+                      let first = (result["albums_loop"] as? [[String: Any]])?.first,
+                      let rawID = first["artist_id"] else {
+                    os_log(.error, log: self.logger, "❌ No artist found for album %{public}s", album.name)
+                    return
+                }
+                // Albums with several artists report "id1,id2"; the first is the album artist.
+                let artistIDs = "\(rawID)"
+                let primaryID = artistIDs.split(separator: ",").first.map(String.init) ?? artistIDs
+                let name = (first["artist"] as? String) ?? album.artist
+                self.showArtistAlbums(artist: Artist(id: primaryID, name: name, albumCount: nil), replacingTop: true)
             }
         }
     }
@@ -2672,6 +2929,18 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             }
             trackItems.append(playAllItem)
 
+            let goToArtistItem = CPListItem(
+                text: "Go to Artist",
+                detailText: album.artist,
+                image: UIImage(systemName: "music.mic"),
+                accessoryImage: nil,
+                accessoryType: .disclosureIndicator
+            )
+            goToArtistItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                self?.goToArtist(album: album, completion: completion)
+            }
+            trackItems.append(goToArtistItem)
+
             // Add individual tracks with artwork
             for (index, track) in tracksToDisplay.enumerated() {
                 // Use coverID if available, otherwise use track ID as fallback
@@ -2716,7 +2985,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             )
 
             self.pushTemplateSafely(tracksTemplate, animated: true)
-            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
+            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 2, album.name)
         }
     }
 

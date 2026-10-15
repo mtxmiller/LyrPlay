@@ -2513,6 +2513,12 @@ extension SlimProtoCoordinator {
     
     // Direct JSON-RPC command sender for preference testing and CarPlay services
     public func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+        sendJSONRPCCommandDirect(jsonRPC, timeout: 5.0, completion: completion)
+    }
+
+    /// Same as above with a caller-chosen timeout, for server commands that hold
+    /// the request open while they work (e.g. HitsPlaylist waits on Last.fm).
+    public func sendJSONRPCCommandDirect(_ jsonRPC: [String: Any], timeout: TimeInterval, completion: @escaping ([String: Any]) -> Void) {
         os_log(.debug, log: logger, "🌐 Sending JSON-RPC command: %{public}s", String(describing: jsonRPC))
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonRPC) else {
@@ -2545,7 +2551,7 @@ extension SlimProtoCoordinator {
         }
 
         request.httpBody = jsonData
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = timeout
         
         let task = URLSession.lms.dataTask(with: request) { data, response, error in
             if let error = error {
