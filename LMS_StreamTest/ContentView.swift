@@ -1014,6 +1014,16 @@ struct WebView: UIViewRepresentable {
         /// updateUIView call (which SwiftUI fires for many unrelated reasons).
         var lastInjectedTopInset: CGFloat = -1
         private let logger = OSLog(subsystem: "com.lmsstream", category: "WebViewCoordinator")
+
+        /// topPad for page-load injection: the GeometryReader inset updateUIView last
+        /// applied, not UIWindow.safeAreaInsets. When CarPlay launches the app, Material
+        /// loads while the phone scene is in the background and the window reports 0;
+        /// injecting that put the toolbar under the Dynamic Island, and updateUIView
+        /// never corrected it because topInset hadn't changed (2026-10-13, build 12).
+        /// Window inset only before updateUIView has run (same fix as p2dj).
+        private func expectedTopPad(_ webView: WKWebView) -> Int {
+            lastInjectedTopInset >= 0 ? Int(lastInjectedTopInset) : Int(webView.window?.safeAreaInsets.top ?? 0)
+        }
         
         init(_ parent: WebView) {
             self.parent = parent
@@ -1075,7 +1085,7 @@ struct WebView: UIViewRepresentable {
             // The DOM exists at didCommit so we can set the CSS variable before Material's
             // Vue created() reads it. This prevents overlapping icons in the status bar area.
             injectTopPad(into: webView,
-                         top: Int(webView.window?.safeAreaInsets.top ?? 0),
+                         top: expectedTopPad(webView),
                          source: "didCommit")
         }
 
@@ -1114,19 +1124,20 @@ struct WebView: UIViewRepresentable {
                 // the webView is in the view hierarchy and the window insets are known.
                 // Always inject (even when 0) to correct stale values from URL param or prior orientation.
                 injectTopPad(into: webView,
-                             top: Int(webView.window?.safeAreaInsets.top ?? 0),
+                             top: self.expectedTopPad(webView),
                              source: "didFinish")
 
                 // Verify topPad took effect after a short delay — Material's Vue may
                 // overwrite it during its own initialization. Read-only check; if it
                 // drifted, re-inject via the shared helper.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    let expectedInset = Int(webView.window?.safeAreaInsets.top ?? 0)
+                    let expectedInset = self.expectedTopPad(webView)
                     let readScript = "getComputedStyle(document.documentElement).getPropertyValue('--top-pad').trim();"
                     webView.evaluateJavaScript(readScript) { result, _ in
                         let current = (result as? String) ?? ""
                         if current != "\(expectedInset)px" {
-                            os_log(.info, log: self.logger, "topPad verify: drifted (was %{public}s, expected %dpx) — re-injecting", current, expectedInset)
+                            os_log(.error, log: self.logger, "topPad verify: drifted (was %{public}s, expected %dpx, window reports %dpx) — re-injecting",
+                                   current, expectedInset, Int(webView.window?.safeAreaInsets.top ?? -1))
                             injectTopPad(into: webView, top: expectedInset, source: "didFinish-verify")
                         } else {
                             os_log(.info, log: self.logger, "topPad verify: ok (%{public}s)", current)
