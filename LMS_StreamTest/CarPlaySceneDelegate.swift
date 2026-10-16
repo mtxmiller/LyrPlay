@@ -2940,21 +2940,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
             var trackItems: [CPListItem] = []
 
-            // Add "Play All" option at the top
-            let playAllItem = CPListItem(
-                text: "Play All",
-                detailText: "Play entire album",
-                image: album.artwork ?? createMusicPlaceholderImage(),
-                accessoryImage: nil,
-                accessoryType: .disclosureIndicator
-            )
-
-            playAllItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                self?.loadAlbumDirectly(album: album)
-                completion()
-            }
-            trackItems.append(playAllItem)
-
+            // No "Play All" row: tapping the first track loads the whole album from the start.
             let goToArtistItem = CPListItem(
                 text: "Go to Artist",
                 detailText: album.artist,
@@ -3011,7 +2997,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             )
 
             self.pushTemplateSafely(tracksTemplate, animated: true)
-            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 2, album.name)
+            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
         }
     }
 
