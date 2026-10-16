@@ -125,8 +125,8 @@ Your support helps maintain LyrPlay and add community-requested features!
 
 ## License
 
-See MIT License. 
+LyrPlay's own source code is released under the [MIT License](LICENSE). Copyright 2025 Eric Miller.
 
-Copyright 2025 Eric Miller. All rights reserved.
+Third-party components keep their own licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In particular, BASS is not open source: LyrPlay uses it under a commercial licence from un4seen developments, and the MIT License does not cover it.
 
 ---
