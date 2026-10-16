@@ -44,6 +44,46 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private var currentTrackFavoriteIndex: String?
     private var trackChangeCancellable: AnyCancellable?
 
+    // The car's list and style limits (CPSessionConfiguration). While the car is
+    // moving it may limit lists (developers report as few as 12 rows), and
+    // maximumItemCount isn't documented to follow that (developers report 500
+    // while far fewer show), so pages also shrink on the limitedUserInterfaces
+    // flag. contentStyle picks icon colors.
+    private var sessionConfiguration: CPSessionConfiguration?
+    private var listsLimited = false
+    private var contentStyle: CPContentStyle = .dark
+
+    /// Rows a limited list keeps. Apple gives no number; 12 is the lowest reported.
+    private static let limitedListRows = 12
+    /// Cap even when the car reports more: one page of a large library stays
+    /// quick to load, and some cars report 500 while showing far fewer.
+    private static let maxListRows = 100
+
+    /// Lists that reload in place (updateSections, never a pop or push) when
+    /// the limits shrink or the style changes, so a page that no longer fits gets
+    /// a reachable More row and icons get the right color. Any list still in the
+    /// stack is covered, not just the one on top.
+    private final class RefreshableList {
+        weak var template: CPListTemplate?
+        /// Row limit and style the current contents were built for.
+        var builtLimit: Int
+        var builtStyle: CPContentStyle
+        let usesIcons: Bool
+        /// Bumped by each reload; a reply for an older one is dropped.
+        var generation = 0
+        let reload: (CPListTemplate) -> Void
+
+        init(template: CPListTemplate, builtLimit: Int, builtStyle: CPContentStyle,
+             usesIcons: Bool, reload: @escaping (CPListTemplate) -> Void) {
+            self.template = template
+            self.builtLimit = builtLimit
+            self.builtStyle = builtStyle
+            self.usesIcons = usesIcons
+            self.reload = reload
+        }
+    }
+    private var refreshableLists: [RefreshableList] = []
+
 
     // MARK: - Services
 
@@ -53,6 +93,14 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         os_log(.info, log: logger, "🚗 CARPLAY WILL CONNECT")
 
         self.interfaceController = interfaceController
+
+        let configuration = CPSessionConfiguration(delegate: self)
+        sessionConfiguration = configuration
+        listsLimited = configuration.limitedUserInterfaces.contains(.lists)
+        contentStyle = configuration.contentStyle
+        os_log(.info, log: logger, "🚗 List limits: maximumItemCount %d, lists limited %{public}s, style %{public}s",
+               CPListTemplate.maximumItemCount, listsLimited ? "yes" : "no",
+               contentStyle.contains(.light) ? "light" : "dark")
 
         // Initialize coordinator if needed (non-blocking - connect is async)
         if AudioManager.shared.slimClient == nil {
@@ -147,6 +195,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         trackChangeCancellable?.cancel()
         trackChangeCancellable = nil
+        sessionConfiguration = nil
+        refreshableLists = []
         hasLoadedData = false
         os_log(.info, log: logger, "  ✅ Interface controller cleared")
         os_log(.info, log: logger, "🚗 CARPLAY DISCONNECTED")
@@ -418,25 +468,31 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     }
     
     private func displayPlaylistTracks(playlist: Playlist) {
-        let playAllItem = CPListItem(
-            text: "Play All",
-            detailText: "Play entire playlist",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        playAllItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.loadPlaylistDirectly(playlist: playlist)
-            completion()
+        let leading: () -> [CPListSection] = { [weak self] in
+            let playAllItem = CPListItem(
+                text: "Play All",
+                detailText: "Play entire playlist",
+                image: nil,
+                accessoryImage: nil,
+                accessoryType: .disclosureIndicator
+            )
+            playAllItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                self?.loadPlaylistDirectly(playlist: playlist)
+                completion()
+            }
+            return [CPListSection(items: [playAllItem])]
         }
 
-        showPagedList(title: playlist.name,
-                      leadingSections: [CPListSection(items: [playAllItem])]) { [weak self] offset, limit, done in
+        // Set once the list shows: reloads (new limits) run this fetch again, and
+        // a failed fetch also comes back empty, so only the first open may fall
+        // back to loading the playlist. A reload must never replace the queue.
+        var listShown = false
+        showPagedList(title: playlist.name, leadingSections: leading) { [weak self] offset, limit, done in
             guard let self = self else { return }
             self.fetchPlaylistTracks(playlist: playlist, offset: offset, limit: limit) { [weak self] tracks, total in
                 guard let self = self else { return }
 
-                if offset == 0 && tracks.isEmpty {
+                if offset == 0 && tracks.isEmpty && !listShown {
                     // Fallback: just load the playlist directly
                     os_log(.info, log: self.logger, "📂 No tracks found, loading playlist directly: %{public}s", playlist.name)
                     self.loadPlaylistDirectly(playlist: playlist)
@@ -444,6 +500,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     return
                 }
 
+                listShown = true
                 self.loadArtworkForTracks(tracks) { [weak self] artworkCache in
                     guard let self = self else { return }
                     let items = tracks.map { track -> CPListItem in
@@ -1796,7 +1853,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     // MARK: - Browse Artists (Alphabetical)
 
-    private func showBrowseArtists() {
+    /// `existing` reloads that index in place (new limits) instead of pushing one.
+    private func showBrowseArtists(into existing: CPListTemplate? = nil) {
         os_log(.info, log: logger, "🎤 Fetching artist index for CarPlay browse")
 
         guard let coordinator = AudioManager.shared.slimClient else { return }
@@ -1808,9 +1866,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             "params": ["", ["artists", 0, 0, "role_id:ALBUMARTIST", "tags:ZZ"]]
         ]
 
+        let generation = existing.map { beginReload($0) }
         coordinator.sendJSONRPCCommandDirect(indexCommand) { [weak self] response in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                if let existing = existing, !self.isCurrentReload(existing, generation) { return }
 
                 guard let result = response["result"] as? [String: Any],
                       let indexList = result["indexList"] as? [[Any]] else {
@@ -1834,7 +1894,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 // Build adaptive ranges from actual artist counts.
                 // Letters with many artists (e.g. "S" with 150) get their own row.
                 // Sparse letters get grouped. Target: index page fits within vehicle's item limit.
-                let maxItems = CPListTemplate.maximumItemCount
+                let maxItems = self.listRowLimit
                 let totalArtists = letterCounts.reduce(0) { $0 + $1.count }
                 // Aim for index page to have at most maxItems entries
                 // Each entry should cover roughly totalArtists/maxItems artists
@@ -1926,26 +1986,32 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     rangeItems.append(item)
                 }
 
-                let browseTemplate = CPListTemplate(
-                    title: "Artists",
-                    sections: [CPListSection(items: rangeItems)]
-                )
-
-                self.pushTemplateSafely(browseTemplate, animated: true)
+                let sections = [CPListSection(items: rangeItems)]
+                if let existing = existing {
+                    self.finishReload(existing, sections: sections, limit: maxItems)
+                } else {
+                    let browseTemplate = CPListTemplate(title: "Artists", sections: sections)
+                    self.showTemplate(browseTemplate)
+                    self.registerRefresh(browseTemplate, limit: maxItems, usesIcons: false) { [weak self] template in
+                        self?.showBrowseArtists(into: template)
+                    }
+                }
                 os_log(.info, log: self.logger, "✅ Displayed artist index with %d ranges", rangeItems.count)
             }
         }
     }
 
-    /// `replacingTop` swaps the current page for the next one. "More" pages must
-    /// not stack: CarPlay allows 5 templates, so stacked pages ran out after two
+    /// `replacing` swaps that page for the next one. "More" pages must not
+    /// stack: CarPlay allows 5 templates, so stacked pages ran out after two
     /// "More" taps and the rest of a large range was unreachable (GH #113).
-    private func fetchArtistsForRange(offset: Int, count: Int, title: String, replacingTop: Bool = false) {
+    /// `existing` reloads that page in place (new limits).
+    private func fetchArtistsForRange(offset: Int, count: Int, title: String,
+                                      replacing: CPTemplate? = nil, into existing: CPListTemplate? = nil) {
         guard let coordinator = AudioManager.shared.slimClient else { return }
 
-        // Query vehicle's item limit, reserve 1 slot for "More..." if needed
-        let maxItems = CPListTemplate.maximumItemCount
-        let pageSize = min(count, max(maxItems - 1, 10))
+        // All of it if it fits, else leave the last row for "More"
+        let maxItems = listRowLimit
+        let pageSize = count <= maxItems ? count : maxItems - 1
 
         os_log(.info, log: logger, "🎤 Fetching artists for %{public}s (offset: %d, count: %d, pageSize: %d, maxItems: %d)",
                title, offset, count, pageSize, maxItems)
@@ -1956,9 +2022,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             "params": ["", ["artists", offset, pageSize, "role_id:ALBUMARTIST"]]
         ]
 
+        let generation = existing.map { beginReload($0) }
         coordinator.sendJSONRPCCommandDirect(fetchCommand) { [weak self] response in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                if let existing = existing, !self.isCurrentReload(existing, generation) { return }
 
                 guard let result = response["result"] as? [String: Any],
                       let artistsLoop = result["artists_loop"] as? [[String: Any]] else {
@@ -2005,24 +2073,22 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     )
                     let nextOffset = offset + pageSize
                     moreItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                        self?.fetchArtistsForRange(offset: nextOffset, count: remaining, title: title, replacingTop: true)
+                        self?.fetchArtistsForRange(offset: nextOffset, count: remaining, title: title,
+                                                   replacing: self?.interfaceController?.topTemplate)
                         completion()
                     }
                     artistItems.append(moreItem)
                 }
 
-                let artistsTemplate = CPListTemplate(
-                    title: title,
-                    sections: [CPListSection(items: artistItems)]
-                )
-
-                if replacingTop, let interfaceController = self.interfaceController,
-                   interfaceController.templates.count > 1 {
-                    interfaceController.popTemplate(animated: false) { [weak self] _, _ in
-                        self?.pushTemplateSafely(artistsTemplate, animated: true)
-                    }
+                let sections = [CPListSection(items: artistItems)]
+                if let existing = existing {
+                    self.finishReload(existing, sections: sections, limit: maxItems)
                 } else {
-                    self.pushTemplateSafely(artistsTemplate, animated: true)
+                    let artistsTemplate = CPListTemplate(title: title, sections: sections)
+                    self.showTemplate(artistsTemplate, replacing: replacing)
+                    self.registerRefresh(artistsTemplate, limit: maxItems, usesIcons: false) { [weak self] template in
+                        self?.fetchArtistsForRange(offset: offset, count: count, title: title, into: template)
+                    }
                 }
                 os_log(.info, log: self.logger, "✅ Displayed %d artists for %{public}s (%d remaining)",
                        artists.count, title, max(0, count - pageSize))
@@ -2157,16 +2223,20 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    private func showArtistAlbums(artist: Artist, replacingTop: Bool = false) {
+    private func showArtistAlbums(artist: Artist, replacing: CPTemplate? = nil) {
         os_log(.info, log: logger, "🎤 Fetching albums for artist: %{public}s", artist.name)
 
         // The Hits rows sit above the albums, so know whether to show them first.
         checkHitsPluginAvailable { [weak self] hitsAvailable in
             guard let self = self else { return }
-            let leading = hitsAvailable ? [CPListSection(items: self.hitsItems(for: artist))] : []
+            // Built on each load, so a reload after a style change recolors the icons.
+            let leading: () -> [CPListSection] = { [weak self] in
+                guard let self = self, hitsAvailable else { return [] }
+                return [CPListSection(items: self.hitsItems(for: artist))]
+            }
 
-            self.showPagedList(title: artist.name, leadingSections: leading, emptyText: "No albums",
-                               replacingTop: replacingTop) { [weak self] offset, limit, done in
+            self.showPagedList(title: artist.name, leadingSections: leading, usesIcons: hitsAvailable,
+                               emptyText: "No albums", replacing: replacing) { [weak self] offset, limit, done in
                 guard let self = self else { return }
                 self.fetchArtistAlbums(artistId: artist.id, offset: offset, limit: limit) { [weak self] albums, total in
                     guard let self = self else { return }
@@ -2196,29 +2266,42 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     // MARK: - Paged lists
 
     /// Shows a long list one page at a time. CarPlay drops rows past
-    /// CPListTemplate.maximumItemCount, so a list that doesn't fit ends with a
+    /// listRowLimit, so a list that doesn't fit ends with a
     /// "More (N remaining)" row. More replaces the page rather than stacking it:
     /// stacked pages hit CarPlay's 5-template cap after two taps (GH #113).
     ///
-    /// `leadingSections` (Play All, Hits) appear on the first page only.
+    /// `leadingSections` (Hits, Go to Artist) appear on the first page only;
+    /// `usesIcons` says they hold icons that follow the car's style.
     /// `fetchPage(offset, limit, completion)` returns up to `limit` rows starting
     /// at `offset`, plus the list's total length; nil rows means it failed and
-    /// nothing is shown.
+    /// nothing is shown. `replacing` is the page a More tap swaps out;
+    /// `existing` reloads that page in place (new limits or style).
     private func showPagedList(title: String,
-                               leadingSections: [CPListSection] = [],
+                               leadingSections: @escaping () -> [CPListSection] = { [] },
+                               usesIcons: Bool = false,
                                emptyText: String = "Nothing here",
                                offset: Int = 0,
-                               replacingTop: Bool = false,
+                               replacing: CPTemplate? = nil,
+                               into existing: CPListTemplate? = nil,
                                fetchPage: @escaping (_ offset: Int, _ limit: Int,
                                                      _ completion: @escaping ([CPListItem]?, Int) -> Void) -> Void) {
-        let leading = offset == 0 ? leadingSections : []
+        let limit = listRowLimit
+        let leading = offset == 0 ? leadingSections() : []
         let leadingRows = leading.reduce(0) { $0 + $1.items.count }
-        let room = max(2, CPListTemplate.maximumItemCount - leadingRows)
+        let room = max(2, limit - leadingRows)
+        let generation = existing.map { beginReload($0) }
 
         fetchPage(offset, room) { [weak self] rows, total in
             guard let self = self else { return }
+            if let existing = existing, !self.isCurrentReload(existing, generation) { return }
             guard let rows = rows else {
                 os_log(.error, log: self.logger, "❌ No page for %{public}s (offset %d)", title, offset)
+                return
+            }
+            // Some fetchers report a failed request as an empty page. A page that
+            // had rows doesn't empty out between reloads, so keep what's shown.
+            if existing != nil && rows.isEmpty {
+                os_log(.error, log: self.logger, "❌ Reload of %{public}s came back empty; keeping the page", title)
                 return
             }
 
@@ -2240,8 +2323,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     accessoryType: .disclosureIndicator
                 )
                 moreItem.handler = { [weak self] (_: CPSelectableListItem, completion: @escaping () -> Void) in
-                    self?.showPagedList(title: title, leadingSections: leadingSections, emptyText: emptyText,
-                                        offset: nextOffset, replacingTop: true, fetchPage: fetchPage)
+                    self?.showPagedList(title: title, leadingSections: leadingSections, usesIcons: usesIcons,
+                                        emptyText: emptyText, offset: nextOffset,
+                                        replacing: self?.interfaceController?.topTemplate, fetchPage: fetchPage)
                     completion()
                 }
                 items.append(moreItem)
@@ -2255,21 +2339,117 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             if !items.isEmpty {
                 sections.append(CPListSection(items: items))
             }
-            self.showTemplate(CPListTemplate(title: title, sections: sections), replacingTop: replacingTop)
+            if let existing = existing {
+                self.finishReload(existing, sections: sections, limit: limit)
+            } else {
+                let template = CPListTemplate(title: title, sections: sections)
+                self.showTemplate(template, replacing: replacing)
+                self.registerRefresh(template, limit: limit, usesIcons: usesIcons && offset == 0) { [weak self] template in
+                    self?.showPagedList(title: title, leadingSections: leadingSections, usesIcons: usesIcons,
+                                        emptyText: emptyText, offset: offset, into: template, fetchPage: fetchPage)
+                }
+            }
             os_log(.info, log: self.logger, "✅ %{public}s: showing %d–%d of %d",
                    title, offset + (shown.isEmpty ? 0 : 1), nextOffset, total)
         }
     }
 
-    /// Push, or swap the top template for this one (More pages, Go to Artist).
-    private func showTemplate(_ template: CPTemplate, replacingTop: Bool) {
-        if replacingTop, let interfaceController = interfaceController,
-           interfaceController.templates.count > 1 {
-            interfaceController.popTemplate(animated: false) { [weak self] _, _ in
-                self?.pushTemplateSafely(template, animated: true)
+    /// Rows one list may hold right now: the car's limit, capped at maxListRows,
+    /// and at limitedListRows while the car limits lists.
+    private var listRowLimit: Int {
+        var limit = min(CPListTemplate.maximumItemCount, Self.maxListRows)
+        if listsLimited {
+            limit = min(limit, Self.limitedListRows)
+        }
+        return max(limit, 2)
+    }
+
+    /// Color for SF Symbol row icons: CarPlay shows them as drawn, so black
+    /// vanishes on a dark screen and white on a light one.
+    private var listIconColor: UIColor {
+        contentStyle.contains(.light) ? .black : .white
+    }
+
+    private func listIcon(_ systemName: String) -> UIImage? {
+        UIImage(systemName: systemName)?.withTintColor(listIconColor, renderingMode: .alwaysOriginal)
+    }
+
+    // MARK: - List reloads (limits and style)
+
+    private func registerRefresh(_ template: CPListTemplate, limit: Int, usesIcons: Bool,
+                                 reload: @escaping (CPListTemplate) -> Void) {
+        refreshableLists.removeAll { $0.template == nil }
+        let entry = RefreshableList(template: template, builtLimit: limit, builtStyle: contentStyle,
+                                    usesIcons: usesIcons, reload: reload)
+        refreshableLists.append(entry)
+        // The limits may have shrunk while this page loaded.
+        if limit > listRowLimit {
+            reload(template)
+        }
+    }
+
+    private func refreshEntry(_ template: CPListTemplate) -> RefreshableList? {
+        refreshableLists.first { $0.template === template }
+    }
+
+    /// Start a reload of `template`; returns its generation.
+    private func beginReload(_ template: CPListTemplate) -> Int {
+        guard let entry = refreshEntry(template) else { return 0 }
+        entry.generation += 1
+        return entry.generation
+    }
+
+    /// False when a newer reload of `template` started, or the list is gone.
+    private func isCurrentReload(_ template: CPListTemplate, _ generation: Int?) -> Bool {
+        guard let entry = refreshEntry(template) else { return false }
+        return entry.generation == generation
+    }
+
+    private func finishReload(_ template: CPListTemplate, sections: [CPListSection], limit: Int) {
+        template.updateSections(sections)
+        guard let entry = refreshEntry(template) else { return }
+        entry.builtLimit = limit
+        entry.builtStyle = contentStyle
+        os_log(.info, log: logger, "🔄 Reloaded a list in place (row limit %d)", limit)
+        // The limits may have shrunk again while this reload ran.
+        if limit > listRowLimit {
+            entry.reload(template)
+        }
+    }
+
+    /// Reload, in place, every list still in the stack whose page no longer
+    /// fits the row limit, or whose icons are the wrong color for the style.
+    /// A limit that grows leaves pages as they are: More still reaches every row.
+    private func reloadListsForNewLimits() {
+        refreshableLists.removeAll { $0.template == nil }
+        let limit = listRowLimit
+        for entry in refreshableLists {
+            guard let template = entry.template else { continue }
+            let tooLong = entry.builtLimit > limit
+            let wrongStyle = entry.usesIcons && entry.builtStyle != contentStyle
+            if tooLong || wrongStyle {
+                entry.reload(template)
             }
-        } else {
+        }
+    }
+
+    /// Push `template`. With `replacing`, swap that page for it instead (More,
+    /// Go to Artist), but only if it is still on top: if the user has moved on
+    /// (to Now Playing, say), the stale result is dropped rather than popping
+    /// whatever is there now.
+    private func showTemplate(_ template: CPTemplate, replacing: CPTemplate? = nil) {
+        guard let replacing = replacing else {
             pushTemplateSafely(template, animated: true)
+            return
+        }
+        guard let interfaceController = interfaceController,
+              interfaceController.topTemplate === replacing,
+              interfaceController.templates.count > 1 else {
+            os_log(.info, log: logger, "↩️ Page no longer on top; dropping its replacement")
+            return
+        }
+        interfaceController.popTemplate(animated: false) { [weak self] _, _ in
+            self?.pushTemplateSafely(template, animated: true)
         }
     }
 
@@ -2302,7 +2482,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let hitsItem = CPListItem(
             text: "Play Hits",
             detailText: "This artist's top tracks in your library",
-            image: UIImage(systemName: "flame")?.withTintColor(.white, renderingMode: .alwaysOriginal),
+            image: listIcon("flame"),
             accessoryImage: nil,
             accessoryType: .none
         )
@@ -2313,7 +2493,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let similarItem = CPListItem(
             text: "Play Hits + Similar",
             detailText: "Top tracks from this artist and similar artists",
-            image: UIImage(systemName: "person.2.wave.2")?.withTintColor(.white, renderingMode: .alwaysOriginal),
+            image: listIcon("person.2.wave.2"),
             accessoryImage: nil,
             accessoryType: .none
         )
@@ -2469,6 +2649,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion()
             return
         }
+        // The album screen whose row was tapped; the artist screen replaces it.
+        let albumScreen = interfaceController?.topTemplate
 
         let command: [String: Any] = [
             "id": 1,
@@ -2491,7 +2673,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 let artistIDs = "\(rawID)"
                 let primaryID = artistIDs.split(separator: ",").first.map(String.init) ?? artistIDs
                 let name = (first["artist"] as? String) ?? album.artist
-                self.showArtistAlbums(artist: Artist(id: primaryID, name: name, albumCount: nil), replacingTop: true)
+                self.showArtistAlbums(artist: Artist(id: primaryID, name: name, albumCount: nil), replacing: albumScreen)
             }
         }
     }
@@ -2893,7 +3075,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["titles", 0, Self.albumTrackLimit, "album_id:\(album.id)", "sort:tracknum", "tags:daltC"]]
+            "params": ["", ["titles", 0, 500, "album_id:\(album.id)", "sort:tracknum", "tags:daltC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -2968,81 +3150,70 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    /// Album tracks to list: as many as the car shows (one row is Go to Artist), at most 50.
-    private static var albumTrackLimit: Int {
-        max(1, min(CPListTemplate.maximumItemCount - 1, 50))
-    }
-
-    /// Display album tracks in a CarPlay list template
+    /// Display album tracks in a CarPlay list template, one page at a time.
     private func displayAlbumTracks(_ tracks: [PlaylistTrack], album: Album) {
-        // Already in album order (disc, then track) from fetchAlbumTracks.
-        let tracksToDisplay = Array(tracks.prefix(Self.albumTrackLimit))
-
-        // Load artwork for tracks
-        loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
-            guard let self = self else { return }
-
-            var trackItems: [CPListItem] = []
-
-            // No "Play All" row: tapping the first track loads the whole album from the start.
+        // No "Play All" row: tapping the first track loads the whole album from the start.
+        // Built on each load, so a reload after a style change recolors the icon.
+        let leading: () -> [CPListSection] = { [weak self] in
+            guard let self = self else { return [] }
             let goToArtistItem = CPListItem(
                 text: "Go to Artist",
                 detailText: album.artist,
-                image: UIImage(systemName: "music.mic")?.withTintColor(.white, renderingMode: .alwaysOriginal),
+                image: self.listIcon("music.mic"),
                 accessoryImage: nil,
                 accessoryType: .disclosureIndicator
             )
             goToArtistItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
                 self?.goToArtist(album: album, completion: completion)
             }
-            trackItems.append(goToArtistItem)
+            return [CPListSection(items: [goToArtistItem])]
+        }
 
-            // Add individual tracks with artwork
-            for (index, track) in tracksToDisplay.enumerated() {
-                // Use coverID if available, otherwise use track ID as fallback
-                let artworkKey = track.artworkURL ?? track.id
-                let artwork = artworkCache[artworkKey]
+        showPagedList(title: album.name, leadingSections: leading, usesIcons: true,
+                      emptyText: "No tracks") { [weak self] offset, limit, done in
+            guard let self = self else { return }
+            // Already in album order (disc, then track) from fetchAlbumTracks.
+            let page = Array(tracks.dropFirst(offset).prefix(limit))
 
-                // Format detail text with track number if available
-                var detailText = track.artist ?? album.artist
-                if let trackNum = track.trackNumber {
-                    detailText = "Track \(trackNum) • \(detailText)"
+            self.loadArtworkForTracks(page) { [weak self] artworkCache in
+                let items = page.enumerated().map { pageIndex, track -> CPListItem in
+                    // Use coverID if available, otherwise use track ID as fallback
+                    let artworkKey = track.artworkURL ?? track.id
+                    let artwork = artworkCache[artworkKey]
+
+                    // Format detail text with track number if available
+                    var detailText = track.artist ?? album.artist
+                    if let trackNum = track.trackNumber {
+                        detailText = "Track \(trackNum) • \(detailText)"
+                    }
+
+                    // Format duration
+                    if let duration = track.duration, duration > 0 {
+                        let minutes = Int(duration) / 60
+                        let seconds = Int(duration) % 60
+                        let timeStr = String(format: "%d:%02d", minutes, seconds)
+                        detailText = "\(detailText) • \(timeStr)"
+                    }
+
+                    let item = CPListItem(
+                        text: track.title,
+                        detailText: detailText,
+                        image: artwork ?? album.artwork,  // Fall back to album artwork
+                        accessoryImage: nil,
+                        accessoryType: .disclosureIndicator
+                    )
+
+                    item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                        // The row's position in album order. Track numbers restart on
+                        // each disc, so trackNumber - 1 picked the wrong disc.
+                        let trackIndex = track.playlistIndex ?? (offset + pageIndex)
+                        self?.playAlbumTrack(album: album, trackIndex: trackIndex, track: track)
+                        completion()
+                    }
+                    return item
                 }
-
-                // Format duration
-                if let duration = track.duration, duration > 0 {
-                    let minutes = Int(duration) / 60
-                    let seconds = Int(duration) % 60
-                    let timeStr = String(format: "%d:%02d", minutes, seconds)
-                    detailText = "\(detailText) • \(timeStr)"
-                }
-
-                let item = CPListItem(
-                    text: track.title,
-                    detailText: detailText,
-                    image: artwork ?? album.artwork,  // Fall back to album artwork
-                    accessoryImage: nil,
-                    accessoryType: .disclosureIndicator
-                )
-
-                item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                    // The row's position in album order. Track numbers restart on
-                    // each disc, so trackNumber - 1 picked the wrong disc.
-                    let trackIndex = track.playlistIndex ?? index
-                    self?.playAlbumTrack(album: album, trackIndex: trackIndex, track: track)
-                    completion()
-                }
-
-                trackItems.append(item)
+                done(items, tracks.count)
             }
-
-            let tracksTemplate = CPListTemplate(
-                title: album.name,
-                sections: [CPListSection(items: trackItems)]
-            )
-
-            self.pushTemplateSafely(tracksTemplate, animated: true)
-            os_log(.info, log: self.logger, "✅ Displayed %d tracks for album %{public}s", trackItems.count - 1, album.name)
         }
     }
 
@@ -3377,3 +3548,34 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
 // Album struct now lives in PlaylistModels.swift (shared with tvOS target). Existing CarPlay
 // `Album(id:name:artist:artworkTrackId:artwork:)` call sites resolve unchanged via target membership.
+
+// MARK: - CPSessionConfigurationDelegate
+
+extension CarPlaySceneDelegate: CPSessionConfigurationDelegate {
+    // The value read at connect can be stale (developer reports); these
+    // callbacks are the reliable source, so the list on screen rebuilds on each.
+    func sessionConfiguration(_ sessionConfiguration: CPSessionConfiguration,
+                              limitedUserInterfacesChanged limitedUserInterfaces: CPLimitableUserInterface) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let limited = limitedUserInterfaces.contains(.lists)
+            os_log(.info, log: self.logger, "🚗 Lists limited changed: %{public}s (row limit was %d)",
+                   limited ? "yes" : "no", self.listRowLimit)
+            guard limited != self.listsLimited else { return }
+            self.listsLimited = limited
+            self.reloadListsForNewLimits()
+        }
+    }
+
+    func sessionConfiguration(_ sessionConfiguration: CPSessionConfiguration,
+                              contentStyleChanged contentStyle: CPContentStyle) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            os_log(.info, log: self.logger, "🚗 Content style changed: %{public}s",
+                   contentStyle.contains(.light) ? "light" : "dark")
+            guard contentStyle != self.contentStyle else { return }
+            self.contentStyle = contentStyle
+            self.reloadListsForNewLimits()
+        }
+    }
+}
