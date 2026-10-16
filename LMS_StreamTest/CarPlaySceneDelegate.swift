@@ -2302,7 +2302,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let hitsItem = CPListItem(
             text: "Play Hits",
             detailText: "This artist's top tracks in your library",
-            image: UIImage(systemName: "flame"),
+            image: UIImage(systemName: "flame")?.withTintColor(.white, renderingMode: .alwaysOriginal),
             accessoryImage: nil,
             accessoryType: .none
         )
@@ -2313,7 +2313,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         let similarItem = CPListItem(
             text: "Play Hits + Similar",
             detailText: "Top tracks from this artist and similar artists",
-            image: UIImage(systemName: "person.2.wave.2"),
+            image: UIImage(systemName: "person.2.wave.2")?.withTintColor(.white, renderingMode: .alwaysOriginal),
             accessoryImage: nil,
             accessoryType: .none
         )
@@ -2988,7 +2988,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             let goToArtistItem = CPListItem(
                 text: "Go to Artist",
                 detailText: album.artist,
-                image: UIImage(systemName: "music.mic"),
+                image: UIImage(systemName: "music.mic")?.withTintColor(.white, renderingMode: .alwaysOriginal),
                 accessoryImage: nil,
                 accessoryType: .disclosureIndicator
             )
