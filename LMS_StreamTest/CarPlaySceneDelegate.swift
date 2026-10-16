@@ -1884,6 +1884,22 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     }
                 }
 
+                // The index page must fit the car's list limit, or CarPlay drops the
+                // last rows (and their letters). Merge the smallest adjacent pair until it fits.
+                while ranges.count > maxItems && ranges.count > 1 {
+                    var best = 0
+                    for i in 0..<(ranges.count - 1)
+                    where ranges[i].count + ranges[i + 1].count < ranges[best].count + ranges[best + 1].count {
+                        best = i
+                    }
+                    let a = ranges[best], b = ranges.remove(at: best + 1)
+                    let letters = a.letters + b.letters
+                    ranges[best] = ("\(letters.first!) – \(letters.last!)", letters, a.offset, a.count + b.count)
+                }
+
+                os_log(.info, log: self.logger, "🎤 Artist index: %d artists in %d ranges (maxItems %d)",
+                       totalArtists, ranges.count, maxItems)
+
                 var rangeItems: [CPListItem] = []
 
                 for range in ranges {
@@ -1919,7 +1935,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
-    private func fetchArtistsForRange(offset: Int, count: Int, title: String) {
+    /// `replacingTop` swaps the current page for the next one. "More" pages must
+    /// not stack: CarPlay allows 5 templates, so stacked pages ran out after two
+    /// "More" taps and the rest of a large range was unreachable (GH #113).
+    private func fetchArtistsForRange(offset: Int, count: Int, title: String, replacingTop: Bool = false) {
         guard let coordinator = AudioManager.shared.slimClient else { return }
 
         // Query vehicle's item limit, reserve 1 slot for "More..." if needed
@@ -1984,7 +2003,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     )
                     let nextOffset = offset + pageSize
                     moreItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                        self?.fetchArtistsForRange(offset: nextOffset, count: remaining, title: title)
+                        self?.fetchArtistsForRange(offset: nextOffset, count: remaining, title: title, replacingTop: true)
                         completion()
                     }
                     artistItems.append(moreItem)
@@ -1995,7 +2014,14 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: artistItems)]
                 )
 
-                self.pushTemplateSafely(artistsTemplate, animated: true)
+                if replacingTop, let interfaceController = self.interfaceController,
+                   interfaceController.templates.count > 1 {
+                    interfaceController.popTemplate(animated: false) { [weak self] _, _ in
+                        self?.pushTemplateSafely(artistsTemplate, animated: true)
+                    }
+                } else {
+                    self.pushTemplateSafely(artistsTemplate, animated: true)
+                }
                 os_log(.info, log: self.logger, "✅ Displayed %d artists for %{public}s (%d remaining)",
                        artists.count, title, max(0, count - pageSize))
             }
