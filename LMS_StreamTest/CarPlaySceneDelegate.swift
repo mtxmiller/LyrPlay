@@ -2845,11 +2845,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
         // Use "titles" query with album_id filter
         // Tags: d=duration, a=artist, l=album, C=coverid, t=tracknum
-        // Query 15 tracks (matches display limit) for faster CarPlay loading
+        // sort:tracknum is disc then track number: the order "playlistcontrol cmd:load
+        // album_id" queues the album in, so a row's position is its play_index.
+        // (Without it LMS sorts by title, and a 15-track page skipped tracks.)
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["titles", 0, 15, "album_id:\(album.id)", "tags:daltC"]]
+            "params": ["", ["titles", 0, Self.albumTrackLimit, "album_id:\(album.id)", "sort:tracknum", "tags:daltC"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
@@ -2924,15 +2926,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
     }
 
+    /// Album tracks to list: as many as the car shows (one row is Go to Artist), at most 50.
+    private static var albumTrackLimit: Int {
+        max(1, min(CPListTemplate.maximumItemCount - 1, 50))
+    }
+
     /// Display album tracks in a CarPlay list template
     private func displayAlbumTracks(_ tracks: [PlaylistTrack], album: Album) {
-        // Sort tracks by track number for proper display order
-        let sortedTracks = tracks.sorted {
-            ($0.trackNumber ?? Int.max) < ($1.trackNumber ?? Int.max)
-        }
-
-        // Limit to first 15 tracks for performance (CarPlay limitation)
-        let tracksToDisplay = Array(sortedTracks.prefix(15))
+        // Already in album order (disc, then track) from fetchAlbumTracks.
+        let tracksToDisplay = Array(tracks.prefix(Self.albumTrackLimit))
 
         // Load artwork for tracks
         loadArtworkForTracks(tracksToDisplay) { [weak self] artworkCache in
@@ -2982,8 +2984,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 )
 
                 item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                    // Use trackNumber-1 since LMS loads albums in track number order (1-based to 0-based)
-                    let trackIndex = (track.trackNumber ?? 1) - 1
+                    // The row's position in album order. Track numbers restart on
+                    // each disc, so trackNumber - 1 picked the wrong disc.
+                    let trackIndex = track.playlistIndex ?? index
                     self?.playAlbumTrack(album: album, trackIndex: trackIndex, track: track)
                     completion()
                 }
