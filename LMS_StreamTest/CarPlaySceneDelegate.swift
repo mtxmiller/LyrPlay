@@ -8,6 +8,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private let logger = OSLog(subsystem: "com.lmsstream", category: "CarPlay")
     var interfaceController: CPInterfaceController?
     private var browseTemplate: CPListTemplate?
+    /// The Up Next list currently shown, so a late jump reply only pops that screen.
+    private weak var upNextTemplate: CPListTemplate?
 
     /// CarPlay caps the navigation stack at 5 templates. Pushing past the cap
     /// raises NSException (clientExceededHierarchyDepthLimit) and crashes, so
@@ -666,6 +668,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                     sections: [CPListSection(items: queueItems)]
                 )
 
+                self.upNextTemplate = upNextTemplate
+
                 // Pop back to Now Playing first, then push fresh Up Next
                 // Prevents stacking multiple Up Next templates on repeated taps
                 self.interfaceController?.popToRootTemplate(animated: false) { [weak self] _, _ in
@@ -711,8 +715,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
                 if !response.isEmpty {
                     os_log(.info, log: self.logger, "✅ Successfully jumped to track %d", trackIndex)
-                    // Pop back to Now Playing screen (one level up from Up Next)
-                    self.interfaceController?.popTemplate(animated: true)
+                    // Pop back to Now Playing screen (one level up from Up Next),
+                    // unless the user already left Up Next while the jump was in flight.
+                    if let interfaceController = self.interfaceController,
+                       let upNext = self.upNextTemplate,
+                       interfaceController.topTemplate === upNext {
+                        interfaceController.popTemplate(animated: true)
+                    }
                 } else {
                     os_log(.error, log: self.logger, "❌ Failed to jump to track")
                 }
@@ -1574,6 +1583,25 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         if let browseTemplate = browseTemplate {
             browseTemplate.updateSections(sections)
             os_log(.info, log: logger, "✅ Home template sections updated in place (stack preserved)")
+
+            // A connection error or retry replaces the root with its own screen.
+            // Updating Home in place doesn't show it, so put Home back. The only way
+            // past the error screen is its Resume row (Now Playing): if the user is
+            // there, rebuild the stack as Home > Now Playing so they stay put.
+            if interfaceController.rootTemplate !== browseTemplate {
+                let wasPastErrorScreen = interfaceController.templates.count > 1
+                interfaceController.setRootTemplate(browseTemplate, animated: !wasPastErrorScreen) { [weak self] _, error in
+                    guard let self = self else { return }
+                    if let error = error {
+                        os_log(.error, log: self.logger, "❌ Failed to restore home template: %{public}s", error.localizedDescription)
+                        return
+                    }
+                    os_log(.info, log: self.logger, "✅ Home template restored as root after connection error")
+                    if wasPastErrorScreen {
+                        self.pushTemplateSafely(CPNowPlayingTemplate.shared, animated: false)
+                    }
+                }
+            }
         } else {
             // No existing root (shouldn't happen — connect sets it): set it now.
             let updatedTemplate = CPListTemplate(title: "LyrPlay", sections: sections)
