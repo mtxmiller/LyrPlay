@@ -284,6 +284,8 @@ class SlimProtoCoordinator: ObservableObject {
 
     /// The remote play waiting on decideResumeRoute; a pause/stop clears it.
     private var remotePlayIntent: UUID?
+    /// A remote play is being decided: app-open recovery must not start under it.
+    var remotePlayPending: Bool { remotePlayIntent != nil }
 
     /// Set when a remote play was sent as a plain unpause; checked 3s later.
     private var resumeInPlaceCheck: UUID?
@@ -882,6 +884,8 @@ class SlimProtoCoordinator: ObservableObject {
         // If a newer recovery started, it owns the stream now: pausing it or
         // arming our unmute latch would corrupt it.
         guard silentRecoveryPauseGeneration == generation else { return }
+        // A user play is being decided: it takes this recovery over when it lands.
+        guard remotePlayIntent == nil else { return }
         silentRecoveryPauseGeneration = nil
         guard recoveryGeneration == generation else { return }
         os_log(.info, log: logger, "⏸️ Silent recovery: pausing (%{public}s)", reason)
@@ -896,7 +900,6 @@ class SlimProtoCoordinator: ObservableObject {
         // Straight to the server: sendJSONRPCCommand("pause") waits 0.5s first,
         // and every 1/10s here is played (muted) past the saved position.
         sendNormalJSONRPCCommand("pause")
-        silentPauseResendCancelled = false
         resendSilentRecoveryPauseIfUnconfirmed(generation: generation, attemptsLeft: 6)
 
         // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
@@ -1090,6 +1093,10 @@ class SlimProtoCoordinator: ObservableObject {
             // Set recovery in progress
             self.isRecoveryInProgress = true
             self.currentRecoveryIsSilent = !shouldPlay
+            if !shouldPlay {
+                // A user play from here on stops this recovery's pause re-sends.
+                self.silentPauseResendCancelled = false
+            }
             self.recoveryGeneration += 1
             os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s, gen %d)", shouldPlay ? "YES" : "NO", self.recoveryGeneration)
 
@@ -2568,6 +2575,10 @@ extension SlimProtoCoordinator {
                 // A pause or stop pressed while we asked LMS wins.
                 guard let self = self, self.remotePlayIntent == intent else { return }
                 self.remotePlayIntent = nil
+                // A silent recovery may have started while we asked (app came forward).
+                if self.takeOverSilentRecoveryForUserPlay() {
+                    return
+                }
                 if route == .resumeInPlace || route == .leaveAlone {
                     // LMS still has our paused stream: a plain unpause resumes it
                     // instantly from the buffer.
@@ -2612,6 +2623,15 @@ extension SlimProtoCoordinator {
     private func takeOverSilentRecoveryForUserPlay() -> Bool {
         guard silentRecoveryOwnsMute else { return false }
         let jumpSent = silentRecoveryPauseGeneration != nil || awaitingSilentRecoveryUnmute
+        // An audible recovery holds the lock (a silent one's leftover arm is all
+        // that's left): clear the leftovers, never its lock or generation.
+        if isRecoveryInProgress && !currentRecoveryIsSilent {
+            silentRecoveryPauseGeneration = nil
+            awaitingSilentRecoveryUnmute = false
+            silentRecoveryWaiting = false
+            audioManager.disableSilentRecoveryMode()
+            return false
+        }
         os_log(.info, log: logger, "🔒 Lock screen PLAY: taking over the silent recovery (jump sent: %{public}s)",
                jumpSent ? "yes" : "no")
         recoveryGeneration += 1   // its pause, re-sends and timers stand down
@@ -2620,7 +2640,21 @@ extension SlimProtoCoordinator {
         silentRecoveryWaiting = false
         isRecoveryInProgress = false
         audioManager.disableSilentRecoveryMode()
-        guard jumpSent else { return false }
+        guard jumpSent else {
+            // Nothing streaming yet (its buffer was flushed): recover audibly.
+            startLockScreenRecovery()
+            return true
+        }
+        // The jump is out and its stream sits at the saved position: play it. Its
+        // completion is now stale, so stay awake with the target in hand: the
+        // hold's watchdog retries if that jump failed.
+        beginOutageHold(reason: "user play took over silent recovery")
+        if audibleRecoveryTarget == nil {
+            audibleRecoveryTarget = Self.savedRecoveryTarget(
+                hasTimestamp: UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil,
+                index: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+                position: UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+        }
         sendNormalJSONRPCCommand("play")
         return true
     }
@@ -2628,6 +2662,11 @@ extension SlimProtoCoordinator {
     /// Reconnect and recover for a remote play: recovery runs from
     /// slimProtoDidConnect via the .lockScreen trigger.
     private func startLockScreenRecovery() {
+        // (takeOverSilentRecoveryForUserPlay calls this after taking over, so
+        // there is no silent owner left by then.)
+        if silentRecoveryOwnsMute && takeOverSilentRecoveryForUserPlay() {
+            return
+        }
         // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
         pendingRecoveryTrigger = .lockScreen
 

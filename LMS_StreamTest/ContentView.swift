@@ -337,7 +337,9 @@ struct ContentView: View {
                         audioManager.cancelPreMute(reason: "stream still on server")
                         return
                     }
-                    guard slimProtoCoordinator.pendingRecoveryTrigger == .none else { return }
+                    // A lock-screen / CarPlay play is being decided: it owns this.
+                    guard slimProtoCoordinator.pendingRecoveryTrigger == .none,
+                          !slimProtoCoordinator.remotePlayPending else { return }
 
                     os_log(.error, log: logger, "[APP-RECOVERY] 🎯 APP OPEN RECOVERY TRIGGERED (connection live: %{public}s)",
                            connectionWasLive ? "yes" : "no")
