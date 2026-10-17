@@ -70,3 +70,33 @@ struct ResumeRouteTests {
         #expect(SlimProtoCoordinator.statusPlayerConnected(nil) == nil)
     }
 }
+
+// LMS stops a paused player right after it reconnects; the lock screen should
+// keep the paused position (where Play recovers to), not drop to 0:00.
+struct ReconnectStopTests {
+    private func stop(after: TimeInterval? = 0.02, state: String = "Paused",
+                      shown: Double = 67.5, saved: Double = 67.5) -> Bool {
+        SlimProtoCoordinator.isReconnectStop(connectedFor: after, localState: state,
+                                             shownPosition: shown, savedPosition: saved)
+    }
+
+    @Test func stopJustAfterConnectWhilePausedIsTheServersReconnectStop() {
+        #expect(stop())
+    }
+
+    @Test func laterStopsAreReal() {
+        #expect(!stop(after: 30))
+        #expect(!stop(after: nil))
+    }
+
+    @Test func stopWhilePlayingOrWithNothingSavedIsReal() {
+        #expect(!stop(state: "Playing"))
+        #expect(!stop(saved: 0))
+    }
+
+    @Test func aPlayerAlreadyStoppedStaysAtZero() {
+        // The user pressed Stop earlier: LMS's forced stop on reconnect must not
+        // bring the old position back.
+        #expect(!stop(shown: 0))
+    }
+}

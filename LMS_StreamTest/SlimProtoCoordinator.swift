@@ -2062,6 +2062,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "⏹️ Server stop command")
         DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
+        let shownPosition = getCurrentInterpolatedTime().time
+        let reconnectStop = Self.isReconnectStop(
+            connectedFor: lastConnectedAt.map { Date().timeIntervalSince($0) },
+            localState: audioManager.getPlayerState(),
+            shownPosition: shownPosition,
+            savedPosition: UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+
         audioManager.stop()
 
         // If a silent-recovery pause was turned into a STOP by the server, didPauseStream
@@ -2080,6 +2087,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // the window closes — the "backward" leg of the timer-hunting bug.
         if serverTimeUpdatesSuppressed() {
             os_log(.info, log: logger, "⏱️ Skipping time reset on strm 'q' during recovery window")
+        } else if reconnectStop {
+            // Play recovers to the saved position, so show that instead of 0:00.
+            os_log(.info, log: logger, "⏱️ Reconnect stop while paused - lock screen stays at %.2f", shownPosition)
+            updateServerTime(position: shownPosition, isPlaying: false)
         } else {
             updateServerTime(position: 0.0, duration: 0.0, isPlaying: false)
         }
@@ -2450,6 +2461,17 @@ extension SlimProtoCoordinator {
         }
     }
     
+    /// LMS stops a paused player when it reconnects (Squeezebox.pm reconnect:
+    /// "If we were paused, then stop"), right after HELO. That stop isn't the
+    /// user's: the paused position is still where Play will resume.
+    /// (A player already stopped shows 0 and stays there: after any stop the
+    /// local state still reads "Paused", so that alone doesn't say paused.)
+    static func isReconnectStop(connectedFor: TimeInterval?, localState: String,
+                                shownPosition: Double, savedPosition: Double) -> Bool {
+        guard let connectedFor = connectedFor, connectedFor < 2.0 else { return false }
+        return localState == "Paused" && shownPosition > 0 && savedPosition > 0
+    }
+
     /// True while inside the post-jump recovery window during which server-derived
     /// time (polls, strm 'q' resets) must not overwrite the seeded tracker position.
     /// Clears the window lazily once it has expired. Main thread only.
