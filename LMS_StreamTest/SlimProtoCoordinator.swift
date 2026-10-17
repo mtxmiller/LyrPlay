@@ -77,7 +77,6 @@ class SlimProtoCoordinator: ObservableObject {
     private var isAppInBackground: Bool = false
     private var backgroundedWhilePlaying: Bool = false
     private var wasDisconnectedWhileInBackground: Bool = false
-    private var backgroundedTime: Date?  // Track when app backgrounded for duration-based recovery
 
     // MARK: - Unified Recovery System (LMS_StreamTest-6lb)
     /// What triggered the current/pending reconnection - determines recovery behavior
@@ -203,6 +202,92 @@ class SlimProtoCoordinator: ObservableObject {
         return heard >= connected && Date().timeIntervalSince(heard) < 15
     }
 
+    /// The connection is still usable: the server sent something on it within
+    /// `liveConnectionWindow`. LMS closes a player it hasn't heard from for 15s
+    /// (3 polls of 5s, Slimproto.pm check_all_clients), and a paused iOS app is
+    /// suspended within seconds and can't answer, so after ~15-20s away the
+    /// server has already dropped us. This replaces the old guess (background
+    /// > 45s). A live connection alone doesn't mean LMS still has our paused
+    /// stream (a new connection after a relaunch doesn't), so resuming in place
+    /// also needs resumeRoute's other checks.
+    var connectionIsLive: Bool {
+        guard connectionManager.connectionState.isConnected,
+              let heard = secondsSinceServerHeardOnThisConnection else { return false }
+        return heard < Self.liveConnectionWindow
+    }
+
+    /// Under LMS's 15s close, with room for its 5s check interval.
+    static let liveConnectionWindow: TimeInterval = 10
+
+    enum ResumeRoute: Equatable {
+        case leaveAlone      // LMS is playing us: nothing to restore
+        case resumeInPlace   // LMS holds our paused stream: plain unpause / nothing to restore
+        case recover         // reconnect if needed, then playlist jump
+    }
+
+    /// Ask LMS, don't guess. On a live connection: LMS playing → leave it alone
+    /// (a stall or track gap looks "not paused" locally); LMS paused and we hold
+    /// the paused stream → resume in place. Anything else (a relaunch, LMS
+    /// stopped the player when it dropped us, a failed or empty status reply)
+    /// recovers. "Unknown" covers BASS's device-paused state after an interruption.
+    static func resumeRoute(connectionLive: Bool, localState: String,
+                            serverMode: String?, serverConnected: Bool?) -> ResumeRoute {
+        guard connectionLive, serverConnected == true else { return .recover }
+        if serverMode == "play" { return .leaveAlone }
+        if serverMode == "pause" && (localState == "Paused" || localState == "Unknown") { return .resumeInPlace }
+        return .recover
+    }
+
+    /// `player_connected` from a status result (LMS sends 0/1, sometimes as a string).
+    static func statusPlayerConnected(_ result: [String: Any]?) -> Bool? {
+        if let value = result?["player_connected"] as? Int { return value == 1 }
+        if let text = result?["player_connected"] as? String { return text == "1" }
+        return nil
+    }
+
+    private var secondsSinceServerHeardOnThisConnection: TimeInterval? {
+        guard let connected = lastConnectedAt, let heard = lastServerMessageAt, heard >= connected else { return nil }
+        return Date().timeIntervalSince(heard)
+    }
+
+    /// Decide how to resume. With a live connection ask LMS (one status call,
+    /// ~50ms on the LAN); without one there's nothing to ask: recover.
+    /// Completion runs on main.
+    func decideResumeRoute(_ completion: @escaping (ResumeRoute) -> Void) {
+        guard connectionIsLive else {
+            os_log(.info, log: logger, "🧭 Resume route: recover (connection not live)")
+            completion(.recover)
+            return
+        }
+        let statusCommand: [String: Any] = [
+            "id": 1,
+            "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand, timeout: 2.0) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let result = response["result"] as? [String: Any]
+                let mode = result?["mode"] as? String
+                let connected = Self.statusPlayerConnected(result)
+                // Re-check: the socket may have died while we asked.
+                let localState = self.audioManager.getPlayerState()
+                let route = Self.resumeRoute(connectionLive: self.connectionIsLive, localState: localState,
+                                             serverMode: mode, serverConnected: connected)
+                os_log(.info, log: self.logger, "🧭 Resume route: %{public}s (server mode %{public}s, connected %{public}s, local %{public}s)",
+                       String(describing: route), mode ?? "none",
+                       connected.map { $0 ? "yes" : "no" } ?? "unknown", localState)
+                completion(route)
+            }
+        }
+    }
+
+    /// The remote play waiting on decideResumeRoute; a pause/stop clears it.
+    private var remotePlayIntent: UUID?
+
+    /// Set when a remote play was sent as a plain unpause; checked 3s later.
+    private var resumeInPlaceCheck: UUID?
+
     /// True if the server has started a stream since we last (re)connected.
     private var serverStartedStreamSinceConnect: Bool {
         guard let connected = lastConnectedAt, let started = lastServerStreamStartAt else { return false }
@@ -256,9 +341,6 @@ class SlimProtoCoordinator: ObservableObject {
         setupAudioCallbacks()
         setupAudioPlayerIntegration()
         setupSyncController()
-        #if os(iOS)
-        setupBackgroundObservers()
-        #endif
 
         #if DEBUG
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
@@ -305,28 +387,6 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "✅ Simplified time tracking connected via AudioManager")
     }
 
-    #if os(iOS)
-    private func setupBackgroundObservers() {
-        // Track app backgrounding for duration-based recovery
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppDidEnterBackground),
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
-
-        #if DEBUG
-        os_log(.info, log: logger, "✅ Background observers configured for duration-based recovery")
-        #endif
-    }
-
-    @objc private func handleAppDidEnterBackground() {
-        backgroundedTime = Date()
-        // Persist so recovery still fires after iOS kills the process during a long background
-        UserDefaults.standard.set(backgroundedTime, forKey: "lyrplay_backgrounded_at")
-        os_log(.info, log: logger, "📱 Coordinator: App backgrounded at %{public}s", backgroundedTime!.description)
-    }
-    #endif
 
     // MARK: - Public Interface
     func connect() {
@@ -346,6 +406,11 @@ class SlimProtoCoordinator: ObservableObject {
     private func connectKeepingFreshSocket() {
         if client.connect() == .keptConnected {
             connectionManager.didConnect()
+            // No slimProtoDidConnect will come to run a recovery queued for this connect.
+            // Not .networkRestored: the kept socket's own didConnect already ran that.
+            if pendingRecoveryTrigger == .appOpen || pendingRecoveryTrigger == .lockScreen {
+                handlePendingRecovery()
+            }
         }
     }
     
@@ -390,19 +455,6 @@ class SlimProtoCoordinator: ObservableObject {
         // Reset ALL reconnection tracking to prevent failover interference when user manually changes servers
         connectionManager.resetAllReconnectionTracking()
         os_log(.info, log: logger, "✅ Connection manager reset - all reconnection tracking cleared")
-    }
-
-    func getBackgroundDuration() -> TimeInterval? {
-        if let bgTime = backgroundedTime {
-            return Date().timeIntervalSince(bgTime)
-        }
-        // In-memory value is lost when iOS terminates the process during long backgrounds.
-        // Fall back to the persisted timestamp so app-open and lock-screen-play recovery
-        // still fire on the relaunched process.
-        if let persistedBgTime = UserDefaults.standard.object(forKey: "lyrplay_backgrounded_at") as? Date {
-            return Date().timeIntervalSince(persistedBgTime)
-        }
-        return nil
     }
 
     /// Request server-side seek for transcoding pipeline fixes
@@ -661,6 +713,8 @@ class SlimProtoCoordinator: ObservableObject {
     /// The silent recovery whose pause hasn't been sent yet. The pause goes out
     /// when its muted stream starts playing, or from the fallback timer.
     private var silentRecoveryPauseGeneration: Int?
+    /// Set by a user play: a silent recovery must not keep re-sending its pause.
+    private var silentPauseResendCancelled = false
     /// A silent recovery is waiting for the server to talk on the connection.
     private var silentRecoveryWaiting = false
 
@@ -806,6 +860,23 @@ class SlimProtoCoordinator: ObservableObject {
         }
     }
 
+    /// The pause goes over HTTP while STMs goes over SlimProto, and LMS ignores a
+    /// pause that arrives before STMs (Pause while buffering is a no-op,
+    /// StreamingController.pm). Simulator 2026-10-16: lost that race once and the
+    /// fallback paused 4s late. Re-send until the STMp confirmation lands
+    /// (["pause","1"] is idempotent).
+    /// Stops early if another recovery took over or the user asked to play.
+    private func resendSilentRecoveryPauseIfUnconfirmed(generation: Int, attemptsLeft: Int) {
+        // Every 0.25s: each wait is played (muted) past the saved position.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self = self, self.awaitingSilentRecoveryUnmute, attemptsLeft > 0,
+                  self.recoveryGeneration == generation, !self.silentPauseResendCancelled else { return }
+            os_log(.info, log: self.logger, "⏸️ Silent recovery: pause not confirmed - sending again")
+            self.sendNormalJSONRPCCommand("pause")
+            self.resendSilentRecoveryPauseIfUnconfirmed(generation: generation, attemptsLeft: attemptsLeft - 1)
+        }
+    }
+
     /// Pause a silent recovery's muted stream, once. Must be called on main.
     private func sendSilentRecoveryPause(generation: Int, reason: String) {
         // If a newer recovery started, it owns the stream now: pausing it or
@@ -825,6 +896,8 @@ class SlimProtoCoordinator: ObservableObject {
         // Straight to the server: sendJSONRPCCommand("pause") waits 0.5s first,
         // and every 1/10s here is played (muted) past the saved position.
         sendNormalJSONRPCCommand("pause")
+        silentPauseResendCancelled = false
+        resendSilentRecoveryPauseIfUnconfirmed(generation: generation, attemptsLeft: 6)
 
         // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
         // so the engine is never left muted. No-op if didPauseStream already did it.
@@ -1020,7 +1093,34 @@ class SlimProtoCoordinator: ObservableObject {
             self.recoveryGeneration += 1
             os_log(.error, log: self.logger, "[APP-RECOVERY] 🔒 PLAYLIST RECOVERY STARTED (shouldPlay: %{public}s, gen %d)", shouldPlay ? "YES" : "NO", self.recoveryGeneration)
 
-            self.executePlaylistRecovery(shouldPlay: shouldPlay)
+            guard !shouldPlay else {
+                self.executePlaylistRecovery(shouldPlay: true)
+                return
+            }
+            // Silent: if LMS is already playing us (it restarts a client that was
+            // playing when it dropped it, e.g. a quick relaunch after a kill, or Siri
+            // started something), the user is listening: unmute and leave it,
+            // rather than jump to an old position and land paused.
+            let generation = self.recoveryGeneration
+            let statusCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand, timeout: 2.0) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.recoveryGeneration == generation, self.isRecoveryInProgress else { return }
+                    let mode = (response["result"] as? [String: Any])?["mode"] as? String
+                    if mode == "play" {
+                        os_log(.info, log: self.logger, "[APP-RECOVERY] 🔄 Server is already playing us - not restoring paused")
+                        self.isRecoveryInProgress = false
+                        self.silentRecoveryPauseGeneration = nil
+                        self.audioManager.disableSilentRecoveryMode()
+                        return
+                    }
+                    self.executePlaylistRecovery(shouldPlay: false)
+                }
+            }
         }
     }
 
@@ -1256,12 +1356,8 @@ class SlimProtoCoordinator: ObservableObject {
                 os_log(.info, log: logger, "🔇 App open recovery: disabled in settings - skipping")
                 return
             }
-            // Consume the persisted background timestamp so a stale value can't keep
-            // re-triggering app-open recovery on every future cold launch.
-            // Scoped to .appOpen only — .lockScreen and .networkRestored leave it alone
-            // so a subsequent cold launch can still gate on it.
+            // Left by builds that gated recovery on background time; nothing reads it now.
             UserDefaults.standard.removeObject(forKey: "lyrplay_backgrounded_at")
-            backgroundedTime = nil
 
             // Double-trigger suppression (bd 34l, captured in device log): the
             // background reconnect timer can race the foreground wake and fire a
@@ -1269,6 +1365,23 @@ class SlimProtoCoordinator: ObservableObject {
             // jump→pause for a paused session — running a second recovery here
             // consumed no data (the first ate it), bumped the generation (killing
             // the first one's pause dance), and bare-unmuted its playing stream.
+            // LMS restarted a stream for us on reconnect (it was playing when we
+            // were dropped, e.g. a quick relaunch after a kill): leave it playing.
+            // (Recently: on a long-lived connection the original stream started on it too.)
+            if serverStartedStreamSinceConnect && serverStartedStreamRecently {
+                os_log(.info, log: logger, "🔇 App open recovery: server already restarted the stream - skipping")
+                audioManager.cancelPreMute(reason: "server restarted stream")
+                return
+            }
+
+            // An outage hold is already getting playback back (audibly); landing
+            // paused on top of it would undo that.
+            guard !outageHoldActive else {
+                os_log(.info, log: logger, "🔇 App open recovery: outage hold active - it owns playback, skipping")
+                audioManager.cancelPreMute(reason: "outage hold active")
+                return
+            }
+
             // silentRecoveryOwnsMute also covers a silent recovery that's waiting for
             // the server or for its pause: enableSilentRecoveryMode below would flush
             // that one's muted stream.
@@ -1873,6 +1986,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "⏸️ Server pause command")
         syncControllerReset(reason: "didPauseStream")
         endOutageHold(reason: "paused")
+        // Paused on purpose (Material, another controller): don't treat the
+        // missing audio as a failed resume.
+        DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
         // CRITICAL FIX: Update SimpleTimeTracker with pause state
         let currentTime = simpleTimeTracker.getCurrentTimeDouble()
@@ -1930,6 +2046,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
         audioManager.stop()
 
@@ -2411,6 +2528,8 @@ extension SlimProtoCoordinator {
         // A user pause/stop ends any attempt to resume playback (bd 6lvg).
         if command.lowercased() == "pause" || command.lowercased() == "stop" {
             endOutageHold(reason: "user \(command.lowercased())")
+            resumeInPlaceCheck = nil
+            remotePlayIntent = nil
         }
 
         // Save position on pause commands (creates save point for future recovery)
@@ -2438,35 +2557,27 @@ extension SlimProtoCoordinator {
         // For PAUSE/other: Just send command normally (no need to disconnect)
 
         if command.lowercased() == "play" {
-            // Check background duration - only reconnect/recover if backgrounded > 45 seconds.
-            // Reads in-memory bgTime, then falls back to UserDefaults if iOS killed the process.
-            if let duration = getBackgroundDuration() {
-                os_log(.info, log: logger, "🔒 Lock screen PLAY: Backgrounded for %.1f seconds", duration)
-
-                if duration > 45 {
-                    // Long background (> 45s) - reconnect and recover position
-                    os_log(.info, log: logger, "🔄 Lock screen PLAY: Long background (%.1fs) - setting lockScreen trigger", duration)
-
-                    // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
-                    pendingRecoveryTrigger = .lockScreen
-
-                    // Stay awake until the reconnect + recovery gets audio going:
-                    // in the car the network may not be up yet (bd 8tjj).
-                    beginOutageHold(reason: "remote play after long background")
-
-                    // Trust BASS to auto-manage stream state during reconnection
-                    // BASS handles iOS audio session activation/deactivation automatically
-                    connect()
-                    // slimProtoDidConnect will call handlePendingRecovery()
+            // The user wants audio: a silent recovery's pause re-sends must stop.
+            silentPauseResendCancelled = true
+            if takeOverSilentRecoveryForUserPlay() {
+                return
+            }
+            let intent = UUID()
+            remotePlayIntent = intent
+            decideResumeRoute { [weak self] route in
+                // A pause or stop pressed while we asked LMS wins.
+                guard let self = self, self.remotePlayIntent == intent else { return }
+                self.remotePlayIntent = nil
+                if route == .resumeInPlace || route == .leaveAlone {
+                    // LMS still has our paused stream: a plain unpause resumes it
+                    // instantly from the buffer.
+                    os_log(.info, log: self.logger, "🔒 Lock screen PLAY: resuming in place")
+                    self.sendJSONRPCCommand("play")
+                    self.checkResumedInPlace()
                 } else {
-                    // Brief background (< 45s) - just send play command (fast!)
-                    os_log(.info, log: logger, "🔒 Lock screen PLAY: Brief background (%.1fs) - sending play command", duration)
-                    sendJSONRPCCommand(command)
+                    os_log(.info, log: self.logger, "🔄 Lock screen PLAY: reconnect if needed + recover")
+                    self.startLockScreenRecovery()
                 }
-            } else {
-                // No background time tracked - just send play command
-                os_log(.info, log: logger, "🔒 Lock screen PLAY: No background time - sending play command")
-                sendJSONRPCCommand(command)
             }
         } else {
             // PAUSE or other commands: Send normally without forced reconnect
@@ -2490,6 +2601,82 @@ extension SlimProtoCoordinator {
         // Track lock screen pause state
         if command.lowercased() == "pause" {
             commandHandler.isPausedByLockScreen = true
+        }
+    }
+
+    /// A user play during a silent (app-open) recovery takes it over: the silent
+    /// pause would otherwise land on top of it. If the jump already went out the
+    /// stream is at the saved position, so unmute and play; if it's still
+    /// waiting, cancel it and let the normal play route recover audibly.
+    /// Returns true when the play has been handled.
+    private func takeOverSilentRecoveryForUserPlay() -> Bool {
+        guard silentRecoveryOwnsMute else { return false }
+        let jumpSent = silentRecoveryPauseGeneration != nil || awaitingSilentRecoveryUnmute
+        os_log(.info, log: logger, "🔒 Lock screen PLAY: taking over the silent recovery (jump sent: %{public}s)",
+               jumpSent ? "yes" : "no")
+        recoveryGeneration += 1   // its pause, re-sends and timers stand down
+        silentRecoveryPauseGeneration = nil
+        awaitingSilentRecoveryUnmute = false
+        silentRecoveryWaiting = false
+        isRecoveryInProgress = false
+        audioManager.disableSilentRecoveryMode()
+        guard jumpSent else { return false }
+        sendNormalJSONRPCCommand("play")
+        return true
+    }
+
+    /// Reconnect and recover for a remote play: recovery runs from
+    /// slimProtoDidConnect via the .lockScreen trigger.
+    private func startLockScreenRecovery() {
+        // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
+        pendingRecoveryTrigger = .lockScreen
+
+        // Stay awake until the reconnect + recovery gets audio going:
+        // in the car the network may not be up yet (bd 8tjj).
+        beginOutageHold(reason: "remote play, connection not live")
+
+        if connectionIsLive {
+            // The connection is fine; LMS just doesn't hold our stream. Recover here.
+            handlePendingRecovery()
+            return
+        }
+        // Connected but quiet: possibly a zombie left by suspension, so replace it.
+        // (A connecting socket is left alone: its didConnect runs the recovery.)
+        if connectionManager.connectionState.isConnected {
+            client.markSocketStale()
+        }
+        connect()
+        // slimProtoDidConnect will call handlePendingRecovery()
+    }
+
+    /// A plain unpause should have audio within a moment. If it doesn't (the
+    /// socket died just after the liveness check, or LMS had stopped the
+    /// player), recover. Cancelled by any pause or stop meanwhile.
+    private func checkResumedInPlace() {
+        let check = UUID()
+        resumeInPlaceCheck = check
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self = self, self.resumeInPlaceCheck == check else { return }
+            self.resumeInPlaceCheck = nil
+            let state = self.audioManager.getPlayerState()
+            guard state != "Playing", state != "Buffering",
+                  !self.isRecoveryInProgress, self.pendingRecoveryTrigger == .none else { return }
+            // Slow but on its way (LMS says play): leave it.
+            let statusCommand: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand, timeout: 2.0) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, !self.isRecoveryInProgress, self.pendingRecoveryTrigger == .none else { return }
+                    let mode = (response["result"] as? [String: Any])?["mode"] as? String
+                    guard mode != "play", self.audioManager.getPlayerState() != "Playing" else { return }
+                    os_log(.error, log: self.logger, "🔒 Lock screen PLAY: no audio 3s after resuming in place (server mode %{public}s) - recovering",
+                           mode ?? "none")
+                    self.startLockScreenRecovery()
+                }
+            }
         }
     }
 

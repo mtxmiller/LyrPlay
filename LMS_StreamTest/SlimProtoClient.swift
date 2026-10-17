@@ -268,6 +268,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             guard let self = self else { return }
             self.isConnected = true
             self.socketConnectedAt = Date()
+            self.socketStale = false
 
             // Request initial status after brief delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
