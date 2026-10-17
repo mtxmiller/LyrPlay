@@ -81,6 +81,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var socketHost: String = ""
     private var socketPort: UInt16 = 0
     private var socketConnectedAt: Date?
+    /// The network changed after this socket was opened; never keep it.
+    private var socketStale = false
 
     /// A socket younger than this is treated as live. At launch and foreground
     /// several triggers call connect() within a second (coordinator foreground,
@@ -147,7 +149,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // Connected but not yet reported on main counts as connecting: didConnect is on its way.
         let connecting = !socket.isDisconnected && (!socket.isConnected || socketConnectedAt == nil)
         let connectedFor = socket.isConnected ? socketConnectedAt.map { Date().timeIntervalSince($0) } : nil
-        if Self.shouldKeepExistingSocket(sameServer: sameServer, isConnecting: connecting,
+        if !socketStale, Self.shouldKeepExistingSocket(sameServer: sameServer, isConnecting: connecting,
                                          isConnected: socket.isConnected, connectedFor: connectedFor) {
             os_log(.info, log: logger, "Keeping the %{public}s socket to %{public}s:%d - not reconnecting",
                    connecting ? "connecting" : "fresh", host, port)
@@ -169,6 +171,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         return .started
     }
     
+    /// The network path changed: the next connect() replaces the socket even if it
+    /// is new (opened on home Wi-Fi in the driveway, then Wi-Fi drops in the car).
+    func markSocketStale() {
+        socketStale = true
+    }
+
     /// Leave the socket alone when it is already connecting to, or freshly
     /// connected to, the server being asked for.
     static func shouldKeepExistingSocket(sameServer: Bool, isConnecting: Bool,
@@ -198,6 +206,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             socketHost = host
             socketPort = port
             socketConnectedAt = nil
+            socketStale = false
         } catch {
             os_log(.error, log: logger, "Connection error: %{public}s", error.localizedDescription)
         }

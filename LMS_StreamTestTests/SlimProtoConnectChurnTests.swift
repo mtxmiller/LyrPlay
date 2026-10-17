@@ -35,4 +35,20 @@ struct SlimProtoConnectChurnTests {
         #expect(!SlimProtoClient.shouldKeepExistingSocket(
             sameServer: true, isConnecting: false, isConnected: false, connectedFor: nil))
     }
+
+    // A socket opened just before the network changed can't be kept: in the car,
+    // one opened on home Wi-Fi is dead once the phone moves to cellular.
+    @Test func lossOrInterfaceChangeInvalidatesTheSocket() {
+        typealias M = SlimProtoConnectionManager
+        #expect(M.pathInvalidatesSocket(wasAvailable: true, isAvailable: false, previous: .wifi, current: .unavailable))
+        #expect(M.pathInvalidatesSocket(wasAvailable: true, isAvailable: true, previous: .wifi, current: .cellular))
+        #expect(!M.pathInvalidatesSocket(wasAvailable: true, isAvailable: true, previous: .wifi, current: .wifi))
+    }
+
+    @Test func theFirstPathUpdateAtLaunchDoesNot() {
+        // At launch the monitor starts "unavailable" and reports the real path
+        // once; that must not undo the launch churn fix.
+        #expect(!SlimProtoConnectionManager.pathInvalidatesSocket(
+            wasAvailable: false, isAvailable: true, previous: .unknown, current: .wifi))
+    }
 }

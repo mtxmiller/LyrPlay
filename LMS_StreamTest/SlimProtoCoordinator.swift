@@ -1705,6 +1705,11 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         sendJSONRPCCommandDirect(saveTimestampCommand) { _ in }
     }
     
+    func connectionManagerNetworkPathChanged() {
+        os_log(.info, log: logger, "🌐 Network path changed - the next connect replaces the socket")
+        client.markSocketStale()
+    }
+
     func connectionManagerNetworkDidChange(isAvailable: Bool, isExpensive: Bool) {
         os_log(.info, log: logger, "🌐 Network change - Available: %{public}s, Expensive: %{public}s",
                isAvailable ? "YES" : "NO", isExpensive ? "YES" : "NO")
