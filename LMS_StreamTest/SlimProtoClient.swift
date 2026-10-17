@@ -76,6 +76,21 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var port: UInt16 = 3483
     private var hasRequestedInitialStatus = false
 
+    // The server the socket was last pointed at, and when it connected, so a
+    // second connect() for the same server can leave a fresh socket alone.
+    private var socketHost: String = ""
+    private var socketPort: UInt16 = 0
+    private var socketConnectedAt: Date?
+
+    /// A socket younger than this is treated as live. At launch and foreground
+    /// several triggers call connect() within a second (coordinator foreground,
+    /// ContentView, network monitor, app-became-active); each used to tear down
+    /// the socket the previous one had just opened, so recovery started on a
+    /// connection that was then replaced (simulator log 2026-10-16: three
+    /// connects in 0.6s, recovery dropped). An older socket may be a zombie
+    /// left by iOS suspension, so it is still replaced.
+    static let freshConnectionWindow: TimeInterval = 10
+
     // MARK: - Delegation
     weak var delegate: SlimProtoClientDelegate?
     
@@ -113,12 +128,32 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     }
     
     // MARK: - Connection Management
-    func connect() {
+    /// What connect() did.
+    enum ConnectResult {
+        case started            // a new connection attempt (didConnect reports it)
+        case keptConnecting     // an attempt to this server is in flight (didConnect reports it)
+        case keptConnected      // a fresh socket to this server is up: no didConnect will come
+        case noHost
+    }
+
+    @discardableResult
+    func connect() -> ConnectResult {
         guard !host.isEmpty else {
             os_log(.error, log: logger, "Cannot connect - host is empty")
-            return
+            return .noHost
         }
-        
+
+        let sameServer = socketHost == host && socketPort == port
+        // Connected but not yet reported on main counts as connecting: didConnect is on its way.
+        let connecting = !socket.isDisconnected && (!socket.isConnected || socketConnectedAt == nil)
+        let connectedFor = socket.isConnected ? socketConnectedAt.map { Date().timeIntervalSince($0) } : nil
+        if Self.shouldKeepExistingSocket(sameServer: sameServer, isConnecting: connecting,
+                                         isConnected: socket.isConnected, connectedFor: connectedFor) {
+            os_log(.info, log: logger, "Keeping the %{public}s socket to %{public}s:%d - not reconnecting",
+                   connecting ? "connecting" : "fresh", host, port)
+            return connecting ? .keptConnecting : .keptConnected
+        }
+
         // CRITICAL FIX: Clean up any existing connection first
         if isConnected || socket.isConnected {
             os_log(.info, log: logger, "Cleaning up existing connection before reconnecting")
@@ -131,8 +166,19 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         } else {
             attemptConnection()
         }
+        return .started
     }
     
+    /// Leave the socket alone when it is already connecting to, or freshly
+    /// connected to, the server being asked for.
+    static func shouldKeepExistingSocket(sameServer: Bool, isConnecting: Bool,
+                                         isConnected: Bool, connectedFor: TimeInterval?) -> Bool {
+        guard sameServer else { return false }
+        if isConnecting { return true }
+        if isConnected, let age = connectedFor, age < freshConnectionWindow { return true }
+        return false
+    }
+
     private func attemptConnection() {
         guard !isConnected else {
             os_log(.info, log: logger, "Already connected")
@@ -147,6 +193,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         do {
             // 4s TCP connect timeout enables fast failover to backup server (issue #76)
             try socket.connect(toHost: host, onPort: port, withTimeout: 4)
+            // Only once the attempt is under way: if connect throws (already
+            // connecting), the in-flight socket keeps its own server's label.
+            socketHost = host
+            socketPort = port
+            socketConnectedAt = nil
         } catch {
             os_log(.error, log: logger, "Connection error: %{public}s", error.localizedDescription)
         }
@@ -207,6 +258,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.isConnected = true
+            self.socketConnectedAt = Date()
 
             // Request initial status after brief delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {

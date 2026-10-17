@@ -337,7 +337,16 @@ class SlimProtoCoordinator: ObservableObject {
         
         connectionManager.willConnect()
         client.updateServerSettings(host: settings.activeServerHost, port: UInt16(settings.activeServerSlimProtoPort))
-        client.connect()
+        connectKeepingFreshSocket()
+    }
+
+    /// client.connect(), but when it keeps a socket that's already up, tell the
+    /// connection manager: it just set .connecting/.reconnecting and no didConnect
+    /// will come to undo that (health checks skip anything not .connected).
+    private func connectKeepingFreshSocket() {
+        if client.connect() == .keptConnected {
+            connectionManager.didConnect()
+        }
     }
     
     func disconnect() {
@@ -649,6 +658,19 @@ class SlimProtoCoordinator: ObservableObject {
     // is gated on the real STMp pause confirmation in didPauseStream() rather than a fixed
     // timer, so DSP gain is only restored after audio has actually stopped flowing.
     private var awaitingSilentRecoveryUnmute = false
+    /// The silent recovery whose pause hasn't been sent yet. The pause goes out
+    /// when its muted stream starts playing, or from the fallback timer.
+    private var silentRecoveryPauseGeneration: Int?
+    /// A silent recovery is waiting for the server to talk on the connection.
+    private var silentRecoveryWaiting = false
+
+    /// A silent recovery owns the mute: waiting, mid jump, or waiting to pause or unmute.
+    private var silentRecoveryOwnsMute: Bool {
+        silentRecoveryWaiting
+            || (isRecoveryInProgress && currentRecoveryIsSilent)
+            || silentRecoveryPauseGeneration != nil
+            || awaitingSilentRecoveryUnmute
+    }
     
     // MARK: - Playlist-Based Position Recovery (Home Assistant Approach)
     
@@ -763,6 +785,58 @@ class SlimProtoCoordinator: ObservableObject {
         }
     }
 
+    /// Fallback for streams that don't report playback start: pause once the
+    /// player says Playing. A pause sent before the stream starts is a no-op on
+    /// the server (Pause while buffering), so don't send it early. Checks every
+    /// 0.5s, then settles.
+    private func pauseSilentRecoveryWhenPlaying(generation: Int, checksLeft: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.silentRecoveryPauseGeneration == generation else { return }
+            // A push stream's STMs goes out in handleDecoderDidStartPlayback, which also
+            // pauses; until then the server is still buffering and ignores a pause.
+            if self.audioManager.getPlayerState() == "Playing" && !self.pendingUnpauseSTMs {
+                self.sendSilentRecoveryPause(generation: generation, reason: "player state playing")
+            } else if checksLeft > 1 {
+                self.pauseSilentRecoveryWhenPlaying(generation: generation, checksLeft: checksLeft - 1)
+            } else {
+                // The stream never played: end the recovery (pauses locally and on
+                // the server if anything is flowing, then unmutes, clears the arm).
+                self.settleSilentRecoveryAudio(reason: "silent stream never played")
+            }
+        }
+    }
+
+    /// Pause a silent recovery's muted stream, once. Must be called on main.
+    private func sendSilentRecoveryPause(generation: Int, reason: String) {
+        // If a newer recovery started, it owns the stream now: pausing it or
+        // arming our unmute latch would corrupt it.
+        guard silentRecoveryPauseGeneration == generation else { return }
+        silentRecoveryPauseGeneration = nil
+        guard recoveryGeneration == generation else { return }
+        os_log(.info, log: logger, "⏸️ Silent recovery: pausing (%{public}s)", reason)
+
+        // Arm the event-gated unmute BEFORE sending pause. didPauseStream() will
+        // restore volume the moment the STMp pause confirmation lands — i.e. once
+        // BASS is actually paused. The old fixed +2s timer could fire while the
+        // stream was still playing (or before the async STRM start landed), which
+        // is what leaked the intermittent (~10%) blip.
+        awaitingSilentRecoveryUnmute = true
+
+        // Straight to the server: sendJSONRPCCommand("pause") waits 0.5s first,
+        // and every 1/10s here is played (muted) past the saved position.
+        sendNormalJSONRPCCommand("pause")
+
+        // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
+        // so the engine is never left muted. No-op if didPauseStream already did it.
+        // Deliberately NOT generation-gated: its only job is "never stay muted",
+        // which is safe to enforce in any generation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            guard let self = self, self.awaitingSilentRecoveryUnmute else { return }
+            self.awaitingSilentRecoveryUnmute = false
+            self.settleSilentRecoveryAudio(reason: "fallback timer")
+        }
+    }
+
     /// Nudge Material to poll player status NOW instead of waiting for its own
     /// (background-dazed) Cometd cycle. During app-open recovery the server is
     /// genuinely playing for ~2s before our pause lands; without this nudge
@@ -791,6 +865,9 @@ class SlimProtoCoordinator: ObservableObject {
     /// whenever it lands (didPauseStream then runs the full bookkeeping).
     /// Must be called on main.
     private func settleSilentRecoveryAudio(reason: String) {
+        // This recovery is over: its pause must not fire on a later stream (the user's own play).
+        silentRecoveryPauseGeneration = nil
+        silentRecoveryWaiting = false
         if audioManager.isSilentRecoveryMuted {
             let state = audioManager.getPlayerState()
             if state != "Paused" && state != "Stopped" {
@@ -829,6 +906,11 @@ class SlimProtoCoordinator: ObservableObject {
         isRecoveryInProgress = false
     }
 
+    /// Recovery waits for the server to talk on the new connection: checks every
+    /// `serverWaitInterval`, up to `serverWaitAttempts` times (10s).
+    static let serverWaitInterval: TimeInterval = 0.25
+    static let serverWaitAttempts = 40
+
     func performPlaylistRecovery(shouldPlay: Bool = true, serverWaitAttempt: Int = 0) {
         // Check-and-set must happen on the same queue that clears the lock (main).
         // The old recoveryQueue hop didn't serialize against main-thread clears, so
@@ -843,19 +925,47 @@ class SlimProtoCoordinator: ObservableObject {
                 self.beginOutageHold(reason: "audible recovery")
             }
 
+            // One silent recovery at a time, from its request to its unmute. A
+            // second one (a reconnect's .networkRestored during an app-open wait)
+            // would find the data used up and settle the first one's still-playing
+            // muted stream: the bd 34l blip. The first one owns the mute.
+            if !shouldPlay && serverWaitAttempt == 0 && self.silentRecoveryOwnsMute {
+                os_log(.info, log: self.logger, "🔇 Silent recovery already under way - skipping this one")
+                return
+            }
+
             // Only jump while the server is actually talking to us on this
             // connection — otherwise LMS can't stream to us and runs through the
             // whole queue (see serverHeardRecently).
             if !self.serverHeardRecently {
-                if serverWaitAttempt < 5 {
-                    os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Server not heard on this connection yet - waiting (%d/5)", serverWaitAttempt + 1)
+                // LMS answers HELO within milliseconds, so check often; same 10s cap as before.
+                if serverWaitAttempt < Self.serverWaitAttempts {
+                    if serverWaitAttempt == 0 {
+                        os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Server not heard on this connection yet - waiting (up to %.0fs)",
+                               Double(Self.serverWaitAttempts) * Self.serverWaitInterval)
+                    }
                     let connectionStamp = self.lastConnectedAt
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    let generationAtWait = self.recoveryGeneration
+                    if !shouldPlay {
+                        self.silentRecoveryWaiting = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.serverWaitInterval) { [weak self] in
                         guard let self = self else { return }
-                        // A new connection runs its own recovery; and once audio
-                        // has started (hold ended) there is nothing left to do.
-                        guard self.lastConnectedAt == connectionStamp,
-                              !shouldPlay || self.outageHoldActive else {
+                        // Silent, but another recovery ran meanwhile (an audible one: it
+                        // lifted the mute and owns playback now). Restoring paused would
+                        // undo it.
+                        if !shouldPlay && self.recoveryGeneration != generationAtWait {
+                            os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Dropping silent wait (another recovery ran)")
+                            self.silentRecoveryWaiting = false
+                            return
+                        }
+                        // Audible: the hold watchdog retries on a new connection, and
+                        // once audio has started (hold ended) there is nothing left to do.
+                        // Silent: nothing else will run it (its trigger was consumed) and
+                        // the engine is already muted, so keep waiting on the new
+                        // connection (simulator log 2026-10-16: dropped here, recovery
+                        // never ran, muted until the 20s ceiling).
+                        guard !shouldPlay || (self.lastConnectedAt == connectionStamp && self.outageHoldActive) else {
                             os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Dropping stale wait (connection changed or playback started)")
                             return
                         }
@@ -871,6 +981,9 @@ class SlimProtoCoordinator: ObservableObject {
                     self.settleSilentRecoveryAudio(reason: "server not heard")
                 }
                 return
+            }
+            if !shouldPlay {
+                self.silentRecoveryWaiting = false
             }
 
             // LMS restarts a known playing client by itself on reconnect, and
@@ -1055,6 +1168,11 @@ class SlimProtoCoordinator: ObservableObject {
         suppressServerTimePollsUntil = Date().addingTimeInterval(3.0)
         os_log(.info, log: logger, "⏱️ Seeded time tracker at %.2f, suppressing server-time polls for 3s", savedPosition)
 
+        // Arm the pause before the jump: the stream can start before its reply arrives.
+        if !shouldPlay {
+            silentRecoveryPauseGeneration = generation
+        }
+
         // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
         // After 300s server forget, new client is STOPPED, and noplay=1 only calls resetSongqueue()
         // which doesn't actually seek to the position. So we always play, then pause if needed.
@@ -1094,6 +1212,7 @@ class SlimProtoCoordinator: ObservableObject {
                     if shouldPlay {
                         self.retryAudibleRecovery(reason: "jump failed")
                     } else {
+                        self.silentRecoveryPauseGeneration = nil
                         self.awaitingSilentRecoveryUnmute = false
                         self.settleSilentRecoveryAudio(reason: "jump failed")
                     }
@@ -1102,35 +1221,12 @@ class SlimProtoCoordinator: ObservableObject {
 
                 os_log(.info, log: self.logger, "🎯 Playlist jump recovery completed")
 
-                // If we jumped with shouldPlay=false, pause after stream establishes (silently muted)
-                // Longer delay (1.5s) ensures stream is fully established before pause
+                // Silent recovery pauses as soon as its muted stream plays
+                // (handleDecoderDidStartPlayback, push streams). Other streams don't
+                // report it, so also watch the player state.
                 if !shouldPlay {
-                    os_log(.info, log: self.logger, "⏸️ App foreground recovery: waiting for silent stream to establish, then pausing")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        // If a newer recovery started while we waited, it owns the stream
-                        // now — pausing it or arming our unmute latch would corrupt it.
-                        guard self.recoveryGeneration == generation else { return }
-
-                        // Arm the event-gated unmute BEFORE sending pause. didPauseStream() will
-                        // restore volume the moment the STMp pause confirmation lands — i.e. once
-                        // BASS is actually paused. The old fixed +2s timer could fire while the
-                        // stream was still playing (or before the async STRM start landed), which
-                        // is what leaked the intermittent (~10%) blip.
-                        self.awaitingSilentRecoveryUnmute = true
-
-                        // Send pause command (channel still muted)
-                        self.sendJSONRPCCommand("pause")
-
-                        // Fallback ceiling: if the pause confirmation never arrives, unmute anyway
-                        // so the engine is never left muted. No-op if didPauseStream already did it.
-                        // Deliberately NOT generation-gated: its only job is "never stay muted",
-                        // which is safe to enforce in any generation.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                            guard self.awaitingSilentRecoveryUnmute else { return }
-                            self.awaitingSilentRecoveryUnmute = false
-                            self.settleSilentRecoveryAudio(reason: "fallback timer")
-                        }
-                    }
+                    os_log(.info, log: self.logger, "⏸️ App foreground recovery: pausing once the silent stream plays")
+                    self.pauseSilentRecoveryWhenPlaying(generation: generation, checksLeft: 16)
                 }
 
                 // Clear recovery flag after completion
@@ -1173,7 +1269,10 @@ class SlimProtoCoordinator: ObservableObject {
             // jump→pause for a paused session — running a second recovery here
             // consumed no data (the first ate it), bumped the generation (killing
             // the first one's pause dance), and bare-unmuted its playing stream.
-            guard !isRecoveryInProgress else {
+            // silentRecoveryOwnsMute also covers a silent recovery that's waiting for
+            // the server or for its pause: enableSilentRecoveryMode below would flush
+            // that one's muted stream.
+            guard !isRecoveryInProgress, !silentRecoveryOwnsMute else {
                 os_log(.info, log: logger, "🔇 App open recovery: another recovery already in flight - skipping duplicate")
                 return
             }
@@ -1210,9 +1309,9 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.info, log: logger, "🔇 App open recovery: muted + paused")
             audioManager.enableSilentRecoveryMode()  // Mute before server sends audio
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.performPlaylistRecovery(shouldPlay: false)
-            }
+            // No settle delay: performPlaylistRecovery waits until the server has
+            // talked on this connection (serverHeardRecently), which is what matters.
+            performPlaylistRecovery(shouldPlay: false)
 
         case .lockScreen:
             // Lock screen recovery: not muted + playing
@@ -1418,7 +1517,7 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
             connectionManager.resetReconnectionAttempts()
         }
 
-        client.connect()
+        connectKeepingFreshSocket()
     }
     
     func connectionManagerDidEnterBackground() {
@@ -3479,7 +3578,11 @@ extension SlimProtoCoordinator {
 
     func handleDecoderDidStartPlayback() {
         DispatchQueue.main.async { [weak self] in
-            self?.endOutageHold(reason: "playback started")
+            guard let self = self else { return }
+            self.endOutageHold(reason: "playback started")
+            if let generation = self.silentRecoveryPauseGeneration {
+                self.sendSilentRecoveryPause(generation: generation, reason: "silent stream playing")
+            }
         }
         if pendingUnpauseSTMs {
             os_log(.info, log: logger, "🎵 Flushing deferred STMs (BASS playback started)")
