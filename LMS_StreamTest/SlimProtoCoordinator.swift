@@ -305,6 +305,12 @@ class SlimProtoCoordinator: ObservableObject {
     /// the spike on the lock screen ("timer hunts"). We know the true position
     /// (we chose it), so we seed the tracker and skip polls while poisoned.
     private var suppressServerTimePollsUntil: Date?
+    /// A remote play that reconnects and recovers holds the saved position on
+    /// screen from the press to the jump. Meanwhile LMS stops the player on
+    /// reconnect (strm 'q' zeroes the time) and reports the previous jump's
+    /// start offset (device log 2026-10-17: 234 → 0 → 227 → 234). The jump's
+    /// own window takes over; ends with the outage hold.
+    private var holdTimeUntilRecoveryJump = false
 
     // MARK: - Player Synchronization (Multi-room Audio)
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
@@ -1273,6 +1279,7 @@ class SlimProtoCoordinator: ObservableObject {
         // Seed BEFORE the jump so no poll race can paint the spike first.
         simpleTimeTracker.updateFromServer(time: savedPosition, playing: shouldPlay)
         suppressServerTimePollsUntil = Date().addingTimeInterval(3.0)
+        holdTimeUntilRecoveryJump = false
         os_log(.info, log: logger, "⏱️ Seeded time tracker at %.2f, suppressing server-time polls for 3s", savedPosition)
 
         // Arm the pause before the jump: the stream can start before its reply arrives.
@@ -2447,6 +2454,7 @@ extension SlimProtoCoordinator {
     /// time (polls, strm 'q' resets) must not overwrite the seeded tracker position.
     /// Clears the window lazily once it has expired. Main thread only.
     private func serverTimeUpdatesSuppressed() -> Bool {
+        if holdTimeUntilRecoveryJump { return true }
         guard let until = suppressServerTimePollsUntil else { return false }
         if Date() < until { return true }
         suppressServerTimePollsUntil = nil
@@ -2673,6 +2681,13 @@ extension SlimProtoCoordinator {
         // Stay awake until the reconnect + recovery gets audio going:
         // in the car the network may not be up yet (bd 8tjj).
         beginOutageHold(reason: "remote play, connection not live")
+
+        let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
+        if savedPosition > 0 && outageHoldActive {
+            simpleTimeTracker.updateFromServer(time: savedPosition, playing: false)
+            holdTimeUntilRecoveryJump = true
+            os_log(.info, log: logger, "⏱️ Holding lock screen at %.2f until the recovery jump", savedPosition)
+        }
 
         if connectionIsLive {
             // The connection is fine; LMS just doesn't hold our stream. Recover here.
@@ -3583,6 +3598,7 @@ extension SlimProtoCoordinator {
         outageHoldActive = false
         outageHoldGeneration += 1  // cancels the pending time limit
         audibleRecoveryTarget = nil
+        holdTimeUntilRecoveryJump = false
         audioManager.setOutputKeepAlive(false)
         connectionManager.persistForPlayback = false
         // Nothing left to resume: a later reconnect must not start playback
