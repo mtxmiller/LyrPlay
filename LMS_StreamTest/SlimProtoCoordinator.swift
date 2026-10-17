@@ -1016,6 +1016,18 @@ class SlimProtoCoordinator: ObservableObject {
                 return
             }
 
+            // A user play is under way (being decided, recovering under the
+            // outage hold, or resumed in place): landing paused would undo it.
+            // A reconnect's .networkRestored waits 0.5s, so a lock-screen play
+            // can land in between (device log 2026-10-17: the silent jump ran
+            // first and Play had to be pressed twice).
+            if !shouldPlay && serverWaitAttempt == 0
+                && (self.outageHoldActive || self.remotePlayPending || self.resumeInPlaceCheck != nil) {
+                os_log(.info, log: self.logger, "🔇 Silent recovery: a play is under way - skipping")
+                self.liftPreMuteForAudibleRecovery()
+                return
+            }
+
             // Only jump while the server is actually talking to us on this
             // connection — otherwise LMS can't stream to us and runs through the
             // whole queue (see serverHeardRecently).
@@ -1445,7 +1457,13 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.info, log: logger, "🔊 Lock screen recovery: playing")
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.performPlaylistRecovery(shouldPlay: true)
+                guard let self = self else { return }
+                // A pause meanwhile ended the hold: don't start playing anyway.
+                guard self.outageHoldActive else {
+                    os_log(.info, log: self.logger, "🔊 Lock screen recovery: paused meanwhile - not playing")
+                    return
+                }
+                self.performPlaylistRecovery(shouldPlay: true)
             }
 
         case .networkRestored:
