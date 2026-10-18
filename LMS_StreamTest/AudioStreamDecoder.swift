@@ -142,6 +142,35 @@ class AudioStreamDecoder {
     /// downloaded since the current decoder stream started.
     private var statStreamBufferedBytes: UInt64 = 0
     private var statStreamBytesReceived: UInt64 = 0
+    /// The decoder stream's HTTP connection is open (snapshot, as above).
+    private var statStreamConnected = false
+    /// Where the last natural decode end left the decoding track, in track
+    /// seconds. A cut connection ends exactly like the real end of a track
+    /// (the socket closes), so the coordinator compares this with the track's
+    /// duration when the end came while it couldn't reach the server.
+    /// Guarded by stateLock.
+    private var lastDecodeEndSeconds: Double?
+
+    /// The current decoder stream as the control plane may see it.
+    struct StreamState: Equatable {
+        /// The HTTP download is still open.
+        var connected: Bool
+        /// The decode ended at the end of its data (STMd was due).
+        var completedNaturally: Bool
+        /// Track seconds reached when it ended (nil while decoding).
+        var decodedEndSeconds: Double?
+        /// The decoding track is the next one: the current one's tail is still playing.
+        var decodingAhead: Bool
+    }
+
+    func streamState() -> StreamState {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return StreamState(connected: statStreamConnected,
+                           completedNaturally: decodeCompletedNaturally,
+                           decodedEndSeconds: lastDecodeEndSeconds,
+                           decodingAhead: trackBoundaryPosition != nil)
+    }
 
     /// Armed by the decode loop's natural-completion exits; consumed by
     /// handleBufferEnd so a buffer STALL only reports end-of-playback (STMu)
@@ -1074,7 +1103,9 @@ class AudioStreamDecoder {
         // BASS_StreamCreateURL completes would report the OLD track's offset
         // against a flushed stream, making the displayed time hunt around
         // after a playlist-jump seek (bd LMS_StreamTest-egd).
-        trackStartTimeOffset = startTime
+        stateLock.lock()
+        trackStartTimeOffset = startTime  // also read on the decode queue (markDecodeCompletedNaturally)
+        stateLock.unlock()
 
         decodeQueue.async { [weak self] in
             self?.performStartDecoding(url, format: format, isNewTrack: isNewTrack,
@@ -1328,6 +1359,8 @@ class AudioStreamDecoder {
             manualStop = false  // This is a fresh start, not a manual stop
             decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
             stmlBaselineBytes = totalBytesPushed  // STMl threshold measures from THIS track's start
+            lastDecodeEndSeconds = nil
+            statStreamConnected = true  // until the loop's first snapshot says otherwise
         } else {
             pendingTrackBoundary = false
         }
@@ -1360,6 +1393,8 @@ class AudioStreamDecoder {
         manualStop = true       // Mark as manual stop
         isDecoding = false
         decodeCompletedNaturally = false  // Manual stop — drain must not report end-of-playback
+        statStreamConnected = false
+        lastDecodeEndSeconds = nil
         stateLock.unlock()
 
         // Clean up sync start monitoring
@@ -1490,6 +1525,10 @@ class AudioStreamDecoder {
     private func markDecodeCompletedNaturally() {
         stateLock.lock()
         decodeCompletedNaturally = true
+        statStreamConnected = false
+        let bytesPerSecond = Double(sampleRate * channels * 4)
+        lastDecodeEndSeconds = trackStartTimeOffset
+            + Double(totalBytesPushed &- stmlBaselineBytes) / bytesPerSecond
         stateLock.unlock()
     }
 
@@ -1547,11 +1586,13 @@ class AudioStreamDecoder {
                 // reads these snapshots instead. -1 (QWORD.max) = not available.
                 let statDownloaded = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
                 let statReadPos = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CURRENT))
+                let statConnected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
                 if statDownloaded != UInt64.max {
                     self.stateLock.lock()
                     self.statStreamBytesReceived = statDownloaded
                     self.statStreamBufferedBytes = (statReadPos != UInt64.max && statDownloaded > statReadPos)
                         ? statDownloaded - statReadPos : 0
+                    self.statStreamConnected = statConnected != 0 && statConnected != UInt64.max
                     self.stateLock.unlock()
                 }
 

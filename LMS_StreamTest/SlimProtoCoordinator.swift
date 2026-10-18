@@ -186,6 +186,20 @@ class SlimProtoCoordinator: ObservableObject {
     /// the new stream waiting forever (bd 6lvg, captured in the outage rig).
     private var lastConnectedAt: Date?
     private var lastServerStreamStartAt: Date?
+    /// The server ("host:port") of the last connection in this process: a
+    /// reconnect HELO is only for the server that has our session.
+    private var sessionServer: String?
+    /// The streaming track's decode ended while we couldn't reach the server.
+    /// A cut download ends exactly like a finished one, so its STMd (and the
+    /// STMu when the buffer drains) wait until a reconnect HELO, when LMS can
+    /// tell us the track's duration. Main thread only.
+    private var decodeEndHeld = false
+    private var drainHeld = false
+    private var resolvingHeldTrackEnd = false
+    /// Where the audio was (track, time) when a reconnect HELO went out under
+    /// an outage hold. After LMS's 300s forget time it ignores the bit and
+    /// restarts at its own saved position; this is where to put it instead.
+    private var reconnectTarget: RecoveryTarget?
     /// Last time any SlimProto frame arrived from the server.
     private var lastServerMessageAt: Date?
 
@@ -1495,6 +1509,11 @@ class SlimProtoCoordinator: ObservableObject {
                 if shouldPlay && self.serverStartedStreamSinceConnect {
                     os_log(.info, log: self.logger, "🔄 Network restored: server already restarted the stream - skipping jump")
                     self.liftPreMuteForAudibleRecovery()
+                    if self.client.lastHeloWasReconnect { self.correctForgottenRestart() }
+                    return
+                }
+                if self.client.lastHeloWasReconnect && !self.serverStartedStreamSinceConnect {
+                    self.continueAfterReconnectHelo(shouldPlay: shouldPlay)
                     return
                 }
                 guard shouldPlay else {
@@ -1507,6 +1526,21 @@ class SlimProtoCoordinator: ObservableObject {
             }
 
         case .none:
+            // A reconnect that came from the network monitor rather than the
+            // connection manager sets no trigger, but an outage hold means
+            // playback was interrupted: check it like a network-restored one.
+            if client.lastHeloWasReconnect && outageHoldActive {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self = self else { return }
+                    if self.serverStartedStreamSinceConnect {
+                        self.correctForgottenRestart()
+                        return
+                    }
+                    guard self.outageHoldActive else { return }
+                    self.continueAfterReconnectHelo(shouldPlay: true)
+                }
+                return
+            }
             // No recovery needed - normal connect (e.g., initial app launch)
             os_log(.info, log: logger, "📡 Normal connect - no recovery needed")
         }
@@ -1516,6 +1550,27 @@ class SlimProtoCoordinator: ObservableObject {
 // MARK: - SlimProtoClientDelegate
 extension SlimProtoCoordinator: SlimProtoClientDelegate {
     
+    func slimProtoShouldHeloReconnect() -> Bool {
+        // In a sync group LMS doesn't restart a reconnecting member (restoreSync),
+        // so our buffer would play on out of sync with the others: keep the fresh HELO.
+        let reconnect = settings.loadSyncGroupID() == nil && Self.heloShouldReconnect(
+            enabled: settings.seamlessReconnect,
+            sameServerAsSession: sessionServer == currentSessionServer,
+            trigger: pendingRecoveryTrigger,
+            playerState: audioManager.getPlayerState(),
+            stalled: audioManager.isPushStreamStalled(),
+            outageHold: outageHoldActive)
+        reconnectTarget = (reconnect && outageHoldActive) ? Self.savedRecoveryTarget(
+            hasTimestamp: true,
+            index: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+            position: getCurrentTimeForSaving()) : nil
+        os_log(.info, log: logger, "🤝 HELO: %{public}s (trigger %{public}s, player %{public}s, hold %{public}s)",
+               reconnect ? "reconnect - LMS keeps the session" : "fresh",
+               String(describing: pendingRecoveryTrigger), audioManager.getPlayerState(),
+               outageHoldActive ? "ON" : "OFF")
+        return reconnect
+    }
+
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         lastConnectedAt = Date()
@@ -1535,9 +1590,18 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Radio: make LMS proxy internet streams for our player (GH #97).
         applyProxiedStreamingPolicy()
 
+        let reconnectHelo = client.lastHeloWasReconnect
+        sessionServer = currentSessionServer
+
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
+
+        if reconnectHelo && decodeEndHeld {
+            resolveHeldTrackEnd()
+        } else if !reconnectHelo {
+            clearHeldTrackEnd()  // LMS restarts the stream or we recover: the held end means nothing now
+        }
 
         // Notify observers (CarPlay uses this for event-driven data loading)
         NotificationCenter.default.post(name: .slimProtoDidConnect, object: nil)
@@ -1591,6 +1655,12 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Record that we received a command (shows connection is alive)
         lastServerMessageAt = Date()
         connectionManager.recordHeartbeatResponse()
+
+        // A decode end held while the connection was quiet but never dropped:
+        // the server is talking again, so settle it now (no reconnect will).
+        if decodeEndHeld && !resolvingHeldTrackEnd {
+            resolveHeldTrackEnd()
+        }
 
         // Handle serv packet for sync group persistence
         if command.type == "serv" {
@@ -1887,6 +1957,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
         lastServerStreamStartAt = Date()
+        clearHeldTrackEnd()
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
@@ -1923,6 +1994,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
         lastServerStreamStartAt = Date()
+        clearHeldTrackEnd()
         // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
         //   '0' (0x30) = WAIT for unpause ('u')                           — used for sync groups + fade-in transitions
         //   '1' (0x31) = autoplay immediately
@@ -2078,6 +2150,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        clearHeldTrackEnd()
         DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
         let shownPosition = getCurrentInterpolatedTime().time
@@ -2132,7 +2205,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     /// Send STMd message when decoder completes naturally (like squeezelite DECODE_COMPLETE)
     /// This tells the server the track finished decoding and triggers next track queueing
-    func sendTrackDecodeComplete() {
+    func sendTrackDecodeComplete(mayHold: Bool = true) {
+        if mayHold && settings.seamlessReconnect && !connectionIsLive {
+            // Maybe the end of the track, maybe the outage cutting the download.
+            decodeEndHeld = true
+            os_log(.info, log: logger, "📬 Decode ended while the server is unreachable - holding STMd until LMS can say if the track ended")
+            return
+        }
         let timestamp = Date()
         os_log(.error, log: logger, "✅✅✅ TRACK DECODE COMPLETE - sending STMd to server")
         os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
@@ -2173,6 +2252,11 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// to its Stopped event: end-of-playlist → clean stop (strm 'q'); next track
     /// still being prepared → plays it when ready. bd LMS_StreamTest-nzj
     func sendPlaybackComplete() {
+        if decodeEndHeld {
+            drainHeld = true
+            os_log(.info, log: logger, "📬 Output drained after a held decode end - holding STMu too")
+            return
+        }
         os_log(.info, log: logger, "🏁 Playback complete (output drained) - sending STMu to server")
         client.sendStatus("STMu")
     }
@@ -2435,6 +2519,14 @@ extension SlimProtoCoordinator {
             // when the jump was issued — hold it until the window closes.
             if serverTimeUpdatesSuppressed() {
                 os_log(.info, log: logger, "⏱️ Ignoring server-time poll during recovery window (server=%.2f)", serverTime)
+                return
+            }
+
+            // A player LMS has marked disconnected has a frozen time (where the
+            // outage began) while our buffer plays on. Taking it would rewind
+            // the tracker, and a recovery would jump back to it.
+            if Self.statusPlayerConnected(result) != true {
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll: LMS has us disconnected (frozen time %.2f)", serverTime)
                 return
             }
 
@@ -3573,6 +3665,299 @@ extension SlimProtoCoordinator {
     /// (immediate, after startPlayback), autostart='0'/'2' jiffies=0 (after
     /// resumePlayback runs via didResumeStream), and autostart='0'/'2' jiffies>0
     /// (after sync-start timer fires BASS_ChannelPlay at the target time).
+    // MARK: - Reconnect HELO (ride out a network drop)
+
+    private var currentSessionServer: String {
+        "\(settings.activeServerHost):\(settings.activeServerSlimProtoPort)"
+    }
+
+    /// Whether a connect's HELO says "reconnect" (squeezelite sets it on every
+    /// connect after the first). Only while we still hold the session: the
+    /// same server, a track playing, paused or stalled locally, and no
+    /// recovery that wants LMS's fresh-connect behaviour (app open and lock
+    /// screen recoveries keep it, as tested in build 14).
+    static func heloShouldReconnect(enabled: Bool, sameServerAsSession: Bool, trigger: RecoveryTrigger,
+                                    playerState: String, stalled: Bool, outageHold: Bool) -> Bool {
+        guard enabled, sameServerAsSession else { return false }
+        switch trigger {
+        case .networkRestored, .none: break
+        default: return false
+        }
+        return playerState == "Playing" || playerState == "Paused" || stalled || outageHold
+    }
+
+    /// After a reconnect HELO LMS keeps our session and sends nothing. If the
+    /// audio is still flowing from the buffer there is nothing to do; if it
+    /// ran dry or the download was cut, jump to where we are (LMS won't
+    /// restart on its own, so the jump can't collide with a server restart).
+    /// A held decode end is settled by resolveHeldTrackEnd instead.
+    private func continueAfterReconnectHelo(shouldPlay: Bool, attempt: Int = 0, generation: Int? = nil) {
+        guard !decodeEndHeld else { return }
+        // Another recovery (the hold's watchdog, a user play) took over meanwhile.
+        let generation = generation ?? recoveryGeneration
+        guard generation == recoveryGeneration, !isRecoveryInProgress else { return }
+        // Only a server that has answered on this connection has kept anything:
+        // a socket can connect and drop again at once on a flaky path.
+        guard serverHeardRecently else {
+            guard attempt < 10, connectionManager.connectionState.isConnected else {
+                os_log(.info, log: logger, "🔁 Reconnect HELO: server never answered on this connection - leaving it to the next reconnect")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.continueAfterReconnectHelo(shouldPlay: shouldPlay, attempt: attempt + 1, generation: generation)
+            }
+            return
+        }
+        let stream = audioManager.pushStreamState()
+        let intact = stream.connected || stream.completedNaturally
+        let state = audioManager.getPlayerState()
+        if !shouldPlay {
+            if intact {
+                os_log(.info, log: logger, "🔁 Reconnected: LMS kept our paused session - nothing to restore")
+            } else {
+                os_log(.info, log: logger, "🔁 Reconnected paused, but the download was cut - recovering")
+                performPlaylistRecovery(shouldPlay: false)
+            }
+            return
+        }
+        if intact && state == "Playing" {
+            confirmKeptSession()
+            return
+        }
+        // A frozen download that came back can take a moment to refill a dry buffer.
+        if intact && attempt < 13 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self = self, self.outageHoldActive else { return }
+                self.continueAfterReconnectHelo(shouldPlay: true, attempt: attempt + 1, generation: generation)
+            }
+            return
+        }
+        os_log(.info, log: logger, "🔁 Reconnected, audio not flowing (state %{public}s, download %{public}s) - jump to our position",
+               state, intact ? "open" : "cut")
+        unlessPausedOnServer {
+            self.performPlaylistRecovery(shouldPlay: true)
+        }
+    }
+
+    /// What to do when our audio played on through the outage and LMS kept the
+    /// session. LMS may have moved on meanwhile (another controller paused,
+    /// stopped or changed the song while our socket was gone: its strm never
+    /// reached us, and the reconnect bit means it won't restart us), so check
+    /// before calling it kept.
+    enum KeptSessionCheck: Equatable {
+        case kept
+        case pauseLocally      // LMS paused us
+        case stopLocally       // LMS stopped us
+        case followServer      // LMS is on another track: play what it has
+    }
+
+    static func keptSessionCheck(serverMode: String?, serverIndex: Int?, localIndex: Int?) -> KeptSessionCheck {
+        switch serverMode {
+        case "pause": return .pauseLocally
+        case "stop": return .stopLocally
+        default: break
+        }
+        if let server = serverIndex, let local = localIndex, server != local { return .followServer }
+        return .kept
+    }
+
+    /// Ask LMS for its state; keep the session, or have LMS send its state
+    /// again now that we're connected (its own commands re-issue the strm).
+    private func confirmKeptSession() {
+        let statusCommand: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, self.outageHoldActive else { return }
+                let result = response["result"] as? [String: Any]
+                let mode = result?["mode"] as? String
+                let index = Self.playlistIndex(fromStatus: result)
+                let local = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+                let check = Self.keptSessionCheck(serverMode: mode, serverIndex: index, localIndex: local)
+                os_log(.info, log: self.logger, "🔁 Reconnected, audio never stopped; LMS: %{public}s track %{public}s (ours %{public}s) → %{public}s",
+                       mode ?? "?", index.map(String.init) ?? "?", local.map(String.init) ?? "?", String(describing: check))
+                switch check {
+                case .kept:
+                    self.endOutageHold(reason: "reconnected - session kept")
+                case .pauseLocally:
+                    self.endOutageHold(reason: "paused on the server meanwhile")
+                    self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                   "params": [self.settings.playerMACAddress, ["pause", "1"]]]) { _ in }
+                case .stopLocally:
+                    self.endOutageHold(reason: "stopped on the server meanwhile")
+                    self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                   "params": [self.settings.playerMACAddress, ["stop"]]]) { _ in }
+                case .followServer:
+                    guard let index = index else { return }
+                    let time = (result?["time"] as? Double) ?? 0
+                    let jump: [String: Any] = [
+                        "id": 1, "method": "slim.request",
+                        "params": [self.settings.playerMACAddress, [
+                            "playlist", "jump", index, 1, 0, ["timeOffset": time]
+                        ]]
+                    ]
+                    self.sendJSONRPCCommandDirect(jump) { _ in }   // the hold ends when that stream plays
+                }
+            }
+        }
+    }
+
+    /// LMS restarted a forgotten player (after 300s it ignores the reconnect
+    /// bit: resumeOnPower(1) jumps to the position it saved when we dropped).
+    /// The audio played on from our buffer after that, so the restart is
+    /// behind where the user stopped hearing it. Once LMS's own restart is
+    /// playing, a jump to our target can't collide with it (it's an ordinary
+    /// jump, like a seek from Material); same track only.
+    static func forgottenRestartNeedsJump(serverIndex: Int?, serverTime: Double, mode: String?,
+                                          target: RecoveryTarget, tolerance: Double = 5) -> Bool {
+        guard mode == "play", serverIndex == target.index else { return false }
+        return abs(serverTime - target.position) > tolerance
+    }
+
+    private func correctForgottenRestart() {
+        guard let target = reconnectTarget else { return }
+        reconnectTarget = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self = self else { return }
+            let statusCommand: [String: Any] = [
+                "id": 1, "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, let result = response["result"] as? [String: Any] else { return }
+                    let time = (result["time"] as? Double) ?? 0
+                    let mode = result["mode"] as? String
+                    let index = Self.playlistIndex(fromStatus: result)
+                    guard Self.forgottenRestartNeedsJump(serverIndex: index, serverTime: time, mode: mode, target: target) else {
+                        os_log(.info, log: self.logger, "🔁 LMS restart at %.1f (track %{public}s, %{public}s) - no correction (target track %d at %.1f)",
+                               time, index.map(String.init) ?? "?", mode ?? "?", target.index, target.position)
+                        return
+                    }
+                    os_log(.info, log: self.logger, "🔁 LMS forgot us and restarted at %.1f - jumping to where the audio stopped: track %d at %.1f",
+                           time, target.index, target.position)
+                    self.simpleTimeTracker.updateFromServer(time: target.position, playing: true)
+                    self.suppressServerTimePollsUntil = Date().addingTimeInterval(3.0)
+                    let jump: [String: Any] = [
+                        "id": 1, "method": "slim.request",
+                        "params": [self.settings.playerMACAddress, [
+                            "playlist", "jump", target.index, 1, 0, ["timeOffset": target.position]
+                        ]]
+                    ]
+                    self.sendJSONRPCCommandDirect(jump) { _ in }
+                }
+            }
+        }
+    }
+
+    /// The held decode end was the real end of the track: the decoded audio
+    /// reaches the track's duration (within `tolerance`). With the next track
+    /// decoding, its decode started at 0, so its decoded seconds are track
+    /// time; with the current one, the end is the playhead's track time plus
+    /// the decoded audio still waiting to play. An unknown duration (radio)
+    /// counts as an end, as before.
+    static func heldDecodeEndWasTrackEnd(decodingAhead: Bool, decodedEndSeconds: Double?,
+                                         trackTime: Double, bufferedSeconds: Double,
+                                         currentDuration: Double, nextDuration: Double,
+                                         tolerance: Double = 3.0) -> Bool {
+        if decodingAhead {
+            guard nextDuration > 0, let end = decodedEndSeconds else { return true }
+            return end >= nextDuration - tolerance
+        }
+        guard currentDuration > 0 else { return true }
+        return trackTime + bufferedSeconds >= currentDuration - tolerance
+    }
+
+    /// Settle a held decode end after a reconnect HELO: send the STMd (and
+    /// STMu) we held, or recover from the cut download.
+    private func resolveHeldTrackEnd() {
+        guard decodeEndHeld, !resolvingHeldTrackEnd else { return }
+        resolvingHeldTrackEnd = true
+        // Give a forgotten client's restart (LMS ignores the bit then) time to arrive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self, self.decodeEndHeld else { return }
+            if self.serverStartedStreamSinceConnect {
+                os_log(.info, log: self.logger, "📬 LMS restarted the stream itself - dropping the held decode end")
+                self.clearHeldTrackEnd()
+                return
+            }
+            // Snapshot before asking: a gapless boundary crossed while the
+            // reply is on its way would mix up which track the numbers are for.
+            let stream = self.audioManager.pushStreamState()
+            let trackTime = self.getCurrentInterpolatedTime().time
+            let buffered = self.audioManager.bufferedPlaybackSeconds()
+            let localIndex = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+            let statusCommand: [String: Any] = [
+                "id": 1, "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 2, "tags:d"]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.decodeEndHeld else { return }
+                    guard let result = response["result"] as? [String: Any] else {
+                        // Can't tell: recover rather than risk cutting the track short.
+                        os_log(.error, log: self.logger, "📬 No status for the held decode end - recovering")
+                        self.recoverFromCutDownload()
+                        return
+                    }
+                    let loop = result["playlist_loop"] as? [[String: Any]] ?? []
+                    func duration(_ i: Int) -> Double {
+                        guard i < loop.count else { return 0 }
+                        return (loop[i]["duration"] as? Double) ?? Double("\(loop[i]["duration"] ?? "")") ?? 0
+                    }
+                    if let local = localIndex, let server = Self.playlistIndex(fromStatus: result), local != server {
+                        // LMS isn't on the track we're playing: its durations don't apply.
+                        os_log(.info, log: self.logger, "📬 Held decode end: LMS is on track %d, we're on %d - recovering", server, local)
+                        self.recoverFromCutDownload()
+                        return
+                    }
+                    let ended = Self.heldDecodeEndWasTrackEnd(
+                        decodingAhead: stream.decodingAhead, decodedEndSeconds: stream.decodedEndSeconds,
+                        trackTime: trackTime, bufferedSeconds: buffered,
+                        currentDuration: duration(0), nextDuration: duration(1))
+                    os_log(.info, log: self.logger,
+                           "📬 Held decode end: %{public}s (ahead %{public}s, decoded %.1f, track time %.1f + buffered %.1f, durations %.1f / %.1f)",
+                           ended ? "track ended - sending STMd" : "download was cut - recovering",
+                           stream.decodingAhead ? "YES" : "NO", stream.decodedEndSeconds ?? -1,
+                           trackTime, buffered, duration(0), duration(1))
+                    if ended {
+                        let drained = self.drainHeld
+                        self.clearHeldTrackEnd()
+                        self.sendTrackDecodeComplete(mayHold: false)
+                        if drained {
+                            self.sendPlaybackComplete()
+                        } else if self.audioManager.getPlayerState() == "Playing" {
+                            // The tail still plays and the next track follows gaplessly:
+                            // nothing will "start playback" to end the hold.
+                            self.endOutageHold(reason: "reconnected - track ended normally")
+                        }
+                    } else {
+                        self.recoverFromCutDownload()
+                    }
+                }
+            }
+        }
+    }
+
+    private func recoverFromCutDownload() {
+        clearHeldTrackEnd()
+        if outageHoldActive || audioManager.getPlayerState() == "Playing" {
+            unlessPausedOnServer {
+                self.performPlaylistRecovery(shouldPlay: true)
+            }
+        } else {
+            performPlaylistRecovery(shouldPlay: false)
+        }
+    }
+
+    private func clearHeldTrackEnd() {
+        decodeEndHeld = false
+        drainHeld = false
+        resolvingHeldTrackEnd = false
+    }
+
     // MARK: - Outage Hold (bd 6lvg, 8tjj)
 
     /// Start the outage hold. No-op if already on: the time limit counts from
@@ -3616,6 +4001,11 @@ extension SlimProtoCoordinator {
     private func scheduleOutageHoldWatchdog(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) { [weak self] in
             guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
+            if self.audioManager.getPlayerState() == "Playing" && self.serverHeardRecently {
+                // Audio is flowing on a live connection: nothing left to recover.
+                self.endOutageHold(reason: "playing on a live connection")
+                return
+            }
             if self.connectionManager.connectionState.isConnected,
                !self.isRecoveryInProgress,
                !self.serverStartedStreamRecently {

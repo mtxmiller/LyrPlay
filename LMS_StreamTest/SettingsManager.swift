@@ -34,6 +34,15 @@ class SettingsManager: ObservableObject {
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
+
+    /// Hidden developer switch (no UI): reconnect with squeezelite's HELO
+    /// reconnect bit, so LMS keeps the session through a network drop. Off =
+    /// the old fresh HELO (LMS restarts or stops the stream on reconnect).
+    /// Set with `defaults write elm.LMS-StreamTest SeamlessReconnect -bool NO`
+    /// or the launch argument `-SeamlessReconnect NO`.
+    var seamlessReconnect: Bool {
+        UserDefaults.standard.object(forKey: "SeamlessReconnect") as? Bool ?? true
+    }
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
