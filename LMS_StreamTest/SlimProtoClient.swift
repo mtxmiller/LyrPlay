@@ -119,6 +119,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     private var offlineEvents = SlimProtoOfflineEvents()
     /// The last HELO carried the reconnect bit. Main thread only.
     private(set) var lastHeloWasReconnect = false
+
+    /// Forget the track events held while offline. Main thread only.
+    func discardHeldEvents() {
+        _ = offlineEvents.take(afterReconnect: false)
+    }
     
     // MARK: - Connection State
     private var host: String = ""

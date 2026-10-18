@@ -432,6 +432,18 @@ class AudioManager: NSObject, ObservableObject {
         return streamDecoder.streamState()
     }
 
+    /// Continue the cut track from a downloaded copy (see AudioStreamDecoder).
+    func continueFromLocalFile(path: String, estimatedSeconds: Double, adjustTrackOffset: Bool,
+                               completion: @escaping (AudioStreamDecoder.ContinuationResult?) -> Void) {
+        streamDecoder.continueFromLocalFile(path: path, estimatedSeconds: estimatedSeconds,
+                                            adjustTrackOffset: adjustTrackOffset, completion: completion)
+    }
+
+    /// Let the decoder end a stalled network stream (see AudioStreamDecoder).
+    func abandonNetworkStream() {
+        streamDecoder.abandonNetworkStream()
+    }
+
     /// Seconds of decoded audio queued but not yet played (push stream).
     func bufferedPlaybackSeconds() -> Double {
         let bytesPerSecond = streamDecoder.nominalBytesPerSecond

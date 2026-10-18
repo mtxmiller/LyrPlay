@@ -37,6 +37,8 @@ class SlimProtoConnectionManager {
     private let networkQueue = DispatchQueue(label: "com.lmsstream.network")
     private var isNetworkAvailable = false
     private var isNetworkExpensive = false
+    /// The current path is metered (cellular, personal hotspot).
+    var networkIsExpensive: Bool { isNetworkExpensive }
     
     // MARK: - Background Task Management
     #if os(iOS)

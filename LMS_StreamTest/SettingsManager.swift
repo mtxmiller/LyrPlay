@@ -41,7 +41,16 @@ class SettingsManager: ObservableObject {
     /// Set with `defaults write elm.LMS-StreamTest SeamlessReconnect -bool NO`
     /// or the launch argument `-SeamlessReconnect NO`.
     var seamlessReconnect: Bool {
-        UserDefaults.standard.object(forKey: "SeamlessReconnect") as? Bool ?? true
+        // integer/bool(forKey:) also parse launch arguments, which arrive as strings.
+        UserDefaults.standard.object(forKey: "SeamlessReconnect") == nil
+            ? true : UserDefaults.standard.bool(forKey: "SeamlessReconnect")
+    }
+
+    /// Hidden developer switch (no UI yet): download the queue ahead to play
+    /// through a long dead spot. 0 = off, 1 = download on Wi-Fi only,
+    /// 2 = always. Launch argument `-Lifeboat 2`.
+    var lifeboatMode: Int {
+        UserDefaults.standard.integer(forKey: "Lifeboat")
     }
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume

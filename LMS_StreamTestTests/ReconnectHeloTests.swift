@@ -131,6 +131,13 @@ struct ForgottenRestartTests {
         #expect(!SlimProtoCoordinator.forgottenRestartNeedsJump(serverIndex: 0, serverTime: 61.0, mode: "play", target: target))
     }
 
+    @Test func afterDownloadedCopiesAnyTrackIsCorrected() {
+        // Offline the copies moved us on to track 2; the forgotten LMS restarts track 0.
+        let lifeboatTarget = SlimProtoCoordinator.RecoveryTarget(index: 2, position: 23)
+        #expect(SlimProtoCoordinator.forgottenRestartNeedsJump(serverIndex: 0, serverTime: 29.4, mode: "play",
+                                                               target: lifeboatTarget, anyTrack: true))
+    }
+
     @Test func leavesAnotherTrackOrAStoppedPlayer() {
         #expect(!SlimProtoCoordinator.forgottenRestartNeedsJump(serverIndex: 1, serverTime: 3.0, mode: "play", target: target))
         #expect(!SlimProtoCoordinator.forgottenRestartNeedsJump(serverIndex: 0, serverTime: 0, mode: "stop", target: target))
