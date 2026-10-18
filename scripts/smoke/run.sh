@@ -9,8 +9,8 @@
 #   scripts/smoke/run.sh S1 S5       # subset
 #
 # Env overrides:
-#   LYRPLAY_LMS_HOST   (192.168.1.8)   LYRPLAY_LMS_PORT  (9000)
-#   LYRPLAY_SLIM_PORT  (3483)          LYRPLAY_SIM_NAME  (iPhone 17 — must
+#   LYRPLAY_LMS_HOST   (192.168.1.8)   LYRPLAY_LMS_PORT  (9010, lms-test)
+#   LYRPLAY_SLIM_PORT  (3490, lms-test) LYRPLAY_SIM_NAME  (iPhone 17 — must
 #                                      exist on the LATEST installed runtime)
 #   LYRPLAY_PLAYER_NAME (SmokeTest Player)
 #   LYRPLAY_APP_PATH   prebuilt .app — skips the xcodebuild step
@@ -20,8 +20,8 @@
 set -euo pipefail
 
 LMS_HOST="${LYRPLAY_LMS_HOST:-192.168.1.8}"
-LMS_PORT="${LYRPLAY_LMS_PORT:-9000}"
-SLIM_PORT="${LYRPLAY_SLIM_PORT:-3483}"
+LMS_PORT="${LYRPLAY_LMS_PORT:-9010}"
+SLIM_PORT="${LYRPLAY_SLIM_PORT:-3490}"
 SIM_NAME="${LYRPLAY_SIM_NAME:-iPhone 17}"
 PLAYER_NAME="${LYRPLAY_PLAYER_NAME:-SmokeTest Player}"
 BUNDLE_ID="elm.LMS-StreamTest"
@@ -71,20 +71,25 @@ print(max(matches)[1])
 echo "-- simulator: $SIM_NAME ($UDID)"
 xcrun simctl bootstatus "$UDID" -b >/dev/null
 
-# 3. Pre-seed UserDefaults so the app skips onboarding and connects straight
-#    to the test server. Keys/types must match SettingsManager.Keys.
-xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" ServerHost -string "$LMS_HOST"
-xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" ServerWebPort -int "$LMS_PORT"
-xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" ServerSlimProtoPort -int "$SLIM_PORT"
-xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" PlayerName -string "$PLAYER_NAME"
+# 3. Install, then pre-seed UserDefaults so the app skips onboarding and
+#    connects straight to the test server. Keys/types must match
+#    SettingsManager.Keys. The values go in the app's own data container: a
+#    plain `defaults write <bundle id>` lands in the simulator-wide domain,
+#    which the app does not read once its container plist exists.
+xcrun simctl install "$UDID" "$APP"
+xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+PREFS="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)/Library/Preferences/$BUNDLE_ID"
+seed() { xcrun simctl spawn "$UDID" defaults write "$PREFS" "$@"; }
+seed ServerHost -string "$LMS_HOST"
+seed ServerWebPort -int "$LMS_PORT"
+seed ServerSlimProtoPort -int "$SLIM_PORT"
+seed PlayerName -string "$PLAYER_NAME"
 # SettingsVersion deliberately NOT seeded: absent (0) is the app's benign
 # first-launch path; a hardcoded literal would silently diverge when the app
 # bumps currentSettingsVersion.
-xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" IsConfigured -bool YES
+seed IsConfigured -bool YES
 
-# 4. Install + fresh launch
-xcrun simctl install "$UDID" "$APP"
-xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+# 4. Fresh launch
 xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
 echo "-- app launched, running scenarios"
 

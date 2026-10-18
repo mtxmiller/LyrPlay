@@ -43,8 +43,10 @@ codesign), boots the simulator, pre-seeds UserDefaults so the app launches
 already configured against the test server, and runs the scenarios. Exit
 nonzero on any failure.
 
+The defaults point at the `lms-test` server on ser5 (web 9010, SlimProto 3490; demo library), so test players never land on the production LMS.
+
 Env knobs (defaults): `LYRPLAY_LMS_HOST` (192.168.1.8), `LYRPLAY_LMS_PORT`
-(9000), `LYRPLAY_SLIM_PORT` (3483), `LYRPLAY_SIM_NAME` (iPhone 17),
+(9010), `LYRPLAY_SLIM_PORT` (3490), `LYRPLAY_SIM_NAME` (iPhone 17),
 `LYRPLAY_PLAYER_NAME` (SmokeTest Player), `LYRPLAY_PLAYER_ID` (skips
 discovery), `LYRPLAY_SOAK_SECONDS` (60), `LYRPLAY_APP_PATH` (prebuilt .app,
 skips the build).
