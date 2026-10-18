@@ -46,6 +46,23 @@ class SettingsManager: ObservableObject {
             ? true : UserDefaults.standard.bool(forKey: "SeamlessReconnect")
     }
 
+    /// The hidden switches given as launch arguments (Xcode scheme, devicectl,
+    /// simctl) are kept, so a later launch from the home screen still has them.
+    /// `-Lifeboat 0` / `-SeamlessReconnect YES` turn them back.
+    private func persistDeveloperSwitchesFromLaunchArguments() {
+        let args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        if let value = args["Lifeboat"] {
+            let mode = Int("\(value)") ?? 0
+            UserDefaults.standard.set(mode, forKey: "Lifeboat")
+            os_log(.info, log: logger, "🛠️ Lifeboat mode %d saved from launch arguments", mode)
+        }
+        if let value = args["SeamlessReconnect"] {
+            let on = ["1", "yes", "true"].contains("\(value)".lowercased())
+            UserDefaults.standard.set(on, forKey: "SeamlessReconnect")
+            os_log(.info, log: logger, "🛠️ Seamless reconnect %{public}s saved from launch arguments", on ? "ON" : "OFF")
+        }
+    }
+
     /// Hidden developer switch (no UI yet): download the queue ahead to play
     /// through a long dead spot. 0 = off, 1 = download on Wi-Fi only,
     /// 2 = always. Launch argument `-Lifeboat 2`.
@@ -333,6 +350,7 @@ class SettingsManager: ObservableObject {
         os_log(.info, log: logger, "Loading settings from UserDefaults")
         
         migrateSettingsIfNeeded()
+        persistDeveloperSwitchesFromLaunchArguments()
         
         serverHost = UserDefaults.standard.string(forKey: Keys.serverHost) ?? ""
         serverWebPort = UserDefaults.standard.object(forKey: Keys.serverWebPort) as? Int ?? 9000
