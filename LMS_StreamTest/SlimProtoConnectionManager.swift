@@ -13,6 +13,9 @@ protocol SlimProtoConnectionManagerDelegate: AnyObject {
     func connectionManagerShouldCheckHealth()
     func connectionManagerShouldStorePosition()
     func connectionManagerDidReconnectAfterTimeout()
+    /// The network went away or moved to another interface (Wi-Fi ↔ cellular):
+    /// a socket opened before this may be bound to a dead path.
+    func connectionManagerNetworkPathChanged()
 }
 
 class SlimProtoConnectionManager {
@@ -167,6 +170,7 @@ class SlimProtoConnectionManager {
     
     private func handleNetworkPathUpdate(_ path: NWPath) {
         let wasAvailable = isNetworkAvailable
+        let previousStatus = networkStatus
         isNetworkAvailable = path.status == .satisfied
         isNetworkExpensive = path.isExpensive
         
@@ -188,6 +192,13 @@ class SlimProtoConnectionManager {
         os_log(.info, log: logger, "🌐 Network status: %{public}s (expensive: %{public}s)",
                networkStatus.displayName, isNetworkExpensive ? "YES" : "NO")
         
+        // Before the restore below reconnects: the current socket can't be trusted.
+        // Not on the first update at launch (wasAvailable starts false).
+        if Self.pathInvalidatesSocket(wasAvailable: wasAvailable, isAvailable: isNetworkAvailable,
+                                      previous: previousStatus, current: networkStatus) {
+            delegate?.connectionManagerNetworkPathChanged()
+        }
+
         // Handle network state changes
         if !wasAvailable && isNetworkAvailable {
             handleNetworkRestored()
@@ -218,6 +229,13 @@ class SlimProtoConnectionManager {
             os_log(.info, log: logger, "🔄 Network restored - attempting reconnection")
             attemptReconnection()
         }
+    }
+
+    /// The network was lost, or stayed up but moved to another interface.
+    static func pathInvalidatesSocket(wasAvailable: Bool, isAvailable: Bool,
+                                      previous: NetworkStatus, current: NetworkStatus) -> Bool {
+        guard wasAvailable else { return false }
+        return !isAvailable || previous != current
     }
 
     /// Pure decision: should a network-restore event trigger a reconnection attempt?
