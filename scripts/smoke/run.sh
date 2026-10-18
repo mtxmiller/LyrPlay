@@ -13,6 +13,10 @@
 #   LYRPLAY_SLIM_PORT  (3490, lms-test) LYRPLAY_SIM_NAME  (iPhone 17 — must
 #                                      exist on the LATEST installed runtime)
 #   LYRPLAY_PLAYER_NAME (SmokeTest Player)
+#   LYRPLAY_APP_WEB_PORT / LYRPLAY_APP_SLIM_PORT   ports the APP is given
+#                      (default: the LMS ports). Set 9011 / 3491 to send the
+#                      app through faultproxy.py; the oracle stays on the LMS.
+#   LYRPLAY_LAUNCH_ARGS  extra app launch arguments, e.g. "-SeamlessReconnect NO"
 #   LYRPLAY_APP_PATH   prebuilt .app — skips the xcodebuild step
 #
 # The Debug build is cached in build/smoke-derived-data; delete it to force
@@ -22,6 +26,8 @@ set -euo pipefail
 LMS_HOST="${LYRPLAY_LMS_HOST:-192.168.1.8}"
 LMS_PORT="${LYRPLAY_LMS_PORT:-9010}"
 SLIM_PORT="${LYRPLAY_SLIM_PORT:-3490}"
+APP_WEB_PORT="${LYRPLAY_APP_WEB_PORT:-$LMS_PORT}"
+APP_SLIM_PORT="${LYRPLAY_APP_SLIM_PORT:-$SLIM_PORT}"
 SIM_NAME="${LYRPLAY_SIM_NAME:-iPhone 17}"
 PLAYER_NAME="${LYRPLAY_PLAYER_NAME:-SmokeTest Player}"
 BUNDLE_ID="elm.LMS-StreamTest"
@@ -81,8 +87,8 @@ xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
 PREFS="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)/Library/Preferences/$BUNDLE_ID"
 seed() { xcrun simctl spawn "$UDID" defaults write "$PREFS" "$@"; }
 seed ServerHost -string "$LMS_HOST"
-seed ServerWebPort -int "$LMS_PORT"
-seed ServerSlimProtoPort -int "$SLIM_PORT"
+seed ServerWebPort -int "$APP_WEB_PORT"
+seed ServerSlimProtoPort -int "$APP_SLIM_PORT"
 seed PlayerName -string "$PLAYER_NAME"
 # SettingsVersion deliberately NOT seeded: absent (0) is the app's benign
 # first-launch path; a hardcoded literal would silently diverge when the app
@@ -90,7 +96,8 @@ seed PlayerName -string "$PLAYER_NAME"
 seed IsConfigured -bool YES
 
 # 4. Fresh launch
-xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
+# shellcheck disable=SC2086  # word-splitting the args is the point
+xcrun simctl launch "$UDID" "$BUNDLE_ID" ${LYRPLAY_LAUNCH_ARGS:-} >/dev/null
 echo "-- app launched, running scenarios"
 
 # 5. Oracle scenarios (exit code propagates)
