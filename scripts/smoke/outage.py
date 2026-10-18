@@ -12,6 +12,7 @@ while the player's "network" is down.
 
 Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
     LYRPLAY_FAULT_CTL   fault proxy control URL (http://<LMS host>:9099)
+    LYRPLAY_LIFEBOAT=1  the app runs with -Lifeboat 2 (O4 then expects continuous playback)
 
 | ID | Outage | Pass criteria |
 |----|--------|---------------|
@@ -20,6 +21,8 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O3 | 40s, paused, connections reset | still paused at the paused time (±1s); Play resumes there |
 | O4 | 90s, playing, download killed at the start (the buffer runs dry) | same track; resumes where the audio stopped: past LMS's frozen time, behind the wall clock |
 | O5 | 320s, as O4 (LMS forgets the player after 300s) — slow, run only when named | as O4 |
+| O6 | phase 2 (`-Lifeboat 2`): 90s, download killed, stream capped at 400 kbit/s beforehand (like a mobile link) | LMS lands where continuous playback would be (±6s): the downloaded copy took over mid-track |
+| O7 | phase 2: 420s, download killed (crosses track boundaries and LMS's forget time) | as O6, on the right later track |
 """
 import os
 import subprocess
@@ -137,7 +140,13 @@ def o3_paused(oracle, album_id):
                           f"expected about {p0['time']:.1f}s on track {p0['index']}")
 
 
+LIFEBOAT = os.environ.get("LYRPLAY_LIFEBOAT") == "1"   # app launched with -Lifeboat 2
+
+
 def o4_dry(oracle, album_id):
+    if LIFEBOAT:
+        # With downloaded copies the buffer never runs dry: playback is continuous.
+        return lifeboat_continuous(oracle, album_id, 90)
     # Kill the download first: only LyrPlay's own buffer (~35s) is left, so the
     # audio stops well inside the outage. (Socket buffers alone can hold
     # minutes of compressed audio: 190s in the simulator rig.)
@@ -175,12 +184,55 @@ def o5_forgotten(oracle, album_id):
     print(f"   … resumed at {s['time']:.1f}s (start {s0['time']:.1f}s, wall clock {wall:.1f}s)")
 
 
+def expected_position(durations, index, time_in, elapsed):
+    """Track and time after `elapsed` seconds of continuous playback."""
+    t = time_in + elapsed
+    while index < len(durations) and t >= durations[index]:
+        t -= durations[index]
+        index += 1
+    return index, t
+
+
+def lifeboat_continuous(oracle, album_id, secs, kbps=0):
+    # Needs the app launched with -Lifeboat 2 and time to download the queue.
+    # kbps caps the stream like a mobile link, so socket buffers don't hold
+    # the whole track (on the LAN they do, and nothing is left to cut).
+    fault(f"/shape?kbps={kbps}")
+    try:
+        s0 = fresh_start(oracle, album_id, settle=25)
+    finally:
+        fault("/shape?kbps=0")
+    w0 = time.time()
+    durations = oracle.playlist_durations()
+    fault("/kill?scope=http")
+    outage(secs, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)  # a forgotten player's restart, then our correction jump
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 6:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±6s "
+                          "(playback did not continue through the outage)")
+
+
+def o6_lifeboat_midtrack(oracle, album_id):
+    lifeboat_continuous(oracle, album_id, 90, kbps=400)
+
+
+def o7_lifeboat_tracks(oracle, album_id):
+    lifeboat_continuous(oracle, album_id, 420)
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
     ("O3", "40s paused, cut", o3_paused),
     ("O4", "90s, download killed, dry", o4_dry),
     ("O5", "320s, LMS forgets us", o5_forgotten),   # slow: only when asked for
+    # Phase 2 (app launched with -Lifeboat 2), only when named:
+    ("O6", "90s killed, plays the copy", o6_lifeboat_midtrack),
+    ("O7", "420s, copies across tracks", o7_lifeboat_tracks),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

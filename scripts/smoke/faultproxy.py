@@ -21,6 +21,10 @@ Control (plain HTTP GET, e.g. with curl):
         blip where TCP survives.
     /kill[?scope=...]   Reset matching connections now (Wi-Fi → cellular: the
                         old address is gone).
+    /shape?kbps=N       Cap each web/stream connection's download to N kbit/s
+                        (0 = no cap). On a LAN, LMS sends a whole track in a
+                        second and it sits in socket buffers; a mobile link
+                        keeps only a little ahead.
     /end                End the current outage now (applies its `after`).
     /status             JSON: outage state and open connections.
 
@@ -98,6 +102,7 @@ class Proxy:
         self.routes = routes     # kind -> (listen port, upstream port)
         self.outage = Outage()
         self.conns = {}
+        self.kbps = 0
 
     # -- data path ------------------------------------------------------------
     async def gate(self, conn):
@@ -110,7 +115,7 @@ class Proxy:
         try:
             while True:
                 await self.gate(conn)
-                data = await reader.read(65536)
+                data = await reader.read(16384 if (self.kbps and not up) else 65536)
                 if not data:
                     break
                 await self.gate(conn)   # an outage that began during the read holds the data
@@ -122,6 +127,8 @@ class Proxy:
                     conn.down_bytes += len(data)
                 writer.write(data)
                 await writer.drain()
+                if not up and conn.kind == "http" and self.kbps > 0:
+                    await asyncio.sleep(len(data) * 8 / (self.kbps * 1000))
         except (ConnectionError, OSError, asyncio.IncompleteReadError):
             pass
         finally:
@@ -222,10 +229,13 @@ class Proxy:
                 self.kill(scope)
             elif url.path == "/end":
                 self.end_outage()
+            elif url.path == "/shape":
+                self.kbps = max(0, int(q.get("kbps", "0")))
+                log(f"SHAPE http download cap {self.kbps} kbit/s" if self.kbps else "SHAPE off")
             elif url.path != "/status":
                 raise ValueError("paths: /outage /kill /end /status")
             o = self.outage
-            body = {"outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
+            body = {"kbps": self.kbps, "outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
                                "remaining_s": round(max(0.0, o.ends_at - time.time()), 1) if o.active else 0},
                     "connections": [c.describe() for c in self.conns.values()]}
             status = "200 OK"
