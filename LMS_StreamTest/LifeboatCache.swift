@@ -87,7 +87,7 @@ final class LifeboatCache {
         where !keep.contains(name) && !name.hasSuffix(".part") {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
-        queue = wanted.filter { !hasFile($0.id) }
+        queue = wanted.filter { !hasFile($0.id) && $0.id != activeID }  // not again while it downloads
         if let activeID = activeID, !wanted.contains(where: { $0.id == activeID }) {
             active?.cancel()
             active = nil

@@ -1194,6 +1194,10 @@ class SlimProtoCoordinator: ObservableObject {
     /// and its settle paths are all dead — fully unmute here. Otherwise
     /// just lift the app-open pre-mute (bd 34l).
     private func liftPreMuteForAudibleRecovery() {
+        // A forgotten-player restart over downloaded copies stays muted until
+        // our correction jump lands (device test 2026-10-18: lifting it on
+        // "server already restarted" played the wrong song for 1.6s).
+        guard !lifeboatRestartMuted else { return }
         if audioManager.isSilentRecoveryMuted {
             audioManager.disableSilentRecoveryMode()
         } else {
