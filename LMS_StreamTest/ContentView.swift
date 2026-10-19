@@ -29,6 +29,10 @@ struct ContentView: View {
     // Drives reactive topPad injection in WebView.updateUIView: when this changes
     // (cold launch / CarPlay foreground 0→59, rotation), updateUIView re-injects.
     @State private var topInset: CGFloat = 0
+    /// Playing downloaded copies while the server can't be reached (shows the offline banner).
+    @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    private let offlinePoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private static let offlineBannerHeight: CGFloat = 30
     /// GH#75: hardware volume rocker → external player forwarding
     @StateObject private var volumeRocker = VolumeRockerForwarder()
 
@@ -147,7 +151,7 @@ struct ContentView: View {
             if let url = URL(string: materialWebURL), !hasConnectionError {
                 WebView(
                     url: url,
-                    topInset: topInset,
+                    topInset: materialTopPad,
                     isLoading: $isLoading,
                     loadError: $loadError,
                     hasConnectionError: $hasConnectionError,
@@ -182,6 +186,11 @@ struct ContentView: View {
             // Error overlay (only show when there's an error)
             if loadError != nil {
                 errorOverlay
+            }
+
+            if let offline = offlineStatus, !isLoading, loadError == nil {
+                offlineBanner(offline)
+                    .zIndex(2)
             }
 
         }
@@ -232,6 +241,10 @@ struct ContentView: View {
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()
         }
+        .onReceive(offlinePoll) { _ in
+            let status = isAppInBackground ? nil : slimProtoCoordinator.offlinePlaybackStatus
+            if status != offlineStatus { offlineStatus = status }
+        }
         .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
             pushStreamInfoToWebView()
         }
@@ -254,11 +267,11 @@ struct ContentView: View {
                 // notch, and updateUIView never corrected it because topInset itself
                 // hadn't changed.
                 os_log(.info, log: webViewLayoutLog, "📐 topPad on foreground: %dpx (window reports %dpx)",
-                       Int(topInset), Int(webView.window?.safeAreaInsets.top ?? -1))
-                injectTopPad(into: webView, top: Int(topInset), source: "willEnterForeground")
+                       Int(materialTopPad), Int(webView.window?.safeAreaInsets.top ?? -1))
+                injectTopPad(into: webView, top: Int(materialTopPad), source: "willEnterForeground")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     logWebViewViewport(webView, source: "foreground+1s")
-                    verifyTopPad(in: webView, expected: Int(topInset), source: "foreground+1s")
+                    verifyTopPad(in: webView, expected: Int(materialTopPad), source: "foreground+1s")
                 }
 
                 // Check if Material's Cometd connection is still alive after backgrounding.
@@ -723,6 +736,45 @@ struct ContentView: View {
     }
     
     // MARK: - Error Overlay (Separate from loading screen)
+    /// Material's top padding: the status bar, plus room for the offline banner.
+    private var materialTopPad: CGFloat {
+        topInset + (offlineStatus != nil && !isLoading && loadError == nil ? Self.offlineBannerHeight : 0)
+    }
+
+    /// Material can't reach the server and freezes, but the music goes on from
+    /// downloaded copies: say so, and open Settings (which shows the details).
+    private func offlineBanner(_ offline: SlimProtoCoordinator.OfflinePlaybackStatus) -> some View {
+        VStack(spacing: 0) {
+            Button {
+                showingSettings = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "wifi.slash")
+                    Text(offline.isPaused ? "Offline · paused" : "Offline · playing saved music")
+                        .fontWeight(.semibold)
+                    Text("· \(offline.minutesLeft < 1 ? "under 1 min" : "\(offline.minutesLeft) min") left")
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.footnote)
+                .foregroundColor(.black)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .frame(height: Self.offlineBannerHeight)
+                .background(Color.orange)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens Settings")
+            .padding(.top, topInset)
+            Spacer()
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.25), value: offline.isPaused)
+    }
+
     private var errorOverlay: some View {
         VStack {
             Spacer()
