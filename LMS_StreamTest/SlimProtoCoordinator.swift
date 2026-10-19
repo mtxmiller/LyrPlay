@@ -4286,19 +4286,14 @@ extension SlimProtoCoordinator {
     /// Copies may be played (whatever the network now: they were fetched earlier).
     /// Not in a sync group: our offline position would move every member (review M6).
     private var lifeboatEnabled: Bool {
-        settings.lifeboatMode != 0 && settings.loadSyncGroupID() == nil && lifeboatSupportsCurrentStream
+        settings.lifeboatMode != 0 && settings.loadSyncGroupID() == nil
     }
 
-    /// Copies are made for Opus and lossless streams only: the copy is the
-    /// original file (same audio) or the Opus transcode. For mp3/aac/ogg
-    /// streams an original would be 5-10× the stream's data and may not even
-    /// share its sample rate. No stream yet (cold launch) uses the saved plan.
-    static func lifeboatSupportsStreamFormat(_ format: String) -> Bool {
-        ["flac", "wav", "pcm", "alac", "aiff", "aif", "opus", "ops"].contains(format.lowercased())
-    }
-
-    private var lifeboatSupportsCurrentStream: Bool {
-        currentStreamFormat.isEmpty || Self.lifeboatSupportsStreamFormat(currentStreamFormat)
+    /// The stream is lossless: an original copy is then the very same audio
+    /// and must match almost perfectly. A lossy stream (mp3/aac/ogg/opus)
+    /// only resembles the copy, so the normal floor applies.
+    static func streamFormatIsLossless(_ format: String) -> Bool {
+        ["flac", "wav", "pcm", "alac", "aiff", "aif"].contains(format.lowercased())
     }
 
     /// Copies may be downloaded now: always (2), or not on a metered network (1).
@@ -4312,7 +4307,7 @@ extension SlimProtoCoordinator {
 
     /// Ask LMS for the queue ahead and keep the copies up to date.
     private func scheduleLifeboatPlan(after delay: TimeInterval) {
-        // Not in a sync group or for other lossy streams: nothing would play the copies.
+        // Not in a sync group: nothing would play the copies.
         guard lifeboatEnabled else { return }
         startLifeboatWatch()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -4462,7 +4457,8 @@ extension SlimProtoCoordinator {
         // original copy of a lossless stream) must match almost perfectly.
         let recentlyRestarted = lastServerStreamStartAt.map { Date().timeIntervalSince($0) < 8 } ?? false
         let searchSeconds: Double = recentlyRestarted ? 60 : 8
-        let minimumConfidence: Float = lifeboat.copiesAreLossy ? AudioStreamDecoder.minimumMatchConfidence : 0.97
+        let identicalAudio = !lifeboat.copiesAreLossy && Self.streamFormatIsLossless(currentStreamFormat)
+        let minimumConfidence: Float = identicalAudio ? 0.97 : AudioStreamDecoder.minimumMatchConfidence
         os_log(.info, log: logger, "🛟 Download cut in track %d near %.1fs - continuing from the downloaded copy (%.0fs window)",
                index, estimate, searchSeconds)
         clearHeldTrackEnd()

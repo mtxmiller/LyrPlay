@@ -27,6 +27,24 @@ final class LifeboatCache {
     enum Variant: String, Codable {
         case original = ""
         case opus = ".ops"
+        case mp3 = ".mp3"
+        case aac = ".aac"
+        case ogg = ".ogg"
+
+        /// The copy the server can make in the stream's own format (LMS
+        /// transcodes `download.<ext>` when it has a rule): the same kind of
+        /// audio as the stream, and a fraction of a lossless original's size.
+        static func forStreamFormat(_ format: String) -> Variant {
+            switch format.lowercased() {
+            case let f where f.contains("opus"): return .opus
+            case "mp3": return .mp3
+            case "aac": return .aac
+            case "ogg": return .ogg
+            default: return .original
+            }
+        }
+
+        var name: String { self == .original ? "original" : String(rawValue.dropFirst()) }
     }
 
     /// How far ahead to keep copies by default, in seconds of music from the
@@ -41,12 +59,12 @@ final class LifeboatCache {
     private(set) var plan: [Track] = []
     private var variant: Variant = .original
     /// The copies are a lossy encode (Opus): a match against the stream can't be exact.
-    var copiesAreLossy: Bool { variant == .opus }
+    var copiesAreLossy: Bool { variant != .original }
     private var queue: [Track] = []
     private var active: URLSessionDownloadTask?
     private var activeID: String?
-    /// The server answered 400 for the Opus variant (no download rule): use originals.
-    private var opusUnavailable = false
+    /// Variants the server answered 400 for (no download rule): use originals.
+    private var unavailableVariants: Set<Variant> = []
     /// Checked before each download (the network may have become metered).
     private var mayDownload: () -> Bool = { true }
     private var allowExpensive = true
@@ -65,7 +83,8 @@ final class LifeboatCache {
         let streamFormat: String
         let replayGainApplied: Bool
         var server: String? = nil
-        var opusUnavailable: Bool? = nil
+        var opusUnavailable: Bool? = nil  // plans saved before unavailableVariants
+        var unavailableVariants: [Variant]? = nil
     }
     private static let planFileName = "plan.json"
 
@@ -101,7 +120,8 @@ final class LifeboatCache {
         self.mayDownload = mayDownload
         self.allowExpensive = allowExpensive
         let wanted = Self.select(upcoming, elapsed: elapsed, lookahead: lookahead)
-        let newVariant: Variant = (streamFormat.lowercased().contains("opus") && !opusUnavailable) ? .opus : .original
+        let wantedVariant = Variant.forStreamFormat(streamFormat)
+        let newVariant: Variant = unavailableVariants.contains(wantedVariant) ? .original : wantedVariant
         if newVariant != variant {
             variant = newVariant
             removeAll()  // a copy at the wrong rate can't be switched to without a gap
@@ -128,8 +148,7 @@ final class LifeboatCache {
             self.activeID = nil
         }
         os_log(.info, log: logger, "🛟 Plan: %d tracks (%.0f min), %d to download (%{public}s)",
-               wanted.count, wanted.reduce(0) { $0 + $1.duration } / 60, queue.count,
-               variant == .opus ? "Opus" : "original")
+               wanted.count, wanted.reduce(0) { $0 + $1.duration } / 60, queue.count, variant.name)
         downloadNext()
     }
 
@@ -210,7 +229,7 @@ final class LifeboatCache {
     private func savePlan() {
         let saved = SavedPlan(tracks: plan, variant: variant, streamFormat: streamFormat,
                               replayGainApplied: replayGainApplied, server: server,
-                              opusUnavailable: opusUnavailable)
+                              unavailableVariants: Array(unavailableVariants))
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
@@ -224,9 +243,8 @@ final class LifeboatCache {
         replayGainApplied = saved.replayGainApplied
         server = saved.server
         // Else every launch would retry Opus, see "changed format" and delete the copies (review M7).
-        opusUnavailable = saved.opusUnavailable ?? false
-        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (%{public}s)", plan.count,
-               variant == .opus ? "Opus" : "original")
+        unavailableVariants = Set(saved.unavailableVariants ?? (saved.opusUnavailable == true ? [.opus] : []))
+        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (%{public}s)", plan.count, variant.name)
     }
 
     private func hasFile(_ id: String) -> Bool {
@@ -286,9 +304,10 @@ final class LifeboatCache {
                     os_log(.info, log: self.logger, "🛟 Downloaded track %{public}s (index %d, %.0fs) %.1f MB in %.1fs",
                            track.id, track.index, track.duration, Double(size) / 1_048_576, Date().timeIntervalSince(started))
                     self.downloadArtwork(for: track)
-                } else if usedVariant == .opus && status == 400 {
-                    os_log(.info, log: self.logger, "🛟 Server has no Opus download rule - using original files")
-                    self.opusUnavailable = true
+                } else if usedVariant != .original && status == 400 {
+                    os_log(.info, log: self.logger, "🛟 Server has no %{public}s download rule - using original files",
+                           usedVariant.name)
+                    self.unavailableVariants.insert(usedVariant)
                     self.variant = .original
                     self.savePlan()
                     self.queue.insert(track, at: 0)

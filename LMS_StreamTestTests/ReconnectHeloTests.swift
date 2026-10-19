@@ -201,12 +201,13 @@ struct HeldDecodeEndDecodedLengthTests {
 }
 
 struct LifeboatStreamFormatTests {
-    @Test func copiesOnlyForOpusAndLossless() {
-        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("FLAC"))
-        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("Opus"))
-        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("WAV"))
-        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("MP3"))
-        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("AAC"))
-        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("OGG"))
+    @Test func strictMatchOnlyForLosslessStreams() {
+        #expect(SlimProtoCoordinator.streamFormatIsLossless("FLAC"))
+        #expect(SlimProtoCoordinator.streamFormatIsLossless("WAV"))
+        #expect(SlimProtoCoordinator.streamFormatIsLossless("ALAC"))
+        #expect(!SlimProtoCoordinator.streamFormatIsLossless("Opus"))
+        #expect(!SlimProtoCoordinator.streamFormatIsLossless("MP3"))
+        #expect(!SlimProtoCoordinator.streamFormatIsLossless("AAC"))
+        #expect(!SlimProtoCoordinator.streamFormatIsLossless("OGG"))
     }
 }

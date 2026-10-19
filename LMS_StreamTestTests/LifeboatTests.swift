@@ -150,3 +150,15 @@ struct OfflineMinutesLeftTests {
         #expect(left == 0)
     }
 }
+
+struct LifeboatVariantTests {
+    @Test func copyFollowsTheStreamFormat() {
+        #expect(LifeboatCache.Variant.forStreamFormat("Opus") == .opus)
+        #expect(LifeboatCache.Variant.forStreamFormat("MP3") == .mp3)
+        #expect(LifeboatCache.Variant.forStreamFormat("AAC") == .aac)
+        #expect(LifeboatCache.Variant.forStreamFormat("OGG") == .ogg)
+        #expect(LifeboatCache.Variant.forStreamFormat("FLAC") == .original)
+        #expect(LifeboatCache.Variant.forStreamFormat("WAV") == .original)
+        #expect(LifeboatCache.Variant.forStreamFormat("") == .original)
+    }
+}
