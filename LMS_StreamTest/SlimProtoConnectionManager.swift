@@ -574,6 +574,17 @@ class SlimProtoConnectionManager {
         }
     }
     
+    /// Playback the user started offline (downloaded copies): the reconnect
+    /// will move LMS to it, so start retrying again even if earlier attempts
+    /// gave up (persistForPlayback keeps them going from here).
+    func resumeReconnecting(reason: String) {
+        guard !connectionState.isConnected, connectionState.canAttemptConnection else { return }
+        reconnectionAttempts = 0
+        totalConsecutiveFailures = 0
+        os_log(.info, log: logger, "🔄 Reconnecting again (%{public}s)", reason)
+        attemptReconnection()
+    }
+
     // MARK: - Enhanced Reconnection Logic
     private func attemptReconnection() {
         guard shouldAttemptReconnection() else {

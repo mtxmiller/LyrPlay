@@ -17,6 +17,7 @@ final class LifeboatCache {
         let duration: Double
         let remote: Bool        // radio / streaming service / CUE: can't be downloaded
         var replayGainDB: Double? = nil
+        var coverID: String? = nil  // LMS artwork id (status tag c), shared by an album's tracks
     }
 
     /// Which file to fetch. The copy must decode at the stream's sample rate
@@ -51,6 +52,9 @@ final class LifeboatCache {
     /// ReplayGain to it: what a cold launch without a server needs to play them.
     private(set) var streamFormat = ""
     private(set) var replayGainApplied = false
+    /// The server ("host:slimport") the plan's ids and indexes belong to.
+    private(set) var server: String?
+    private var artworkInFlight: Set<String> = []
 
     /// The plan, saved next to the files so a relaunch (no server) still knows them.
     private struct SavedPlan: Codable {
@@ -58,6 +62,8 @@ final class LifeboatCache {
         let variant: Variant
         let streamFormat: String
         let replayGainApplied: Bool
+        var server: String? = nil
+        var opusUnavailable: Bool? = nil
     }
     private static let planFileName = "plan.json"
 
@@ -87,6 +93,7 @@ final class LifeboatCache {
     /// New queue from LMS. Starts downloading what's missing and deletes
     /// copies that left the window.
     func update(upcoming: [Track], elapsed: Double, streamFormat: String, replayGainApplied: Bool = false,
+                server: String? = nil,
                 lookahead: TimeInterval = lookahead,
                 mayDownload: @escaping () -> Bool = { true }, allowExpensive: Bool = true) {
         self.mayDownload = mayDownload
@@ -100,13 +107,19 @@ final class LifeboatCache {
         plan = wanted
         self.streamFormat = streamFormat
         self.replayGainApplied = replayGainApplied
+        self.server = server
         savePlan()
-        let keep = Set(wanted.map { fileName(for: $0.id) }).union([Self.planFileName])
+        let keep = Set(wanted.map { fileName(for: $0.id) } + wanted.compactMap { $0.coverID.map(artFileName) })
+            .union([Self.planFileName])
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         where !keep.contains(name) && !name.hasSuffix(".part") {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
         queue = wanted.filter { !hasFile($0.id) && $0.id != activeID }  // not again while it downloads
+        if mayDownload() {
+            // Copies saved before their cover was (or by an older build).
+            for track in wanted where hasFile(track.id) { downloadArtwork(for: track) }
+        }
         if let activeID = activeID, !wanted.contains(where: { $0.id == activeID }) {
             active?.cancel()
             active = nil
@@ -126,6 +139,13 @@ final class LifeboatCache {
     func fileURL(forIndex index: Int) -> URL? {
         guard let track = track(at: index), hasFile(track.id) else { return nil }
         return directory.appendingPathComponent(fileName(for: track.id))
+    }
+
+    /// The saved cover of the track at playlist `index`, if downloaded.
+    func artworkURL(forIndex index: Int) -> URL? {
+        guard let cover = track(at: index)?.coverID else { return nil }
+        let url = directory.appendingPathComponent(artFileName(cover))
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     /// Space the downloaded copies take, for the settings screen.
@@ -162,10 +182,33 @@ final class LifeboatCache {
     // MARK: - Downloads (one at a time)
 
     private func fileName(for id: String) -> String { "\(id).audio" }
+    private func artFileName(_ coverID: String) -> String { "\(coverID).art" }
+
+    /// The cover for the offline player (one per album; small next to the audio).
+    private func downloadArtwork(for track: Track) {
+        guard let cover = track.coverID, !cover.isEmpty else { return }
+        let dest = directory.appendingPathComponent(artFileName(cover))
+        guard !FileManager.default.fileExists(atPath: dest.path), !artworkInFlight.contains(cover),
+              let url = URL(string: settings.buildURLString(path: "/music/\(cover)/cover_600x600.jpg")) else { return }
+        artworkInFlight.insert(cover)
+        var request = URLRequest(url: url)
+        request.allowsExpensiveNetworkAccess = allowExpensive
+        request.setValue(settings.customUserAgent, forHTTPHeaderField: "User-Agent")
+        if let auth = settings.generateAuthHeader() {
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+        URLSession.lms.dataTask(with: request) { [weak self] data, response, _ in
+            if let data = data, !data.isEmpty, (response as? HTTPURLResponse)?.statusCode == 200 {
+                try? data.write(to: dest, options: .atomic)
+            }
+            DispatchQueue.main.async { self?.artworkInFlight.remove(cover) }
+        }.resume()
+    }
 
     private func savePlan() {
         let saved = SavedPlan(tracks: plan, variant: variant, streamFormat: streamFormat,
-                              replayGainApplied: replayGainApplied)
+                              replayGainApplied: replayGainApplied, server: server,
+                              opusUnavailable: opusUnavailable)
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
@@ -177,6 +220,9 @@ final class LifeboatCache {
         variant = saved.variant  // else the first update would think the format changed and delete the copies
         streamFormat = saved.streamFormat
         replayGainApplied = saved.replayGainApplied
+        server = saved.server
+        // Else every launch would retry Opus, see "changed format" and delete the copies (review M7).
+        opusUnavailable = saved.opusUnavailable ?? false
         os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (%{public}s)", plan.count,
                variant == .opus ? "Opus" : "original")
     }
@@ -237,10 +283,12 @@ final class LifeboatCache {
                     let size = ((try? FileManager.default.attributesOfItem(atPath: stored.path))?[.size] as? NSNumber)?.int64Value ?? 0
                     os_log(.info, log: self.logger, "🛟 Downloaded track %{public}s (index %d, %.0fs) %.1f MB in %.1fs",
                            track.id, track.index, track.duration, Double(size) / 1_048_576, Date().timeIntervalSince(started))
+                    self.downloadArtwork(for: track)
                 } else if usedVariant == .opus && status == 400 {
                     os_log(.info, log: self.logger, "🛟 Server has no Opus download rule - using original files")
                     self.opusUnavailable = true
                     self.variant = .original
+                    self.savePlan()
                     self.queue.insert(track, at: 0)
                 } else {
                     os_log(.error, log: self.logger, "🛟 Download of track %{public}s failed (HTTP %d, %{public}s)",

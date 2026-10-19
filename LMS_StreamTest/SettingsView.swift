@@ -342,7 +342,7 @@ struct SettingsView: View {
             set: { mode in
                 settings.lifeboatMode = mode
                 if mode == 0 {
-                    LifeboatCache.clearStorage()  // off: don't keep the downloads
+                    coordinator.clearSavedMusic()  // off: drop the downloads and the live plan (review M8)
                     offlineStorageText = Self.formatStorage(0)
                 }
             }

@@ -297,7 +297,9 @@ def o10_saved_music_launch(oracle, album_id):
     print(f"   … paused at {s_quit['time']:.1f}s; outage 150s (new connections refused)", flush=True)
     t0 = time.time()
     relaunch_app()
-    time.sleep(15)
+    # After the app's 8 reconnect attempts gave up (~17s): pressing Play must
+    # start them again, or LMS is never moved (2026-10-19).
+    time.sleep(25)
     press("playsaved"); t_play = time.time()
     time.sleep(max(0, 150 - (time.time() - t0)))
     wait_back(oracle, timeout=45)

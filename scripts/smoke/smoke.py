@@ -64,7 +64,7 @@ class Oracle:
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.load(resp).get("result", {})
+                return self._result(json.load(resp))
         except urllib.error.URLError as e:
             # macOS Local Network privacy can block python3 from LAN hosts
             # ("No route to host"); Apple's curl is exempt.
@@ -81,7 +81,14 @@ class Oracle:
         )
         if r.returncode != 0:
             raise OSError(f"curl exit {r.returncode}")
-        return json.loads(r.stdout).get("result", {})
+        return self._result(json.loads(r.stdout))
+
+    @staticmethod
+    def _result(reply):
+        # A garbled reply (seen on a slow Wi-Fi link) is a failed request, not a crash.
+        if not isinstance(reply, dict):
+            raise OSError(f"unexpected JSON-RPC reply: {str(reply)[:120]}")
+        return reply.get("result", {})
 
     def player_rpc(self, cmd):
         return self.rpc(cmd, player=self.player_id)
