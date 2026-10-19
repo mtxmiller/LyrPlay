@@ -251,7 +251,9 @@ struct ContentView: View {
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
-            openOfflinePlayerUntil = Date().addingTimeInterval(15)
+            // Only when the server is already out of reach: a drop in the next
+            // seconds while Material is in use gets the banner, not the player.
+            openOfflinePlayerUntil = slimProtoCoordinator.connectionIsLive ? nil : Date().addingTimeInterval(15)
 
             // App open recovery for warm resume is handled by willEnterForegroundNotification below.
             // Cold launches don't get that notification, so the block above handles them on first appear.
@@ -294,7 +296,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
-            openOfflinePlayerUntil = Date().addingTimeInterval(15)
+            openOfflinePlayerUntil = slimProtoCoordinator.connectionIsLive ? nil : Date().addingTimeInterval(15)
 
             // Warm-resume layout correction. The reactive updateUIView path only fires
             // when topInset CHANGES; a same-orientation warm resume keeps the inset, so we

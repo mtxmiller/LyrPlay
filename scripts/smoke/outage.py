@@ -28,6 +28,18 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O11 | no outage: paused, app frozen 40s (like iOS suspending it), lock-screen Play as it wakes | LMS playing again (the button reached LMS, not just the phone's old buffer) |
 | O12 | phase 2: 120s offline, Next; then the web side is back while SlimProto still refuses (20s) | LMS on the next track at the time played there (±6s): a save during the refusals must not put back LMS's old track |
 | O10 | phase 2: paused, app quit, relaunched with the server unreachable (150s), "Play Saved Music" | LMS lands where the saved music got to (±8s), playing |
+| O13 | phase 2: last track of the playlist, 150s offline, its copy ends (repeat off) | LMS never behind what was heard, on the last track or stopped; 25s later not wrapped to track 0 |
+| O14 | phase 2: as O13 with repeat all | LMS playing: the wrap (track 0) or the end of the last track, never replaying what was heard |
+| O15 | phase 2: shuffle on, 240s offline across a boundary | LMS on the track (by id) and time continuous playback in SHUFFLED order would give (±6s) |
+| O16 | phase 2: seek +60s, download killed 1s later, 90s offline | LMS at the seeked position + wall clock (±8s): the copy took over at the right place |
+| O17 | phase 2: as O16, killed 6s after the seek (the 3s time poll has caught up) | as O16 |
+| O18 | phase 2: 120s offline, back for 2s, 25s offline again (during the reconnect jump) | as O6 (±8s) |
+| O19 | phase 2: 240s offline; meanwhile another controller inserts an album after the current track | LMS on the song played offline (found by id), at the time played there (±8s) |
+| O20 | phase 2: offline Pause, 330s outage (LMS forgets the player) | LMS paused afterwards, time not moving |
+| O21 | phase 2: as O13 with a 330s outage (LMS forgets the player) | as O13 |
+| O22 | phase 2: the next track's copy deleted (failed download), outage across that boundary | offline playback stops there; LMS back at the end of that track or the start of the next, never replaying what was heard |
+| O23 | phase 2: 150s offline; LyrPlay backgrounded (Settings app in front) 30s and foregrounded meanwhile | as O6 (±8s); screenshot of the offline player saved |
+| O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
 """
 import os
 import subprocess
@@ -371,6 +383,374 @@ def o7_lifeboat_tracks(oracle, album_id):
     lifeboat_continuous(oracle, album_id, 420)
 
 
+# -- edge cases (review 2026-10-19) -------------------------------------------
+
+def current_track_id(oracle):
+    loop = oracle.player_rpc(["status", "-", 1, "tags:"]).get("playlist_loop", [])
+    return str(loop[0]["id"]) if loop else None
+
+
+def play_order_ids(oracle):
+    return [str(t["id"]) for t in oracle.player_rpc(["status", 0, 99, "tags:"]).get("playlist_loop", [])]
+
+
+def start_last_track(oracle, album_id, seconds_left, settle=12):
+    """Album loaded, playing the LAST track with `seconds_left` to go (the
+    copies' plan then holds only that track)."""
+    smoke.load_album(oracle, album_id)
+    oracle.wait_until_advancing(timeout=15)
+    durations = oracle.playlist_durations()
+    last = len(durations) - 1
+    oracle.player_rpc(["playlist", "index", last])
+    time.sleep(2)
+    oracle.player_rpc(["time", str(max(1, durations[last] - seconds_left))])
+    oracle.wait_until_advancing(timeout=15)
+    time.sleep(settle)   # the plan (3s after the strm) and its download
+    s0 = oracle.status()
+    if s0["index"] != last:
+        raise CheckFailed(f"not on the last track: {s0}")
+    return s0, durations
+
+
+def o13_end_of_playlist_offline(oracle, album_id):
+    # The last copy ends during the outage (nothing follows). Afterwards LMS
+    # must not be behind where the user stopped hearing it, and never on
+    # another track than the last one (repeat off): end of the playlist.
+    oracle.player_rpc(["playlist", "repeat", 0])
+    s0, durations = start_last_track(oracle, album_id, 45)
+    last = len(durations) - 1
+    fault("/kill?scope=http")
+    outage(150, "drop")
+    deadline = time.time() + 45
+    while time.time() < deadline and not connected(oracle):
+        time.sleep(1)
+    time.sleep(12)
+    s = oracle.status()
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s (last track {last}, {durations[last]:.0f}s)")
+    if s["mode"] == "play":
+        if s["index"] != last:
+            raise CheckFailed(f"playing track {s['index']} after the playlist ended offline (expected {last} or stop)")
+        if s["time"] < durations[last] - 50:
+            raise CheckFailed(f"playing the last track from {s['time']:.1f}s: behind what was already heard")
+    elif s["mode"] != "stop":
+        raise CheckFailed(f"mode {s['mode']} after the playlist ended offline")
+    settle_after_playlist_end(oracle, last)
+
+
+def settle_after_playlist_end(oracle, last):
+    """25s later LMS must have stopped (repeat off): a jump to the end of the
+    last track is a "next track" to LMS, which wraps to track 0 and plays."""
+    time.sleep(25)
+    s = oracle.status()
+    print(f"   … 25s later: LMS {s['mode']} at track {s['index']} {s['time']:.1f}s")
+    if s["mode"] == "play" and s["index"] != last:
+        raise CheckFailed(f"LMS wrapped to track {s['index']} and is playing: the playlist had ended (repeat off)")
+    if s["mode"] == "play":
+        t = s["time"]
+        time.sleep(3)
+        if oracle.status()["time"] > t + 1:
+            raise CheckFailed(f"LMS replaying the last track from {t:.1f}s after the playlist ended offline")
+        # A jump to the END of the last track gets an STMd but never an STMu
+        # (nothing plays), so LMS sits in "play" at the end for good.
+        raise CheckFailed(f"LMS stuck in play at {t:.1f}s (end of the last track) instead of stop")
+
+
+def o14_repeat_all_offline(oracle, album_id):
+    # Repeat all: LMS would wrap to track 0, but no copy of it is ahead in
+    # the plan. Once back, LMS must be playing from the start of the wrap
+    # (track 0), not replaying the heard end of the last track.
+    oracle.player_rpc(["playlist", "repeat", 2])
+    try:
+        s0, durations = start_last_track(oracle, album_id, 45)
+        last = len(durations) - 1
+        fault("/kill?scope=http")
+        outage(150, "drop")
+        wait_back(oracle, timeout=45)
+        time.sleep(8)
+        s = watch_monotonic(oracle, 6)
+        print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s (last track {last})")
+        if s["mode"] != "play":
+            raise CheckFailed(f"mode {s['mode']}, expected play (repeat all)")
+        if s["index"] == last and s["time"] < durations[last] - 50:
+            raise CheckFailed(f"replaying the last track from {s['time']:.1f}s: already heard")
+        if s["index"] not in (0, last):
+            raise CheckFailed(f"on track {s['index']}, expected the wrap (0) or the end of {last}")
+    finally:
+        oracle.player_rpc(["playlist", "repeat", 0])
+
+
+def o15_shuffle_offline(oracle, album_id):
+    # Shuffled queue: offline Next-track must follow LMS's play order (the
+    # plan uses `playlist index`), and the reconnect must land on that track.
+    oracle.player_rpc(["playlist", "shuffle", 1])
+    try:
+        s0 = fresh_start(oracle, album_id, settle=25)
+        ids = play_order_ids(oracle)
+        durations = oracle.playlist_durations()
+        w0 = time.time()
+        fault("/kill?scope=http")
+        outage(240, "drop")
+        wait_back(oracle, timeout=45)
+        time.sleep(6)
+        s = watch_monotonic(oracle)
+        idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+        got = current_track_id(oracle)
+        print(f"   … LMS at track {s['index']} (id {got}) {s['time']:.1f}s; continuous: track {idx} (id {ids[idx]}) {t:.1f}s")
+        if s["index"] != idx or got != ids[idx] or abs(s["time"] - t) > 6:
+            raise CheckFailed(f"LMS at track {s['index']} id {got} {s['time']:.1f}s, expected track {idx} id {ids[idx]} {t:.1f}±6s")
+    finally:
+        oracle.player_rpc(["playlist", "shuffle", 0])
+
+
+def seek_then_cut(oracle, album_id, gap):
+    # A seek `gap` seconds before the download dies: the copy's switch point
+    # is an estimate (the app learns the seek from a 3s server-time poll) plus
+    # an audio match in an 8s window.
+    # Unshaped while the copies download (the cap would slow them too: a copy
+    # still downloading at the cut can't take over). The seek starts a new
+    # stream, which is what the cap has to keep short.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    durations = oracle.playlist_durations()
+    target = s0["time"] + 60
+    if target > durations[s0["index"]] - 60:
+        raise CheckFailed(f"opening track too short for a +60s seek ({durations[s0['index']]:.0f}s)")
+    fault("/shape?kbps=400")
+    try:
+        oracle.player_rpc(["time", f"{target:.1f}"])
+        w0 = time.time()
+        time.sleep(gap)
+        fault("/kill?scope=http")
+    finally:
+        fault("/shape?kbps=0")
+    outage(90, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], target, time.time() - w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous from the seek: track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s "
+                          "(the copy did not take over at the seeked position)")
+
+
+def o16_seek_1s_before_cut(oracle, album_id):
+    seek_then_cut(oracle, album_id, 1.0)
+
+
+def o17_seek_6s_before_cut(oracle, album_id):
+    seek_then_cut(oracle, album_id, 6.0)
+
+
+def o18_flap_during_jump(oracle, album_id):
+    # The network comes back, and drops again ~2s later, while the reconnect
+    # is moving LMS to us. The second return must still land at our place.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    w0 = time.time()
+    durations = oracle.playlist_durations()
+    fault("/kill?scope=http")
+    outage(120, "drop")
+    time.sleep(2.0)
+    outage(25, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s")
+
+
+def o19_queue_edited_offline(oracle, album_id):
+    # Another controller inserts songs after the current track during the
+    # outage. Offline we play the OLD next track from its copy; back online
+    # LMS must be on that same song (found by id) at the time played there.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    ids = play_order_ids(oracle)
+    durations = oracle.playlist_durations()
+    w0 = time.time()
+    other = next(a for a in [a["id"] for a in oracle.rpc(["albums", 0, 50]).get("albums_loop", [])] if a != album_id)
+    fault("/kill?scope=http")
+    fault("/outage?secs=240&after=drop")
+    print("   … outage 240s (after=drop)", flush=True)
+    time.sleep(10)
+    oracle.player_rpc(["playlistcontrol", "cmd:insert", f"album_id:{other}"])
+    new_ids = play_order_ids(oracle)
+    print(f"   … inserted album {other} after the current track ({len(ids)} → {len(new_ids)} tracks)")
+    time.sleep(230)
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    want = ids[idx]
+    got = current_track_id(oracle)
+    print(f"   … LMS on id {got} at track {s['index']} {s['time']:.1f}s; played offline: id {want} "
+          f"(now at index {new_ids.index(want) if want in new_ids else '?'}) {t:.1f}s")
+    if got != want or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS on id {got} {s['time']:.1f}s, expected id {want} {t:.1f}±8s")
+
+
+def o20_paused_offline_forgotten(oracle, album_id):
+    # Offline Pause, then LMS forgets the player (> 300s). Back: LMS must be
+    # paused at the paused time, not playing LMS's own restart.
+    fresh_start(oracle, album_id, settle=25)
+    fault("/kill?scope=http")
+    fault("/outage?secs=330&after=drop")
+    print("   … outage 330s (after=drop)", flush=True)
+    t0 = time.time()
+    time.sleep(20); press("pause")
+    time.sleep(max(0, 330 - (time.time() - t0)))
+    deadline = time.time() + 45
+    while time.time() < deadline and not connected(oracle):
+        time.sleep(1)
+    time.sleep(12)
+    s = oracle.status()
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s")
+    if s["mode"] != "pause":
+        raise CheckFailed(f"LMS mode {s['mode']} after a pause made offline and a 330s outage, expected pause")
+    t = s["time"]
+    time.sleep(3)
+    if abs(oracle.status()["time"] - t) > 0.5:
+        raise CheckFailed("time moving while LMS says paused")
+
+
+def o21_copies_ran_out_forgotten(oracle, album_id):
+    # The last copy ends offline and LMS forgets us (> 300s): as O13, but LMS
+    # restarts a forgotten player at its own saved position.
+    oracle.player_rpc(["playlist", "repeat", 0])
+    s0, durations = start_last_track(oracle, album_id, 45)
+    last = len(durations) - 1
+    fault("/kill?scope=http")
+    outage(330, "drop")
+    deadline = time.time() + 45
+    while time.time() < deadline and not connected(oracle):
+        time.sleep(1)
+    time.sleep(15)
+    s = oracle.status()
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s (last track {last}, {durations[last]:.0f}s)")
+    if s["mode"] == "play":
+        if s["index"] != last:
+            raise CheckFailed(f"playing track {s['index']} after the playlist ended offline (expected {last} or stop)")
+        if s["time"] < durations[last] - 50:
+            raise CheckFailed(f"playing the last track from {s['time']:.1f}s: behind what was already heard")
+    elif s["mode"] != "stop":
+        raise CheckFailed(f"mode {s['mode']} after the playlist ended offline")
+    settle_after_playlist_end(oracle, last)
+
+
+def o22_missing_copy_in_plan(oracle, album_id):
+    # The next track's copy is missing (failed download): offline playback
+    # must stop at that boundary, and LMS must not come back behind or on an
+    # unrelated track.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    ids = play_order_ids(oracle)
+    durations = oracle.playlist_durations()
+    nxt = s0["index"] + 1
+    container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    victim = os.path.join(container, "Library", "Caches", "Lifeboat", f"{ids[nxt]}.audio")
+    if not os.path.exists(victim):
+        raise CheckFailed(f"no copy of the next track to remove at {victim}")
+    os.remove(victim)
+    print(f"   … removed the copy of track {nxt} (id {ids[nxt]})", flush=True)
+    w0 = time.time()
+    fault("/kill?scope=http")
+    outage(durations[s0["index"]] - s0["time"] + 60, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(8)
+    s = watch_monotonic(oracle, 6)
+    got = current_track_id(oracle)
+    print(f"   … LMS {s['mode']} at track {s['index']} (id {got}) {s['time']:.1f}s; wall clock would be "
+          f"track {expected_position(durations, s0['index'], s0['time'], time.time() - w0)}")
+    if s["index"] not in (s0["index"], nxt):
+        raise CheckFailed(f"LMS on track {s['index']}, expected the end of {s0['index']} or the start of {nxt}")
+    if s["index"] == s0["index"] and s["time"] < durations[s0["index"]] - 20:
+        raise CheckFailed(f"replaying track {s0['index']} from {s['time']:.1f}s: already heard")
+    if s["index"] == nxt and s["time"] > 60:
+        raise CheckFailed(f"track {nxt} at {s['time']:.1f}s: skipped ahead past audio that never played")
+
+
+def o23_background_foreground_offline(oracle, album_id):
+    # Playing copies offline, the app goes to the background (another app in
+    # front) and comes back: the foreground recovery must not disturb the
+    # offline playback, and the reconnect must still land where we are.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    w0 = time.time()
+    durations = oracle.playlist_durations()
+    fault("/kill?scope=http")
+    fault("/outage?secs=150&after=drop")
+    print("   … outage 150s (after=drop)", flush=True)
+    time.sleep(40)
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+    print("   … Settings app in front (LyrPlay in the background)", flush=True)
+    time.sleep(30)
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "elm.LMS-StreamTest"], capture_output=True)
+    print("   … LyrPlay in front again", flush=True)
+    time.sleep(5)
+    shot = os.path.join(os.environ.get("LYRPLAY_SHOT_DIR", "/tmp"), "o23-offline-player.png")
+    subprocess.run(["xcrun", "simctl", "io", SIM_NAME, "screenshot", shot], capture_output=True)
+    print(f"   … screenshot {shot}", flush=True)
+    time.sleep(max(0, 150 - (time.time() - w0)))
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s")
+
+
+def seed_pref(key, kind, value):
+    container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    plist = os.path.join(container, "Library", "Preferences", "elm.LMS-StreamTest")
+    subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "defaults", "write", plist, key, kind, str(value)], check=True)
+
+
+def app_log_count(pattern, minutes):
+    r = subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "log", "show", "--last", f"{minutes}m", "--info",
+                        "--predicate", 'subsystem == "com.lmsstream"'], capture_output=True, text=True)
+    return sum(1 for line in r.stdout.splitlines() if pattern in line)
+
+
+def o24_backup_server_offline(oracle, album_id):
+    # A backup server is configured (unreachable here, like a second LMS at
+    # home when the car is in a dead spot). The reconnect attempts alternate
+    # primary/backup every 2 failures; the copies belong to the primary.
+    # Playback must still land where we are, and the offline UI (banner /
+    # player) should not flicker with the active server: screenshots saved.
+    seed_pref("BackupServerHost", "-string", "192.168.1.250")
+    seed_pref("BackupServerWebPort", "-int", 9000)
+    seed_pref("BackupServerSlimProtoPort", "-int", 3483)
+    seed_pref("IsBackupServerEnabled", "-bool", "YES")
+    try:
+        relaunch_app()
+        oracle.discover(smoke.PLAYER_NAME, timeout=40)
+        s0 = fresh_start(oracle, album_id, settle=25)
+        w0 = time.time()
+        durations = oracle.playlist_durations()
+        fault("/kill?scope=http")
+        fault("/outage?secs=150&after=drop")
+        print("   … outage 150s (after=drop)", flush=True)
+        shots = os.environ.get("LYRPLAY_SHOT_DIR", "/tmp")
+        for i, at in enumerate((25, 45, 65, 85, 105, 125)):
+            time.sleep(max(0, at - (time.time() - w0)))
+            path = os.path.join(shots, f"o24-offline-{i}.png")
+            subprocess.run(["xcrun", "simctl", "io", SIM_NAME, "screenshot", path], capture_output=True)
+        time.sleep(max(0, 150 - (time.time() - w0)))
+        wait_back(oracle, timeout=60)
+        time.sleep(6)
+        s = watch_monotonic(oracle)
+        idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+        switches = app_log_count("switching to backup", 5)
+        print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
+              f"{switches} switch(es) to the backup during the outage; screenshots in {shots}")
+        if s["index"] != idx or abs(s["time"] - t) > 8:
+            raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s")
+    finally:
+        seed_pref("IsBackupServerEnabled", "-bool", "NO")
+        relaunch_app()
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -385,6 +765,19 @@ SCENARIOS = [
     ("O10", "offline launch, saved music", o10_saved_music_launch),
     ("O11", "suspended, lock-screen Play", o11_suspended_play),
     ("O12", "offline skip, slow reconnect", o12_skip_then_slow_reconnect),
+    # Edge cases (review 2026-10-19), phase 2, only when named:
+    ("O13", "end of playlist offline", o13_end_of_playlist_offline),
+    ("O14", "repeat all, end offline", o14_repeat_all_offline),
+    ("O15", "shuffle, boundary offline", o15_shuffle_offline),
+    ("O16", "seek 1s before the cut", o16_seek_1s_before_cut),
+    ("O17", "seek 6s before the cut", o17_seek_6s_before_cut),
+    ("O18", "flap during the jump", o18_flap_during_jump),
+    ("O19", "queue edited offline", o19_queue_edited_offline),
+    ("O20", "paused offline, forgotten", o20_paused_offline_forgotten),
+    ("O21", "copies ran out, forgotten", o21_copies_ran_out_forgotten),
+    ("O22", "missing copy in the plan", o22_missing_copy_in_plan),
+    ("O23", "background/foreground offline", o23_background_foreground_offline),
+    ("O24", "backup server set, offline", o24_backup_server_offline),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

@@ -433,10 +433,11 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     /// Continue the cut track from a downloaded copy (see AudioStreamDecoder).
-    func continueFromLocalFile(path: String, estimatedSeconds: Double, adjustTrackOffset: Bool,
-                               completion: @escaping (AudioStreamDecoder.ContinuationResult?) -> Void) {
-        streamDecoder.continueFromLocalFile(path: path, estimatedSeconds: estimatedSeconds,
-                                            adjustTrackOffset: adjustTrackOffset, completion: completion)
+    func continueFromLocalFile(path: String, estimatedSeconds: Double, searchSeconds: Double, minimumConfidence: Float,
+                               completion: @escaping (Result<AudioStreamDecoder.ContinuationResult,
+                                                             AudioStreamDecoder.ContinuationFailure>) -> Void) {
+        streamDecoder.continueFromLocalFile(path: path, estimatedSeconds: estimatedSeconds, searchSeconds: searchSeconds,
+                                            minimumConfidence: minimumConfidence, completion: completion)
     }
 
     /// Let the decoder end a stalled network stream (see AudioStreamDecoder).

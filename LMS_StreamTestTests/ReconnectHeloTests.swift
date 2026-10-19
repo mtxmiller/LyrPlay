@@ -162,3 +162,51 @@ struct KeptSessionCheckTests {
         #expect(SlimProtoCoordinator.keptSessionCheck(serverMode: "play", serverIndex: 5, localIndex: 3) == .followServer)
     }
 }
+
+// Where the reconnect puts LMS when the copies or the buffer ran out at the
+// very end of a track (rig O13/O21, 2026-10-19).
+struct SettledJumpTargetTests {
+    private func settle(index: Int = 8, position: Double, duration: Double? = 161, tracks: Int? = 9,
+                        repeatMode: Int? = 0) -> SlimProtoCoordinator.RecoveryTarget? {
+        SlimProtoCoordinator.settledJumpTarget(index: index, position: position, duration: duration,
+                                               playlistTracks: tracks, repeatMode: repeatMode)
+    }
+
+    @Test func midTrackIsLeftAlone() {
+        #expect(settle(position: 100) == SlimProtoCoordinator.RecoveryTarget(index: 8, position: 100))
+        #expect(settle(position: 100, duration: nil) == SlimProtoCoordinator.RecoveryTarget(index: 8, position: 100))
+    }
+
+    @Test func endOfATrackGoesToTheNextOne() {
+        #expect(settle(index: 3, position: 160.5) == SlimProtoCoordinator.RecoveryTarget(index: 4, position: 0.5))
+    }
+
+    @Test func endOfThePlaylistStopsUnlessRepeating() {
+        #expect(settle(position: 161.1) == nil)
+        #expect(settle(position: 161.1, repeatMode: 2) == SlimProtoCoordinator.RecoveryTarget(index: 0, position: 0.5))
+        #expect(settle(position: 161.1, repeatMode: 1) == SlimProtoCoordinator.RecoveryTarget(index: 8, position: 0.5))
+    }
+}
+
+struct HeldDecodeEndDecodedLengthTests {
+    // Rig O22: the copy decoded all 260s, the tracker had stopped at 256.6.
+    @Test func decodedUpToTheDurationIsTheEnd() {
+        #expect(SlimProtoCoordinator.heldDecodeEndWasTrackEnd(decodingAhead: false, decodedEndSeconds: 260.0,
+                                                              trackTime: 256.6, bufferedSeconds: 0,
+                                                              currentDuration: 260, nextDuration: 172))
+        #expect(!SlimProtoCoordinator.heldDecodeEndWasTrackEnd(decodingAhead: false, decodedEndSeconds: 190.0,
+                                                               trackTime: 160.7, bufferedSeconds: 29.0,
+                                                               currentDuration: 260, nextDuration: 172))
+    }
+}
+
+struct LifeboatStreamFormatTests {
+    @Test func copiesOnlyForOpusAndLossless() {
+        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("FLAC"))
+        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("Opus"))
+        #expect(SlimProtoCoordinator.lifeboatSupportsStreamFormat("WAV"))
+        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("MP3"))
+        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("AAC"))
+        #expect(!SlimProtoCoordinator.lifeboatSupportsStreamFormat("OGG"))
+    }
+}

@@ -40,6 +40,8 @@ final class LifeboatCache {
     private let directory: URL
     private(set) var plan: [Track] = []
     private var variant: Variant = .original
+    /// The copies are a lossy encode (Opus): a match against the stream can't be exact.
+    var copiesAreLossy: Bool { variant == .opus }
     private var queue: [Track] = []
     private var active: URLSessionDownloadTask?
     private var activeID: String?
