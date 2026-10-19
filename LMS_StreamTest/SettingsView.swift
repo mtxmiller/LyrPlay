@@ -22,6 +22,7 @@ struct SettingsView: View {
     // Status card (bd x19i)
     @State private var isConnectedNow = false
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
     private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -99,6 +100,14 @@ struct SettingsView: View {
                 Section {
                     NavigationLink(destination: ServerSettingsView()) {
                         statusCard
+                    }
+                    if let offer = savedMusicOffer {
+                        Button {
+                            coordinator.playSavedMusicOffline()
+                            refreshConnectionStatus()
+                        } label: {
+                            Label("Play Saved Music · \(offer.minutesLeft) min", systemImage: "play.circle.fill")
+                        }
                     }
                 }
 
@@ -293,6 +302,7 @@ struct SettingsView: View {
     private func refreshConnectionStatus() {
         isConnectedNow = coordinator.isConnected
         offlineStatus = coordinator.offlinePlaybackStatus
+        savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
     }
 

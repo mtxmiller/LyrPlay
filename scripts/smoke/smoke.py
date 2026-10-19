@@ -75,7 +75,7 @@ class Oracle:
 
     def _rpc_curl(self, body):
         r = subprocess.run(
-            ["curl", "-s", "-m", "10", "-H", "Content-Type: application/json",
+            ["curl", "-s", "--compressed", "-m", "10", "-H", "Content-Type: application/json",
              self.url, "--data-binary", "@-"],
             input=body, capture_output=True,
         )

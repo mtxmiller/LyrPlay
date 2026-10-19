@@ -25,6 +25,8 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O7 | phase 2: 420s, download killed (crosses track boundaries and LMS's forget time) | as O6, on the right later track |
 | O8 | phase 2: 240s offline, lock-screen Next, Pause, Play (Debug-build button hook) | LMS on the next track at the time played there (±6s) |
 | O9 | phase 2: 90s offline, Pause after 20s | LMS paused afterwards, time not moving |
+| O11 | no outage: paused, app frozen 40s (like iOS suspending it), lock-screen Play as it wakes | LMS playing again (the button reached LMS, not just the phone's old buffer) |
+| O10 | phase 2: paused, app quit, relaunched with the server unreachable (150s), "Play Saved Music" | LMS lands where the saved music got to (±8s), playing |
 """
 import os
 import subprocess
@@ -274,6 +276,66 @@ def o9_paused_offline(oracle, album_id):
         raise CheckFailed("time moving while LMS says paused")
 
 
+def relaunch_app():
+    # Settings were seeded into the app's preferences by run.sh: a plain launch keeps them.
+    subprocess.run(["xcrun", "simctl", "terminate", SIM_NAME, "elm.LMS-StreamTest"], capture_output=True)
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "elm.LMS-StreamTest"], check=True, capture_output=True)
+    print("   … app relaunched", flush=True)
+
+
+def o10_saved_music_launch(oracle, album_id):
+    # Quit while playing, relaunch in a "dead spot", play the saved copies,
+    # then the network comes back: LMS must move to where the saved music got to.
+    # Paused, then quit (the usual way to end up here): the saved position is exact.
+    fresh_start(oracle, album_id, settle=25)
+    durations = oracle.playlist_durations()
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    s_quit = oracle.status()
+    fault("/outage?secs=150&after=drop&new=refuse")
+    print(f"   … paused at {s_quit['time']:.1f}s; outage 150s (new connections refused)", flush=True)
+    t0 = time.time()
+    relaunch_app()
+    time.sleep(15)
+    press("playsaved"); t_play = time.time()
+    time.sleep(max(0, 150 - (time.time() - t0)))
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s_quit["index"], s_quit["time"], time.time() - t_play)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; saved music would be at track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s")
+
+
+def app_signal(sig):
+    r = subprocess.run(["pgrep", "-f", "LMS_StreamTest.app/LMS_StreamTest"], capture_output=True, text=True)
+    pids = r.stdout.split()
+    if not pids:
+        raise CheckFailed("app process not found")
+    subprocess.run(["kill", f"-{sig}"] + pids, check=True)
+
+
+def o11_suspended_play(oracle, album_id):
+    # The network is fine; the app's connection died because iOS suspended it.
+    # A lock-screen Play then must go to LMS (device log 2026-10-19).
+    fresh_start(oracle, album_id, settle=10)
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    app_signal("STOP")
+    print("   … app frozen 40s", flush=True)
+    try:
+        time.sleep(40)
+    finally:
+        app_signal("CONT")
+    press("play")
+    wait_back(oracle, timeout=30)
+    s = oracle.status()
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s")
+    if s["mode"] != "play":
+        raise CheckFailed(f"LMS {s['mode']} after lock-screen Play, expected play")
+
+
 def o6_lifeboat_midtrack(oracle, album_id):
     lifeboat_continuous(oracle, album_id, 90, kbps=400)
 
@@ -293,6 +355,8 @@ SCENARIOS = [
     ("O7", "420s, copies across tracks", o7_lifeboat_tracks),
     ("O8", "offline Next/Pause/Play", o8_offline_buttons),
     ("O9", "paused offline, back < 5min", o9_paused_offline),
+    ("O10", "offline launch, saved music", o10_saved_music_launch),
+    ("O11", "suspended, lock-screen Play", o11_suspended_play),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 
@@ -323,6 +387,8 @@ def main():
         except CheckFailed as e:
             result, failed = f"FAIL — {e}", failed + 1
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             result, failed = f"FAIL — {type(e).__name__}: {e}", failed + 1
         finally:
             fault("/end")

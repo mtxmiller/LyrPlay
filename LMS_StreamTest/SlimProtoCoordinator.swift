@@ -229,6 +229,9 @@ class SlimProtoCoordinator: ObservableObject {
     /// The next silent recovery restores paused even if LMS says it's playing
     /// (it only "plays" because it never got our offline pause).
     private var forcePausedRestore = false
+    /// "Play Saved Music" was pressed with no server: LMS's pause (or stop)
+    /// is older than that press, so the reconnect plays over it.
+    private var savedMusicStartedOffline = false
     /// Format of the last stream LMS sent (picks the copies' format).
     private var currentStreamFormat = ""
     /// Last time any SlimProto frame arrived from the server.
@@ -2061,6 +2064,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         lifeboatUsed = false
         lifeboatPausedLocally = false
         forcePausedRestore = false
+        savedMusicStartedOffline = false
         if !outageHoldActive { connectionManager.persistForPlayback = false }
         scheduleLifeboatPlan(after: 3)
         // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
@@ -2223,6 +2227,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         clearHeldTrackEnd()
         lifeboatActive = false
         lifeboatUsed = false
+        savedMusicStartedOffline = false
         DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
         let shownPosition = getCurrentInterpolatedTime().time
@@ -4168,6 +4173,7 @@ extension SlimProtoCoordinator {
                     let upcoming = Self.lifeboatTracks(fromStatus: result)
                     let elapsed = (result["time"] as? Double) ?? 0
                     self.lifeboat.update(upcoming: upcoming, elapsed: elapsed, streamFormat: self.currentStreamFormat,
+                                         replayGainApplied: self.lastStreamReplayGain > 0,
                                          lookahead: TimeInterval(self.settings.lifeboatMinutes * 60),
                                          mayDownload: { [weak self] in self?.lifeboatMayDownload ?? false },
                                          allowExpensive: self.settings.lifeboatMode == 2)
@@ -4243,7 +4249,9 @@ extension SlimProtoCoordinator {
             return holdDownloadEnd(askNow: false)
         }
 
-        if lifeboatEnabled, let duration = lifeboat.track(at: decodingIndex)?.duration, duration > 0 {
+        // A silent recovery flushing the old stream to replace it isn't a cut.
+        if lifeboatEnabled, !audioManager.isSilentRecoveryMuted,
+           let duration = lifeboat.track(at: decodingIndex)?.duration, duration > 0 {
             let ended = Self.heldDecodeEndWasTrackEnd(
                 decodingAhead: stream.decodingAhead, decodedEndSeconds: stream.decodedEndSeconds,
                 trackTime: getCurrentInterpolatedTime().time, bufferedSeconds: audioManager.bufferedPlaybackSeconds(),
@@ -4372,7 +4380,13 @@ extension SlimProtoCoordinator {
     /// server: act on the phone (LMS would never get them), and have the
     /// reconnect move LMS to what we ended up doing. True = handled.
     private func handleOfflineCommand(_ command: String) -> Bool {
-        guard !connectionIsLive else { return false }
+        // Only during an outage. A suspended app's connection is dead too, and
+        // there the normal path reconnects and tells LMS (device log 2026-10-19:
+        // Play after a long background played the old buffer, LMS stayed paused).
+        // Playing means not suspended: a silent connection then is an outage.
+        guard !connectionIsLive,
+              outageHoldActive || lifeboatActive || lifeboatUsed || lifeboatPausedLocally
+                || audioManager.getPlayerState() == "Playing" else { return false }
         let state = audioManager.getPlayerState()
         let hasLocalAudio = state == "Playing" || state == "Paused" || audioManager.isPushStreamStalled() || lifeboatActive
         guard hasLocalAudio, let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int else {
@@ -4417,8 +4431,59 @@ extension SlimProtoCoordinator {
         }
     }
 
-    /// Start the copy of track `index` now, from its beginning (a skip).
-    private func playLifeboatTrackNow(index: Int) -> Bool {
+    /// Saved music the app can play with no server (e.g. launched in a dead spot).
+    struct SavedMusicOffer: Equatable {
+        let index: Int
+        let position: Double
+        let title: String
+        let minutesLeft: Int
+    }
+
+    /// Non-nil when the server can't be reached, nothing is playing, and the
+    /// track we were last on has a downloaded copy.
+    var savedMusicOffer: SavedMusicOffer? {
+        let state = audioManager.getPlayerState()
+        guard lifeboatEnabled, !connectionIsLive, !lifeboatActive, !lifeboatPausedLocally,
+              state == "No Stream" || state == "Stopped",
+              var index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+              let saved = lifeboat.track(at: index) else { return nil }
+        var position = max(0, UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+        if position > saved.duration - 2 {
+            // Saved at the very end: the next track is where playback goes on.
+            index += 1
+            position = 0
+        }
+        guard let track = lifeboat.track(at: index), lifeboat.fileURL(forIndex: index) != nil else { return nil }
+        let seconds = Self.offlineSecondsLeft(from: index, elapsed: position,
+                                              duration: { self.lifeboat.track(at: $0)?.duration },
+                                              hasCopy: { self.lifeboat.fileURL(forIndex: $0) != nil })
+        guard seconds >= 30 else { return nil }
+        return SavedMusicOffer(index: index, position: position, title: track.title,
+                               minutesLeft: Int((seconds / 60).rounded(.down)))
+    }
+
+    /// Play the saved copies from where we left off; the reconnect then moves LMS here.
+    func playSavedMusicOffline() {
+        guard let offer = savedMusicOffer else { return }
+        os_log(.info, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
+        // This IS the recovery: the app-open jump would start LMS's stream over it.
+        pendingRecoveryTrigger = .none
+        audioManager.cancelPreMute(reason: "playing saved music")
+        // A fresh launch hasn't had a stream from LMS: use what the copies were made for.
+        if currentStreamFormat.isEmpty { currentStreamFormat = lifeboat.streamFormat }
+        // The copies continue the last session on this server: reconnect to it
+        // (with the HELO reconnect bit) so LMS doesn't restart its own stream
+        // over ours, and the reconnect moves LMS here.
+        if sessionServer == nil { sessionServer = currentSessionServer }
+        savedMusicStartedOffline = true
+        if lastStreamReplayGain == 0 && lifeboat.replayGainApplied {
+            lastStreamReplayGain = 1  // only "LMS applies gain" matters to lifeboatGain
+        }
+        _ = playLifeboatTrackNow(index: offer.index, from: offer.position)
+    }
+
+    /// Start the copy of track `index` now, from `position` (a skip starts at 0).
+    private func playLifeboatTrackNow(index: Int, from position: Double = 0) -> Bool {
         guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
         clearHeldTrackEnd()
         lifeboatActive = true
@@ -4426,13 +4491,13 @@ extension SlimProtoCoordinator {
         connectionManager.persistForPlayback = true
         lifeboatPausedLocally = false
         UserDefaults.standard.set(index, forKey: "lyrplay_recovery_index")
-        UserDefaults.standard.set(0.0, forKey: "lyrplay_recovery_position")
+        UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
         UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
         beginOutageHold(reason: "playing offline")
         audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
                                              replayGain: lifeboatGain(index: index), isGapless: false,
-                                             startTime: 0, waitForUnpause: false)
-        simpleTimeTracker.updateFromServer(time: 0, duration: track.duration, playing: true)
+                                             startTime: position, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: position, duration: track.duration, playing: true)
         audioManager.updateTrackMetadata(title: track.title, artist: track.artist, album: track.album,
                                          artworkURL: nil, duration: track.duration)
         return true
@@ -4472,7 +4537,11 @@ extension SlimProtoCoordinator {
                 UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
                 UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
                 self.audibleRecoveryTarget = nil
-                if shouldPlay {
+                if shouldPlay && self.savedMusicStartedOffline {
+                    // LMS was paused before the press: don't let that pause win.
+                    self.savedMusicStartedOffline = false
+                    self.performPlaylistRecovery(shouldPlay: true)
+                } else if shouldPlay {
                     self.unlessPausedOnServer {
                         self.performPlaylistRecovery(shouldPlay: true)
                     }

@@ -8,7 +8,7 @@ import os.log
 
 final class LifeboatCache {
     /// One queue entry LMS gave us (`status - N tags:adlx`).
-    struct Track: Equatable {
+    struct Track: Equatable, Codable {
         let index: Int          // playlist index (play order)
         let id: String          // LMS track id
         let title: String
@@ -23,7 +23,7 @@ final class LifeboatCache {
     /// so playback can switch to it without a gap: the original for lossless
     /// streams (MobileTranscode re-encodes FLAC at the same rate), Opus (48k)
     /// when the stream is Opus.
-    enum Variant: String {
+    enum Variant: String, Codable {
         case original = ""
         case opus = ".ops"
     }
@@ -47,11 +47,25 @@ final class LifeboatCache {
     /// Checked before each download (the network may have become metered).
     private var mayDownload: () -> Bool = { true }
     private var allowExpensive = true
+    /// Format of the stream the copies were made for, and whether LMS applied
+    /// ReplayGain to it: what a cold launch without a server needs to play them.
+    private(set) var streamFormat = ""
+    private(set) var replayGainApplied = false
+
+    /// The plan, saved next to the files so a relaunch (no server) still knows them.
+    private struct SavedPlan: Codable {
+        let tracks: [Track]
+        let variant: Variant
+        let streamFormat: String
+        let replayGainApplied: Bool
+    }
+    private static let planFileName = "plan.json"
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         directory = caches.appendingPathComponent("Lifeboat", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        loadPlan()
     }
 
     // MARK: - Planning
@@ -72,7 +86,7 @@ final class LifeboatCache {
 
     /// New queue from LMS. Starts downloading what's missing and deletes
     /// copies that left the window.
-    func update(upcoming: [Track], elapsed: Double, streamFormat: String,
+    func update(upcoming: [Track], elapsed: Double, streamFormat: String, replayGainApplied: Bool = false,
                 lookahead: TimeInterval = lookahead,
                 mayDownload: @escaping () -> Bool = { true }, allowExpensive: Bool = true) {
         self.mayDownload = mayDownload
@@ -84,7 +98,10 @@ final class LifeboatCache {
             removeAll()  // a copy at the wrong rate can't be switched to without a gap
         }
         plan = wanted
-        let keep = Set(wanted.map { fileName(for: $0.id) })
+        self.streamFormat = streamFormat
+        self.replayGainApplied = replayGainApplied
+        savePlan()
+        let keep = Set(wanted.map { fileName(for: $0.id) }).union([Self.planFileName])
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         where !keep.contains(name) && !name.hasSuffix(".part") {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
@@ -132,6 +149,7 @@ final class LifeboatCache {
     }
 
     func removeAll() {
+        plan = []
         active?.cancel()
         active = nil
         activeID = nil
@@ -144,6 +162,24 @@ final class LifeboatCache {
     // MARK: - Downloads (one at a time)
 
     private func fileName(for id: String) -> String { "\(id).audio" }
+
+    private func savePlan() {
+        let saved = SavedPlan(tracks: plan, variant: variant, streamFormat: streamFormat,
+                              replayGainApplied: replayGainApplied)
+        guard let data = try? JSONEncoder().encode(saved) else { return }
+        try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
+    }
+
+    private func loadPlan() {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.planFileName)),
+              let saved = try? JSONDecoder().decode(SavedPlan.self, from: data) else { return }
+        plan = saved.tracks
+        variant = saved.variant  // else the first update would think the format changed and delete the copies
+        streamFormat = saved.streamFormat
+        replayGainApplied = saved.replayGainApplied
+        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (%{public}s)", plan.count,
+               variant == .opus ? "Opus" : "original")
+    }
 
     private func hasFile(_ id: String) -> Bool {
         FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName(for: id)).path)

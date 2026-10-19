@@ -237,7 +237,7 @@ final class PlaybackSessionController {
         guard !Self.debugRemoteCommandsRegistered else { return }
         Self.debugRemoteCommandsRegistered = true
         let center = CFNotificationCenterGetDarwinNotifyCenter()
-        for name in ["play", "pause", "next", "previous"] {
+        for name in ["play", "pause", "next", "previous", "playsaved"] {
             CFNotificationCenterAddObserver(center, Unmanaged.passUnretained(self).toOpaque(), { _, observer, cfName, _, _ in
                 guard let observer = observer, let cfName = cfName else { return }
                 let controller = Unmanaged<PlaybackSessionController>.fromOpaque(observer).takeUnretainedValue()
@@ -248,6 +248,12 @@ final class PlaybackSessionController {
     }
 
     private func handleDebugRemoteCommand(_ name: String) {
+        if name == "playsaved" {
+            // The "Play Saved Music" button (offline launch).
+            os_log(.info, log: logger, "🧪 Debug: play saved music")
+            (slimProtoProvider?() as? SlimProtoCoordinator)?.playSavedMusicOffline()
+            return
+        }
         let commands: [String: RemoteCommand] = ["play": .play, "pause": .pause, "next": .next, "previous": .previous]
         guard let command = commands[name] else { return }
         os_log(.info, log: logger, "🧪 Debug remote command: %{public}s", name)

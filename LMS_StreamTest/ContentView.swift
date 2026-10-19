@@ -31,6 +31,7 @@ struct ContentView: View {
     @State private var topInset: CGFloat = 0
     /// Playing downloaded copies while the server can't be reached (shows the offline banner).
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     private let offlinePoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private static let offlineBannerHeight: CGFloat = 30
     /// GH#75: hardware volume rocker → external player forwarding
@@ -244,6 +245,8 @@ struct ContentView: View {
         .onReceive(offlinePoll) { _ in
             let status = isAppInBackground ? nil : slimProtoCoordinator.offlinePlaybackStatus
             if status != offlineStatus { offlineStatus = status }
+            let offer = isAppInBackground ? nil : slimProtoCoordinator.savedMusicOffer
+            if offer != savedMusicOffer { savedMusicOffer = offer }
         }
         .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
             pushStreamInfoToWebView()
@@ -618,6 +621,29 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+
+            if let offline = offlineStatus {
+                // No server, but the downloaded copies are playing.
+                VStack(spacing: 4) {
+                    Label(offline.isPaused ? "Offline · paused" : "Playing saved music", systemImage: "wifi.slash")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.orange)
+                    Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text(offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal)
+            } else if let offer = savedMusicOffer {
+                Button("Play Saved Music · \(offer.minutesLeft) min") {
+                    slimProtoCoordinator.playSavedMusicOffline()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .padding(.horizontal, 40)
+            }
 
             Button("Open Settings") {
                 showingSettings = true
