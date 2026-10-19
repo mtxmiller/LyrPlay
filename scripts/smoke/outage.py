@@ -26,6 +26,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O8 | phase 2: 240s offline, lock-screen Next, Pause, Play (Debug-build button hook) | LMS on the next track at the time played there (±6s) |
 | O9 | phase 2: 90s offline, Pause after 20s | LMS paused afterwards, time not moving |
 | O11 | no outage: paused, app frozen 40s (like iOS suspending it), lock-screen Play as it wakes | LMS playing again (the button reached LMS, not just the phone's old buffer) |
+| O12 | phase 2: 120s offline, Next; then the web side is back while SlimProto still refuses (20s) | LMS on the next track at the time played there (±6s): a save during the refusals must not put back LMS's old track |
 | O10 | phase 2: paused, app quit, relaunched with the server unreachable (150s), "Play Saved Music" | LMS lands where the saved music got to (±8s), playing |
 """
 import os
@@ -336,6 +337,30 @@ def o11_suspended_play(oracle, album_id):
         raise CheckFailed(f"LMS {s['mode']} after lock-screen Play, expected play")
 
 
+def o12_skip_then_slow_reconnect(oracle, album_id):
+    # Device log 2026-10-19: offline skip A → B; when the network came back the
+    # first SlimProto connect timed out, and the save on that disconnect asked
+    # LMS (reachable again) for its track: A. The reconnect jumped to A.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    fault("/kill?scope=http")
+    fault("/outage?secs=120&after=drop")
+    print("   … outage 120s (after=drop)", flush=True)
+    t0 = time.time()
+    time.sleep(40); press("next"); t_next = time.time()
+    time.sleep(max(0, 120 - (time.time() - t0)))
+    fault("/end")
+    fault("/outage?secs=20&after=drop&scope=slim&new=refuse")
+    print("   … web back, SlimProto refused 20s", flush=True)
+    time.sleep(20)
+    wait_back(oracle, timeout=45)
+    time.sleep(4)
+    s = watch_monotonic(oracle)
+    played = time.time() - t_next
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; expected track {s0['index'] + 1} ~{played:.1f}s")
+    if s["index"] != s0["index"] + 1 or abs(s["time"] - played) > 6:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {s0['index'] + 1} {played:.1f}±6s")
+
+
 def o6_lifeboat_midtrack(oracle, album_id):
     lifeboat_continuous(oracle, album_id, 90, kbps=400)
 
@@ -357,6 +382,7 @@ SCENARIOS = [
     ("O9", "paused offline, back < 5min", o9_paused_offline),
     ("O10", "offline launch, saved music", o10_saved_music_launch),
     ("O11", "suspended, lock-screen Play", o11_suspended_play),
+    ("O12", "offline skip, slow reconnect", o12_skip_then_slow_reconnect),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

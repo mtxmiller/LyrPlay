@@ -189,8 +189,8 @@ struct ContentView: View {
                 errorOverlay
             }
 
-            if let offline = offlineStatus, !isLoading, loadError == nil {
-                offlineBanner(offline)
+            if showsOfflineBanner {
+                offlineBanner
                     .zIndex(2)
             }
 
@@ -764,21 +764,34 @@ struct ContentView: View {
     // MARK: - Error Overlay (Separate from loading screen)
     /// Material's top padding: the status bar, plus room for the offline banner.
     private var materialTopPad: CGFloat {
-        topInset + (offlineStatus != nil && !isLoading && loadError == nil ? Self.offlineBannerHeight : 0)
+        topInset + (showsOfflineBanner ? Self.offlineBannerHeight : 0)
+    }
+
+    private var showsOfflineBanner: Bool {
+        (offlineStatus != nil || savedMusicOffer != nil) && !isLoading && loadError == nil
+    }
+
+    private var offlineBannerText: (main: String, detail: String) {
+        if let offline = offlineStatus {
+            let left = offline.minutesLeft < 1 ? "under 1 min" : "\(offline.minutesLeft) min"
+            return (offline.isPaused ? "Offline · paused" : "Offline · playing saved music", "· \(left) left")
+        }
+        // Paused (or stopped) with no network: the copies can take over.
+        return ("Offline · saved music ready", "· \(savedMusicOffer?.minutesLeft ?? 0) min")
     }
 
     /// Material can't reach the server and freezes, but the music goes on from
     /// downloaded copies: say so, and open Settings (which shows the details).
-    private func offlineBanner(_ offline: SlimProtoCoordinator.OfflinePlaybackStatus) -> some View {
+    private var offlineBanner: some View {
         VStack(spacing: 0) {
             Button {
                 showingSettings = true
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "wifi.slash")
-                    Text(offline.isPaused ? "Offline · paused" : "Offline · playing saved music")
+                    Text(offlineBannerText.main)
                         .fontWeight(.semibold)
-                    Text("· \(offline.minutesLeft < 1 ? "under 1 min" : "\(offline.minutesLeft) min") left")
+                    Text(offlineBannerText.detail)
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                 }
@@ -798,7 +811,7 @@ struct ContentView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .transition(.move(edge: .top).combined(with: .opacity))
-        .animation(.easeInOut(duration: 0.25), value: offline.isPaused)
+        .animation(.easeInOut(duration: 0.25), value: offlineStatus?.isPaused)
     }
 
     private var errorOverlay: some View {
