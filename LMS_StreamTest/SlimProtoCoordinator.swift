@@ -4333,6 +4333,41 @@ extension SlimProtoCoordinator {
         return Float(pow(10, db / 20))
     }
 
+    /// What the settings screen shows while we play downloaded copies offline.
+    struct OfflinePlaybackStatus: Equatable {
+        let title: String
+        let artist: String
+        let isPaused: Bool
+        /// Saved music left from the playhead, counting only the copies that follow on unbroken.
+        let minutesLeft: Int
+    }
+
+    /// Non-nil while the server can't be reached and a downloaded copy is
+    /// playing (or paused on the phone). Polled by the settings screen.
+    var offlinePlaybackStatus: OfflinePlaybackStatus? {
+        guard !connectionIsLive, lifeboatActive || lifeboatPausedLocally,
+              let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+              let track = lifeboat.track(at: index) else { return nil }
+        let seconds = Self.offlineSecondsLeft(from: index, elapsed: getCurrentInterpolatedTime().time,
+                                              duration: { self.lifeboat.track(at: $0)?.duration },
+                                              hasCopy: { self.lifeboat.fileURL(forIndex: $0) != nil })
+        return OfflinePlaybackStatus(title: track.title, artist: track.artist,
+                                     isPaused: lifeboatPausedLocally || audioManager.getPlayerState() == "Paused",
+                                     minutesLeft: Int((seconds / 60).rounded(.down)))
+    }
+
+    /// Rest of track `index`, plus each following track while its copy is downloaded.
+    static func offlineSecondsLeft(from index: Int, elapsed: Double,
+                                   duration: (Int) -> Double?, hasCopy: (Int) -> Bool) -> Double {
+        var total = max(0, (duration(index) ?? 0) - elapsed)
+        var next = index + 1
+        while hasCopy(next), let length = duration(next) {
+            total += length
+            next += 1
+        }
+        return total
+    }
+
     /// Lock screen / CarPlay / AirPods buttons while we can't reach the
     /// server: act on the phone (LMS would never get them), and have the
     /// reconnect move LMS to what we ended up doing. True = handled.
@@ -4349,7 +4384,6 @@ extension SlimProtoCoordinator {
             lifeboatPausedLocally = true
             lifeboatUsed = true
             connectionManager.persistForPlayback = true
-        connectionManager.persistForPlayback = true
             let position = getCurrentTimeForSaving()
             simpleTimeTracker.updateFromServer(time: position, playing: false)
             UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")

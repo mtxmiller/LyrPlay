@@ -127,3 +127,26 @@ struct DecodeSourceFinishedTests {
         #expect(AudioStreamDecoder.localFilePath("http://192.168.1.8:9000/stream.mp3") == nil)
     }
 }
+
+struct OfflineMinutesLeftTests {
+    private let durations: [Int: Double] = [3: 200, 4: 180, 5: 240, 6: 300]
+
+    @Test func countsTheRestOfThisTrackAndTheCopiesThatFollow() {
+        let left = SlimProtoCoordinator.offlineSecondsLeft(
+            from: 3, elapsed: 50, duration: { durations[$0] }, hasCopy: { [4, 5].contains($0) })
+        #expect(left == 150 + 180 + 240)
+    }
+
+    @Test func stopsAtTheFirstMissingCopy() {
+        // Track 6 is downloaded but 5 isn't: playback stops after 4.
+        let left = SlimProtoCoordinator.offlineSecondsLeft(
+            from: 3, elapsed: 0, duration: { durations[$0] }, hasCopy: { [4, 6].contains($0) })
+        #expect(left == 200 + 180)
+    }
+
+    @Test func neverNegativePastTheEnd() {
+        let left = SlimProtoCoordinator.offlineSecondsLeft(
+            from: 3, elapsed: 230, duration: { durations[$0] }, hasCopy: { _ in false })
+        #expect(left == 0)
+    }
+}

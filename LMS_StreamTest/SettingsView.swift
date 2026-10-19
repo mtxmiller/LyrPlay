@@ -21,6 +21,7 @@ struct SettingsView: View {
 
     // Status card (bd x19i)
     @State private var isConnectedNow = false
+    @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
     @State private var connectionStateText = ""
     private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -246,16 +247,29 @@ struct SettingsView: View {
                     .frame(width: 7, height: 7)
                 Text(statusText)
                     .foregroundColor(statusColor)
-                Text("· \(settings.activeServerHost.isEmpty ? "No server set" : settings.activeServerHost)")
+                if offlineStatus == nil {
+                    Text("· \(settings.activeServerHost.isEmpty ? "No server set" : settings.activeServerHost)")
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .font(.footnote)
+            if let offline = offlineStatus {
+                Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
+                    .font(.footnote)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            .font(.footnote)
         }
         .accessibilityElement(children: .combine)
     }
 
     private var statusText: String {
+        if let offline = offlineStatus {
+            // The server can't be reached, but the downloaded copies keep the music going.
+            let left = offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left"
+            return "Offline · \(offline.isPaused ? "paused" : "playing saved music") · \(left)"
+        }
         if isConnectedNow {
             return settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
         }
@@ -266,6 +280,7 @@ struct SettingsView: View {
     }
 
     private var statusColor: Color {
+        if offlineStatus != nil { return .orange }
         if isConnectedNow {
             return settings.currentActiveServer == .backup ? .orange : .green
         }
@@ -277,6 +292,7 @@ struct SettingsView: View {
 
     private func refreshConnectionStatus() {
         isConnectedNow = coordinator.isConnected
+        offlineStatus = coordinator.offlinePlaybackStatus
         connectionStateText = coordinator.connectionState
     }
 
