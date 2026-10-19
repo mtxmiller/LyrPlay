@@ -1474,6 +1474,13 @@ class AudioStreamDecoder {
         // half-counted across the reset (bd LMS_StreamTest-433.2.2).
         stateLock.lock()
         BASS_ChannelSetPosition(pushStream, 0, DWORD(BASS_POS_BYTE))
+        // Boundary syncs are byte positions in the old stream's audio: after the
+        // reset they'd fire at the same byte of the new one and count a track
+        // that never started (seen 2026-10-19: index 0→1 ~29s into a new album).
+        for sync in trackBoundarySyncs {
+            BASS_ChannelRemoveSync(pushStream, sync)
+        }
+        trackBoundarySyncs.removeAll()
 
         // Sync mode: don't restart playback here — the sync timer (after 'u' arrives)
         // is responsible for the actual BASS_ChannelPlay. Calling it here would start
