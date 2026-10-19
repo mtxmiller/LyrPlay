@@ -224,6 +224,11 @@ class SlimProtoCoordinator: ObservableObject {
     /// LMS's ReplayGain for the last stream (0 = LMS applies none for us).
     private var lastStreamReplayGain: Float = 0
     private var lifeboatCacheCleared = false
+    /// Paused with the lock screen / CarPlay while offline (LMS doesn't know).
+    private var lifeboatPausedLocally = false
+    /// The next silent recovery restores paused even if LMS says it's playing
+    /// (it only "plays" because it never got our offline pause).
+    private var forcePausedRestore = false
     /// Format of the last stream LMS sent (picks the copies' format).
     private var currentStreamFormat = ""
     /// Last time any SlimProto frame arrived from the server.
@@ -724,7 +729,8 @@ class SlimProtoCoordinator: ObservableObject {
     func handleAudioPlayerDidStartPlaying() {
         os_log(.info, log: logger, "🎵 Audio playback actually started - sending STMs")
         DispatchQueue.main.async { [weak self] in
-            self?.endOutageHold(reason: "playback started")
+            guard let self = self, !self.lifeboatHoldsSession else { return }
+            self.endOutageHold(reason: "playback started")
         }
 
         // This is when we should send STMs (track started playing)
@@ -1176,13 +1182,14 @@ class SlimProtoCoordinator: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self = self, self.recoveryGeneration == generation, self.isRecoveryInProgress else { return }
                     let mode = (response["result"] as? [String: Any])?["mode"] as? String
-                    if mode == "play" {
+                    if mode == "play" && !self.forcePausedRestore {
                         os_log(.info, log: self.logger, "[APP-RECOVERY] 🔄 Server is already playing us - not restoring paused")
                         self.isRecoveryInProgress = false
                         self.silentRecoveryPauseGeneration = nil
                         self.audioManager.disableSilentRecoveryMode()
                         return
                     }
+                    self.forcePausedRestore = false
                     self.executePlaylistRecovery(shouldPlay: false)
                 }
             }
@@ -1595,7 +1602,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
             client.discardHeldEvents()
         }
         reconnectTargetFromLifeboat = lifeboatUsed
-        reconnectTarget = (reconnect && outageHoldActive) ? Self.savedRecoveryTarget(
+        reconnectTarget = (reconnect && (outageHoldActive || lifeboatUsed)) ? Self.savedRecoveryTarget(
             hasTimestamp: true,
             index: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
             position: getCurrentTimeForSaving()) : nil
@@ -1631,6 +1638,16 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
+
+        if lifeboatUsed {
+            // Offline we played copies or used the buttons: LMS has to come to us,
+            // whatever recovery trigger this connect has (a pause offline ends the hold).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self, self.lifeboatUsed, self.serverHeardRecently else { return }
+                self.clearHeldTrackEnd()
+                self.jumpLMSToLifeboatPosition(shouldPlay: !self.lifeboatPausedLocally)
+            }
+        }
 
         if reconnectHelo && decodeEndHeld {
             resolveHeldTrackEnd()
@@ -2042,6 +2059,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         }
         lifeboatActive = false
         lifeboatUsed = false
+        lifeboatPausedLocally = false
+        forcePausedRestore = false
+        if !outageHoldActive { connectionManager.persistForPlayback = false }
         scheduleLifeboatPlan(after: 3)
         // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
         //   '0' (0x30) = WAIT for unpause ('u')                           — used for sync groups + fade-in transitions
@@ -2584,6 +2604,15 @@ extension SlimProtoCoordinator {
             // A player LMS has marked disconnected has a frozen time (where the
             // outage began) while our buffer plays on. Taking it would rewind
             // the tracker, and a recovery would jump back to it.
+            if lifeboatUsed || outageHoldActive {
+                // Through an outage our tracker is the truth (frozen where the
+                // audio stopped, or following local audio) until playback from
+                // the server resumes and ends the hold. Right after a reconnect
+                // LMS's time is our drained stream's 0 (rig O4) or stale (O9:
+                // 260s replaced our paused 42.8s), and a recovery would jump there.
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll during the outage (server=%.2f)", serverTime)
+                return
+            }
             if Self.statusPlayerConnected(result) != true {
                 os_log(.info, log: logger, "⏱️ Ignoring server-time poll: LMS has us disconnected (frozen time %.2f)", serverTime)
                 return
@@ -2750,6 +2779,8 @@ extension SlimProtoCoordinator {
             saveCurrentPositionForRecovery()
             os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
         }
+
+        if handleOfflineCommand(command.lowercased()) { return }
 
         #if os(iOS)
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
@@ -3904,6 +3935,8 @@ extension SlimProtoCoordinator {
         lifeboatRestartMuted = true
         liftLifeboatRestartMute(after: 8)  // ceiling, should the correction never run
         os_log(.info, log: logger, "🛟 LMS restarted a forgotten player over our downloaded copies - muted until we move it")
+        // A pause offline ended the outage hold, so no recovery trigger will call it.
+        if lifeboatPausedLocally { correctForgottenRestart() }
     }
 
     private func liftLifeboatRestartMute(after delay: TimeInterval = 0) {
@@ -3918,6 +3951,18 @@ extension SlimProtoCoordinator {
     private func correctForgottenRestart() {
         guard let target = reconnectTarget else { liftLifeboatRestartMute(); return }
         reconnectTarget = nil
+        if lifeboatPausedLocally {
+            // Paused on the phone while offline: land paused at our place (the
+            // silent recovery mutes, jumps and pauses; it owns the mute now).
+            os_log(.info, log: logger, "🔁 LMS forgot us while we were paused offline - restoring paused: track %d at %.1f",
+                   target.index, target.position)
+            lifeboatRestartMuted = false
+            UserDefaults.standard.set(target.index, forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.set(target.position, forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            performPlaylistRecovery(shouldPlay: false)
+            return
+        }
         let anyTrack = reconnectTargetFromLifeboat
         // Muted: no need to let the restart run long (it only has to be playing).
         DispatchQueue.main.asyncAfter(deadline: .now() + (lifeboatRestartMuted ? 1.5 : 3.0)) { [weak self] in
@@ -4088,6 +4133,11 @@ extension SlimProtoCoordinator {
 
     // MARK: - Lifeboat (ride out network loss, phase 2)
 
+    /// Playing from copies (or paused offline) while the server is away.
+    private var lifeboatHoldsSession: Bool {
+        (lifeboatActive || lifeboatUsed) && !connectionIsLive
+    }
+
     /// Copies may be played (whatever the network now: they were fetched earlier).
     private var lifeboatEnabled: Bool { settings.lifeboatMode != 0 }
 
@@ -4118,6 +4168,7 @@ extension SlimProtoCoordinator {
                     let upcoming = Self.lifeboatTracks(fromStatus: result)
                     let elapsed = (result["time"] as? Double) ?? 0
                     self.lifeboat.update(upcoming: upcoming, elapsed: elapsed, streamFormat: self.currentStreamFormat,
+                                         lookahead: TimeInterval(self.settings.lifeboatMinutes * 60),
                                          mayDownload: { [weak self] in self?.lifeboatMayDownload ?? false },
                                          allowExpensive: self.settings.lifeboatMode == 2)
                 }
@@ -4265,17 +4316,91 @@ extension SlimProtoCoordinator {
             os_log(.info, log: logger, "🛟 No downloaded copy of track %d - waiting for the server", index)
             return false
         }
-        // LMS normally sends each track's gain in its strm; offline, use the
-        // track's ReplayGain tag when LMS applies gain for us at all.
-        var gain: Float = 0
-        if lastStreamReplayGain > 0, let db = lifeboat.track(at: index)?.replayGainDB {
-            gain = Float(pow(10, db / 20))
-        }
+        let gain = lifeboatGain(index: index)
         os_log(.info, log: logger, "🛟 Offline: queuing the downloaded copy of track %d (gain %.3f)", index, gain)
         lifeboatActive = true
         lifeboatUsed = true
+        connectionManager.persistForPlayback = true
         audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
                                              replayGain: gain, isGapless: true, startTime: 0, waitForUnpause: false)
+        return true
+    }
+
+    /// Linear gain for the copy at `index`: LMS sends each track's gain in its
+    /// strm; offline, use the track's ReplayGain tag when LMS applies gain for us.
+    private func lifeboatGain(index: Int) -> Float {
+        guard lastStreamReplayGain > 0, let db = lifeboat.track(at: index)?.replayGainDB else { return 0 }
+        return Float(pow(10, db / 20))
+    }
+
+    /// Lock screen / CarPlay / AirPods buttons while we can't reach the
+    /// server: act on the phone (LMS would never get them), and have the
+    /// reconnect move LMS to what we ended up doing. True = handled.
+    private func handleOfflineCommand(_ command: String) -> Bool {
+        guard !connectionIsLive else { return false }
+        let state = audioManager.getPlayerState()
+        let hasLocalAudio = state == "Playing" || state == "Paused" || audioManager.isPushStreamStalled() || lifeboatActive
+        guard hasLocalAudio, let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int else {
+            return false
+        }
+        switch command {
+        case "pause", "stop":
+            audioManager.pause()
+            lifeboatPausedLocally = true
+            lifeboatUsed = true
+            connectionManager.persistForPlayback = true
+        connectionManager.persistForPlayback = true
+            let position = getCurrentTimeForSaving()
+            simpleTimeTracker.updateFromServer(time: position, playing: false)
+            UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            endOutageHold(reason: "paused offline")
+            os_log(.info, log: logger, "📴 Offline: paused on the phone at %.1fs", position)
+            return true
+        case "play":
+            guard state == "Paused" || lifeboatPausedLocally else { return true }
+            lifeboatPausedLocally = false
+            beginOutageHold(reason: "playing offline")
+            audioManager.play()
+            simpleTimeTracker.updateFromServer(time: getCurrentTimeForSaving(), playing: true)
+            os_log(.info, log: logger, "📴 Offline: resumed on the phone")
+            return true
+        case "next":
+            if playLifeboatTrackNow(index: index + 1) {
+                os_log(.info, log: logger, "📴 Offline: skipped to the downloaded copy of track %d", index + 1)
+            } else {
+                os_log(.info, log: logger, "📴 Offline: no downloaded copy of track %d - staying", index + 1)
+            }
+            return true
+        case "previous":
+            // Back to the start of this song (earlier copies are already deleted).
+            if !playLifeboatTrackNow(index: index) {
+                os_log(.info, log: logger, "📴 Offline: no downloaded copy of track %d to restart", index)
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Start the copy of track `index` now, from its beginning (a skip).
+    private func playLifeboatTrackNow(index: Int) -> Bool {
+        guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
+        clearHeldTrackEnd()
+        lifeboatActive = true
+        lifeboatUsed = true
+        connectionManager.persistForPlayback = true
+        lifeboatPausedLocally = false
+        UserDefaults.standard.set(index, forKey: "lyrplay_recovery_index")
+        UserDefaults.standard.set(0.0, forKey: "lyrplay_recovery_position")
+        UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+        beginOutageHold(reason: "playing offline")
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: lifeboatGain(index: index), isGapless: false,
+                                             startTime: 0, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: 0, duration: track.duration, playing: true)
+        audioManager.updateTrackMetadata(title: track.title, artist: track.artist, album: track.album,
+                                         artworkURL: nil, duration: track.duration)
         return true
     }
 
@@ -4318,6 +4443,7 @@ extension SlimProtoCoordinator {
                         self.performPlaylistRecovery(shouldPlay: true)
                     }
                 } else {
+                    self.forcePausedRestore = true
                     self.performPlaylistRecovery(shouldPlay: false)
                 }
             }
@@ -4408,7 +4534,9 @@ extension SlimProtoCoordinator {
         audibleRecoveryTarget = nil
         holdTimeUntilRecoveryJump = false
         audioManager.setOutputKeepAlive(false)
-        connectionManager.persistForPlayback = false
+        // Out of step with LMS (copies or offline buttons): keep reconnecting
+        // until we can move it to where we are.
+        connectionManager.persistForPlayback = lifeboatUsed
         // Nothing left to resume: a later reconnect must not start playback
         // on its own (wasPlaying is recomputed at the next disconnect).
         wasPlayingBeforeDisconnect = false
@@ -4634,6 +4762,9 @@ extension SlimProtoCoordinator {
     func handleDecoderDidStartPlayback() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // Audio from a downloaded copy while the server is away isn't the
+            // server's playback coming back: keep the hold (and the reconnects).
+            if self.lifeboatHoldsSession { return }
             self.endOutageHold(reason: "playback started")
             if let generation = self.silentRecoveryPauseGeneration {
                 self.sendSilentRecoveryPause(generation: generation, reason: "silent stream playing")

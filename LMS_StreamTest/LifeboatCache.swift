@@ -28,9 +28,10 @@ final class LifeboatCache {
         case opus = ".ops"
     }
 
-    /// How far ahead to keep copies, in seconds of music from the playhead.
+    /// How far ahead to keep copies by default, in seconds of music from the
+    /// playhead (the setting chooses 15, 30 or 60 minutes).
     static let lookahead: TimeInterval = 30 * 60
-    static let maxTracks = 20
+    static let maxTracks = 40
     static let maxBytes: Int64 = 600 * 1024 * 1024
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "Lifeboat")
@@ -72,10 +73,11 @@ final class LifeboatCache {
     /// New queue from LMS. Starts downloading what's missing and deletes
     /// copies that left the window.
     func update(upcoming: [Track], elapsed: Double, streamFormat: String,
+                lookahead: TimeInterval = lookahead,
                 mayDownload: @escaping () -> Bool = { true }, allowExpensive: Bool = true) {
         self.mayDownload = mayDownload
         self.allowExpensive = allowExpensive
-        let wanted = Self.select(upcoming, elapsed: elapsed)
+        let wanted = Self.select(upcoming, elapsed: elapsed, lookahead: lookahead)
         let newVariant: Variant = (streamFormat.lowercased().contains("opus") && !opusUnavailable) ? .opus : .original
         if newVariant != variant {
             variant = newVariant
@@ -107,6 +109,26 @@ final class LifeboatCache {
     func fileURL(forIndex index: Int) -> URL? {
         guard let track = track(at: index), hasFile(track.id) else { return nil }
         return directory.appendingPathComponent(fileName(for: track.id))
+    }
+
+    /// Space the downloaded copies take, for the settings screen.
+    static func storageUsed() -> Int64 {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = caches.appendingPathComponent("Lifeboat", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.reduce(Int64(0)) { sum, name in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(name).path)
+            return sum + ((attrs?[.size] as? NSNumber)?.int64Value ?? 0)
+        }
+    }
+
+    /// Delete all downloaded copies (the setting was turned off).
+    static func clearStorage() {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = caches.appendingPathComponent("Lifeboat", isDirectory: true)
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     func removeAll() {

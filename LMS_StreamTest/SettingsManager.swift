@@ -63,11 +63,29 @@ class SettingsManager: ObservableObject {
         }
     }
 
-    /// Hidden developer switch (no UI yet): download the queue ahead to play
-    /// through a long dead spot. 0 = off, 1 = download on Wi-Fi only,
+    /// Offline playback ("Keep Playing Offline"): download the queue ahead
+    /// to play through a dead spot. 0 = off, 1 = download on Wi-Fi only,
     /// 2 = always. Launch argument `-Lifeboat 2`.
     var lifeboatMode: Int {
-        UserDefaults.standard.integer(forKey: "Lifeboat")
+        get { UserDefaults.standard.integer(forKey: "Lifeboat") }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: "Lifeboat")
+        }
+    }
+
+    static let lifeboatMinuteChoices = [15, 30, 60]
+
+    /// How much music ahead to keep downloaded, in minutes.
+    var lifeboatMinutes: Int {
+        get {
+            let value = UserDefaults.standard.integer(forKey: "LifeboatMinutes")
+            return Self.lifeboatMinuteChoices.contains(value) ? value : 30
+        }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: "LifeboatMinutes")
+        }
     }
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume

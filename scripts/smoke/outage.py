@@ -23,6 +23,8 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O5 | 320s, as O4 (LMS forgets the player after 300s) — slow, run only when named | as O4 |
 | O6 | phase 2 (`-Lifeboat 2`): 90s, download killed, stream capped at 400 kbit/s beforehand (like a mobile link) | LMS lands where continuous playback would be (±6s): the downloaded copy took over mid-track |
 | O7 | phase 2: 420s, download killed (crosses track boundaries and LMS's forget time) | as O6, on the right later track |
+| O8 | phase 2: 240s offline, lock-screen Next, Pause, Play (Debug-build button hook) | LMS on the next track at the time played there (±6s) |
+| O9 | phase 2: 90s offline, Pause after 20s | LMS paused afterwards, time not moving |
 """
 import os
 import subprocess
@@ -216,6 +218,62 @@ def lifeboat_continuous(oracle, album_id, secs, kbps=0):
                           "(playback did not continue through the outage)")
 
 
+SIM_NAME = os.environ.get("LYRPLAY_SIM_NAME", "iPhone 17")
+
+
+def press(button):
+    """Press a lock-screen button in the simulator app (Debug builds: Darwin
+    notification com.lmsstream.debug.remote.<button>)."""
+    subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "notifyutil", "-p",
+                    f"com.lmsstream.debug.remote.{button}"], check=True)
+    print(f"   … pressed {button}", flush=True)
+
+
+def o8_offline_buttons(oracle, album_id):
+    # Offline: Next, Pause, Play, then back online. LMS must land on the next
+    # track at the time actually played there.
+    s0 = fresh_start(oracle, album_id, settle=25)
+    fault("/kill?scope=http")
+    fault("/outage?secs=240&after=drop")
+    print("   … outage 240s (after=drop)", flush=True)
+    t0 = time.time()
+    time.sleep(40); press("next"); t_next = time.time()
+    time.sleep(20); press("pause"); t_pause = time.time()
+    time.sleep(90); press("play"); t_play = time.time()
+    time.sleep(max(0, 240 - (time.time() - t0)))
+    wait_back(oracle, timeout=45)
+    time.sleep(4)
+    s = watch_monotonic(oracle)
+    played = (t_pause - t_next) + (time.time() - t_play)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; expected track {s0['index'] + 1} ~{played:.1f}s")
+    if s["index"] != s0["index"] + 1 or abs(s["time"] - played) > 6:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {s0['index'] + 1} {played:.1f}±6s")
+
+
+def o9_paused_offline(oracle, album_id):
+    # Offline: Pause. Back online (< 300s): LMS paused at the time we paused.
+    fresh_start(oracle, album_id, settle=25)
+    fault("/kill?scope=http")
+    fault("/outage?secs=90&after=drop")
+    print("   … outage 90s (after=drop)", flush=True)
+    t0 = time.time()
+    time.sleep(20); press("pause")
+    s_at_pause_wall = time.time()
+    time.sleep(max(0, 90 - (time.time() - t0)))
+    deadline = time.time() + 40
+    while time.time() < deadline and not connected(oracle):
+        time.sleep(1)
+    time.sleep(8)
+    s = oracle.status()
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s")
+    if s["mode"] != "pause":
+        raise CheckFailed(f"LMS mode {s['mode']} after a pause made offline, expected pause")
+    t = s["time"]
+    time.sleep(3)
+    if abs(oracle.status()["time"] - t) > 0.5:
+        raise CheckFailed("time moving while LMS says paused")
+
+
 def o6_lifeboat_midtrack(oracle, album_id):
     lifeboat_continuous(oracle, album_id, 90, kbps=400)
 
@@ -233,6 +291,8 @@ SCENARIOS = [
     # Phase 2 (app launched with -Lifeboat 2), only when named:
     ("O6", "90s killed, plays the copy", o6_lifeboat_midtrack),
     ("O7", "420s, copies across tracks", o7_lifeboat_tracks),
+    ("O8", "offline Next/Pause/Play", o8_offline_buttons),
+    ("O9", "paused offline, back < 5min", o9_paused_offline),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

@@ -9,6 +9,7 @@ import StoreKit
 
 // MARK: - Main Settings View
 struct SettingsView: View {
+    @State private var offlineStorageText = "None"
     @StateObject private var settings = SettingsManager.shared
     @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @EnvironmentObject private var coordinator: SlimProtoCoordinator
@@ -125,6 +126,8 @@ struct SettingsView: View {
                 } footer: {
                     Text("Resume restores your place after 45+ seconds in the background. Volume Buttons (experimental) sends the phone's buttons to the selected player when it isn't this device; fixed-volume players are skipped.")
                 }
+
+                offlineSection
 
                 Section {
                     Toggle("Show Only This Player", isOn: $settings.iOSPlayerFocus)
@@ -278,6 +281,51 @@ struct SettingsView: View {
     }
 
     // MARK: - Audio
+
+    /// Offline playback (ride out network loss, phase 2).
+    private var offlineSection: some View {
+        Section {
+            Picker("Keep Playing Offline", selection: lifeboatModeBinding) {
+                Text("Off").tag(0)
+                Text("On Wi-Fi").tag(1)
+                Text("Always").tag(2)
+            }
+            .pickerStyle(.menu)
+
+            if settings.lifeboatMode != 0 {
+                Picker("Download Ahead", selection: $settings.lifeboatMinutes) {
+                    ForEach(SettingsManager.lifeboatMinuteChoices, id: \.self) { minutes in
+                        Text("\(minutes) min").tag(minutes)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                valueRow("Storage Used", offlineStorageText)
+            }
+        } header: {
+            Text("Offline")
+        } footer: {
+            Text("Downloads the next songs in your queue so music keeps playing through dead spots, then picks up on the server where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
+        }
+        .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
+    }
+
+    private var lifeboatModeBinding: Binding<Int> {
+        Binding(
+            get: { settings.lifeboatMode },
+            set: { mode in
+                settings.lifeboatMode = mode
+                if mode == 0 {
+                    LifeboatCache.clearStorage()  // off: don't keep the downloads
+                    offlineStorageText = Self.formatStorage(0)
+                }
+            }
+        )
+    }
+
+    static func formatStorage(_ bytes: Int64) -> String {
+        bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
 
     private var audioSection: some View {
         Section {
