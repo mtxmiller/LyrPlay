@@ -40,6 +40,33 @@ struct SlimProtoOfflineEvents {
     static let limit = 8
 
     private(set) var pending: [String] = []
+    /// STMd written to a socket the server hasn't answered on since. A frozen
+    /// connection still accepts writes, so a song that finished downloading
+    /// as the outage began sent its STMd nowhere. Without it LMS reads the
+    /// held STMu as "the next song is buffering" and sits in play (rig O13).
+    private(set) var unconfirmed: [String] = []
+
+    /// A track event went out on a live socket.
+    mutating func sent(_ code: String) {
+        guard code == "STMd" else { return }
+        if unconfirmed.count >= Self.limit { unconfirmed.removeFirst() }
+        unconfirmed.append(code)
+    }
+
+    /// The server sent a frame: what we wrote before it got through. (After an
+    /// STMd LMS answers with the next song's strm, so a resent STMd can't make
+    /// it skip one.)
+    mutating func serverFrameArrived() {
+        unconfirmed.removeAll()
+    }
+
+    /// The connection dropped: STMds the server never answered go out again,
+    /// ahead of what was held offline. A second STMd for the same song is a
+    /// no-op to LMS (ReadyToStream with nothing streaming).
+    mutating func connectionLost() {
+        pending = Array((unconfirmed + pending).suffix(Self.limit))
+        unconfirmed.removeAll()
+    }
 
     /// Keep `code` for later. False if it isn't a track event (not kept).
     mutating func hold(_ code: String) -> Bool {
@@ -52,7 +79,7 @@ struct SlimProtoOfflineEvents {
     /// The events to send now, in order: all of them after a reconnect HELO,
     /// none after a fresh one. Empties the queue.
     mutating func take(afterReconnect: Bool) -> [String] {
-        defer { pending.removeAll() }
+        defer { pending.removeAll(); unconfirmed.removeAll() }
         return afterReconnect ? pending : []
     }
 }
@@ -365,6 +392,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // A stale socket's late disconnect must not touch the new one's events.
+            if sock === self.socket { self.offlineEvents.connectionLost() }
             self.isConnected = false
             self.hasRequestedInitialStatus = false
             self.delegate?.slimProtoDidDisconnect(error: err)
@@ -423,6 +452,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             // Command processing runs on main (single-threaded control plane).
             // Main-queue FIFO preserves server command order.
             DispatchQueue.main.async { [weak self] in
+                if sock === self?.socket { self?.offlineEvents.serverFrameArrived() }
                 self?.delegate?.slimProtoDidReceiveCommand(command)
             }
 
@@ -693,6 +723,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // os_log(.debug, log: logger, "STAT packet: %{public}s", fullMessage.map { String(format: "%02X", $0) }.joined(separator: " "))
 
         socket.write(fullMessage, withTimeout: 30, tag: 2)
+        offlineEvents.sent(code)
     }
 
     // MARK: - Public Interface

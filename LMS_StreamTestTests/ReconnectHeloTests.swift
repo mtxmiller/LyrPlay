@@ -79,6 +79,32 @@ struct OfflineEventQueueTests {
         #expect(q.pending.isEmpty)
     }
 
+    @Test func resendsAnUnansweredStmdAfterTheDrop() {
+        var q = SlimProtoOfflineEvents()
+        q.sent("STMd")
+        q.sent("STMt")
+        q.connectionLost()
+        _ = q.hold("STMu")
+        #expect(q.take(afterReconnect: true) == ["STMd", "STMu"])
+    }
+
+    @Test func aServerFrameConfirmsTheStmd() {
+        var q = SlimProtoOfflineEvents()
+        q.sent("STMd")
+        q.serverFrameArrived()
+        q.connectionLost()
+        _ = q.hold("STMu")
+        #expect(q.take(afterReconnect: true) == ["STMu"])
+    }
+
+    @Test func unansweredStmdIsDroppedAfterAFreshHelo() {
+        var q = SlimProtoOfflineEvents()
+        q.sent("STMd")
+        q.connectionLost()
+        #expect(q.take(afterReconnect: false).isEmpty)
+        #expect(q.unconfirmed.isEmpty)
+    }
+
     @Test func boundedKeepingTheNewest() {
         var q = SlimProtoOfflineEvents()
         for _ in 0..<SlimProtoOfflineEvents.limit { _ = q.hold("STMs") }
