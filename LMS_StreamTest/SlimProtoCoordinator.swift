@@ -236,6 +236,8 @@ class SlimProtoCoordinator: ObservableObject {
     private var serverUnreachableSince: Date?
     /// Format of the last stream LMS sent (picks the copies' format).
     private var currentStreamFormat = ""
+    /// The current stream started while a track played: it's the next track's.
+    private var streamIsForNextTrack = false
     /// Last time any SlimProto frame arrived from the server.
     private var lastServerMessageAt: Date?
 
@@ -2094,6 +2096,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
         lastServerStreamStartAt = Date()
+        // A stream that starts while we play is the next track's (LMS sends it
+        // after our STMd); a start, seek or jump flushes playback first.
+        streamIsForNextTrack = audioManager.getPlayerState() == "Playing"
         clearHeldTrackEnd()
         currentStreamFormat = format
         lastStreamReplayGain = replayGain
@@ -4316,14 +4321,20 @@ extension SlimProtoCoordinator {
             self.lifeboatPlanAt = Date()
             let command: [String: Any] = [
                 "id": 1, "method": "slim.request",
-                "params": [self.settings.playerMACAddress, ["status", "-", LifeboatCache.maxTracks + 1, "tags:acdlxuY"]]
+                "params": [self.settings.playerMACAddress, ["status", "-", LifeboatCache.maxTracks + 1, "tags:acdlxuYo"]]
             ]
             self.sendJSONRPCCommandDirect(command) { [weak self] response in
                 DispatchQueue.main.async {
                     guard let self = self, let result = response["result"] as? [String: Any] else { return }
                     let upcoming = Self.lifeboatTracks(fromStatus: result)
                     let elapsed = (result["time"] as? Double) ?? 0
+                    // The stream (and its format) is the next track's while that one waits
+                    // its turn. LMS moved on in the last seconds: can't tell which, don't learn.
+                    let streamTrack = self.streamIsForNextTrack ? 1 : 0
+                    let clear = !self.streamIsForNextTrack || elapsed > 4
                     self.lifeboat.update(upcoming: upcoming, elapsed: elapsed, streamFormat: self.currentStreamFormat,
+                                         streamSourceType: clear && upcoming.indices.contains(streamTrack)
+                                             ? upcoming[streamTrack].sourceType : nil,
                                          replayGainApplied: self.lastStreamReplayGain > 0,
                                          server: self.currentSessionServer,
                                          lookahead: TimeInterval(self.settings.lifeboatMinutes * 60),
@@ -4349,7 +4360,8 @@ extension SlimProtoCoordinator {
                 // CUE-sheet tracks share one file (url "...#start-end"): a download is the whole album.
                 remote: (number(item["remote"]) ?? 0) != 0 || ((item["url"] as? String)?.contains("#") ?? false),
                 replayGainDB: number(item["replay_gain"]),
-                coverID: item["coverid"].map { "\($0)" })
+                coverID: item["coverid"].map { "\($0)" },
+                sourceType: (item["type"] as? String)?.lowercased())
         }
     }
 
@@ -4457,7 +4469,7 @@ extension SlimProtoCoordinator {
         // original copy of a lossless stream) must match almost perfectly.
         let recentlyRestarted = lastServerStreamStartAt.map { Date().timeIntervalSince($0) < 8 } ?? false
         let searchSeconds: Double = recentlyRestarted ? 60 : 8
-        let identicalAudio = !lifeboat.copiesAreLossy && Self.streamFormatIsLossless(currentStreamFormat)
+        let identicalAudio = !lifeboat.copyIsTranscode(forIndex: index) && Self.streamFormatIsLossless(currentStreamFormat)
         let minimumConfidence: Float = identicalAudio ? 0.97 : AudioStreamDecoder.minimumMatchConfidence
         os_log(.info, log: logger, "🛟 Download cut in track %d near %.1fs - continuing from the downloaded copy (%.0fs window)",
                index, estimate, searchSeconds)

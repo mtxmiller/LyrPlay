@@ -40,7 +40,9 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O22 | phase 2: the next track's copy deleted (failed download), outage across that boundary | offline playback stops there; LMS back at the end of that track or the start of the next, never replaying what was heard |
 | O23 | phase 2: 150s offline; LyrPlay backgrounded (Settings app in front) 30s and foregrounded meanwhile | as O6 (±8s); screenshot of the offline player saved |
 | O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
+| O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
 """
+import glob
 import os
 import subprocess
 import sys
@@ -231,6 +233,31 @@ def lifeboat_continuous(oracle, album_id, secs, kbps=0):
     if s["index"] != idx or abs(s["time"] - t) > 6:
         raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±6s "
                           "(playback did not continue through the outage)")
+
+
+def o25_mixed_formats(oracle, album_id):
+    # A queue mixing FLAC and MP3 files (LYRPLAY_MIXED_TRACKS, track ids in
+    # play order, FLAC first): FLAC files get the stream's transcode as
+    # copies, MP3 files their originals, so the outage crosses a copy with
+    # another format and rate. LMS must land where continuous playback would.
+    ids = os.environ.get("LYRPLAY_MIXED_TRACKS", "")
+    if not ids:
+        raise CheckFailed("set LYRPLAY_MIXED_TRACKS (e.g. 11,130,12,131: FLAC, MP3, ...)")
+    oracle.player_rpc(["playlistcontrol", "cmd:load", f"track_id:{ids}"])
+    oracle.wait_until_advancing(timeout=15)
+    time.sleep(25)  # the copies download
+    s0 = oracle.status()
+    w0 = time.time()
+    durations = oracle.playlist_durations()
+    fault("/kill?scope=http")
+    outage(240, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s")
+    if s["index"] != idx or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±8s")
 
 
 SIM_NAME = os.environ.get("LYRPLAY_SIM_NAME", "iPhone 17")
@@ -647,9 +674,11 @@ def o22_missing_copy_in_plan(oracle, album_id):
     nxt = s0["index"] + 1
     container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
                                capture_output=True, text=True, check=True).stdout.strip()
-    victim = os.path.join(container, "Library", "Caches", "Lifeboat", f"{ids[nxt]}.audio")
-    if not os.path.exists(victim):
-        raise CheckFailed(f"no copy of the next track to remove at {victim}")
+    # <id>.audio for an original copy, <id>.<variant>.audio for a transcode
+    copies = glob.glob(os.path.join(container, "Library", "Caches", "Lifeboat", f"{ids[nxt]}.*audio"))
+    if not copies:
+        raise CheckFailed(f"no copy of the next track (id {ids[nxt]}) to remove in {container}")
+    victim = copies[0]
     os.remove(victim)
     print(f"   … removed the copy of track {nxt} (id {ids[nxt]})", flush=True)
     w0 = time.time()
@@ -778,6 +807,7 @@ SCENARIOS = [
     ("O22", "missing copy in the plan", o22_missing_copy_in_plan),
     ("O23", "background/foreground offline", o23_background_foreground_offline),
     ("O24", "backup server set, offline", o24_backup_server_offline),
+    ("O25", "mixed FLAC/MP3 queue offline", o25_mixed_formats),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

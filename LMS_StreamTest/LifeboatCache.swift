@@ -18,33 +18,43 @@ final class LifeboatCache {
         let remote: Bool        // radio / streaming service / CUE: can't be downloaded
         var replayGainDB: Double? = nil
         var coverID: String? = nil  // LMS artwork id (status tag c), shared by an album's tracks
+        var sourceType: String? = nil  // LMS content type of the file (status tag o): flc, mp3, ...
     }
 
-    /// Which file to fetch. The copy must decode at the stream's sample rate
-    /// so playback can switch to it without a gap: the original for lossless
-    /// streams (MobileTranscode re-encodes FLAC at the same rate), Opus (48k)
-    /// when the stream is Opus.
-    enum Variant: String, Codable {
-        case original = ""
-        case opus = ".lyo"
-        case mp3 = ".mp3?bitrate=320"
-        case aac = ".aac"
-        case ogg = ".lyv"
+    /// Which file to fetch for a track. The copy must be the audio LMS
+    /// streams for that track, at its sample rate, so playback can switch to
+    /// it mid-song: LMS (with MobileTranscode's LyrPlay rules) transcodes only
+    /// FLAC files to the stream format, and streams other files as they are.
+    /// So a FLAC file gets the transcode the stream uses, any other file the
+    /// original. Raw values are stable ids (saved in plan.json, file names).
+    enum Variant: String {
+        case original
+        case opus
+        case mp3
+        case ogg
 
-        /// The copy the server can make in the stream's own format (LMS
-        /// transcodes `download.<ext>` when it has a rule): the same kind of
-        /// audio as the stream, and a fraction of a lossless original's size.
-        /// Downloads carry no player, so only "* *" rules match them. For Opus
-        /// and Ogg those come from MobileTranscode 1.4+ as private types (lyo,
-        /// lyv): a "* *" ops/ogg rule would also change what squeezelite
-        /// players stream. MP3 uses LMS's own rule at the stream's 320k.
+        /// The transcode a FLAC file is streamed as, from that stream's format
+        /// (LMS has no AAC download rule: FLAC streamed as AAC gets originals).
         static func forStreamFormat(_ format: String) -> Variant {
             switch format.lowercased() {
             case let f where f.contains("opus"): return .opus
             case "mp3": return .mp3
-            case "aac": return .aac
             case "ogg": return .ogg
             default: return .original
+            }
+        }
+
+        /// Appended to `/music/<id>/download`. Downloads carry no player, so
+        /// only "* *" rules match them. Opus and Ogg come from MobileTranscode
+        /// 1.4+ as private types (lyo, lyv): a "* *" ops/ogg rule would also
+        /// change what squeezelite players stream. MP3 uses LMS's own rule, at
+        /// the stream rule's 320k and LAME quality 0 (the download default is 9).
+        var urlSuffix: String {
+            switch self {
+            case .original: return ""
+            case .opus: return ".lyo"
+            case .mp3: return ".mp3?bitrate=320&quality=0"
+            case .ogg: return ".lyv"
             }
         }
 
@@ -53,7 +63,6 @@ final class LifeboatCache {
             case .original: return "original"
             case .opus: return "Opus"
             case .mp3: return "MP3"
-            case .aac: return "AAC"
             case .ogg: return "Ogg"
             }
         }
@@ -69,14 +78,17 @@ final class LifeboatCache {
     private let settings = SettingsManager.shared
     private let directory: URL
     private(set) var plan: [Track] = []
-    private var variant: Variant = .original
-    /// The copies are a lossy encode (Opus): a match against the stream can't be exact.
-    var copiesAreLossy: Bool { variant != .original }
+    /// What FLAC files are streamed as, learned from the stream of a FLAC
+    /// track (the setting and the server's prioritizeNative decide it).
+    private var flacVariant: Variant = .original
     private var queue: [Track] = []
     private var active: URLSessionDownloadTask?
     private var activeID: String?
-    /// Variants the server answered 400 for (no download rule): use originals.
-    private var unavailableVariants: Set<Variant> = []
+    /// "server|variant" the server answered 400 for (no download rule): those
+    /// tracks get originals. Per launch, so installing the rule takes effect.
+    private var unavailable: Set<String> = []
+    /// "id|variant" downloads that failed or came back too short: not again this launch.
+    private var failed: Set<String> = []
     /// Checked before each download (the network may have become metered).
     private var mayDownload: () -> Bool = { true }
     private var allowExpensive = true
@@ -89,14 +101,13 @@ final class LifeboatCache {
     private var artworkInFlight: Set<String> = []
 
     /// The plan, saved next to the files so a relaunch (no server) still knows them.
+    /// Older plans (one `variant` for all tracks) still decode: unknown keys are ignored.
     private struct SavedPlan: Codable {
         let tracks: [Track]
-        let variant: Variant
         let streamFormat: String
         let replayGainApplied: Bool
         var server: String? = nil
-        var opusUnavailable: Bool? = nil  // plans saved before unavailableVariants
-        var unavailableVariants: [Variant]? = nil
+        var flacVariant: String? = nil
     }
     private static let planFileName = "plan.json"
 
@@ -125,34 +136,40 @@ final class LifeboatCache {
 
     /// New queue from LMS. Starts downloading what's missing and deletes
     /// copies that left the window.
-    func update(upcoming: [Track], elapsed: Double, streamFormat: String, replayGainApplied: Bool = false,
-                server: String? = nil,
+    /// `streamSourceType`: the file type of the track the current stream
+    /// belongs to (the next track's while it decodes ahead).
+    func update(upcoming: [Track], elapsed: Double, streamFormat: String, streamSourceType: String? = nil,
+                replayGainApplied: Bool = false, server: String? = nil,
                 lookahead: TimeInterval = lookahead,
                 mayDownload: @escaping () -> Bool = { true }, allowExpensive: Bool = true) {
         self.mayDownload = mayDownload
         self.allowExpensive = allowExpensive
         let wanted = Self.select(upcoming, elapsed: elapsed, lookahead: lookahead)
-        let wantedVariant = Variant.forStreamFormat(streamFormat)
-        let newVariant: Variant = unavailableVariants.contains(wantedVariant) ? .original : wantedVariant
-        if newVariant != variant {
-            variant = newVariant
-            removeAll()  // a copy at the wrong rate can't be switched to without a gap
+        if streamSourceType == "flc", !streamFormat.isEmpty {
+            // The stream playing now is a FLAC file's: that's what FLAC files become.
+            // A change only replaces the FLAC tracks' copies (by file name, below).
+            let learned = Variant.forStreamFormat(streamFormat)
+            if learned != flacVariant {
+                os_log(.info, log: logger, "🛟 FLAC files stream as %{public}s: their copies follow", learned.name)
+                flacVariant = learned
+            }
         }
         plan = wanted
         self.streamFormat = streamFormat
         self.replayGainApplied = replayGainApplied
         self.server = server
         savePlan()
-        let keep = Set(wanted.map { fileName(for: $0.id) } + wanted.compactMap { $0.coverID.map(artFileName) })
+        let keep = Set(wanted.map { fileName(for: $0) } + wanted.compactMap { $0.coverID.map(artFileName) })
             .union([Self.planFileName])
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         where !keep.contains(name) && !name.hasSuffix(".part") {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
-        queue = wanted.filter { !hasFile($0.id) && $0.id != activeID }  // not again while it downloads
+        queue = wanted.filter { !hasFile($0) && $0.id != activeID  // not again while it downloads
+            && !failed.contains("\($0.id)|\(variant(for: $0).rawValue)") }
         if mayDownload() {
             // Copies saved before their cover was (or by an older build).
-            for track in wanted where hasFile(track.id) { downloadArtwork(for: track) }
+            for track in wanted where hasFile(track) { downloadArtwork(for: track) }
         }
         if let activeID = activeID, !wanted.contains(where: { $0.id == activeID }) {
             active?.cancel()
@@ -160,7 +177,7 @@ final class LifeboatCache {
             self.activeID = nil
         }
         os_log(.info, log: logger, "🛟 Plan: %d tracks (%.0f min), %d to download (%{public}s)",
-               wanted.count, wanted.reduce(0) { $0 + $1.duration } / 60, queue.count, variant.name)
+               wanted.count, wanted.reduce(0) { $0 + $1.duration } / 60, queue.count, flacVariant.name)
         downloadNext()
     }
 
@@ -170,8 +187,21 @@ final class LifeboatCache {
 
     /// The downloaded copy of the track at playlist `index`, if complete.
     func fileURL(forIndex index: Int) -> URL? {
-        guard let track = track(at: index), hasFile(track.id) else { return nil }
-        return directory.appendingPathComponent(fileName(for: track.id))
+        guard let track = track(at: index), hasFile(track) else { return nil }
+        return directory.appendingPathComponent(fileName(for: track))
+    }
+
+    /// The copy of the track at `index` is a lossy transcode: a match against
+    /// the stream can't be exact.
+    func copyIsTranscode(forIndex index: Int) -> Bool {
+        track(at: index).map { variant(for: $0) != .original } ?? false
+    }
+
+    /// The file to fetch for `track`: see `Variant`.
+    private func variant(for track: Track) -> Variant {
+        guard track.sourceType == "flc", flacVariant != .original,
+              !unavailable.contains("\(server ?? "")|\(flacVariant.rawValue)") else { return .original }
+        return flacVariant
     }
 
     /// The saved cover of the track at playlist `index`, if downloaded.
@@ -214,7 +244,10 @@ final class LifeboatCache {
 
     // MARK: - Downloads (one at a time)
 
-    private func fileName(for id: String) -> String { "\(id).audio" }
+    private func fileName(for track: Track) -> String { fileName(for: track.id, variant: variant(for: track)) }
+    private func fileName(for id: String, variant: Variant) -> String {
+        variant == .original ? "\(id).audio" : "\(id).\(variant.rawValue).audio"
+    }
     private func artFileName(_ coverID: String) -> String { "\(coverID).art" }
 
     /// The cover for the offline player (one per album; small next to the audio).
@@ -239,9 +272,9 @@ final class LifeboatCache {
     }
 
     private func savePlan() {
-        let saved = SavedPlan(tracks: plan, variant: variant, streamFormat: streamFormat,
+        let saved = SavedPlan(tracks: plan, streamFormat: streamFormat,
                               replayGainApplied: replayGainApplied, server: server,
-                              unavailableVariants: Array(unavailableVariants))
+                              flacVariant: flacVariant.rawValue)
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
@@ -250,17 +283,22 @@ final class LifeboatCache {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.planFileName)),
               let saved = try? JSONDecoder().decode(SavedPlan.self, from: data) else { return }
         plan = saved.tracks
-        variant = saved.variant  // else the first update would think the format changed and delete the copies
         streamFormat = saved.streamFormat
         replayGainApplied = saved.replayGainApplied
         server = saved.server
-        // Else every launch would retry Opus, see "changed format" and delete the copies (review M7).
-        unavailableVariants = Set(saved.unavailableVariants ?? (saved.opusUnavailable == true ? [.opus] : []))
-        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (%{public}s)", plan.count, variant.name)
+        flacVariant = saved.flacVariant.flatMap(Variant.init(rawValue:)) ?? .original
+        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (FLAC as %{public}s)", plan.count, flacVariant.name)
     }
 
-    private func hasFile(_ id: String) -> Bool {
-        FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName(for: id)).path)
+    private func hasFile(_ track: Track) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName(for: track)).path)
+    }
+
+    /// Smaller than any real copy of `duration` seconds (16 kbit/s): an empty
+    /// or cut-off answer (a pass-through rule that outputs nothing, a
+    /// transcoder that died) mustn't count as a copy.
+    static func isImplausiblySmall(bytes: Int64, duration: Double) -> Bool {
+        bytes < max(16_000, Int64(duration * 2_000))
     }
 
     private func directorySize() -> Int64 {
@@ -282,7 +320,8 @@ final class LifeboatCache {
             return
         }
         let track = queue.removeFirst()
-        let path = "/music/\(track.id)/download\(variant.rawValue)"
+        let usedVariant = variant(for: track)
+        let path = "/music/\(track.id)/download\(usedVariant.urlSuffix)"
         guard let url = URL(string: settings.buildURLString(path: path)) else { return }
         var request = URLRequest(url: url)
         request.allowsExpensiveNetworkAccess = allowExpensive
@@ -291,14 +330,27 @@ final class LifeboatCache {
             request.setValue(auth, forHTTPHeaderField: "Authorization")
         }
         let started = Date()
-        let usedVariant = variant
+        let usedServer = server ?? ""
         activeID = track.id
         let task = URLSession.lms.downloadTask(with: request) { [weak self] location, response, error in
             // Move the file before returning: the temporary one is deleted afterwards.
             var stored: URL?
             var status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if let location = location, error == nil, status == 200 || status == 206, let self = self {
-                let dest = self.directory.appendingPathComponent(self.fileName(for: track.id))
+                let size = ((try? FileManager.default.attributesOfItem(atPath: location.path))?[.size] as? NSNumber)?.int64Value ?? 0
+                guard !Self.isImplausiblySmall(bytes: size, duration: track.duration) else {
+                    DispatchQueue.main.async {
+                        guard self.activeID == track.id else { return }
+                        os_log(.error, log: self.logger, "🛟 Download of track %{public}s too short (%lld bytes for %.0fs) - not kept",
+                               track.id, size, track.duration)
+                        self.active = nil
+                        self.activeID = nil
+                        self.failed.insert("\(track.id)|\(usedVariant.rawValue)")
+                        self.downloadNext()
+                    }
+                    return
+                }
+                let dest = self.directory.appendingPathComponent(self.fileName(for: track.id, variant: usedVariant))
                 try? FileManager.default.removeItem(at: dest)
                 do {
                     try FileManager.default.moveItem(at: location, to: dest)
@@ -317,15 +369,15 @@ final class LifeboatCache {
                            track.id, track.index, track.duration, Double(size) / 1_048_576, Date().timeIntervalSince(started))
                     self.downloadArtwork(for: track)
                 } else if usedVariant != .original && status == 400 {
+                    // FLAC files only ask for a transcode, so this is the server's rule missing.
                     os_log(.info, log: self.logger, "🛟 Server has no %{public}s download rule - using original files",
                            usedVariant.name)
-                    self.unavailableVariants.insert(usedVariant)
-                    self.variant = .original
-                    self.savePlan()
+                    self.unavailable.insert("\(usedServer)|\(usedVariant.rawValue)")
                     self.queue.insert(track, at: 0)
                 } else {
                     os_log(.error, log: self.logger, "🛟 Download of track %{public}s failed (HTTP %d, %{public}s)",
                            track.id, status, error?.localizedDescription ?? "-")
+                    if status >= 400 { self.failed.insert("\(track.id)|\(usedVariant.rawValue)") }
                 }
                 self.downloadNext()
             }

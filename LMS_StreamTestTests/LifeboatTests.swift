@@ -155,10 +155,24 @@ struct LifeboatVariantTests {
     @Test func copyFollowsTheStreamFormat() {
         #expect(LifeboatCache.Variant.forStreamFormat("Opus") == .opus)
         #expect(LifeboatCache.Variant.forStreamFormat("MP3") == .mp3)
-        #expect(LifeboatCache.Variant.forStreamFormat("AAC") == .aac)
+        #expect(LifeboatCache.Variant.forStreamFormat("AAC") == .original)  // no AAC download rule
         #expect(LifeboatCache.Variant.forStreamFormat("OGG") == .ogg)
         #expect(LifeboatCache.Variant.forStreamFormat("FLAC") == .original)
         #expect(LifeboatCache.Variant.forStreamFormat("WAV") == .original)
         #expect(LifeboatCache.Variant.forStreamFormat("") == .original)
+    }
+
+    @Test func downloadSuffixes() {
+        #expect(LifeboatCache.Variant.original.urlSuffix == "")
+        #expect(LifeboatCache.Variant.opus.urlSuffix == ".lyo")
+        #expect(LifeboatCache.Variant.ogg.urlSuffix == ".lyv")
+        #expect(LifeboatCache.Variant.mp3.urlSuffix == ".mp3?bitrate=320&quality=0")
+    }
+
+    @Test func emptyOrCutOffDownloadsAreRejected() {
+        #expect(LifeboatCache.isImplausiblySmall(bytes: 0, duration: 200))
+        #expect(LifeboatCache.isImplausiblySmall(bytes: 100_000, duration: 200))  // 4 kbit/s
+        #expect(!LifeboatCache.isImplausiblySmall(bytes: 3_200_000, duration: 200))  // 128 kbit/s
+        #expect(LifeboatCache.isImplausiblySmall(bytes: 10_000, duration: 0))
     }
 }
