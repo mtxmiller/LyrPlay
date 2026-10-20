@@ -26,14 +26,18 @@ final class LifeboatCache {
     /// when the stream is Opus.
     enum Variant: String, Codable {
         case original = ""
-        case opus = ".ops"
-        case mp3 = ".mp3"
+        case opus = ".lyo"
+        case mp3 = ".mp3?bitrate=320"
         case aac = ".aac"
-        case ogg = ".ogg"
+        case ogg = ".lyv"
 
         /// The copy the server can make in the stream's own format (LMS
         /// transcodes `download.<ext>` when it has a rule): the same kind of
         /// audio as the stream, and a fraction of a lossless original's size.
+        /// Downloads carry no player, so only "* *" rules match them. For Opus
+        /// and Ogg those come from MobileTranscode 1.4+ as private types (lyo,
+        /// lyv): a "* *" ops/ogg rule would also change what squeezelite
+        /// players stream. MP3 uses LMS's own rule at the stream's 320k.
         static func forStreamFormat(_ format: String) -> Variant {
             switch format.lowercased() {
             case let f where f.contains("opus"): return .opus
@@ -44,7 +48,15 @@ final class LifeboatCache {
             }
         }
 
-        var name: String { self == .original ? "original" : String(rawValue.dropFirst()) }
+        var name: String {
+            switch self {
+            case .original: return "original"
+            case .opus: return "Opus"
+            case .mp3: return "MP3"
+            case .aac: return "AAC"
+            case .ogg: return "Ogg"
+            }
+        }
     }
 
     /// How far ahead to keep copies by default, in seconds of music from the
