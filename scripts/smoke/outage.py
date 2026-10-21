@@ -44,6 +44,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O26 | phase 2: the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
 """
 import glob
+import json
 import shutil
 import os
 import subprocess
@@ -829,6 +830,373 @@ def o24_backup_server_offline(oracle, album_id):
         relaunch_app()
 
 
+# -- playing saved copies online (bd 5syr) ------------------------------------
+
+def copy_line(index, how):
+    """The app's .default line for a song played from its saved copy (how: "next song" / "from the start")."""
+    return f"Playing the saved copy of track {index} instead of the stream ({how})"
+
+
+def stream_requests(since):
+    """Audio streams the app opened through the proxy since `since` (local
+    epoch); the proxy's clock may differ from ours."""
+    offset = json.loads(fault("/requests?since=9e12"))["now"] - time.time()
+    reply = json.loads(fault(f"/requests?since={since + offset}"))
+    return [r for r in reply["requests"] if r["request"].startswith("GET /stream")]
+
+
+def lifeboat_dir():
+    container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    return os.path.join(container, "Library", "Caches", "Lifeboat")
+
+
+def wait_for_copies(oracle, indexes, timeout=120):
+    """The app has complete copies of the songs at these play-order indexes."""
+    ids = play_order_ids(oracle)
+    deadline = time.time() + timeout
+    while True:
+        missing = [i for i in indexes if not glob.glob(os.path.join(lifeboat_dir(), f"{ids[i]}.*audio"))]
+        if not missing:
+            return ids
+        if time.time() > deadline:
+            raise CheckFailed(f"no saved copy of track(s) {missing} after {timeout}s")
+        time.sleep(2)
+
+
+def wait_for_index(oracle, index, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = oracle.status()
+        if s["index"] == index:
+            return s
+        time.sleep(0.5)
+    raise CheckFailed(f"LMS not on track {index} within {timeout:.0f}s: {oracle.status()}")
+
+
+def on_copy(oracle, album_id, index, copies_ahead=1):
+    """Album loaded, song `index` playing from its saved copy (started from 0)."""
+    smoke.load_album(oracle, album_id)
+    oracle.wait_until_advancing(timeout=15)
+    wait_for_copies(oracle, list(range(index, index + 1 + copies_ahead)))
+    w = time.time()
+    oracle.player_rpc(["playlist", "index", index])
+    wait_for_index(oracle, index, 10)
+    oracle.wait_until_advancing(timeout=15)
+    time.sleep(2)
+    if app_log_count(copy_line(index, "from the start"), since=w - 1) < 1:
+        raise CheckFailed(f"track {index} did not start from its saved copy")
+    if stream_requests(w):
+        raise CheckFailed(f"track {index} opened a stream although it has a saved copy")
+    return oracle.status()
+
+
+def seek_to_end_and_cross(oracle, seconds_left=25):
+    """Seek the current song to `seconds_left` before its end (that streams),
+    wait for the boundary; returns (status after, seek time, boundary time)."""
+    s = oracle.status()
+    oracle.player_rpc(["time", str(max(1, s["duration"] - seconds_left))])
+    t_seek = time.time()
+    oracle.wait_until_advancing(timeout=15)
+    after = wait_for_index(oracle, s["index"] + 1 if s["index"] + 1 < s["tracks"] else 0, seconds_left + 20)
+    return after, t_seek, time.time()
+
+
+def p1_next_song_from_file(oracle, album_id):
+    # The next song after our STMd plays from its saved copy: LMS gets the
+    # usual boundary (index changes on time) and no stream is opened for it.
+    smoke.load_album(oracle, album_id)
+    oracle.wait_until_advancing(timeout=15)
+    wait_for_copies(oracle, [1])
+    s0 = oracle.status()
+    oracle.player_rpc(["time", str(s0["duration"] - 25)])
+    t_seek = time.time()
+    oracle.wait_until_advancing(timeout=15)
+    expected = t_seek + 25
+    s = wait_for_index(oracle, s0["index"] + 1, 45)
+    early = expected - time.time()
+    time.sleep(10)
+    oracle.assert_time_advancing()
+    streams = stream_requests(t_seek + 5)
+    copies = app_log_count(copy_line(s0["index"] + 1, "next song"), since=t_seek)
+    print(f"   … boundary {-early:+.1f}s from the expected time; stream requests after the seek's: {len(streams)}; "
+          f"next song from the copy: {copies}")
+    if early > 4 or early < -10:
+        raise CheckFailed(f"track changed {-early:+.1f}s from the expected boundary (allowed -4/+10)")
+    if streams:
+        raise CheckFailed(f"the next song opened a stream: {streams}")
+    if copies < 1:
+        raise CheckFailed("the next song did not play from its saved copy")
+
+
+def p2_drop_while_file_plays(oracle, album_id):
+    # 150s without the server while a saved copy plays: no gap (LMS lands on
+    # the continuous position), no jump needed (no other copy was used).
+    on_copy(oracle, album_id, 2)
+    time.sleep(10)
+    s0, w0 = oracle.status(), time.time()
+    durations = oracle.playlist_durations()
+    outage(150, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    streams = stream_requests(w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
+          f"streams opened: {len(streams)}")
+    if s["index"] != idx or abs(s["time"] - t) > 6:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±6s")
+    if streams:
+        raise CheckFailed(f"a stream was opened for the song playing from its copy: {streams}")
+
+
+def p3_flapping(oracle, album_id):
+    # The commute: signal off and on every 3-5s for 2 minutes while a saved
+    # copy plays. Only control traffic suffers: no stream for the playing
+    # song, no skipped song, LMS on the continuous position (±10s).
+    import random
+    rnd = random.Random(5)
+    on_copy(oracle, album_id, 2)
+    s0, w0 = oracle.status(), time.time()
+    durations = oracle.playlist_durations()
+    flaps = 0
+    while time.time() - w0 < 120:
+        off = rnd.uniform(3, 5)
+        after = "drop" if flaps % 2 else "resume"
+        fault(f"/outage?secs={off:.1f}&after={after}")
+        time.sleep(off)
+        flaps += 1
+        time.sleep(rnd.uniform(3, 5))
+    print(f"   … {flaps} flaps over {time.time() - w0:.0f}s", flush=True)
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    streams = stream_requests(w0)
+    streamed = app_log_count("📼 Streaming", since=w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
+          f"streams opened: {len(streams)}, streaming decisions: {streamed}")
+    if s["index"] != idx or abs(s["time"] - t) > 10:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±10s")
+    if streams or streamed:
+        raise CheckFailed(f"a stream was started during the flapping: {streams}, {streamed} decision(s)")
+
+
+def p4_handback(oracle, album_id):
+    # A long outage that crosses into the next song's copy: back online, our
+    # jump's strm finds that copy playing where we asked and hands back
+    # (STMc + STMs): one strm, no flush, no stream.
+    s0 = on_copy(oracle, album_id, 1, copies_ahead=2)
+    durations = oracle.playlist_durations()
+    time.sleep(max(0, durations[1] - 50 - s0["time"]))
+    s0, w0 = oracle.status(), time.time()
+    outage(120, "drop")
+    t_back = time.time()
+    wait_back(oracle, timeout=45)
+    time.sleep(8)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    handbacks = app_log_count("📼 Handback", since=w0)
+    streams = stream_requests(t_back)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
+          f"handbacks: {handbacks}, streams after the outage: {len(streams)}")
+    if s["index"] != idx or abs(s["time"] - t) > 6:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±6s")
+    if handbacks < 1:
+        raise CheckFailed("no handback after the reconnect jump")
+    if streams:
+        raise CheckFailed(f"a stream was opened after the outage: {streams}")
+
+
+def p5_seek_streams_then_file(oracle, album_id):
+    # A seek in a song playing from its copy streams the rest of it (LMS
+    # starts mid-song); the next song is back on its copy.
+    on_copy(oracle, album_id, 1, copies_ahead=1)
+    time.sleep(5)
+    s, t_seek, t_boundary = seek_to_end_and_cross(oracle, 25)
+    seek_streams = stream_requests(t_seek - 1)
+    seek_streams = [r for r in seek_streams if r["t"] < seek_streams[0]["t"] + 5] if seek_streams else []
+    time.sleep(10)
+    oracle.assert_time_advancing()
+    later = stream_requests(t_seek + 5)
+    copies = app_log_count(copy_line(2, "next song"), since=t_seek)
+    print(f"   … streams for the seek: {len(seek_streams)}; after it: {len(later)}; next song from its copy: {copies}")
+    if not seek_streams:
+        raise CheckFailed("the seek did not stream")
+    if later or copies < 1:
+        raise CheckFailed(f"the next song did not play from its copy (streams {later}, copy {copies})")
+
+
+def p6_repeat_and_shuffle(oracle, album_id):
+    # Repeat one replays the song from its copy; repeat all wraps to track 0
+    # from its copy; shuffle plays the next song in LMS's play order from its copy.
+    try:
+        on_copy(oracle, album_id, 1, copies_ahead=0)
+        oracle.player_rpc(["playlist", "repeat", 1])
+        s = oracle.status()
+        oracle.player_rpc(["time", str(s["duration"] - 20)])
+        t_seek = time.time()
+        time.sleep(30)
+        s = oracle.status()
+        replays = app_log_count(copy_line(1, "next song"), since=t_seek)
+        print(f"   … repeat one: track {s['index']} at {s['time']:.1f}s, from its copy: {replays}", flush=True)
+        if s["index"] != 1 or s["time"] > 15 or replays < 1 or stream_requests(t_seek + 5):
+            raise CheckFailed(f"repeat one: track {s['index']} {s['time']:.1f}s, copy {replays}")
+
+        oracle.player_rpc(["playlist", "repeat", 2])
+        last = s["tracks"] - 1
+        oracle.player_rpc(["playlist", "index", last])
+        wait_for_index(oracle, last, 10)
+        oracle.wait_until_advancing(timeout=15)
+        wait_for_copies(oracle, [0], timeout=90)
+        s, t_seek, _ = seek_to_end_and_cross(oracle, 25)
+        time.sleep(5)
+        wraps = app_log_count(copy_line(0, "next song"), since=t_seek)
+        print(f"   … repeat all: wrapped to track {s['index']}, from its copy: {wraps}", flush=True)
+        oracle.assert_time_advancing()
+        if s["index"] != 0 or wraps < 1 or stream_requests(t_seek + 5):
+            raise CheckFailed(f"repeat all: track {s['index']}, copy {wraps}")
+        oracle.player_rpc(["playlist", "repeat", 0])
+
+        oracle.player_rpc(["playlist", "shuffle", 1])
+        time.sleep(1)
+        oracle.player_rpc(["playlist", "index", 1])   # a strm: the copies' plan follows the shuffled order
+        oracle.wait_until_advancing(timeout=15)
+        ids = wait_for_copies(oracle, [1, 2], timeout=120)
+        s, t_seek, _ = seek_to_end_and_cross(oracle, 25)
+        got = current_track_id(oracle)
+        time.sleep(5)
+        shuffled = app_log_count(copy_line(2, "next song"), since=t_seek)
+        print(f"   … shuffle: track {s['index']} id {got} (play order says {ids[2]}), from its copy: {shuffled}")
+        oracle.assert_time_advancing()
+        if s["index"] != 2 or got != ids[2] or shuffled < 1 or stream_requests(t_seek + 5):
+            raise CheckFailed(f"shuffle: track {s['index']} id {got}, expected id {ids[2]}, copy {shuffled}")
+    finally:
+        oracle.player_rpc(["playlist", "repeat", 0])
+        oracle.player_rpc(["playlist", "shuffle", 0])
+
+
+def p7_next_mid_song(oracle, album_id):
+    # Next pressed mid-song (Material sends `playlist index +1`): LMS starts
+    # the next song from 0 and it plays from its copy, twice in a row.
+    on_copy(oracle, album_id, 1, copies_ahead=2)
+    for expected in (2, 3):
+        time.sleep(8)
+        w = time.time()
+        oracle.player_rpc(["playlist", "index", "+1"])
+        s = wait_for_index(oracle, expected, 10)
+        oracle.wait_until_advancing(timeout=15)
+        s = oracle.status()
+        copies = app_log_count(copy_line(expected, "from the start"), since=w - 1)
+        streams = stream_requests(w)
+        print(f"   … Next → track {s['index']} at {s['time']:.1f}s, from its copy: {copies}, streams: {len(streams)}", flush=True)
+        if s["index"] != expected or s["time"] > 8 or copies < 1 or streams:
+            raise CheckFailed(f"Next: track {s['index']} {s['time']:.1f}s, copy {copies}, streams {streams}")
+
+
+FAKE_PLAYER = os.environ.get("LYRPLAY_FAKE_PLAYER", "02:00:00:00:99:98")
+FAKE_HOST = os.environ.get("LYRPLAY_FAKE_HOST", "ser5")   # ssh host next to the LMS
+
+
+def p8_sync_group_streams(oracle, album_id):
+    # In a sync group (with a fake second player, scripts/smoke/fakeplayer.py)
+    # every song streams: a copy would put us out of step with the others.
+    here = os.path.dirname(os.path.abspath(__file__))
+    slim_port = int(os.environ.get("LYRPLAY_SLIM_PORT", "3490"))
+    subprocess.run(["scp", "-q", os.path.join(here, "fakeplayer.py"), f"{FAKE_HOST}:/tmp/fakeplayer.py"], check=True)
+    subprocess.run(["ssh", FAKE_HOST, f"nohup python3 /tmp/fakeplayer.py --port {slim_port} --mac {FAKE_PLAYER} "
+                    "> /tmp/fakeplayer.log 2>&1 < /dev/null &"], check=True)
+    try:
+        deadline = time.time() + 20
+        while not any(p.get("playerid") == FAKE_PLAYER and p.get("connected")
+                      for p in oracle.rpc(["serverstatus", 0, 99]).get("players_loop", [])):
+            if time.time() > deadline:
+                raise CheckFailed("the fake player did not register")
+            time.sleep(1)
+        oracle.rpc(["power", "1"], player=FAKE_PLAYER)   # a new player starts powered off
+        smoke.load_album(oracle, album_id)
+        oracle.wait_until_advancing(timeout=15)
+        wait_for_copies(oracle, [0, 1, 2])
+        # [A, sync, B] puts B in A's group with A's playlist: LyrPlay stays master.
+        oracle.player_rpc(["sync", FAKE_PLAYER])
+        time.sleep(2)
+        if oracle.player_rpc(["status", "-", 1]).get("sync_slaves") is None:
+            raise CheckFailed("the sync group did not form")
+        # Two starts from 0 whose songs have copies (a jump, then Next): both
+        # must stream. (The fake can't keep a seeked group's clock, so no
+        # boundary is waited for here; the gapless strm takes the same check.)
+        w = time.time()
+        for target in (1, 2):
+            oracle.player_rpc(["playlist", "index", target])
+            wait_for_index(oracle, target, 15)
+            time.sleep(6)
+        s = oracle.status()
+        copies = app_log_count("Playing the saved copy", since=w)
+        synced = app_log_count("Streaming: in a sync group", since=w)
+        streams = stream_requests(w)
+        print(f"   … synced: track {s['index']} {s['mode']}, streams opened: {len(streams)}, "
+              f"sync-group decisions: {synced}, songs from copies: {copies}")
+        if s["mode"] != "play" or copies or synced < 2 or len(streams) < 2:
+            raise CheckFailed(f"in a sync group: mode {s['mode']}, {copies} song(s) from copies, "
+                              f"{synced} sync decision(s), {len(streams)} stream(s)")
+    finally:
+        try:
+            oracle.player_rpc(["sync", "-"])
+            oracle.rpc(["sync", "-"], player=FAKE_PLAYER)
+            oracle.rpc(["stop"], player=FAKE_PLAYER)   # closes the transcoder LMS opened for it
+            time.sleep(1)
+        except Exception:
+            pass
+        subprocess.run(["ssh", FAKE_HOST, 'pkill -f "[p]ython3 /tmp/fakeplayer"; true'])
+        time.sleep(1)
+        oracle.rpc(["client", "forget"], player=FAKE_PLAYER)
+
+
+def transcoders():
+    # [f]lac: the pattern must not match pgrep's own sh -c command line.
+    r = subprocess.run(["ssh", "ser5", 'docker exec lms-test sh -c "pgrep -af \\"[f]lac|[o]pusenc|[s]ox|[l]ame\\""'],
+                       capture_output=True, text=True)
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def p9_no_transcoder_leak(oracle, album_id):
+    # Ten songs from copies: LMS opens each song's transcoder before the strm
+    # and we never read it. It must be closed at the next strm, not pile up.
+    oracle.player_rpc(["stop"])
+    time.sleep(2)
+    baseline = len(transcoders())   # other players' (P8's fake player, a download)
+    smoke.load_album(oracle, album_id)
+    oracle.wait_until_advancing(timeout=15)
+    tracks = oracle.status()["tracks"]
+    wait_for_copies(oracle, list(range(tracks)), timeout=300)
+    oracle.player_rpc(["playlist", "index", 0])
+    oracle.wait_until_advancing(timeout=15)
+    w = time.time()
+    most = 0
+    # Forward only (the copies behind the playing song are deleted), then the
+    # last song again (a restart from 0 is a strm too): ten strms in all.
+    for n in range(10):
+        time.sleep(6)
+        target = min(n + 1, tracks - 1)
+        oracle.player_rpc(["playlist", "index", target])
+        wait_for_index(oracle, target, 10)
+        time.sleep(2)
+        procs = transcoders()
+        most = max(most, len(procs) - baseline)
+        print(f"   … track {target}: {len(procs)} transcoder process(es)", flush=True)
+    copies = app_log_count("Playing the saved copy", since=w)
+    streams = stream_requests(w)
+    oracle.player_rpc(["stop"])
+    time.sleep(3)
+    left = len(transcoders()) - baseline
+    print(f"   … songs from copies: {copies}, streams: {len(streams)}, most transcoder processes at once: {most} "
+          f"(one idle pipeline is sh + flac + opusenc), after stop: {left} (baseline {baseline})")
+    if copies < 10 or streams:
+        raise CheckFailed(f"{copies} of 10 songs from copies, {len(streams)} stream(s)")
+    if most > 3 or left > 0:
+        raise CheckFailed(f"transcoders pile up: {most} at once, {left} left after stop")
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -858,6 +1226,16 @@ SCENARIOS = [
     ("O24", "backup server set, offline", o24_backup_server_offline),
     ("O25", "mixed FLAC/MP3 queue offline", o25_mixed_formats),
     ("O26", "failed match restarts the copy", o26_failed_match_restarts_copy),
+    # Playing saved copies online (bd 5syr), phase 2, only when named:
+    ("P1", "next song from its copy", p1_next_song_from_file),
+    ("P2", "150s drop on a copy", p2_drop_while_file_plays),
+    ("P3", "flapping 2 min on a copy", p3_flapping),
+    ("P4", "handback after copies", p4_handback),
+    ("P5", "seek streams, next on copy", p5_seek_streams_then_file),
+    ("P6", "repeat one/all, shuffle", p6_repeat_and_shuffle),
+    ("P7", "Next mid-song, from copy", p7_next_mid_song),
+    ("P8", "sync group streams", p8_sync_group_streams),
+    ("P9", "no transcoder leak", p9_no_transcoder_leak),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

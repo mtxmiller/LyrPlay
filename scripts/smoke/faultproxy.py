@@ -27,6 +27,10 @@ Control (plain HTTP GET, e.g. with curl):
                         keeps only a little ahead.
     /end                End the current outage now (applies its `after`).
     /status             JSON: outage state and open connections.
+    /requests[?since=T] JSON: HTTP requests the player sent through the proxy
+                        (every request line, also on kept-alive connections),
+                        with the proxy's clock `t` (epoch) and its `now`, so
+                        a harness can tell which songs were streamed.
 
 Run on the host that reaches the LMS (ser5 for lms-test):
     python3 faultproxy.py [--lms-host 127.0.0.1] [--web 9011:9010] [--slim 3491:3490] [--ctl 9099]
@@ -35,6 +39,7 @@ app's log and the oracle.
 """
 import argparse
 import asyncio
+import collections
 import itertools
 import json
 import socket
@@ -103,6 +108,7 @@ class Proxy:
         self.outage = Outage()
         self.conns = {}
         self.kbps = 0
+        self.requests = collections.deque(maxlen=5000)
 
     # -- data path ------------------------------------------------------------
     async def gate(self, conn):
@@ -123,6 +129,11 @@ class Proxy:
                     conn.up_bytes += len(data)
                     if not conn.first_line and conn.kind == "http":
                         conn.first_line = data.split(b"\r\n", 1)[0].decode("latin1")[:120]
+                    if conn.kind == "http" and data[:5] in (b"GET /", b"POST ", b"HEAD "):
+                        line = data.split(b"\r\n", 1)[0].decode("latin1")[:200]
+                        self.requests.append({"t": round(time.time(), 3), "conn": conn.id, "request": line})
+                        if line.startswith("GET /stream"):
+                            log(f"#{conn.id} {line}")
                 else:
                     conn.down_bytes += len(data)
                 writer.write(data)
@@ -232,12 +243,17 @@ class Proxy:
             elif url.path == "/shape":
                 self.kbps = max(0, int(q.get("kbps", "0")))
                 log(f"SHAPE http download cap {self.kbps} kbit/s" if self.kbps else "SHAPE off")
+            elif url.path == "/requests":
+                since = float(q.get("since", "0"))
+                body = {"now": round(time.time(), 3), "requests": [r for r in self.requests if r["t"] >= since]}
             elif url.path != "/status":
-                raise ValueError("paths: /outage /kill /end /status")
+                raise ValueError("paths: /outage /kill /end /status /requests")
             o = self.outage
-            body = {"kbps": self.kbps, "outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
-                               "remaining_s": round(max(0.0, o.ends_at - time.time()), 1) if o.active else 0},
-                    "connections": [c.describe() for c in self.conns.values()]}
+            if url.path != "/requests":
+                body = {"kbps": self.kbps,
+                        "outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
+                                   "remaining_s": round(max(0.0, o.ends_at - time.time()), 1) if o.active else 0},
+                        "connections": [c.describe() for c in self.conns.values()]}
             status = "200 OK"
         except Exception as e:
             body, status = {"error": str(e)}, "400 Bad Request"
