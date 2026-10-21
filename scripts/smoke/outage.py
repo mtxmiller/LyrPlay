@@ -42,6 +42,15 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
 | O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
 | O26 | phase 2: the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
+| P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
+| P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
+| P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
+| P4 | a copy plays 50s before its end, 120s offline (the next song's copy follows) | LMS on the continuous position (±6s), "Handback" in the app log, no stream after the outage |
+| P5 | seek in a song playing from its copy | the seek streams; the next song plays from its copy |
+| P6 | repeat one; repeat all at the last song; shuffle | the same song / track 0 / the next in LMS's play order, each from its copy, no stream |
+| P7 | Next twice mid-song (`playlist index +1`, what Material sends) | the right song from 0, from its copy, no stream |
+| P8 | a sync group with a fake second player (`fakeplayer.py` on the LMS host), a jump and Next | both stream although copies exist ("in a sync group") |
+| P9 | ten songs from copies (jumps) | no stream; LMS's idle transcoder for each song is closed at the next strm (at most one pipeline at once, none after stop) |
 """
 import glob
 import json
