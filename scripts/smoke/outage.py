@@ -899,6 +899,7 @@ def on_copy(oracle, album_id, index, copies_ahead=1):
     smoke.load_album(oracle, album_id)
     oracle.wait_until_advancing(timeout=15)
     wait_for_copies(oracle, list(range(index, index + 1 + copies_ahead)))
+    time.sleep(6)   # the app re-plans ~3s after a queue change; a jump before that streams (copies found via the plan)
     w = time.time()
     oracle.player_rpc(["playlist", "index", index])
     wait_for_index(oracle, index, 10)
