@@ -41,8 +41,10 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O23 | phase 2: 150s offline; LyrPlay backgrounded (Settings app in front) 30s and foregrounded meanwhile | as O6 (±8s); screenshot of the offline player saved |
 | O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
 | O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
+| O26 | phase 2: the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
 """
 import glob
+import shutil
 import os
 import subprocess
 import sys
@@ -698,6 +700,49 @@ def o22_missing_copy_in_plan(oracle, album_id):
         raise CheckFailed(f"track {nxt} at {s['time']:.1f}s: skipped ahead past audio that never played")
 
 
+def o26_failed_match_restarts_copy(oracle, album_id):
+    # The cut track's copy holds the wrong audio (here: another track's copy
+    # written over it), so the sample-exact splice can't match. The copy must
+    # then restart near the cut, not be skipped: LMS comes back on the SAME
+    # track at the wall-clock position (bd vsgg; tester: "it just skipped a track").
+    # The cap stays on until the kill: at LAN speed the rest of the track
+    # would land in the socket buffers while the copy is swapped, and there
+    # would be nothing left to cut.
+    fault("/shape?kbps=400")
+    s0 = fresh_start(oracle, album_id, settle=25)
+    ids = play_order_ids(oracle)
+    durations = oracle.playlist_durations()
+    cur = s0["index"]
+    container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    lifeboat_dir = os.path.join(container, "Library", "Caches", "Lifeboat")
+    mine = glob.glob(os.path.join(lifeboat_dir, f"{ids[cur]}.*audio"))
+    donors = [(durations[i], glob.glob(os.path.join(lifeboat_dir, f"{ids[i]}.*audio")))
+              for i in range(len(ids)) if i != cur]
+    donors = [(d, files[0]) for d, files in donors if files]
+    if not mine or not donors:
+        raise CheckFailed(f"copies missing in {lifeboat_dir}: own {mine}, donors {donors}")
+    donor_len, donor = max(donors)   # the longest other copy: it must outlast the outage
+    shutil.copyfile(donor, mine[0])
+    print(f"   … copy of track {cur} (id {ids[cur]}) replaced by {os.path.basename(donor)} ({donor_len:.0f}s)", flush=True)
+    w0 = time.time()
+    fault("/kill?scope=http")
+    fault("/shape?kbps=0")
+    outage(60, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, cur, s0["time"], time.time() - w0)
+    restarts = app_log_count("Restarting the copy of track", since=w0)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
+          f"restarts logged: {restarts}")
+    if restarts < 1:
+        raise CheckFailed("the copy was not restarted after the failed match")
+    if s["index"] != idx or abs(s["time"] - t) > 10:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {idx} {t:.1f}±10s "
+                          "(the rest of the track was skipped or replayed)")
+
+
 def o23_background_foreground_offline(oracle, album_id):
     # Playing copies offline, the app goes to the background (another app in
     # front) and comes back: the foreground recovery must not disturb the
@@ -735,8 +780,12 @@ def seed_pref(key, kind, value):
     subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "defaults", "write", plist, key, kind, str(value)], check=True)
 
 
-def app_log_count(pattern, minutes):
-    r = subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "log", "show", "--last", f"{minutes}m", "--info",
+def app_log_count(pattern, minutes=5, since=None):
+    """Persisted app log lines (.default/.error level: the simulator does not
+    keep .info) matching `pattern`, from `since` (epoch) or the last `minutes`."""
+    window = (["--start", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))] if since
+              else ["--last", f"{minutes}m"])
+    r = subprocess.run(["xcrun", "simctl", "spawn", SIM_NAME, "log", "show", *window, "--info",
                         "--predicate", 'subsystem == "com.lmsstream"'], capture_output=True, text=True)
     return sum(1 for line in r.stdout.splitlines() if pattern in line)
 
@@ -808,6 +857,7 @@ SCENARIOS = [
     ("O23", "background/foreground offline", o23_background_foreground_offline),
     ("O24", "backup server set, offline", o24_backup_server_offline),
     ("O25", "mixed FLAC/MP3 queue offline", o25_mixed_formats),
+    ("O26", "failed match restarts the copy", o26_failed_match_restarts_copy),
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

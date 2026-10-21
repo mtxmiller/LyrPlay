@@ -4490,7 +4490,21 @@ extension SlimProtoCoordinator {
                     self.unusableCopies.insert(trackID)  // never usable; a no-match may be next time
                 }
                 self.lifeboatActive = false
-                if self.connectionIsLive {
+                // A fresh start flushes what is buffered, so it begins at the
+                // playhead, not at the estimate (= playhead + buffered): O26 landed 12 s ahead.
+                let playhead = self.getCurrentInterpolatedTime().time
+                if self.restartCopy(index: index, at: playhead) {
+                    // No sample-exact splice, but the copy still plays: restart it near
+                    // where the audio stopped (a small jump) rather than lose the rest
+                    // of the song (tester 2026-10-21: "it just skipped a track"). The
+                    // connection can look live for 10 s after a real cut, so this does
+                    // not depend on liveness: online, LMS's elapsed follows the copy
+                    // as after a successful splice. A rate mismatch only blocks the
+                    // splice; a fresh start is fine.
+                    // .default: persisted, so the rig can count it (O26); .info is memory-only.
+                    os_log(.default, log: self.logger, "🛟 Restarting the copy of track %d at %.1fs (no splice: %{public}s)",
+                           index, playhead, String(describing: failure))
+                } else if self.connectionIsLive {
                     self.decodeEndHeld = true
                     self.recoverFromCutDownload(tryCopy: false)
                 } else if self.startLifeboatTrack(index: index + 1) {
@@ -4517,6 +4531,21 @@ extension SlimProtoCoordinator {
         connectionManager.persistForPlayback = true
         audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
                                              replayGain: gain, isGapless: true, startTime: 0, waitForUnpause: false)
+        return true
+    }
+
+    /// The splice into the copy failed but the copy is playable: start it fresh at
+    /// `position` (a small jump). Same flags as `startLifeboatTrack`; not a user
+    /// action, so a pause made elsewhere still wins at the reconnect.
+    private func restartCopy(index: Int, at position: Double) -> Bool {
+        guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
+        lifeboatActive = true
+        lifeboatUsed = true
+        connectionManager.persistForPlayback = true
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: lifeboatGain(index: index), isGapless: false,
+                                             startTime: position, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: position, duration: track.duration, playing: true)
         return true
     }
 
