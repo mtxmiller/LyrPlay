@@ -418,6 +418,9 @@ class SlimProtoCoordinator: ObservableObject {
     /// Asking LMS about a strm 's'; a strm 'p' meanwhile makes it start paused.
     private var copyDecisionPending = false
     private var pausedDuringCopyDecision = false
+    /// The output drained (STMu) while we asked LMS about a gapless strm:
+    /// nothing is left to queue behind, the song starts fresh (rig O22).
+    private var drainedDuringCopyDecision = false
 
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
@@ -1742,6 +1745,18 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         serverUnreachableSince = serverUnreachableSince ?? Date()
+        // A strm being decided died with the connection: its status reply is
+        // void, and hasActiveStream must not call the reconnect's 'u' a resume.
+        copyDecisionGeneration += 1
+        copyDecisionPending = false
+        reportZeroElapsedWhileDeciding = false
+        pausedDuringCopyDecision = false
+        if copyDecodeEndHeld, !audioManager.pushStreamState().decodingAhead {
+            // The playing song's decode end was held for that decision: let it
+            // take the usual path now (a copy queued behind keeps its hold).
+            copyDecodeEndHeld = false
+            DispatchQueue.main.async { [weak self] in self?.sendTrackDecodeComplete() }  // after this handler's bookkeeping
+        }
 
         // UNIFIED RECOVERY: Capture playback state for networkRestored recovery (LMS_StreamTest-6lb)
         let playerState = audioManager.getPlayerState()
@@ -2110,6 +2125,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         decodingCopy = nil
         playingCopy = nil
         statElapsedOffset = 0
+        // An HTTP stream is never a copy: void a pending decision, and the
+        // deferred stop's timer must not stop this stream 5 s from now.
+        copyDecisionGeneration += 1
+        copyDecisionPending = false
+        reportZeroElapsedWhileDeciding = false
+        copyDecodeEndHeld = false
+        handbackStopDeferred = false
+        deferredHandback = nil
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
@@ -2203,6 +2226,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         handbackStopDeferred = false
         copyDecisionPending = false
         pausedDuringCopyDecision = false
+        drainedDuringCopyDecision = false
         let afterDecodeError = decodeErrorSinceStrm
         decodeErrorSinceStrm = false
         var handback = deferredHandback
@@ -2241,6 +2265,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             guard let self = self else { return }
             self.reportZeroElapsedWhileDeciding = false
             self.copyDecisionPending = false
+            // A decode end held while we asked is moot: a start flushes it, a
+            // handback works it out again below.
+            self.copyDecodeEndHeld = false
             // LMS paused us meanwhile: start, but play only on its 'u'.
             let paused = self.pausedDuringCopyDecision || waitForUnpause
             let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
@@ -2248,7 +2275,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                                              handback: self.pausedDuringCopyDecision ? nil : handback,
                                              status: status)
             self.pausedDuringCopyDecision = false
-            if !isGapless { self.statElapsedOffset = 0 }  // gapless: the handed-back song still plays
+            // The old song drained while we asked: queued "gaplessly" onto a
+            // drained push stream its boundary never fires (no STMs, rig O22).
+            let gapless = isGapless && !self.drainedDuringCopyDecision
+            if isGapless && !gapless {
+                os_log(.default, log: self.logger, "📼 The song before drained while asking LMS - starting the next one fresh")
+            }
+            if !gapless { self.statElapsedOffset = 0 }  // gapless: the handed-back song still plays
             switch decision {
             case .file(let index):
                 if let file = self.lifeboat.fileURL(forIndex: index), let id = self.lifeboat.track(at: index)?.id {
@@ -2256,7 +2289,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                     os_log(.default, log: self.logger, "📼 Playing the saved copy of track %d instead of the stream (%{public}s)",
                            index, isGapless ? "next song" : "from the start")
                     self.startDirectStream(url: file.absoluteString, format: format, startTime: 0, replayGain: replayGain,
-                                           waitForUnpause: paused, isGapless: isGapless,
+                                           waitForUnpause: paused, isGapless: gapless,
                                            copy: CopySource(index: index, id: id), connectedSent: true)
                     return
                 }
@@ -2268,7 +2301,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 os_log(.default, log: self.logger, "📼 Streaming: %{public}s", reason)
             }
             self.startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
-                                   waitForUnpause: paused, isGapless: isGapless, copy: nil, connectedSent: true)
+                                   waitForUnpause: paused, isGapless: gapless, copy: nil, connectedSent: true)
         }
     }
 
@@ -2543,14 +2576,21 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             let generation = copyDecisionGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
                 guard let self = self, self.handbackStopDeferred, self.copyDecisionGeneration == generation else { return }
-                os_log(.default, log: self.logger, "📼 No strm after LMS's stop - stopping the saved copy")
                 self.handbackStopDeferred = false
                 self.deferredHandback = nil
+                if !self.connectionIsLive {
+                    // The link died before the strm came: the copy rides out
+                    // the outage as before, the next reconnect jumps to it again.
+                    os_log(.default, log: self.logger, "📼 No strm after LMS's stop and the connection is gone - the saved copy plays on")
+                    return
+                }
+                os_log(.default, log: self.logger, "📼 No strm after LMS's stop - stopping the saved copy")
                 self.didStopStream()
             }
             return
         }
         handbackStopDeferred = false
+        deferredHandback = nil
         statElapsedOffset = 0
         decodingCopy = nil
         playingCopy = nil
@@ -2620,6 +2660,14 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             os_log(.info, log: logger, "📼 Decode ended while LMS restarts us - the handback sends the STMd")
             return
         }
+        if copyDecisionPending {
+            // LMS's strm 's' is being decided: an STMd now would come before
+            // its STMs (a handback near the song's end sends it after; a
+            // start flushes the song, so the hold is dropped then).
+            copyDecodeEndHeld = true
+            os_log(.default, log: logger, "📼 Decode ended while asking LMS about the strm - STMd waits")
+            return
+        }
         if mayHold, let copy = decodingCopy, Self.holdsCopyDecodeEnd(
             live: connectionIsLive, decodingCopy: true, decodingAhead: audioManager.pushStreamState().decodingAhead) {
             // A copy decodes in a moment, not in real time like a stream: its
@@ -2684,6 +2732,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // "gaplessly" onto a drained push stream its boundary never fires, so
         // no STMs goes out and LMS stays on the old track (rig O22).
         expectingGaplessTransition = false
+        if copyDecisionPending { drainedDuringCopyDecision = true }  // the strm already came; its start is fresh
     }
 
     /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
