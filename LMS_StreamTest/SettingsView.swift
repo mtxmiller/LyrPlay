@@ -24,6 +24,7 @@ struct SettingsView: View {
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
+    @State private var playbackSource: String?   // "streaming" / "playing saved copy" while audio plays
     private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     // Server-side Fixed Output + ReplayGain prefs (bd x19i)
@@ -280,7 +281,9 @@ struct SettingsView: View {
             return "Offline · \(offline.isPaused ? "paused" : "playing saved music") · \(left)"
         }
         if isConnectedNow {
-            return settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
+            let server = settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
+            // Online, a song can come from its saved copy instead of the stream (bd 5syr).
+            return playbackSource.map { "\(server) · \($0)" } ?? server
         }
         switch connectionStateText {
         case "Connecting", "Reconnecting": return "\(connectionStateText)…"
@@ -304,6 +307,12 @@ struct SettingsView: View {
         offlineStatus = coordinator.offlinePlaybackStatus
         savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
+        switch audioPlayer.getPlayerState() {
+        case "Playing", "Buffering":
+            playbackSource = audioPlayer.currentStreamInfo?.isSavedCopy == true ? "playing saved copy" : "streaming"
+        default:
+            playbackSource = nil
+        }
     }
 
     // MARK: - Audio
