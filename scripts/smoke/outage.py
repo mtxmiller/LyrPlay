@@ -42,6 +42,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
 | O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
 | O26 | phase 2: seek +20s into a 400 kbit/s stream, the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
+| O27 | phase 2: 60s offline with a Next at 20s (the copy of the next track); then web requests held 32s while SlimProto is back and delivered when the hold ends (the reconnect jump times out, its retry goes out, the first jump lands late) | LMS on the continuous position (±8s), "Handback" in the app log, no stream after the outage, time never steps back |
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
@@ -764,6 +765,49 @@ def o26_failed_match_restarts_copy(oracle, album_id):
                           "(the rest of the track was skipped or replayed)")
 
 
+def o27_jump_lost_then_lands_late(oracle, album_id):
+    # Device log 2026-10-21 15:52 (airplane mode, an offline Next, cellular
+    # back): SlimProto reconnected but web requests got no reply for 15s. The
+    # reconnect's jump timed out, its retry re-sent the stale target while the
+    # copy played on, and the first jump still reached LMS later: the copy was
+    # flushed and the song restarted twice. Now the retry targets the copy
+    # where it is, and every strm for a jump of ours hands back: no stream,
+    # nothing replayed. (A copy that was already playing online needs no jump
+    # after a drop — P2 — so the offline Next makes LMS need one.)
+    s0 = fresh_start(oracle, album_id, settle=25)
+    fault("/kill?scope=http")
+    fault("/outage?secs=60&after=drop")
+    print("   … outage 60s (after=drop)", flush=True)
+    t0 = time.time()
+    time.sleep(20); press("next"); t_next = time.time()
+    time.sleep(max(0, 60 - (time.time() - t0)))
+    fault("/end")
+    t_back = time.time()
+    # New web connections hang 32s (SlimProto is back at once); what the app
+    # sent meanwhile reaches LMS when the hold ends, like TCP resending a
+    # request the app has given up on. The lookup and the jump time out (5s
+    # each), the retry's probe too, so the retry's jump (re-targeted to the
+    # copy) is out before the hold ends: the first jump and the retry's then
+    # land together, and each strm must hand back.
+    fault("/outage?secs=32&after=resume&scope=http&new=hold")
+    print("   … SlimProto back, web requests held 32s and delivered late", flush=True)
+    time.sleep(44)
+    wait_back(oracle, timeout=30)
+    s = watch_monotonic(oracle, seconds=10)
+    played = time.time() - t_next
+    handbacks = app_log_count("📼 Handback", since=t_back)
+    streams = stream_requests(t_back)
+    print(f"   … LMS at track {s['index']} {s['time']:.1f}s; expected track {s0['index'] + 1} ~{played:.1f}s; "
+          f"handbacks: {handbacks}, streams after the outage: {len(streams)}")
+    if s["index"] != s0["index"] + 1 or abs(s["time"] - played) > 8:
+        raise CheckFailed(f"LMS at track {s['index']} {s['time']:.1f}s, expected track {s0['index'] + 1} {played:.1f}±8s "
+                          "(a jump restarted the song behind the copy)")
+    if handbacks < 1:
+        raise CheckFailed("no handback after the reconnect jumps")
+    if streams:
+        raise CheckFailed(f"a stream was opened after the outage (the copy was flushed): {streams}")
+
+
 def o23_background_foreground_offline(oracle, album_id):
     # Playing copies offline, the app goes to the background (another app in
     # front) and comes back: the foreground recovery must not disturb the
@@ -1255,6 +1299,7 @@ SCENARIOS = [
     ("O24", "backup server set, offline", o24_backup_server_offline),
     ("O25", "mixed FLAC/MP3 queue offline", o25_mixed_formats),
     ("O26", "failed match restarts the copy", o26_failed_match_restarts_copy),
+    ("O27", "jump lost, lands late", o27_jump_lost_then_lands_late),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),

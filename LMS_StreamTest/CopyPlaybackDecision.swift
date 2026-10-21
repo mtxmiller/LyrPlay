@@ -59,8 +59,9 @@ enum CopyPlaybackDecision: Equatable {
     /// LMS starts at the offset we sent (a few ms off after a native seek).
     static let handbackTolerance: Double = 3
     /// Our playhead may run ahead of the jump's offset by the time the jump
-    /// took to go out (the recovery waits up to 10 s for the server).
-    static let handbackMaxLead: Double = 15
+    /// took to land: a jump that got no reply can still reach LMS up to a
+    /// minute later (SlimProtoCoordinator.lateJumpWindow), on top of its retry.
+    static let handbackMaxLead: Double = 60
     /// Below this LMS starts the song from its start.
     static let startTolerance: Double = 1.5
 
@@ -109,6 +110,14 @@ enum CopyPlaybackDecision: Equatable {
             return .stream(String(format: "starts mid-song (a seek or a jump): LMS at %.1fs", server.time ?? -1))
         }
         return fileIfSaved(current, strmFormat: strmFormat, server: server, copies: copies)
+    }
+
+    /// Of our jumps still awaiting their strm (a retry on top of one that
+    /// got no reply), the one LMS's status time answers to: the nearest
+    /// start offset. Without a time there is nothing to tell them apart.
+    static func expectedJump(_ candidates: [ExpectedHandback], nearest time: Double?) -> ExpectedHandback? {
+        guard let time = time else { return candidates.last }
+        return candidates.min { abs($0.offset - time) < abs($1.offset - time) }
     }
 
     /// The song LMS plays after `index` (shuffle is already the play order).

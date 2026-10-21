@@ -114,14 +114,33 @@ struct CopyPlaybackDecisionTableTests {
 
     @Test func handbackNeedsTheCopyPlayingNearTheJump() {
         let expected = Decision.ExpectedHandback(index: 2, id: "12", offset: 80)
-        // Behind what LMS will claim, or far ahead of it: no handback.
+        // Behind what LMS will claim, or further ahead of it than a late jump can be: no handback.
         #expect(isStream(decide(server: server(index: 2, time: 80), playing: Decision.PlayingCopy(id: "12", position: 76.5),
                                 handback: expected)))
-        #expect(isStream(decide(server: server(index: 2, time: 80), playing: Decision.PlayingCopy(id: "12", position: 96),
+        #expect(isStream(decide(server: server(index: 2, time: 80), playing: Decision.PlayingCopy(id: "12", position: 141),
                                 handback: expected)))
         // Seconds ahead (the jump waited for the server): still ours.
         #expect(decide(server: server(index: 2, time: 80), playing: Decision.PlayingCopy(id: "12", position: 91),
                        handback: expected) == .handback(startOffset: 80))
+    }
+
+    // Device log 2026-10-21 15:52: a jump that got no reply landed 25 s after
+    // it was sent, while the copy had played on from 11.75 to 37 s. Still ours.
+    @Test func aLateJumpOfOursHandsBackHoweverFarTheCopyRan() {
+        let expected = Decision.ExpectedHandback(index: 2, id: "12", offset: 11.75)
+        #expect(decide(server: server(index: 2, time: 11.7), playing: Decision.PlayingCopy(id: "12", position: 37),
+                       handback: expected) == .handback(startOffset: 11.7))
+    }
+
+    // A retry on top of a jump that got no reply: two of our jumps are out,
+    // and LMS's time says which one its strm answers.
+    @Test func theStrmAnswersTheJumpNearestLMSsTime() {
+        let first = Decision.ExpectedHandback(index: 18, id: "66746", offset: 11.75)
+        let retry = Decision.ExpectedHandback(index: 18, id: "66746", offset: 27.3)
+        #expect(Decision.expectedJump([first, retry], nearest: 11.7) == first)
+        #expect(Decision.expectedJump([first, retry], nearest: 27.4) == retry)
+        #expect(Decision.expectedJump([first, retry], nearest: nil) == retry)
+        #expect(Decision.expectedJump([], nearest: 11.7) == nil)
     }
 
     @Test func handbackNeedsACopyOfThatSongPlaying() {
