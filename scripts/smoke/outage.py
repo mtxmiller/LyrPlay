@@ -41,7 +41,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O23 | phase 2: 150s offline; LyrPlay backgrounded (Settings app in front) 30s and foregrounded meanwhile | as O6 (±8s); screenshot of the offline player saved |
 | O24 | phase 2: an (unreachable) backup server configured, 150s offline with copies; relaunches the app with the pref and reverts it | as O6 (±8s); screenshots every 20s show whether the offline UI flickers as the reconnect alternates servers |
 | O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
-| O26 | phase 2: the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
+| O26 | phase 2: seek +20s into a 400 kbit/s stream, the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
@@ -715,34 +715,45 @@ def o26_failed_match_restarts_copy(oracle, album_id):
     # written over it), so the sample-exact splice can't match. The copy must
     # then restart near the cut, not be skipped: LMS comes back on the SAME
     # track at the wall-clock position (bd vsgg; tester: "it just skipped a track").
-    # The cap stays on until the kill: at LAN speed the rest of the track
-    # would land in the socket buffers while the copy is swapped, and there
-    # would be nothing left to cut.
-    fault("/shape?kbps=400")
-    s0 = fresh_start(oracle, album_id, settle=25)
-    ids = play_order_ids(oracle)
+    # Unshaped while the copies download (an earlier scenario may have
+    # evicted them). A seek then starts a new stream - a song with a complete
+    # copy only plays from the copy when it starts from the beginning (bd
+    # 5syr) - and the cap keeps that stream short: at LAN speed the rest of
+    # the track would land in the socket buffers while the copy is swapped,
+    # and there would be nothing left to cut.
+    s0 = fresh_start(oracle, album_id, settle=8)
     durations = oracle.playlist_durations()
     cur = s0["index"]
-    container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
-                               capture_output=True, text=True, check=True).stdout.strip()
-    lifeboat_dir = os.path.join(container, "Library", "Caches", "Lifeboat")
-    mine = glob.glob(os.path.join(lifeboat_dir, f"{ids[cur]}.*audio"))
-    donors = [(durations[i], glob.glob(os.path.join(lifeboat_dir, f"{ids[i]}.*audio")))
+    ids = wait_for_copies(oracle, list(range(cur, min(cur + 4, len(durations)))))
+    target = s0["time"] + 20
+    if target > durations[cur] - 120:
+        raise CheckFailed(f"opening track too short for the seek and the outage ({durations[cur]:.0f}s)")
+    mine = glob.glob(os.path.join(lifeboat_dir(), f"{ids[cur]}.*audio"))
+    donors = [(durations[i], glob.glob(os.path.join(lifeboat_dir(), f"{ids[i]}.*audio")))
               for i in range(len(ids)) if i != cur]
     donors = [(d, files[0]) for d, files in donors if files]
     if not mine or not donors:
-        raise CheckFailed(f"copies missing in {lifeboat_dir}: own {mine}, donors {donors}")
+        raise CheckFailed(f"copies missing in {lifeboat_dir()}: own {mine}, donors {donors}")
     donor_len, donor = max(donors)   # the longest other copy: it must outlast the outage
-    shutil.copyfile(donor, mine[0])
-    print(f"   … copy of track {cur} (id {ids[cur]}) replaced by {os.path.basename(donor)} ({donor_len:.0f}s)", flush=True)
-    w0 = time.time()
-    fault("/kill?scope=http")
-    fault("/shape?kbps=0")
+    if donor_len < target + 120:
+        raise CheckFailed(f"longest other copy ({donor_len:.0f}s) too short to play through the outage")
+    fault("/shape?kbps=400")
+    try:
+        oracle.player_rpc(["time", f"{target:.1f}"])
+        time.sleep(10)   # the capped stream is under way, most of the song still to come
+        shutil.copyfile(donor, mine[0])
+        print(f"   … copy of track {cur} (id {ids[cur]}) replaced by {os.path.basename(donor)} ({donor_len:.0f}s)",
+              flush=True)
+        s1 = oracle.status()
+        w0 = time.time()
+        fault("/kill?scope=http")
+    finally:
+        fault("/shape?kbps=0")
     outage(60, "drop")
     wait_back(oracle, timeout=45)
     time.sleep(6)
     s = watch_monotonic(oracle)
-    idx, t = expected_position(durations, cur, s0["time"], time.time() - w0)
+    idx, t = expected_position(durations, cur, s1["time"], time.time() - w0)
     restarts = app_log_count("Restarting the copy of track", since=w0)
     print(f"   … LMS at track {s['index']} {s['time']:.1f}s; continuous playback would be track {idx} {t:.1f}s; "
           f"restarts logged: {restarts}")
@@ -1288,6 +1299,7 @@ def main():
             result, failed = f"FAIL — {type(e).__name__}: {e}", failed + 1
         finally:
             fault("/end")
+            fault("/shape?kbps=0")   # a scenario that died with the cap on must not slow the rest
         print(f"{sid} {label:<28} {result}", flush=True)
         time.sleep(3)
     try:
