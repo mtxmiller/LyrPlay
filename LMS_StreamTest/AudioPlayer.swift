@@ -41,6 +41,8 @@ class AudioPlayer: NSObject, ObservableObject {
         /// path, not BASS. nil until the first metadata poll lands, or for
         /// sources LMS has no bitrate for.
         let bitrateText: String?
+        /// Decoded from a saved copy on the phone, not from LMS's stream.
+        var isSavedCopy = false
 
         var displayString: String {
             // Stereo is the common case — omit channel info to match iPhone
@@ -1024,7 +1026,8 @@ class AudioPlayer: NSObject, ObservableObject {
             sampleRate: info.sampleRate,
             channels: info.channels,
             bitDepth: info.bitDepth,
-            bitrateText: effectiveBitrateText
+            bitrateText: effectiveBitrateText,
+            isSavedCopy: info.isSavedCopy
         )
     }
 

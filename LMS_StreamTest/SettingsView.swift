@@ -331,7 +331,7 @@ struct SettingsView: View {
         } header: {
             Text("Offline")
         } footer: {
-            Text("Downloads the next songs in your queue so music keeps playing through dead spots, then picks up on the server where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
+            Text("Saves the next songs in your queue on the phone. Saved songs play from the phone instead of streaming, so music keeps playing through dead spots, and the server picks up where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
         }
         .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
     }
@@ -434,7 +434,8 @@ struct SettingsView: View {
         case .native: alterations = []
         case .nativeRate(let a), .resampled(let a): alterations = a
         }
-        let path = "\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
+        let source = stream.isSavedCopy ? "Saved copy · " : ""
+        let path = "\(source)\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
         return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text("Signal Path")

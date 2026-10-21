@@ -336,6 +336,14 @@ class AudioStreamDecoder {
     func sampleMeasuredBitrate() -> String? {
         guard decoderStream != 0 else { return nil }
 
+        if decoderIsLocalFile {
+            // A saved copy: its average bitrate (LMS's is the source file's).
+            let size = BASS_StreamGetFilePosition(decoderStream, DWORD(BASS_FILEPOS_END))
+            let seconds = BASS_ChannelBytes2Seconds(decoderStream, BASS_ChannelGetLength(decoderStream, DWORD(BASS_POS_BYTE)))
+            guard size != UInt64.max, seconds > 0 else { return nil }
+            return "\(Int(Double(size) * 8 / seconds / 1000))kbps"
+        }
+
         let now = ProcessInfo.processInfo.systemUptime
         let bytes = BASS_StreamGetFilePosition(decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
 
@@ -2115,7 +2123,8 @@ class AudioStreamDecoder {
             sampleRate: Int(info.freq),
             channels: Int(info.chans),
             bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
-            bitrateText: audioPlayer?.carryOverBitrateText
+            bitrateText: audioPlayer?.carryOverBitrateText,
+            isSavedCopy: decoderIsLocalFile
         )
 
         setCurrentStreamInfoOnMain(streamInfo)

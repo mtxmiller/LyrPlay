@@ -74,7 +74,7 @@ class SettingsManager: ObservableObject {
         }
     }
 
-    static let lifeboatMinuteChoices = [15, 30, 60]
+    static let lifeboatMinuteChoices = [15, 30, 60, 120]
 
     /// How much music ahead to keep downloaded, in minutes.
     var lifeboatMinutes: Int {
