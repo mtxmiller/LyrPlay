@@ -48,6 +48,10 @@ enum CopyPlaybackDecision: Equatable {
         var time: Double?
         var duration: Double?
         var remote: Bool
+        /// LMS has us in a sync group (status sync_master / sync_slaves). The
+        /// app's own flag comes only from a serv packet, and LMS sends a synced
+        /// player's next song with autostart '1' like any other.
+        var synced = false
         /// Track ids by playlist index, from the status loop.
         var ids: [Int: String]
     }
@@ -72,6 +76,7 @@ enum CopyPlaybackDecision: Equatable {
                        playing: PlayingCopy?, handback: ExpectedHandback?) -> CopyPlaybackDecision {
         guard enabled else { return .stream("saved copies off or in a sync group") }
         guard sameServer else { return .stream("the copies are from another server") }
+        guard !server.synced else { return .stream("in a sync group") }
         guard !server.remote else { return .stream("radio or a streaming service") }
         guard !afterDecodeError else { return .stream("after a decode error") }
         guard let current = server.index, server.tracks > 0 else { return .stream("no status") }
@@ -87,7 +92,8 @@ enum CopyPlaybackDecision: Equatable {
         if let expected = handback, expected.index == current, server.ids[current] == expected.id,
            let playing = playing, playing.id == expected.id {
             guard let start = server.time, abs(start - expected.offset) <= handbackTolerance else {
-                return .stream("LMS did not start where we moved it")
+                return .stream(String(format: "LMS did not start where we moved it: %.1fs, asked %.1fs",
+                                      server.time ?? -1, expected.offset))
             }
             guard playing.position >= start - handbackTolerance,
                   playing.position <= start + handbackMaxLead else {
@@ -100,7 +106,7 @@ enum CopyPlaybackDecision: Equatable {
         // the start offset clipped to the duration, so a time at the very end is no proof.
         guard let start = server.time, start <= startTolerance,
               server.duration.map({ start < $0 - 0.5 }) ?? true else {
-            return .stream("starts mid-song (a seek or a jump)")
+            return .stream(String(format: "starts mid-song (a seek or a jump): LMS at %.1fs", server.time ?? -1))
         }
         return fileIfSaved(current, strmFormat: strmFormat, server: server, copies: copies)
     }

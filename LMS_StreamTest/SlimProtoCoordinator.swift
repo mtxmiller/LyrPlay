@@ -2217,6 +2217,48 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.info, log: logger, "🔗 strm 's' - sending STMc, asking LMS which song this is")
         client.sendStatus("STMc")
         let generation = copyDecisionGeneration
+        askLMSAboutStrm(generation: generation, startMayBeStale: !isGapless) { [weak self] status in
+            guard let self = self else { return }
+            self.reportZeroElapsedWhileDeciding = false
+            self.copyDecisionPending = false
+            // LMS paused us meanwhile: start, but play only on its 'u'.
+            let paused = self.pausedDuringCopyDecision
+            self.pausedDuringCopyDecision = false
+            let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
+                                             afterDecodeError: afterDecodeError, handback: paused ? nil : handback,
+                                             status: status)
+            self.statElapsedOffset = 0
+            switch decision {
+            case .file(let index):
+                if let file = self.lifeboat.fileURL(forIndex: index), let id = self.lifeboat.track(at: index)?.id {
+                    // .default: persisted, so the rig can count it (P1-P9).
+                    os_log(.default, log: self.logger, "📼 Playing the saved copy of track %d instead of the stream (%{public}s)",
+                           index, isGapless ? "next song" : "from the start")
+                    self.startDirectStream(url: file.absoluteString, format: format, startTime: 0, replayGain: replayGain,
+                                           waitForUnpause: paused, isGapless: isGapless,
+                                           copy: CopySource(index: index, id: id), connectedSent: true)
+                    return
+                }
+                os_log(.default, log: self.logger, "📼 Streaming: the copy of track %d is gone", index)
+            case .handback(let startOffset):
+                self.handBackToServer(startOffset: startOffset)
+                return
+            case .stream(let reason):
+                os_log(.default, log: self.logger, "📼 Streaming: %{public}s", reason)
+            }
+            self.startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
+                                   waitForUnpause: paused, isGapless: isGapless, copy: nil, connectedSent: true)
+        }
+    }
+
+    /// `status - 2` for a strm 's', on main (nil = no answer). LMS reads our
+    /// STATs and the JSON request in whatever order its select loop finds
+    /// them, so the first answer may predate the 0-elapsed STMc and show the
+    /// old song's elapsed on top of the start offset. A time of ~0 still
+    /// proves a start from 0; anything else is asked again once, when the
+    /// STMc has long been read.
+    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, attempt: Int = 0,
+                                 completion: @escaping ([String: Any]?) -> Void) {
         let statusCommand: [String: Any] = [
             "id": 1, "method": "slim.request",
             "params": [settings.playerMACAddress, ["status", "-", 2, "tags:o"]]
@@ -2228,35 +2270,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                     os_log(.info, log: self.logger, "📼 Status reply for an older strm - ignored")
                     return
                 }
-                self.reportZeroElapsedWhileDeciding = false
-                self.copyDecisionPending = false
-                // LMS paused us meanwhile: start, but play only on its 'u'.
-                let paused = self.pausedDuringCopyDecision
-                self.pausedDuringCopyDecision = false
-                let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
-                                                 afterDecodeError: afterDecodeError, handback: paused ? nil : handback,
-                                                 status: response["result"] as? [String: Any])
-                self.statElapsedOffset = 0
-                switch decision {
-                case .file(let index):
-                    if let file = self.lifeboat.fileURL(forIndex: index), let id = self.lifeboat.track(at: index)?.id {
-                        // .default: persisted, so the rig can count it (P1-P9).
-                        os_log(.default, log: self.logger, "📼 Playing the saved copy of track %d instead of the stream (%{public}s)",
-                               index, isGapless ? "next song" : "from the start")
-                        self.startDirectStream(url: file.absoluteString, format: format, startTime: 0, replayGain: replayGain,
-                                               waitForUnpause: paused, isGapless: isGapless,
-                                               copy: CopySource(index: index, id: id), connectedSent: true)
-                        return
+                let result = response["result"] as? [String: Any]
+                let time = (result?["time"] as? Double) ?? (result?["time"] as? Int).map(Double.init)
+                if startMayBeStale, attempt == 0, let time = time, time > CopyPlaybackDecision.startTolerance {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        guard let self = self, generation == self.copyDecisionGeneration else { return }
+                        self.askLMSAboutStrm(generation: generation, startMayBeStale: true, attempt: 1, completion: completion)
                     }
-                    os_log(.default, log: self.logger, "📼 Streaming: the copy of track %d is gone", index)
-                case .handback(let startOffset):
-                    self.handBackToServer(startOffset: startOffset)
                     return
-                case .stream(let reason):
-                    os_log(.default, log: self.logger, "📼 Streaming: %{public}s", reason)
                 }
-                self.startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
-                                       waitForUnpause: paused, isGapless: isGapless, copy: nil, connectedSent: true)
+                completion(result)
             }
         }
     }
@@ -2280,6 +2303,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             time: number(result["time"]),
             duration: number(result["duration"]),
             remote: (number(result["remote"]) ?? 0) != 0,
+            synced: result["sync_master"] != nil || result["sync_slaves"] != nil,
             ids: ids)
         var copies: [Int: CopyPlaybackDecision.SavedCopy] = [:]
         for index in Set(ids.keys).union([0]) {

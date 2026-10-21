@@ -41,6 +41,15 @@ struct CopyPlaybackDecisionTableTests {
         #expect(isStream(decide(enabled: false, afterDecodeEnd: true)))
     }
 
+    @Test func syncGroupSeenByLMSStreams() {
+        var s = server(index: 1, time: 150)
+        s.synced = true
+        #expect(isStream(decide(afterDecodeEnd: true, server: s)))
+        var start = server(index: 3, time: 0)
+        start.synced = true
+        #expect(isStream(decide(server: start)))
+    }
+
     @Test func anotherServerStreams() {
         #expect(isStream(decide(sameServer: false)))
         #expect(isStream(decide(sameServer: false, afterDecodeEnd: true)))
