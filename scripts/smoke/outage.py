@@ -45,7 +45,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
-| P4 | a copy plays 50s before its end, 120s offline (the next song's copy follows) | LMS on the continuous position (±6s), "Handback" in the app log, no stream after the outage |
+| P4 | a copy plays 50s before its end, 120s offline (the next song's copy follows) | LMS on the continuous position (±6s), "Handback" in the app log, no stream after the outage; still continuous 10s before that song ends (after the next song's strm) |
 | P5 | seek in a song playing from its copy | the seek streams; the next song plays from its copy |
 | P6 | repeat one; repeat all at the last song; shuffle | the same song / track 0 / the next in LMS's play order, each from its copy, no stream |
 | P7 | Next twice mid-song (`playlist index +1`, what Material sends) | the right song from 0, from its copy, no stream |
@@ -1015,6 +1015,14 @@ def p4_handback(oracle, album_id):
         raise CheckFailed("no handback after the reconnect jump")
     if streams:
         raise CheckFailed(f"a stream was opened after the outage: {streams}")
+    # Near the end of the handed-back song the next song's strm has come:
+    # LMS's time must still be the song's (STAT elapsed stays relative).
+    time.sleep(max(0, durations[idx] - t - 10))
+    s = oracle.status()
+    idx2, t2 = expected_position(durations, s0["index"], s0["time"], time.time() - w0)
+    print(f"   … near the end: LMS at track {s['index']} {s['time']:.1f}s; continuous: track {idx2} {t2:.1f}s")
+    if s["index"] != idx2 or abs(s["time"] - t2) > 6:
+        raise CheckFailed(f"near the end: LMS at track {s['index']} {s['time']:.1f}s, expected track {idx2} {t2:.1f}±6s")
 
 
 def p5_seek_streams_then_file(oracle, album_id):
