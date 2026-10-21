@@ -114,6 +114,7 @@
 				AudioPlayer.swift,
 				AudioStreamDecoder.swift,
 				Connections.swift,
+				CopyPlaybackDecision.swift,
 				KeychainManager.swift,
 				LifeboatCache.swift,
 				MonotonicGate.swift,
