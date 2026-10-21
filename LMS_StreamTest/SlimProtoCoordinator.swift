@@ -694,7 +694,10 @@ class SlimProtoCoordinator: ObservableObject {
     var isConnected: Bool {
         return connectionManager.connectionState.isConnected
     }
-    
+
+    /// When the current SlimProto connection was established (nil before the first).
+    var connectedAt: Date? { lastConnectedAt }
+
     var streamState: String {
         return commandHandler.streamState
     }

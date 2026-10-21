@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var offlinePlayer: SlimProtoCoordinator.OfflinePlayerState?
     @State private var showingOfflinePlayer = false
+    @State private var materialPlayerID: String?   // last player Material reported (bd vdb6)
     /// Opening the app while offline opens the offline player (Material is
     /// frozen then); a network drop while the app is in use only shows the banner.
     @State private var openOfflinePlayerUntil: Date?
@@ -170,6 +171,18 @@ struct ContentView: View {
                         // WebView reference may have been recreated (reload).
                         volumeRocker.webView = webView
                         volumeRocker.materialPlayerChanged(player)
+                        // Material moves to its default player when the list
+                        // refreshes after a reconnect; put LyrPlay back (bd vdb6).
+                        let previous = materialPlayerID
+                        materialPlayerID = player?.id
+                        if MaterialPlayerRestore.shouldRestore(
+                            previousID: previous, newID: player?.id, localID: settings.playerMACAddress,
+                            reconnectedAgo: slimProtoCoordinator.connectedAt.map { Date().timeIntervalSince($0) },
+                            playing: audioManager.getPlayerState() == "Playing") {
+                            os_log(.info, log: logger, "🔁 Material switched to %{public}s after the reconnect - selecting LyrPlay again",
+                                   player?.name ?? player?.id ?? "?")
+                            webView?.evaluateJavaScript("setCurrentPlayer('\(settings.playerMACAddress)')", completionHandler: nil)
+                        }
                     }
                 )
                 // WebView fills edge-to-edge; Material's topPad CSS var handles status bar spacing.
