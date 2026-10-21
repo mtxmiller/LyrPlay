@@ -2197,9 +2197,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         if isGapless { handback = nil }
 
         // A saved copy of the song may play instead of the stream (bd 5syr).
-        // Sync groups wait for 'u' (and never use copies); with no copy at all
-        // there is nothing to ask.
-        guard !waitForUnpause, lifeboatEnabled, lifeboat.server == currentSessionServer,
+        // With no copy at all there is nothing to ask. (autostart '0' is not
+        // only sync groups: LMS starts a playlist jump with it too. The status
+        // below tells a sync group.)
+        guard lifeboatEnabled, lifeboat.server == currentSessionServer,
               handback != nil || lifeboat.hasSavedCopies else {
             statElapsedOffset = 0
             startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
@@ -2222,11 +2223,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             self.reportZeroElapsedWhileDeciding = false
             self.copyDecisionPending = false
             // LMS paused us meanwhile: start, but play only on its 'u'.
-            let paused = self.pausedDuringCopyDecision
-            self.pausedDuringCopyDecision = false
+            let paused = self.pausedDuringCopyDecision || waitForUnpause
             let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
-                                             afterDecodeError: afterDecodeError, handback: paused ? nil : handback,
+                                             afterDecodeError: afterDecodeError,
+                                             handback: self.pausedDuringCopyDecision ? nil : handback,
                                              status: status)
+            self.pausedDuringCopyDecision = false
             self.statElapsedOffset = 0
             switch decision {
             case .file(let index):
@@ -2241,7 +2243,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 }
                 os_log(.default, log: self.logger, "📼 Streaming: the copy of track %d is gone", index)
             case .handback(let startOffset):
-                self.handBackToServer(startOffset: startOffset)
+                self.handBackToServer(startOffset: startOffset, waitForUnpause: waitForUnpause)
                 return
             case .stream(let reason):
                 os_log(.default, log: self.logger, "📼 Streaming: %{public}s", reason)
@@ -2323,25 +2325,39 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// LMS restarted the song a saved copy is playing, where our reconnect jump
     /// asked: keep the decoder and the time, tell LMS it is connected and
     /// playing. Our STATs report song time; LMS adds the strm's start offset.
-    private func handBackToServer(startOffset: Double) {
+    /// A jump comes with autostart '0': LMS starts it with 'u' once we report
+    /// the buffer loaded (STMl), and STMs answers the 'u' as for any start.
+    private func handBackToServer(startOffset: Double, waitForUnpause: Bool) {
         os_log(.default, log: logger, "📼 Handback: LMS restarted track %{public}s at %.1fs where the saved copy plays - keeping it, no stream",
                playingCopy.map { String($0.index) } ?? "?", startOffset)
         statElapsedOffset = startOffset
         // The recovery's hold waits for a playback start that never comes now.
         endOutageHold(reason: "handed back to LMS")
-        client.sendStatus("STMs")
+        // The copy may have finished decoding already (offline): LMS needs that
+        // STMd after the STMs, to send the next song.
+        let stream = audioManager.pushStreamState()
+        copyDecodeEndHeld = stream.completedNaturally && !stream.decodingAhead
+        if waitForUnpause {
+            pendingUnpauseSTMs = true
+            client.sendStatus("STMl")
+        } else {
+            client.sendStatus("STMs")
+            releaseHeldCopyDecodeEnd()
+        }
         startServerTimeFetching()
         startPlaybackHeartbeat()
         startRadioMetadataRefreshTimer()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.fetchCurrentTrackMetadata()
         }
-        // The copy may have finished decoding already (offline): LMS needs that
-        // STMd now, after the STMs, to send the next song.
-        let stream = audioManager.pushStreamState()
-        if stream.completedNaturally && !stream.decodingAhead {
-            sendTrackDecodeComplete()
-        }
+    }
+
+    /// A copy's STMd held until its STMs went out: send it now (on main, once
+    /// the decoder has cleared any boundary it is reporting).
+    private func releaseHeldCopyDecodeEnd() {
+        guard copyDecodeEndHeld else { return }
+        copyDecodeEndHeld = false
+        DispatchQueue.main.async { [weak self] in self?.sendTrackDecodeComplete() }
     }
 
     /// Start decoding the strm's song: LMS's stream, or the saved copy chosen for it.
@@ -2674,12 +2690,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
         client.sendStatus("STMs")
-        if copyDecodeEndHeld {
-            // The copy queued behind the last song plays now: its STMd may go
-            // (once the decoder has cleared this boundary).
-            copyDecodeEndHeld = false
-            DispatchQueue.main.async { [weak self] in self?.sendTrackDecodeComplete() }
-        }
+        // The copy queued behind the last song plays now: its STMd may go.
+        releaseHeldCopyDecodeEnd()
 
         // CRITICAL FIX: Delay metadata fetch to avoid race condition with server
         // Server needs time to process STMs before we query metadata, otherwise it may
@@ -5566,6 +5578,7 @@ extension SlimProtoCoordinator {
             os_log(.info, log: logger, "🎵 Flushing deferred STMs (BASS playback started)")
             client.sendStatus("STMs")
             pendingUnpauseSTMs = false
+            DispatchQueue.main.async { [weak self] in self?.releaseHeldCopyDecodeEnd() }  // a handback's
         }
     }
 
