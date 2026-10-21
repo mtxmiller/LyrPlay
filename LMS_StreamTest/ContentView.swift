@@ -29,6 +29,16 @@ struct ContentView: View {
     // Drives reactive topPad injection in WebView.updateUIView: when this changes
     // (cold launch / CarPlay foreground 0→59, rotation), updateUIView re-injects.
     @State private var topInset: CGFloat = 0
+    /// Playing downloaded copies while the server can't be reached (shows the offline banner).
+    @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
+    @State private var offlinePlayer: SlimProtoCoordinator.OfflinePlayerState?
+    @State private var showingOfflinePlayer = false
+    /// Opening the app while offline opens the offline player (Material is
+    /// frozen then); a network drop while the app is in use only shows the banner.
+    @State private var openOfflinePlayerUntil: Date?
+    private let offlinePoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private static let offlineBannerHeight: CGFloat = 30
     /// GH#75: hardware volume rocker → external player forwarding
     @StateObject private var volumeRocker = VolumeRockerForwarder()
 
@@ -147,7 +157,7 @@ struct ContentView: View {
             if let url = URL(string: materialWebURL), !hasConnectionError {
                 WebView(
                     url: url,
-                    topInset: topInset,
+                    topInset: materialTopPad,
                     isLoading: $isLoading,
                     loadError: $loadError,
                     hasConnectionError: $hasConnectionError,
@@ -182,6 +192,22 @@ struct ContentView: View {
             // Error overlay (only show when there's an error)
             if loadError != nil {
                 errorOverlay
+            }
+
+            if showsOfflineBanner {
+                offlineBanner
+                    .zIndex(2)
+            }
+
+            if showingOfflinePlayer, let player = offlinePlayer {
+                OfflinePlayerView(
+                    state: player,
+                    onCommand: { slimProtoCoordinator.offlinePlayerCommand($0) },
+                    onPlayTrack: { slimProtoCoordinator.playSavedTrackOffline(index: $0) },
+                    onSettings: { showingSettings = true },
+                    onClose: { showingOfflinePlayer = false })
+                    .transition(.move(edge: .bottom))
+                    .zIndex(3)
             }
 
         }
@@ -225,12 +251,42 @@ struct ContentView: View {
             if !hasConnected && !hasConnectionError {
                 connectToLMS()
             }
+            // Only when the server is already out of reach: a drop in the next
+            // seconds while Material is in use gets the banner, not the player.
+            openOfflinePlayerUntil = slimProtoCoordinator.connectionIsLive ? nil : Date().addingTimeInterval(15)
 
             // App open recovery for warm resume is handled by willEnterForegroundNotification below.
             // Cold launches don't get that notification, so the block above handles them on first appear.
         }
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()
+        }
+        .onReceive(offlinePoll) { _ in
+            let status = isAppInBackground ? nil : slimProtoCoordinator.offlinePlaybackStatus
+            if status != offlineStatus { offlineStatus = status }
+            let offer = isAppInBackground ? nil : slimProtoCoordinator.savedMusicOffer
+            if offer != savedMusicOffer { savedMusicOffer = offer }
+            let player = isAppInBackground ? nil : slimProtoCoordinator.offlinePlayerState
+            if player != offlinePlayer { offlinePlayer = player }
+            if hasConnectionError && !showingSettings && slimProtoCoordinator.connectionIsLive {
+                // Launched offline and the server is back: load Material (as closing Settings does).
+                os_log(.info, log: logger, "🌐 Server reachable again - loading Material")
+                hasConnectionError = false
+                hasShownError = false
+                hasHandledError = false
+                loadError = nil
+            }
+            if player != nil && slimProtoCoordinator.offlinePlayerRequested {
+                // Play Saved Music pressed (here, in Settings, or a debug hook).
+                slimProtoCoordinator.offlinePlayerRequested = false
+                showingOfflinePlayer = true
+            }
+            if player == nil {
+                showingOfflinePlayer = false  // back online: Material again
+            } else if let until = openOfflinePlayerUntil, Date() < until {
+                openOfflinePlayerUntil = nil
+                showingOfflinePlayer = true
+            }
         }
         .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
             pushStreamInfoToWebView()
@@ -240,6 +296,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             isAppInBackground = false
+            openOfflinePlayerUntil = slimProtoCoordinator.connectionIsLive ? nil : Date().addingTimeInterval(15)
 
             // Warm-resume layout correction. The reactive updateUIView path only fires
             // when topInset CHANGES; a same-orientation warm resume keeps the inset, so we
@@ -254,11 +311,11 @@ struct ContentView: View {
                 // notch, and updateUIView never corrected it because topInset itself
                 // hadn't changed.
                 os_log(.info, log: webViewLayoutLog, "📐 topPad on foreground: %dpx (window reports %dpx)",
-                       Int(topInset), Int(webView.window?.safeAreaInsets.top ?? -1))
-                injectTopPad(into: webView, top: Int(topInset), source: "willEnterForeground")
+                       Int(materialTopPad), Int(webView.window?.safeAreaInsets.top ?? -1))
+                injectTopPad(into: webView, top: Int(materialTopPad), source: "willEnterForeground")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     logWebViewViewport(webView, source: "foreground+1s")
-                    verifyTopPad(in: webView, expected: Int(topInset), source: "foreground+1s")
+                    verifyTopPad(in: webView, expected: Int(materialTopPad), source: "foreground+1s")
                 }
 
                 // Check if Material's Cometd connection is still alive after backgrounding.
@@ -292,7 +349,9 @@ struct ContentView: View {
             // Recovery is only needed when LMS has dropped our connection (it closes
             // a player it hasn't heard from for 15s; a suspended app can't answer).
             let connectionWasLive = slimProtoCoordinator.connectionIsLive
-            if settings.enableAppOpenRecovery,
+            // Offline playback owns the audio and the reconnect (review H3).
+            let offlineOwns = slimProtoCoordinator.offlinePlaybackOwnsRecovery
+            if settings.enableAppOpenRecovery, !offlineOwns,
                !slimProtoCoordinator.isRecoveryActive,  // an in-flight (lock-screen) recovery owns the audio
                !connectionWasLive,
                audioManager.getPlayerState() != "Playing" {
@@ -303,6 +362,10 @@ struct ContentView: View {
             // App foreground recovery: Use backgrounding duration to determine if recovery needed
             // Wait 2 seconds to ensure connection is stable after foregrounding
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if slimProtoCoordinator.offlinePlaybackOwnsRecovery {
+                    os_log(.info, log: logger, "📱 App Foreground: offline playback owns recovery - skipping")
+                    return
+                }
                 // Skip recovery if already playing (background audio kept connection alive)
                 let currentState = audioManager.getPlayerState()
                 if currentState == "Playing" {
@@ -606,6 +669,29 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
+            if let offline = offlineStatus {
+                // No server, but the downloaded copies are playing.
+                VStack(spacing: 4) {
+                    Label(offline.isPaused ? "Offline · paused" : "Playing saved music", systemImage: "wifi.slash")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.orange)
+                    Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text(offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal)
+            } else if let offer = savedMusicOffer {
+                Button("Play Saved Music · \(offer.minutesLeft) min") {
+                    slimProtoCoordinator.playSavedMusicOffline()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .padding(.horizontal, 40)
+            }
+
             Button("Open Settings") {
                 showingSettings = true
             }
@@ -723,6 +809,59 @@ struct ContentView: View {
     }
     
     // MARK: - Error Overlay (Separate from loading screen)
+    /// Material's top padding: the status bar, plus room for the offline banner.
+    private var materialTopPad: CGFloat {
+        topInset + (showsOfflineBanner ? Self.offlineBannerHeight : 0)
+    }
+
+    private var showsOfflineBanner: Bool {
+        // Not over the can't-connect screen: it shows the offer itself (review L7).
+        (offlineStatus != nil || savedMusicOffer != nil) && !isLoading && loadError == nil && !hasConnectionError
+    }
+
+    private var offlineBannerText: (main: String, detail: String) {
+        if let offline = offlineStatus {
+            let left = offline.minutesLeft < 1 ? "under 1 min" : "\(offline.minutesLeft) min"
+            return (offline.isPaused ? "Offline · paused" : "Offline · playing saved music", "· \(left) left")
+        }
+        // Paused (or stopped) with no network: the copies can take over.
+        return ("Offline · saved music ready", "· \(savedMusicOffer?.minutesLeft ?? 0) min")
+    }
+
+    /// Material can't reach the server and freezes, but the music goes on from
+    /// downloaded copies: say so, and open Settings (which shows the details).
+    private var offlineBanner: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation { showingOfflinePlayer = true }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "wifi.slash")
+                    Text(offlineBannerText.main)
+                        .fontWeight(.semibold)
+                    Text(offlineBannerText.detail)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.footnote)
+                .foregroundColor(.black)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .frame(height: Self.offlineBannerHeight)
+                .background(Color.orange)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the offline player")
+            .padding(.top, topInset)
+            Spacer()
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.25), value: offlineStatus?.isPaused)
+    }
+
     private var errorOverlay: some View {
         VStack {
             Spacer()
@@ -763,7 +902,7 @@ struct ContentView: View {
                     
                     // Auto-show settings after 10 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-                        if self.loadError != nil && !self.showingSettings {
+                        if self.loadError != nil && !self.showingSettings && !self.showingOfflinePlayer {
                             self.showingSettings = true
                         }
                     }

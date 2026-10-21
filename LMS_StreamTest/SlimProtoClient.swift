@@ -10,6 +10,78 @@ protocol SlimProtoClientDelegate: AnyObject {
     func slimProtoDidConnect()
     func slimProtoDidDisconnect(error: Error?)
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand)
+    /// Whether this connect's HELO says "reconnect". Asked on main, just before the HELO.
+    func slimProtoShouldHeloReconnect() -> Bool
+}
+
+/// The HELO's reconnect fields (squeezelite slimproto.c:143-145, 964-970).
+/// With the 0x4000 bit and the bytes received, LMS treats the connect as the
+/// same session coming back: a playing player keeps playing, a paused one
+/// stays paused (Squeezebox.pm reconnect). Without it, LMS restarts the stream
+/// at its own frozen time, or stops a paused player.
+struct SlimProtoHeloReconnect: Equatable {
+    var isReconnect: Bool
+    var bytesReceived: UInt64
+
+    static let fresh = SlimProtoHeloReconnect(isReconnect: false, bytesReceived: 0)
+
+    var wlanChannels: UInt16 { isReconnect ? 0x4000 : 0x0000 }
+}
+
+/// Track events (decode complete, track started, underrun) that happen while
+/// the control connection is down. squeezelite keeps them as decoder/output
+/// state and sends them on the first loop after a reconnect; dropping them
+/// leaves LMS waiting for an STMd that never comes, so the queue stops after
+/// the current track. They only make sense to a server that kept our session:
+/// sent after a reconnect HELO, dropped after a fresh one.
+struct SlimProtoOfflineEvents {
+    static let queuedCodes: Set<String> = ["STMd", "STMs", "STMu"]
+    /// Far more than an outage can produce (one STMd + STMs per track).
+    static let limit = 8
+
+    private(set) var pending: [String] = []
+    /// STMd written to a socket the server hasn't answered on since. A frozen
+    /// connection still accepts writes, so a song that finished downloading
+    /// as the outage began sent its STMd nowhere. Without it LMS reads the
+    /// held STMu as "the next song is buffering" and sits in play (rig O13).
+    private(set) var unconfirmed: [String] = []
+
+    /// A track event went out on a live socket.
+    mutating func sent(_ code: String) {
+        guard code == "STMd" else { return }
+        if unconfirmed.count >= Self.limit { unconfirmed.removeFirst() }
+        unconfirmed.append(code)
+    }
+
+    /// The server sent a frame: what we wrote before it got through. (After an
+    /// STMd LMS answers with the next song's strm, so a resent STMd can't make
+    /// it skip one.)
+    mutating func serverFrameArrived() {
+        unconfirmed.removeAll()
+    }
+
+    /// The connection dropped: STMds the server never answered go out again,
+    /// ahead of what was held offline. A second STMd for the same song is a
+    /// no-op to LMS (ReadyToStream with nothing streaming).
+    mutating func connectionLost() {
+        pending = Array((unconfirmed + pending).suffix(Self.limit))
+        unconfirmed.removeAll()
+    }
+
+    /// Keep `code` for later. False if it isn't a track event (not kept).
+    mutating func hold(_ code: String) -> Bool {
+        guard Self.queuedCodes.contains(code) else { return false }
+        if pending.count >= Self.limit { pending.removeFirst() }
+        pending.append(code)
+        return true
+    }
+
+    /// The events to send now, in order: all of them after a reconnect HELO,
+    /// none after a fresh one. Empties the queue.
+    mutating func take(afterReconnect: Bool) -> [String] {
+        defer { pending.removeAll(); unconfirmed.removeAll() }
+        return afterReconnect ? pending : []
+    }
 }
 
 // MARK: - Command Structure
@@ -70,6 +142,15 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     // MARK: - Socket Management
     private var socket: GCDAsyncSocket!
     private var isConnected = false
+    /// Track events held while disconnected. Main thread only.
+    private var offlineEvents = SlimProtoOfflineEvents()
+    /// The last HELO carried the reconnect bit. Main thread only.
+    private(set) var lastHeloWasReconnect = false
+
+    /// Forget the track events held while offline. Main thread only.
+    func discardHeldEvents() {
+        _ = offlineEvents.take(afterReconnect: false)
+    }
     
     // MARK: - Connection State
     private var host: String = ""
@@ -258,17 +339,36 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     func socket(_ sock: GCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
         os_log(.info, log: logger, "✅ Connected to LMS at %{public}s:%d", host, port)
 
-        // Send HELO and arm the first header read immediately — the server
-        // replies to HELO right away.
-        sendHelo()
+        // Arm the first header read now; the server answers the HELO right away.
         socket.readData(toLength: 2, withTimeout: 30, tag: 0)
         os_log(.info, log: logger, "Read data initiated after connect - expecting 2-byte length header")
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // Dropped (or replaced by a newer connect) before this hop ran: the
+            // disconnect callback reports it; don't spend the held events on it.
+            guard sock === self.socket, sock.isConnected else {
+                os_log(.info, log: self.logger, "Socket gone before the HELO - skipping this connect")
+                return
+            }
+            // HELO from main: whether it says "reconnect" depends on player
+            // state, which lives on main. Nothing is read before the HELO.
+            let reconnect = (self.delegate?.slimProtoShouldHeloReconnect() ?? false)
+                ? SlimProtoHeloReconnect(isReconnect: true,
+                                         bytesReceived: self.commandHandler?.getStatTelemetry().bytesReceived ?? 0)
+                : .fresh
+            self.sendHelo(reconnect: reconnect)
+            self.lastHeloWasReconnect = reconnect.isReconnect
             self.isConnected = true
             self.socketConnectedAt = Date()
             self.socketStale = false
+
+            let held = self.offlineEvents.take(afterReconnect: reconnect.isReconnect)
+            if !held.isEmpty {
+                os_log(.info, log: self.logger, "📬 Sending track events held while offline: %{public}s",
+                       held.joined(separator: ", "))
+                held.forEach { self.sendStatus($0) }
+            }
 
             // Request initial status after brief delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -292,6 +392,8 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // A stale socket's late disconnect must not touch the new one's events.
+            if sock === self.socket { self.offlineEvents.connectionLost() }
             self.isConnected = false
             self.hasRequestedInitialStatus = false
             self.delegate?.slimProtoDidDisconnect(error: err)
@@ -350,6 +452,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
             // Command processing runs on main (single-threaded control plane).
             // Main-queue FIFO preserves server command order.
             DispatchQueue.main.async { [weak self] in
+                if sock === self?.socket { self?.offlineEvents.serverFrameArrived() }
                 self?.delegate?.slimProtoDidReceiveCommand(command)
             }
 
@@ -364,8 +467,9 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
     }
     
     // MARK: - FIXED: Protocol Messages with proper device identification
-    private func sendHelo() {
-        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS")
+    private func sendHelo(reconnect: SlimProtoHeloReconnect) {
+        os_log(.info, log: logger, "Sending HELO message as LyrPlay for iOS (reconnect: %{public}s, bytes: %llu)",
+               reconnect.isReconnect ? "YES" : "NO", reconnect.bytesReceived)
 
         // Device ID 12 = squeezelite — well-recognized by LMS. Prevents the
         // "AppleCoreMedia" identification issue.
@@ -392,13 +496,12 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // UUID (16 bytes) - optional, using zeros
         helloData.append(Data(repeating: 0, count: 16))
 
-        // WLAN channel list (2 bytes) - always 0x0000
-        // Client-side playlist jump recovery handles position restoration
-        let wlanChannels: UInt16 = 0x0000
+        // WLAN channel list (2 bytes): bit 0x4000 = reconnect (see SlimProtoHeloReconnect)
+        let wlanChannels = reconnect.wlanChannels
         helloData.append(Data([UInt8(wlanChannels >> 8), UInt8(wlanChannels & 0xff)]))
 
-        // Bytes received (8 bytes) - optional, starting at 0
-        helloData.append(Data(repeating: 0, count: 8))
+        // Bytes received (8 bytes): of the current stream, on a reconnect
+        helloData.append(withUnsafeBytes(of: reconnect.bytesReceived.bigEndian) { Data($0) })
 
         // Language (2 bytes) - optional, "en"
         helloData.append("en".data(using: .ascii) ?? Data([0x65, 0x6e]))
@@ -447,7 +550,11 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
 
     func sendStatus(_ code: String, serverTimestamp: UInt32 = 0) {
         guard isConnected else {
-            os_log(.error, log: logger, "Cannot send status - not connected")
+            if offlineEvents.hold(code) {
+                os_log(.info, log: logger, "📬 Not connected - holding %{public}s for the reconnect", code)
+            } else {
+                os_log(.error, log: logger, "Cannot send status - not connected")
+            }
             return
         }
 
@@ -616,6 +723,7 @@ class SlimProtoClient: NSObject, GCDAsyncSocketDelegate {
         // os_log(.debug, log: logger, "STAT packet: %{public}s", fullMessage.map { String(format: "%02X", $0) }.joined(separator: " "))
 
         socket.write(fullMessage, withTimeout: 30, tag: 2)
+        offlineEvents.sent(code)
     }
 
     // MARK: - Public Interface

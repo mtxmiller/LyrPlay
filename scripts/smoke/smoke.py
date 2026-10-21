@@ -15,7 +15,7 @@ launches a preconfigured app). Run directly when the app is already up:
 
 Env:
     LYRPLAY_LMS_HOST      LMS host (default 192.168.1.8)
-    LYRPLAY_LMS_PORT      LMS HTTP port (default 9000)
+    LYRPLAY_LMS_PORT      LMS HTTP port (default 9010, the lms-test server)
     LYRPLAY_PLAYER_NAME   player name to discover (default "SmokeTest Player")
     LYRPLAY_PLAYER_ID     player MAC — skips name discovery
     LYRPLAY_SOAK_SECONDS  S6 soak duration (default 60)
@@ -23,14 +23,17 @@ Env:
 Exit code 0 = all selected scenarios passed.
 """
 
+import errno
 import json
 import os
+import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 LMS_HOST = os.environ.get("LYRPLAY_LMS_HOST", "192.168.1.8")
-LMS_PORT = int(os.environ.get("LYRPLAY_LMS_PORT", "9000"))
+LMS_PORT = int(os.environ.get("LYRPLAY_LMS_PORT", "9010"))
 PLAYER_NAME = os.environ.get("LYRPLAY_PLAYER_NAME", "SmokeTest Player")
 PLAYER_ID = os.environ.get("LYRPLAY_PLAYER_ID", "")
 SOAK_SECONDS = int(os.environ.get("LYRPLAY_SOAK_SECONDS", "60"))
@@ -48,16 +51,44 @@ class Oracle:
     def __init__(self, host, port):
         self.url = f"http://{host}:{port}/jsonrpc.js"
         self.player_id = PLAYER_ID
+        self.use_curl = False
 
     def rpc(self, cmd, player=""):
         body = json.dumps(
             {"id": 1, "method": "slim.request", "params": [player, cmd]}
         ).encode()
+        if self.use_curl:
+            return self._rpc_curl(body)
         req = urllib.request.Request(
             self.url, data=body, headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.load(resp).get("result", {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return self._result(json.load(resp))
+        except urllib.error.URLError as e:
+            # macOS Local Network privacy can block python3 from LAN hosts
+            # ("No route to host"); Apple's curl is exempt.
+            if getattr(e.reason, "errno", None) != errno.EHOSTUNREACH:
+                raise
+            self.use_curl = True
+            return self._rpc_curl(body)
+
+    def _rpc_curl(self, body):
+        r = subprocess.run(
+            ["curl", "-s", "--compressed", "-m", "10", "-H", "Content-Type: application/json",
+             self.url, "--data-binary", "@-"],
+            input=body, capture_output=True,
+        )
+        if r.returncode != 0:
+            raise OSError(f"curl exit {r.returncode}")
+        return self._result(json.loads(r.stdout))
+
+    @staticmethod
+    def _result(reply):
+        # A garbled reply (seen on a slow Wi-Fi link) is a failed request, not a crash.
+        if not isinstance(reply, dict):
+            raise OSError(f"unexpected JSON-RPC reply: {str(reply)[:120]}")
+        return reply.get("result", {})
 
     def player_rpc(self, cmd):
         return self.rpc(cmd, player=self.player_id)

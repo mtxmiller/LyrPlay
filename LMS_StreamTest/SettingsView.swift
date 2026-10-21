@@ -9,6 +9,7 @@ import StoreKit
 
 // MARK: - Main Settings View
 struct SettingsView: View {
+    @State private var offlineStorageText = "None"
     @StateObject private var settings = SettingsManager.shared
     @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @EnvironmentObject private var coordinator: SlimProtoCoordinator
@@ -20,6 +21,8 @@ struct SettingsView: View {
 
     // Status card (bd x19i)
     @State private var isConnectedNow = false
+    @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
     private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -98,6 +101,14 @@ struct SettingsView: View {
                     NavigationLink(destination: ServerSettingsView()) {
                         statusCard
                     }
+                    if let offer = savedMusicOffer {
+                        Button {
+                            coordinator.playSavedMusicOffline()
+                            refreshConnectionStatus()
+                        } label: {
+                            Label("Play Saved Music · \(offer.minutesLeft) min", systemImage: "play.circle.fill")
+                        }
+                    }
                 }
 
                 audioSection
@@ -125,6 +136,8 @@ struct SettingsView: View {
                 } footer: {
                     Text("Resume restores your place after 45+ seconds in the background. Volume Buttons (experimental) sends the phone's buttons to the selected player when it isn't this device; fixed-volume players are skipped.")
                 }
+
+                offlineSection
 
                 Section {
                     Toggle("Show Only This Player", isOn: $settings.iOSPlayerFocus)
@@ -243,16 +256,29 @@ struct SettingsView: View {
                     .frame(width: 7, height: 7)
                 Text(statusText)
                     .foregroundColor(statusColor)
-                Text("· \(settings.activeServerHost.isEmpty ? "No server set" : settings.activeServerHost)")
+                if offlineStatus == nil {
+                    Text("· \(settings.activeServerHost.isEmpty ? "No server set" : settings.activeServerHost)")
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .font(.footnote)
+            if let offline = offlineStatus {
+                Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
+                    .font(.footnote)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            .font(.footnote)
         }
         .accessibilityElement(children: .combine)
     }
 
     private var statusText: String {
+        if let offline = offlineStatus {
+            // The server can't be reached, but the downloaded copies keep the music going.
+            let left = offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left"
+            return "Offline · \(offline.isPaused ? "paused" : "playing saved music") · \(left)"
+        }
         if isConnectedNow {
             return settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
         }
@@ -263,6 +289,7 @@ struct SettingsView: View {
     }
 
     private var statusColor: Color {
+        if offlineStatus != nil { return .orange }
         if isConnectedNow {
             return settings.currentActiveServer == .backup ? .orange : .green
         }
@@ -274,10 +301,57 @@ struct SettingsView: View {
 
     private func refreshConnectionStatus() {
         isConnectedNow = coordinator.isConnected
+        offlineStatus = coordinator.offlinePlaybackStatus
+        savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
     }
 
     // MARK: - Audio
+
+    /// Offline playback (ride out network loss, phase 2).
+    private var offlineSection: some View {
+        Section {
+            Picker("Keep Playing Offline", selection: lifeboatModeBinding) {
+                Text("Off").tag(0)
+                Text("On Wi-Fi").tag(1)
+                Text("Always").tag(2)
+            }
+            .pickerStyle(.menu)
+
+            if settings.lifeboatMode != 0 {
+                Picker("Download Ahead", selection: $settings.lifeboatMinutes) {
+                    ForEach(SettingsManager.lifeboatMinuteChoices, id: \.self) { minutes in
+                        Text("\(minutes) min").tag(minutes)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                valueRow("Storage Used", offlineStorageText)
+            }
+        } header: {
+            Text("Offline")
+        } footer: {
+            Text("Downloads the next songs in your queue so music keeps playing through dead spots, then picks up on the server where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
+        }
+        .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
+    }
+
+    private var lifeboatModeBinding: Binding<Int> {
+        Binding(
+            get: { settings.lifeboatMode },
+            set: { mode in
+                settings.lifeboatMode = mode
+                if mode == 0 {
+                    coordinator.clearSavedMusic()  // off: drop the downloads and the live plan (review M8)
+                    offlineStorageText = Self.formatStorage(0)
+                }
+            }
+        )
+    }
+
+    static func formatStorage(_ bytes: Int64) -> String {
+        bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
 
     private var audioSection: some View {
         Section {

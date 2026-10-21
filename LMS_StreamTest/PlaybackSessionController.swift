@@ -180,6 +180,10 @@ final class PlaybackSessionController {
             os_log(.error, log: logger, "❌ Failed to activate session for lock screen: %{public}s", error.localizedDescription)
         }
 
+        #if DEBUG
+        registerDebugRemoteCommands()
+        #endif
+
         commandCenter.playCommand.removeTarget(nil)
         commandCenter.pauseCommand.removeTarget(nil)
         commandCenter.nextTrackCommand.removeTarget(nil)
@@ -223,6 +227,39 @@ final class PlaybackSessionController {
 
         os_log(.info, log: logger, "✅ Remote command center configured (including shuffle)")
     }
+
+    #if DEBUG
+    private static var debugRemoteCommandsRegistered = false
+
+    /// Test hook: a Darwin notification "com.lmsstream.debug.remote.<play|pause|next|previous>"
+    /// presses that lock-screen button (scripts can't; `simctl spawn <sim> notifyutil -p <name>`).
+    private func registerDebugRemoteCommands() {
+        guard !Self.debugRemoteCommandsRegistered else { return }
+        Self.debugRemoteCommandsRegistered = true
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        for name in ["play", "pause", "next", "previous", "playsaved"] {
+            CFNotificationCenterAddObserver(center, Unmanaged.passUnretained(self).toOpaque(), { _, observer, cfName, _, _ in
+                guard let observer = observer, let cfName = cfName else { return }
+                let controller = Unmanaged<PlaybackSessionController>.fromOpaque(observer).takeUnretainedValue()
+                let command = (cfName.rawValue as String).components(separatedBy: ".").last ?? ""
+                DispatchQueue.main.async { controller.handleDebugRemoteCommand(command) }
+            }, "com.lmsstream.debug.remote.\(name)" as CFString, nil, .deliverImmediately)
+        }
+    }
+
+    private func handleDebugRemoteCommand(_ name: String) {
+        if name == "playsaved" {
+            // The "Play Saved Music" button (offline launch).
+            os_log(.info, log: logger, "🧪 Debug: play saved music")
+            (slimProtoProvider?() as? SlimProtoCoordinator)?.playSavedMusicOffline()
+            return
+        }
+        let commands: [String: RemoteCommand] = ["play": .play, "pause": .pause, "next": .next, "previous": .previous]
+        guard let command = commands[name] else { return }
+        os_log(.info, log: logger, "🧪 Debug remote command: %{public}s", name)
+        _ = handleRemoteCommand(command)
+    }
+    #endif
 
     private func handleRemoteCommand(_ command: RemoteCommand) -> MPRemoteCommandHandlerStatus {
         beginBackgroundTask(named: "LockScreenCommand")

@@ -186,6 +186,58 @@ class SlimProtoCoordinator: ObservableObject {
     /// the new stream waiting forever (bd 6lvg, captured in the outage rig).
     private var lastConnectedAt: Date?
     private var lastServerStreamStartAt: Date?
+    /// The server ("host:port") of the last connection in this process: a
+    /// reconnect HELO is only for the server that has our session.
+    private var sessionServer: String?
+    /// The streaming track's decode ended while we couldn't reach the server.
+    /// A cut download ends exactly like a finished one, so its STMd (and the
+    /// STMu when the buffer drains) wait until a reconnect HELO, when LMS can
+    /// tell us the track's duration. Main thread only.
+    private var decodeEndHeld = false
+    private var drainHeld = false
+    private var resolvingHeldTrackEnd = false
+    /// Where the audio was (track, time) when a reconnect HELO went out under
+    /// an outage hold. After LMS's 300s forget time it ignores the bit and
+    /// restarts at its own saved position; this is where to put it instead.
+    private var reconnectTarget: RecoveryTarget?
+    /// reconnectTarget is where downloaded copies took us: any track, not just LMS's.
+    private var reconnectTargetFromLifeboat = false
+    /// LMS's forgotten-player restart was muted (it would play the wrong place).
+    private var lifeboatRestartMuted = false
+    /// Downloaded copies of the queue (ride out network loss, phase 2).
+    private let lifeboat = LifeboatCache()
+    /// Playing a downloaded copy now (no stream from LMS).
+    private var lifeboatActive = false
+    /// A downloaded copy of a LATER track played since LMS last streamed to
+    /// us: LMS doesn't know where we are, so the reconnect jumps it there.
+    /// (Continuing the cut track from its copy doesn't: LMS still has that
+    /// track, and our STATs keep its time.)
+    private var lifeboatUsed = false
+    private var lifeboatWatchTimer: Timer?
+    private var lifeboatPlanAt: Date?
+    /// When the current decode end was held (a server restart after it supersedes it).
+    private var decodeEndHeldAt: Date?
+    /// Copies that couldn't be switched to (format, no match): never retried.
+    private var unusableCopies: Set<String> = []
+    /// Connection the lifeboat jump was sent on (one per connection).
+    private var lifeboatJumpConnection: Date?
+    /// LMS's ReplayGain for the last stream (0 = LMS applies none for us).
+    private var lastStreamReplayGain: Float = 0
+    private var lifeboatCacheCleared = false
+    /// Paused with the lock screen / CarPlay while offline (LMS doesn't know).
+    private var lifeboatPausedLocally = false
+    /// "Play Saved Music" was pressed with no server: LMS's pause (or stop)
+    /// is older than that press, so the reconnect plays over it.
+    private var savedMusicStartedOffline = false
+    /// Saved music was started from a button: the UI opens the offline player.
+    var offlinePlayerRequested = false
+    /// Set by a lost connection or failed connect, cleared on connect: the
+    /// first second of a normal launch (not yet connected) isn't "offline".
+    private var serverUnreachableSince: Date?
+    /// Format of the last stream LMS sent (picks the copies' format).
+    private var currentStreamFormat = ""
+    /// The current stream started while a track played: it's the next track's.
+    private var streamIsForNextTrack = false
     /// Last time any SlimProto frame arrived from the server.
     private var lastServerMessageAt: Date?
 
@@ -684,7 +736,8 @@ class SlimProtoCoordinator: ObservableObject {
     func handleAudioPlayerDidStartPlaying() {
         os_log(.info, log: logger, "🎵 Audio playback actually started - sending STMs")
         DispatchQueue.main.async { [weak self] in
-            self?.endOutageHold(reason: "playback started")
+            guard let self = self, !self.lifeboatHoldsSession else { return }
+            self.endOutageHold(reason: "playback started")
         }
 
         // This is when we should send STMs (track started playing)
@@ -821,6 +874,13 @@ class SlimProtoCoordinator: ObservableObject {
 
     /// Server-derived index (status poll / position-save roundtrip), stale-guarded.
     func setRecoveryIndexFromServer(_ index: Int) {
+        // Playing downloaded copies: LMS's index is where it was left, not where
+        // we are (device log 2026-10-19: a save on a reconnect timeout put back
+        // track A after an offline skip to B, and the jump went to A).
+        guard !lifeboatUsed else {
+            os_log(.info, log: logger, "📍 Ignoring server recovery index %d - playing downloaded copies", index)
+            return
+        }
         let current = UserDefaults.standard.integer(forKey: "lyrplay_recovery_index")
         let bumpedAt = UserDefaults.standard.double(forKey: Self.recoveryIndexBumpStampKey)
         let sinceBump = Date().timeIntervalSince1970 - bumpedAt
@@ -993,7 +1053,13 @@ class SlimProtoCoordinator: ObservableObject {
     static let serverWaitInterval: TimeInterval = 0.25
     static let serverWaitAttempts = 40
 
-    func performPlaylistRecovery(shouldPlay: Bool = true, serverWaitAttempt: Int = 0) {
+    /// `landPausedEvenIfPlaying`: a silent recovery lands paused even when LMS
+    /// says it's playing (it only "plays" because it never got our offline
+    /// pause, or restarted a forgotten player). Carried by the call, not a
+    /// shared flag: LMS's own strm s can arrive (on the socket queue) between
+    /// the request and the status reply (rig O20, 2026-10-19).
+    func performPlaylistRecovery(shouldPlay: Bool = true, serverWaitAttempt: Int = 0,
+                                 landPausedEvenIfPlaying: Bool = false) {
         // Check-and-set must happen on the same queue that clears the lock (main).
         // The old recoveryQueue hop didn't serialize against main-thread clears, so
         // two near-simultaneous triggers could both pass the guard and interleave
@@ -1063,7 +1129,8 @@ class SlimProtoCoordinator: ObservableObject {
                             os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Dropping stale wait (connection changed or playback started)")
                             return
                         }
-                        self.performPlaylistRecovery(shouldPlay: shouldPlay, serverWaitAttempt: serverWaitAttempt + 1)
+                        self.performPlaylistRecovery(shouldPlay: shouldPlay, serverWaitAttempt: serverWaitAttempt + 1,
+                                                     landPausedEvenIfPlaying: landPausedEvenIfPlaying)
                     }
                     return
                 }
@@ -1136,7 +1203,7 @@ class SlimProtoCoordinator: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self = self, self.recoveryGeneration == generation, self.isRecoveryInProgress else { return }
                     let mode = (response["result"] as? [String: Any])?["mode"] as? String
-                    if mode == "play" {
+                    if mode == "play" && !landPausedEvenIfPlaying {
                         os_log(.info, log: self.logger, "[APP-RECOVERY] 🔄 Server is already playing us - not restoring paused")
                         self.isRecoveryInProgress = false
                         self.silentRecoveryPauseGeneration = nil
@@ -1154,6 +1221,10 @@ class SlimProtoCoordinator: ObservableObject {
     /// and its settle paths are all dead — fully unmute here. Otherwise
     /// just lift the app-open pre-mute (bd 34l).
     private func liftPreMuteForAudibleRecovery() {
+        // A forgotten-player restart over downloaded copies stays muted until
+        // our correction jump lands (device test 2026-10-18: lifting it on
+        // "server already restarted" played the wrong song for 1.6s).
+        guard !lifeboatRestartMuted else { return }
         if audioManager.isSilentRecoveryMuted {
             audioManager.disableSilentRecoveryMode()
         } else {
@@ -1375,6 +1446,16 @@ class SlimProtoCoordinator: ObservableObject {
         let trigger = pendingRecoveryTrigger
         pendingRecoveryTrigger = .none  // Reset immediately to prevent double-execution
 
+        // Offline playback (copies or offline buttons): the lifeboat jump moves LMS
+        // to us. A second recovery from saved data would fight it (review H3).
+        if offlinePlaybackOwnsRecovery, trigger == .appOpen || trigger == .lockScreen {
+            os_log(.info, log: logger, "🛟 %{public}s recovery: offline playback owns it - moving LMS to us instead",
+                   String(describing: trigger))
+            audioManager.cancelPreMute(reason: "offline playback owns recovery")
+            if connectionIsLive { jumpLMSToLifeboatPosition() }
+            return
+        }
+
         switch trigger {
         case .appOpen:
             // App open recovery: muted + paused (unique silent recovery feature)
@@ -1495,6 +1576,11 @@ class SlimProtoCoordinator: ObservableObject {
                 if shouldPlay && self.serverStartedStreamSinceConnect {
                     os_log(.info, log: self.logger, "🔄 Network restored: server already restarted the stream - skipping jump")
                     self.liftPreMuteForAudibleRecovery()
+                    if self.client.lastHeloWasReconnect { self.correctForgottenRestart() }
+                    return
+                }
+                if self.client.lastHeloWasReconnect && !self.serverStartedStreamSinceConnect {
+                    self.continueAfterReconnectHelo(shouldPlay: shouldPlay)
                     return
                 }
                 guard shouldPlay else {
@@ -1507,6 +1593,21 @@ class SlimProtoCoordinator: ObservableObject {
             }
 
         case .none:
+            // A reconnect that came from the network monitor rather than the
+            // connection manager sets no trigger, but an outage hold means
+            // playback was interrupted: check it like a network-restored one.
+            if client.lastHeloWasReconnect && outageHoldActive {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self = self else { return }
+                    if self.serverStartedStreamSinceConnect {
+                        self.correctForgottenRestart()
+                        return
+                    }
+                    guard self.outageHoldActive else { return }
+                    self.continueAfterReconnectHelo(shouldPlay: true)
+                }
+                return
+            }
             // No recovery needed - normal connect (e.g., initial app launch)
             os_log(.info, log: logger, "📡 Normal connect - no recovery needed")
         }
@@ -1516,9 +1617,38 @@ class SlimProtoCoordinator: ObservableObject {
 // MARK: - SlimProtoClientDelegate
 extension SlimProtoCoordinator: SlimProtoClientDelegate {
     
+    func slimProtoShouldHeloReconnect() -> Bool {
+        // In a sync group LMS doesn't restart a reconnecting member (restoreSync),
+        // so our buffer would play on out of sync with the others: keep the fresh HELO.
+        let reconnect = settings.loadSyncGroupID() == nil && Self.heloShouldReconnect(
+            enabled: settings.seamlessReconnect,
+            sameServerAsSession: sessionServer == currentSessionServer,
+            // Offline playback: we still hold the session even when stopped
+            // (copies ran out) or with an app-open trigger (review H3).
+            trigger: offlinePlaybackOwnsRecovery ? .none : pendingRecoveryTrigger,
+            playerState: audioManager.getPlayerState(),
+            stalled: audioManager.isPushStreamStalled(),
+            outageHold: outageHoldActive || offlinePlaybackOwnsRecovery)
+        if lifeboatUsed {
+            // Their track events describe what we played offline, not what LMS has.
+            client.discardHeldEvents()
+        }
+        reconnectTargetFromLifeboat = lifeboatUsed
+        reconnectTarget = (reconnect && (outageHoldActive || lifeboatUsed)) ? Self.savedRecoveryTarget(
+            hasTimestamp: true,
+            index: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+            position: getCurrentTimeForSaving()) : nil
+        os_log(.info, log: logger, "🤝 HELO: %{public}s (trigger %{public}s, player %{public}s, hold %{public}s)",
+               reconnect ? "reconnect - LMS keeps the session" : "fresh",
+               String(describing: pendingRecoveryTrigger), audioManager.getPlayerState(),
+               outageHoldActive ? "ON" : "OFF")
+        return reconnect
+    }
+
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         lastConnectedAt = Date()
+        serverUnreachableSince = nil
         audibleRecoveryRetries = 0  // retry budget is per connection (bd 6lvg)
         connectionManager.didConnect()
         syncControllerReset(reason: "slimProtoDidConnect")
@@ -1535,9 +1665,28 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Radio: make LMS proxy internet streams for our player (GH #97).
         applyProxiedStreamingPolicy()
 
+        let reconnectHelo = client.lastHeloWasReconnect
+        sessionServer = currentSessionServer
+
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
         handlePendingRecovery()
+
+        if lifeboatUsed || lifeboatPausedLocally {
+            // Offline we played copies or used the buttons: LMS has to come to us,
+            // whatever recovery trigger this connect has (a pause offline ends the hold).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self, self.lifeboatUsed || self.lifeboatPausedLocally, self.serverHeardRecently else { return }
+                self.clearHeldTrackEnd()
+                self.jumpLMSToLifeboatPosition()
+            }
+        }
+
+        if reconnectHelo && decodeEndHeld {
+            resolveHeldTrackEnd()
+        } else if !reconnectHelo {
+            clearHeldTrackEnd()  // LMS restarts the stream or we recover: the held end means nothing now
+        }
 
         // Notify observers (CarPlay uses this for event-driven data loading)
         NotificationCenter.default.post(name: .slimProtoDidConnect, object: nil)
@@ -1545,6 +1694,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
+        serverUnreachableSince = serverUnreachableSince ?? Date()
 
         // UNIFIED RECOVERY: Capture playback state for networkRestored recovery (LMS_StreamTest-6lb)
         let playerState = audioManager.getPlayerState()
@@ -1589,8 +1739,23 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     
     func slimProtoDidReceiveCommand(_ command: SlimProtoCommand) {
         // Record that we received a command (shows connection is alive)
+        let silence = lastServerMessageAt.map { Date().timeIntervalSince($0) } ?? 0
         lastServerMessageAt = Date()
+        if offlinePlaybackOwnsRecovery && silence > Self.liveConnectionWindow {
+            // The socket never dropped (no reconnect will run), but we played or
+            // paused offline meanwhile: move LMS to us now (review M4).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self, self.offlinePlaybackOwnsRecovery, self.connectionIsLive else { return }
+                self.jumpLMSToLifeboatPosition()
+            }
+        }
         connectionManager.recordHeartbeatResponse()
+
+        // A decode end held while the connection was quiet but never dropped:
+        // the server is talking again, so settle it now (no reconnect will).
+        if decodeEndHeld && !resolvingHeldTrackEnd {
+            resolveHeldTrackEnd()
+        }
 
         // Handle serv packet for sync group persistence
         if command.type == "serv" {
@@ -1618,11 +1783,17 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // IMPROVED FAILOVER: Switch servers if current server keeps failing
         let reconnectionAttempts = connectionManager.getReconnectionAttempts()
 
+        // Riding out a dead spot (outage hold, or copies / offline buttons in
+        // use): the session and the copies belong to this server, and the
+        // backup is as unreachable. Alternating would flip the offline UI and
+        // could hand the return to the backup (review 2026-10-19, F6).
+        let ridingOutOutage = outageHoldActive || offlinePlaybackOwnsRecovery
         // Try backup server if primary fails twice (fast failover, issue #76).
         // >= 2 (not >= 1) so a single transient blip on a normally-reachable
         // primary — dropped first SYN, momentary Wi-Fi stall, server mid-restart —
         // gets one free retry before we abandon it for backup.
-        if settings.automaticFailoverEnabled &&
+        if !ridingOutOutage &&
+           settings.automaticFailoverEnabled &&
            settings.currentActiveServer == .primary &&
            reconnectionAttempts >= 2 &&
            settings.isBackupServerEnabled &&
@@ -1644,7 +1815,8 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
         // Symmetric with the forward branch: >= 2 absorbs one transient backup
         // blip, and the non-empty primary-host guard prevents snapping to an
         // empty/unreachable primary and reconnect-looping.
-        else if settings.automaticFailoverEnabled &&
+        else if !ridingOutOutage &&
+                settings.automaticFailoverEnabled &&
                 settings.currentActiveServer == .backup &&
                 reconnectionAttempts >= 2 &&
                 !settings.serverHost.isEmpty {
@@ -1887,6 +2059,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
         lastServerStreamStartAt = Date()
+        clearHeldTrackEnd()
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
@@ -1923,6 +2096,28 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
         lastServerStreamStartAt = Date()
+        // A stream that starts while we play is the next track's (LMS sends it
+        // after our STMd); a start, seek or jump flushes playback first.
+        streamIsForNextTrack = audioManager.getPlayerState() == "Playing"
+        clearHeldTrackEnd()
+        currentStreamFormat = format
+        lastStreamReplayGain = replayGain
+        if settings.lifeboatMode == 0 && !lifeboatCacheCleared {
+            lifeboatCacheCleared = true
+            lifeboat.removeAll()  // switched off: don't keep copies around
+        }
+        muteForgottenRestartOverCopies()
+        if lifeboatActive || lifeboatUsed {
+            os_log(.info, log: logger, "🛟 LMS is streaming again - leaving the downloaded copies")
+        }
+        lifeboatActive = false
+        lifeboatUsed = false
+        // A muted forgotten-player restart is LMS's stream, not our jump: the
+        // offline pause is still to be restored over it (rig O20).
+        if !lifeboatRestartMuted { lifeboatPausedLocally = false }
+        savedMusicStartedOffline = false
+        if !outageHoldActive { connectionManager.persistForPlayback = false }
+        scheduleLifeboatPlan(after: 3)
         // autostart byte from the SlimProto strm packet (per Squeezebox.pm:519):
         //   '0' (0x30) = WAIT for unpause ('u')                           — used for sync groups + fade-in transitions
         //   '1' (0x31) = autoplay immediately
@@ -2078,6 +2273,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        // LMS's forgotten-player restart is q then s: decide before the flags clear.
+        muteForgottenRestartOverCopies()
+        clearHeldTrackEnd()
+        lifeboatActive = false
+        lifeboatUsed = false
+        savedMusicStartedOffline = false
         DispatchQueue.main.async { [weak self] in self?.resumeInPlaceCheck = nil }
 
         let shownPosition = getCurrentInterpolatedTime().time
@@ -2132,7 +2333,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     /// Send STMd message when decoder completes naturally (like squeezelite DECODE_COMPLETE)
     /// This tells the server the track finished decoding and triggers next track queueing
-    func sendTrackDecodeComplete() {
+    func sendTrackDecodeComplete(mayHold: Bool = true) {
+        if mayHold && settings.seamlessReconnect && handleDownloadEnd() {
+            return
+        }
         let timestamp = Date()
         os_log(.error, log: logger, "✅✅✅ TRACK DECODE COMPLETE - sending STMd to server")
         os_log(.error, log: logger, "📊 Timestamp: %{public}s", timestamp.description)
@@ -2173,8 +2377,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// to its Stopped event: end-of-playlist → clean stop (strm 'q'); next track
     /// still being prepared → plays it when ready. bd LMS_StreamTest-nzj
     func sendPlaybackComplete() {
+        if decodeEndHeld {
+            drainHeld = true
+            os_log(.info, log: logger, "📬 Output drained after a held decode end - holding STMu too")
+            return
+        }
         os_log(.info, log: logger, "🏁 Playback complete (output drained) - sending STMu to server")
         client.sendStatus("STMu")
+        // Nothing is left to play out: the next strm starts fresh. Queued
+        // "gaplessly" onto a drained push stream its boundary never fires, so
+        // no STMs goes out and LMS stays on the old track (rig O22).
+        expectingGaplessTransition = false
     }
 
     /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
@@ -2193,6 +2406,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // This ensures lock screen shows 0:00 for the new track, not stale time from previous track
         simpleTimeTracker.updateFromServer(time: 0.0, duration: 0.0, playing: true)
         os_log(.info, log: logger, "[BOUNDARY-DRIFT] 🔄 Reset SimpleTimeTracker to 0.0 for new track start")
+
+        if lifeboatActive, let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+           let track = lifeboat.track(at: index) {
+            // Offline: LMS can't tell us what's playing.
+            audioManager.updateTrackMetadata(title: track.title, artist: track.artist, album: track.album,
+                                             artworkURL: lifeboat.artworkURL(forIndex: index)?.absoluteString,
+                                             duration: track.duration)
+            os_log(.info, log: logger, "🛟 Now playing the downloaded copy of track %d: %{public}s", index, track.title)
+        } else {
+            scheduleLifeboatPlan(after: 2)
+        }
 
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
@@ -2438,6 +2662,23 @@ extension SlimProtoCoordinator {
                 return
             }
 
+            // A player LMS has marked disconnected has a frozen time (where the
+            // outage began) while our buffer plays on. Taking it would rewind
+            // the tracker, and a recovery would jump back to it.
+            if lifeboatUsed || outageHoldActive {
+                // Through an outage our tracker is the truth (frozen where the
+                // audio stopped, or following local audio) until playback from
+                // the server resumes and ends the hold. Right after a reconnect
+                // LMS's time is our drained stream's 0 (rig O4) or stale (O9:
+                // 260s replaced our paused 42.8s), and a recovery would jump there.
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll during the outage (server=%.2f)", serverTime)
+                return
+            }
+            if Self.statusPlayerConnected(result) != true {
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll: LMS has us disconnected (frozen time %.2f)", serverTime)
+                return
+            }
+
             // PHASE 1: Track jiffies epoch for player synchronization
             // Get current local jiffies (milliseconds since app start)
             let currentJiffies = gettime_ms()
@@ -2599,6 +2840,8 @@ extension SlimProtoCoordinator {
             saveCurrentPositionForRecovery()
             os_log(.info, log: logger, "💾 Saved position on pause command for future recovery")
         }
+
+        if handleOfflineCommand(command.lowercased()) { return }
 
         #if os(iOS)
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
@@ -3573,6 +3816,1106 @@ extension SlimProtoCoordinator {
     /// (immediate, after startPlayback), autostart='0'/'2' jiffies=0 (after
     /// resumePlayback runs via didResumeStream), and autostart='0'/'2' jiffies>0
     /// (after sync-start timer fires BASS_ChannelPlay at the target time).
+    // MARK: - Reconnect HELO (ride out a network drop)
+
+    private var currentSessionServer: String {
+        "\(settings.activeServerHost):\(settings.activeServerSlimProtoPort)"
+    }
+
+    /// Whether a connect's HELO says "reconnect" (squeezelite sets it on every
+    /// connect after the first). Only while we still hold the session: the
+    /// same server, a track playing, paused or stalled locally, and no
+    /// recovery that wants LMS's fresh-connect behaviour (app open and lock
+    /// screen recoveries keep it, as tested in build 14).
+    static func heloShouldReconnect(enabled: Bool, sameServerAsSession: Bool, trigger: RecoveryTrigger,
+                                    playerState: String, stalled: Bool, outageHold: Bool) -> Bool {
+        guard enabled, sameServerAsSession else { return false }
+        switch trigger {
+        case .networkRestored, .none: break
+        default: return false
+        }
+        return playerState == "Playing" || playerState == "Paused" || stalled || outageHold
+    }
+
+    /// After a reconnect HELO LMS keeps our session and sends nothing. If the
+    /// audio is still flowing from the buffer there is nothing to do; if it
+    /// ran dry or the download was cut, jump to where we are (LMS won't
+    /// restart on its own, so the jump can't collide with a server restart).
+    /// A held decode end is settled by resolveHeldTrackEnd instead.
+    private func continueAfterReconnectHelo(shouldPlay: Bool, attempt: Int = 0, generation: Int? = nil) {
+        if lifeboatUsed && serverHeardRecently {
+            clearHeldTrackEnd()
+            jumpLMSToLifeboatPosition()
+            return
+        }
+        guard !decodeEndHeld else { return }
+        // Another recovery (the hold's watchdog, a user play) took over meanwhile.
+        let generation = generation ?? recoveryGeneration
+        guard generation == recoveryGeneration, !isRecoveryInProgress else { return }
+        // Only a server that has answered on this connection has kept anything:
+        // a socket can connect and drop again at once on a flaky path.
+        guard serverHeardRecently else {
+            guard attempt < 10, connectionManager.connectionState.isConnected else {
+                os_log(.info, log: logger, "🔁 Reconnect HELO: server never answered on this connection - leaving it to the next reconnect")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.continueAfterReconnectHelo(shouldPlay: shouldPlay, attempt: attempt + 1, generation: generation)
+            }
+            return
+        }
+        if lifeboatUsed {
+            clearHeldTrackEnd()
+            jumpLMSToLifeboatPosition()
+            return
+        }
+        if lifeboatActive && shouldPlay && audioManager.getPlayerState() == "Playing" {
+            // Still on LMS's track, from its copy: LMS kept the session.
+            confirmKeptSession()
+            return
+        }
+        let stream = audioManager.pushStreamState()
+        let intact = stream.connected || stream.completedNaturally
+        let state = audioManager.getPlayerState()
+        if stream.completedNaturally && !stream.connected && state != "Playing" && state != "Paused",
+           let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+           let duration = lifeboat.track(at: index)?.duration, duration > 0,
+           max(stream.decodedEndSeconds ?? 0, getCurrentTimeForSaving()) >= duration - 3 {
+            // The track really ended (the plan's duration says so) and drained
+            // while we were away: its STMd/STMu went out with the HELO, and LMS
+            // decides (next track, or the end of the playlist). A jump to the end
+            // of the track would leave LMS in "play" with nothing playing (rig O13).
+            os_log(.info, log: logger, "🔁 Reconnected after the track ended and drained offline - leaving it to LMS")
+            endOutageHold(reason: "track ended offline - LMS decides")
+            return
+        }
+        if !shouldPlay {
+            if intact {
+                os_log(.info, log: logger, "🔁 Reconnected: LMS kept our paused session - nothing to restore")
+            } else {
+                os_log(.info, log: logger, "🔁 Reconnected paused, but the download was cut - recovering")
+                performPlaylistRecovery(shouldPlay: false)
+            }
+            return
+        }
+        if intact && state == "Playing" {
+            confirmKeptSession()
+            return
+        }
+        // A frozen download that came back can take a moment to refill a dry buffer.
+        if intact && attempt < 13 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self = self, self.outageHoldActive else { return }
+                self.continueAfterReconnectHelo(shouldPlay: true, attempt: attempt + 1, generation: generation)
+            }
+            return
+        }
+        os_log(.info, log: logger, "🔁 Reconnected, audio not flowing (state %{public}s, download %{public}s) - jump to our position",
+               state, intact ? "open" : "cut")
+        unlessPausedOnServer {
+            self.performPlaylistRecovery(shouldPlay: true)
+        }
+    }
+
+    /// What to do when our audio played on through the outage and LMS kept the
+    /// session. LMS may have moved on meanwhile (another controller paused,
+    /// stopped or changed the song while our socket was gone: its strm never
+    /// reached us, and the reconnect bit means it won't restart us), so check
+    /// before calling it kept.
+    enum KeptSessionCheck: Equatable {
+        case kept
+        case pauseLocally      // LMS paused us
+        case stopLocally       // LMS stopped us
+        case followServer      // LMS is on another track: play what it has
+    }
+
+    static func keptSessionCheck(serverMode: String?, serverIndex: Int?, localIndex: Int?) -> KeptSessionCheck {
+        switch serverMode {
+        case "pause": return .pauseLocally
+        case "stop": return .stopLocally
+        default: break
+        }
+        if let server = serverIndex, let local = localIndex, server != local { return .followServer }
+        return .kept
+    }
+
+    /// Ask LMS for its state; keep the session, or have LMS send its state
+    /// again now that we're connected (its own commands re-issue the strm).
+    private func confirmKeptSession() {
+        let statusCommand: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, self.outageHoldActive else { return }
+                let result = response["result"] as? [String: Any]
+                let mode = result?["mode"] as? String
+                let index = Self.playlistIndex(fromStatus: result)
+                let local = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+                let check = Self.keptSessionCheck(serverMode: mode, serverIndex: index, localIndex: local)
+                os_log(.info, log: self.logger, "🔁 Reconnected, audio never stopped; LMS: %{public}s track %{public}s (ours %{public}s) → %{public}s",
+                       mode ?? "?", index.map(String.init) ?? "?", local.map(String.init) ?? "?", String(describing: check))
+                switch check {
+                case .kept:
+                    self.endOutageHold(reason: "reconnected - session kept")
+                case .pauseLocally:
+                    self.endOutageHold(reason: "paused on the server meanwhile")
+                    self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                   "params": [self.settings.playerMACAddress, ["pause", "1"]]]) { _ in }
+                case .stopLocally:
+                    self.endOutageHold(reason: "stopped on the server meanwhile")
+                    self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                   "params": [self.settings.playerMACAddress, ["stop"]]]) { _ in }
+                case .followServer:
+                    guard let index = index else { return }
+                    let time = (result?["time"] as? Double) ?? 0
+                    let jump: [String: Any] = [
+                        "id": 1, "method": "slim.request",
+                        "params": [self.settings.playerMACAddress, [
+                            "playlist", "jump", index, 1, 0, ["timeOffset": time]
+                        ]]
+                    ]
+                    self.sendJSONRPCCommandDirect(jump) { _ in }   // the hold ends when that stream plays
+                }
+            }
+        }
+    }
+
+    /// LMS restarted a forgotten player (after 300s it ignores the reconnect
+    /// bit: resumeOnPower(1) jumps to the position it saved when we dropped).
+    /// The audio played on from our buffer after that, so the restart is
+    /// behind where the user stopped hearing it. Once LMS's own restart is
+    /// playing, a jump to our target can't collide with it (it's an ordinary
+    /// jump, like a seek from Material); same track only.
+    static func forgottenRestartNeedsJump(serverIndex: Int?, serverTime: Double, mode: String?,
+                                          target: RecoveryTarget, anyTrack: Bool = false,
+                                          tolerance: Double = 5) -> Bool {
+        guard mode == "play", let serverIndex = serverIndex else { return false }
+        if serverIndex != target.index { return anyTrack }
+        return abs(serverTime - target.position) > tolerance
+    }
+
+    /// LMS forgot us during the outage (> 300s) and restarts where it lost us
+    /// (strm q, then s, right after the HELO), far behind the copies we
+    /// played. Mute before the restart's stream is created; the correction
+    /// jump to our place unmutes.
+    private func muteForgottenRestartOverCopies() {
+        guard !lifeboatRestartMuted, lifeboatUsed || lifeboatActive,
+              client.lastHeloWasReconnect, reconnectTarget != nil,
+              let connected = lastConnectedAt, Date().timeIntervalSince(connected) < 3 else { return }
+        audioManager.enableSilentRecoveryMode()
+        lifeboatRestartMuted = true
+        liftLifeboatRestartMute(after: 8)  // ceiling, should the correction never run
+        os_log(.info, log: logger, "🛟 LMS restarted a forgotten player over our downloaded copies - muted until we move it")
+        // A pause offline ended the outage hold, so no recovery trigger will call it.
+        if lifeboatPausedLocally { correctForgottenRestart() }
+    }
+
+    private func liftLifeboatRestartMute(after delay: TimeInterval = 0) {
+        guard lifeboatRestartMuted else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.lifeboatRestartMuted else { return }
+            self.lifeboatRestartMuted = false
+            self.audioManager.disableSilentRecoveryMode()
+        }
+    }
+
+    private func correctForgottenRestart() {
+        guard let target = reconnectTarget else { liftLifeboatRestartMute(); return }
+        reconnectTarget = nil
+        if lifeboatPausedLocally {
+            // Paused on the phone while offline: land paused at our place (the
+            // silent recovery mutes, jumps and pauses; it owns the mute now).
+            os_log(.info, log: logger, "🔁 LMS forgot us while we were paused offline - restoring paused: track %d at %.1f",
+                   target.index, target.position)
+            lifeboatRestartMuted = false
+            UserDefaults.standard.set(target.index, forKey: "lyrplay_recovery_index")
+            UserDefaults.standard.set(target.position, forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            // LMS's restart says "play": still land paused (review H5).
+            performPlaylistRecovery(shouldPlay: false, landPausedEvenIfPlaying: true)
+            return
+        }
+        let anyTrack = reconnectTargetFromLifeboat
+        // Muted: no need to let the restart run long (it only has to be playing).
+        DispatchQueue.main.asyncAfter(deadline: .now() + (lifeboatRestartMuted ? 1.5 : 3.0)) { [weak self] in
+            guard let self = self else { return }
+            let statusCommand: [String: Any] = [
+                "id": 1, "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 1]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    guard let result = response["result"] as? [String: Any] else { self.liftLifeboatRestartMute(); return }
+                    let time = (result["time"] as? Double) ?? 0
+                    let mode = result["mode"] as? String
+                    let index = Self.playlistIndex(fromStatus: result)
+                    guard Self.forgottenRestartNeedsJump(serverIndex: index, serverTime: time, mode: mode,
+                                                         target: target, anyTrack: anyTrack) else {
+                        self.liftLifeboatRestartMute()
+                        os_log(.info, log: self.logger, "🔁 LMS restart at %.1f (track %{public}s, %{public}s) - no correction (target track %d at %.1f)",
+                               time, index.map(String.init) ?? "?", mode ?? "?", target.index, target.position)
+                        return
+                    }
+                    // The audio stopped at the very end of a track: the next one, or
+                    // the end of the playlist (a jump to the end leaves LMS in "play"
+                    // with nothing playing, rig O21).
+                    guard let settled = Self.settledJumpTarget(
+                        index: target.index, position: target.position,
+                        duration: self.lifeboat.track(at: target.index)?.duration,
+                        playlistTracks: Self.playlistTracks(fromStatus: result),
+                        repeatMode: Self.playlistRepeat(fromStatus: result)) else {
+                        os_log(.info, log: self.logger, "🔁 LMS forgot us and restarted at %.1f, but the playlist had ended - stopping it", time)
+                        self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                       "params": [self.settings.playerMACAddress, ["stop"]]]) { [weak self] _ in
+                            DispatchQueue.main.async { self?.liftLifeboatRestartMute(after: 1.0) }
+                        }
+                        self.endOutageHold(reason: "playlist ended offline")
+                        return
+                    }
+                    os_log(.info, log: self.logger, "🔁 LMS forgot us and restarted at %.1f - jumping to where the audio stopped: track %d at %.1f",
+                           time, settled.index, settled.position)
+                    self.simpleTimeTracker.updateFromServer(time: settled.position, playing: true)
+                    self.suppressServerTimePollsUntil = Date().addingTimeInterval(3.0)
+                    let jump: [String: Any] = [
+                        "id": 1, "method": "slim.request",
+                        "params": [self.settings.playerMACAddress, [
+                            "playlist", "jump", settled.index, 1, 0, ["timeOffset": settled.position]
+                        ]]
+                    ]
+                    self.sendJSONRPCCommandDirect(jump) { [weak self] _ in
+                        DispatchQueue.main.async { self?.liftLifeboatRestartMute(after: 1.0) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where to put LMS when our target is at the very end of its track (the
+    /// copies or the buffer ran out there): the start of the next track, the
+    /// wrap for repeat-all, the same track again for repeat-one, or nil when
+    /// the playlist has ended (stop it). LMS takes a jump with `timeOffset`
+    /// at or past the duration as "next track", and a stream started at the
+    /// end gets an STMd but never an STMu, so LMS sits in "play" for good
+    /// (rig O13/O21, 2026-10-19). The start is 0.5s: a saved position of 0
+    /// means "nothing to jump to" in continuePlaylistRecovery.
+    static func settledJumpTarget(index: Int, position: Double, duration: Double?,
+                                  playlistTracks: Int?, repeatMode: Int?) -> RecoveryTarget? {
+        guard let duration = duration, duration > 0, position >= duration - 1 else {
+            return RecoveryTarget(index: index, position: position)
+        }
+        let start = 0.5
+        if repeatMode == 1 { return RecoveryTarget(index: index, position: start) }
+        if let tracks = playlistTracks, index + 1 >= tracks {
+            return repeatMode == 2 ? RecoveryTarget(index: 0, position: start) : nil
+        }
+        return RecoveryTarget(index: index + 1, position: start)
+    }
+
+    /// playlist_tracks / "playlist repeat" from a status result (strings or numbers).
+    static func playlistTracks(fromStatus result: [String: Any]?) -> Int? {
+        if let n = result?["playlist_tracks"] as? Int { return n }
+        return Int(result?["playlist_tracks"] as? String ?? "")
+    }
+
+    static func playlistRepeat(fromStatus result: [String: Any]?) -> Int? {
+        if let n = result?["playlist repeat"] as? Int { return n }
+        return Int(result?["playlist repeat"] as? String ?? "")
+    }
+
+    /// The held decode end was the real end of the track: the decoded audio
+    /// reaches the track's duration (within `tolerance`). With the next track
+    /// decoding, its decode started at 0, so its decoded seconds are track
+    /// time; with the current one, the end is the playhead's track time plus
+    /// the decoded audio still waiting to play. An unknown duration (radio)
+    /// counts as an end, as before.
+    static func heldDecodeEndWasTrackEnd(decodingAhead: Bool, decodedEndSeconds: Double?,
+                                         trackTime: Double, bufferedSeconds: Double,
+                                         currentDuration: Double, nextDuration: Double,
+                                         tolerance: Double = 3.0) -> Bool {
+        if decodingAhead {
+            guard nextDuration > 0, let end = decodedEndSeconds else { return true }
+            return end >= nextDuration - tolerance
+        }
+        guard currentDuration > 0 else { return true }
+        // Decoded up to the duration can only be the end (a stream-relative
+        // figure after a seek is smaller, never larger). The tracker can lag
+        // the real drain by seconds (rig O22: 256.6 of 260 → taken for a cut).
+        if let end = decodedEndSeconds, end >= currentDuration - tolerance { return true }
+        return trackTime + bufferedSeconds >= currentDuration - tolerance
+    }
+
+    /// Settle a held decode end after a reconnect HELO: send the STMd (and
+    /// STMu) we held, or recover from the cut download.
+    private func resolveHeldTrackEnd() {
+        guard decodeEndHeld, !resolvingHeldTrackEnd else { return }
+        resolvingHeldTrackEnd = true
+        // Give a forgotten client's restart (LMS ignores the bit then) time to arrive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self, self.decodeEndHeld else { return }
+            if self.lifeboatUsed {
+                // We played later tracks from copies: LMS has to come to us.
+                self.clearHeldTrackEnd()
+                self.jumpLMSToLifeboatPosition()
+                return
+            }
+            if let held = self.decodeEndHeldAt, let started = self.lastServerStreamStartAt, started > held {
+                os_log(.info, log: self.logger, "📬 LMS restarted the stream itself - dropping the held decode end")
+                self.clearHeldTrackEnd()
+                return
+            }
+            // Snapshot before asking: a gapless boundary crossed while the
+            // reply is on its way would mix up which track the numbers are for.
+            let stream = self.audioManager.pushStreamState()
+            let trackTime = self.getCurrentInterpolatedTime().time
+            let buffered = self.audioManager.bufferedPlaybackSeconds()
+            let localIndex = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+            let statusCommand: [String: Any] = [
+                "id": 1, "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", 2, "tags:d"]]
+            ]
+            self.sendJSONRPCCommandDirect(statusCommand) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.decodeEndHeld else { return }
+                    guard let result = response["result"] as? [String: Any] else {
+                        if self.connectionIsLive {
+                            // SlimProto is fine but JSON-RPC isn't: don't stall the queue on it.
+                            os_log(.info, log: self.logger, "📬 No status for the held decode end, connection live - sending STMd")
+                            self.sendHeldTrackEnd()
+                        } else {
+                            // Unreachable after all: keep it held for the reconnect (or the next server frame).
+                            os_log(.info, log: self.logger, "📬 No status for the held decode end - still holding")
+                            self.resolvingHeldTrackEnd = false
+                        }
+                        return
+                    }
+                    let loop = result["playlist_loop"] as? [[String: Any]] ?? []
+                    func duration(_ i: Int) -> Double {
+                        guard i < loop.count else { return 0 }
+                        return (loop[i]["duration"] as? Double) ?? Double("\(loop[i]["duration"] ?? "")") ?? 0
+                    }
+                    if let local = localIndex, let server = Self.playlistIndex(fromStatus: result), local != server {
+                        // LMS isn't on the track we're playing: its durations don't apply.
+                        os_log(.info, log: self.logger, "📬 Held decode end: LMS is on track %d, we're on %d - recovering", server, local)
+                        self.recoverFromCutDownload()
+                        return
+                    }
+                    let ended = Self.heldDecodeEndWasTrackEnd(
+                        decodingAhead: stream.decodingAhead, decodedEndSeconds: stream.decodedEndSeconds,
+                        trackTime: trackTime, bufferedSeconds: buffered,
+                        currentDuration: duration(0), nextDuration: duration(1))
+                    os_log(.info, log: self.logger,
+                           "📬 Held decode end: %{public}s (ahead %{public}s, decoded %.1f, track time %.1f + buffered %.1f, durations %.1f / %.1f)",
+                           ended ? "track ended - sending STMd" : "download was cut - recovering",
+                           stream.decodingAhead ? "YES" : "NO", stream.decodedEndSeconds ?? -1,
+                           trackTime, buffered, duration(0), duration(1))
+                    if ended {
+                        self.sendHeldTrackEnd()
+                    } else {
+                        self.recoverFromCutDownload()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The held end was a real end: send STMd (and the STMu if it drained).
+    private func sendHeldTrackEnd() {
+        let drained = drainHeld
+        clearHeldTrackEnd()
+        // The strm LMS answers with is the next track, not a forgotten player's
+        // restart: don't mute it (rig O22: muted for the 8s ceiling).
+        reconnectTarget = nil
+        lifeboatActive = false
+        if drained {
+            // The push stream drained and stalled: free it, so LMS's next strm
+            // creates it afresh and startPlayback sends the STMs. Pushed into
+            // the stalled one, the next track resumed silently with no STMs,
+            // and LMS never moved on from the old track (rig O22).
+            audioManager.stopPushStreamPlayback()
+        }
+        sendTrackDecodeComplete(mayHold: false)
+        if drained {
+            // Nothing is left to play out: LMS's next strm starts fresh (see
+            // sendPlaybackComplete). The STMu itself waits: right behind the
+            // STMd it reads as an underrun to LMS, which restarts the CURRENT
+            // track (rig O22: track 0 from 0:00). LMS answers the STMd with the
+            // next track within a moment; only if nothing comes (the end of the
+            // playlist) is the STMu due, and LMS then stops.
+            expectingGaplessTransition = false
+            let sentAt = Date()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self = self else { return }
+                if let started = self.lastServerStreamStartAt, started > sentAt { return }
+                os_log(.info, log: self.logger, "📬 No stream after the held STMd - the playlist ended: sending STMu")
+                self.sendPlaybackComplete()
+            }
+        } else if audioManager.getPlayerState() == "Playing" {
+            // The tail still plays and the next track follows gaplessly:
+            // nothing will "start playback" to end the hold.
+            endOutageHold(reason: "reconnected - track ended normally")
+        }
+    }
+
+    private func recoverFromCutDownload(tryCopy: Bool = true) {
+        if tryCopy, let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int {
+            let stream = audioManager.pushStreamState()
+            if continueFromCopy(index: stream.decodingAhead ? index + 1 : index, stream: stream) { return }
+        }
+        clearHeldTrackEnd()
+        if outageHoldActive || audioManager.getPlayerState() == "Playing" {
+            unlessPausedOnServer {
+                self.performPlaylistRecovery(shouldPlay: true)
+            }
+        } else {
+            performPlaylistRecovery(shouldPlay: false)
+        }
+    }
+
+    private func clearHeldTrackEnd() {
+        decodeEndHeldAt = nil
+        decodeEndHeld = false
+        drainHeld = false
+        resolvingHeldTrackEnd = false
+    }
+
+    // MARK: - Lifeboat (ride out network loss, phase 2)
+
+    /// Playing from copies (or paused offline) while the server is away.
+    private var lifeboatHoldsSession: Bool {
+        (lifeboatActive || lifeboatUsed) && !connectionIsLive
+    }
+
+    /// Copies may be played (whatever the network now: they were fetched earlier).
+    /// Not in a sync group: our offline position would move every member (review M6).
+    private var lifeboatEnabled: Bool {
+        settings.lifeboatMode != 0 && settings.loadSyncGroupID() == nil
+    }
+
+    /// The stream is lossless: an original copy is then the very same audio
+    /// and must match almost perfectly. A lossy stream (mp3/aac/ogg/opus)
+    /// only resembles the copy, so the normal floor applies.
+    static func streamFormatIsLossless(_ format: String) -> Bool {
+        ["flac", "wav", "pcm", "alac", "aiff", "aif"].contains(format.lowercased())
+    }
+
+    /// Copies may be downloaded now: always (2), or not on a metered network (1).
+    private var lifeboatMayDownload: Bool {
+        switch settings.lifeboatMode {
+        case 2: return true
+        case 1: return !connectionManager.networkIsExpensive
+        default: return false
+        }
+    }
+
+    /// Ask LMS for the queue ahead and keep the copies up to date.
+    private func scheduleLifeboatPlan(after delay: TimeInterval) {
+        // Not in a sync group: nothing would play the copies.
+        guard lifeboatEnabled else { return }
+        startLifeboatWatch()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.lifeboatMayDownload, self.connectionIsLive, !self.lifeboatActive else { return }
+            if let last = self.lifeboatPlanAt, Date().timeIntervalSince(last) < 1.5 { return }
+            self.lifeboatPlanAt = Date()
+            let command: [String: Any] = [
+                "id": 1, "method": "slim.request",
+                "params": [self.settings.playerMACAddress, ["status", "-", LifeboatCache.maxTracks + 1, "tags:acdlxuYo"]]
+            ]
+            self.sendJSONRPCCommandDirect(command) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, let result = response["result"] as? [String: Any] else { return }
+                    let upcoming = Self.lifeboatTracks(fromStatus: result)
+                    let elapsed = (result["time"] as? Double) ?? 0
+                    // The stream (and its format) is the next track's while that one waits
+                    // its turn. LMS moved on in the last seconds: can't tell which, don't learn.
+                    let streamTrack = self.streamIsForNextTrack ? 1 : 0
+                    let clear = !self.streamIsForNextTrack || elapsed > 4
+                    self.lifeboat.update(upcoming: upcoming, elapsed: elapsed, streamFormat: self.currentStreamFormat,
+                                         streamSourceType: clear && upcoming.indices.contains(streamTrack)
+                                             ? upcoming[streamTrack].sourceType : nil,
+                                         replayGainApplied: self.lastStreamReplayGain > 0,
+                                         server: self.currentSessionServer,
+                                         lookahead: TimeInterval(self.settings.lifeboatMinutes * 60),
+                                         mayDownload: { [weak self] in self?.lifeboatMayDownload ?? false },
+                                         allowExpensive: self.settings.lifeboatMode == 2)
+                }
+            }
+        }
+    }
+
+    static func lifeboatTracks(fromStatus result: [String: Any]) -> [LifeboatCache.Track] {
+        let loop = result["playlist_loop"] as? [[String: Any]] ?? []
+        func number(_ v: Any?) -> Double? { (v as? Double) ?? (v as? Int).map(Double.init) ?? Double("\(v ?? "")") }
+        return loop.compactMap { item in
+            guard let index = number(item["playlist index"]).map({ Int($0) }),
+                  let id = item["id"].map({ "\($0)" }) else { return nil }
+            return LifeboatCache.Track(
+                index: index, id: id,
+                title: item["title"] as? String ?? "",
+                artist: item["artist"] as? String ?? "",
+                album: item["album"] as? String ?? "",
+                duration: number(item["duration"]) ?? 0,
+                // CUE-sheet tracks share one file (url "...#start-end"): a download is the whole album.
+                remote: (number(item["remote"]) ?? 0) != 0 || ((item["url"] as? String)?.contains("#") ?? false),
+                replayGainDB: number(item["replay_gain"]),
+                coverID: item["coverid"].map { "\($0)" },
+                sourceType: (item["type"] as? String)?.lowercased())
+        }
+    }
+
+    /// Once a second: a network stream that stopped delivering while we
+    /// can't reach the server (dead spot, connection still open) is given up
+    /// before the buffer runs dry, so the downloaded copy takes over in time.
+    private func startLifeboatWatch() {
+        guard lifeboatWatchTimer == nil else { return }
+        lifeboatWatchTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.lifeboatEnabled, !self.lifeboatActive, !self.connectionIsLive,
+                  self.audioManager.getPlayerState() == "Playing" || self.audioManager.isPushStreamStalled() else { return }
+            let stream = self.audioManager.pushStreamState()
+            guard stream.connected, !stream.completedNaturally,
+                  self.audioManager.bufferedPlaybackSeconds() < Self.lifeboatSwitchMargin,
+                  let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+                  self.lifeboat.fileURL(forIndex: stream.decodingAhead ? index + 1 : index) != nil else { return }
+            self.audioManager.abandonNetworkStream()
+        }
+    }
+
+    /// Buffered audio left when a stalled stream is given up for its copy:
+    /// room to open the file and find the switch point.
+    static let lifeboatSwitchMargin: TimeInterval = 8
+
+    /// Seconds missing before a download end on a live connection counts as a
+    /// cut (a Wi-Fi → cellular cut loses minutes; a wrong duration a few seconds).
+    static let onlineCutTolerance: Double = 15
+
+    /// The decode ended because its download closed: the end of the track,
+    /// or a cut (dead spot, Wi-Fi → cellular). The connection can't tell us
+    /// which (it can still look live for 10s after the network died), so the
+    /// track's duration does: from the downloaded-copies plan when we have
+    /// it, else from LMS. True = handled here, don't send STMd now.
+    private func handleDownloadEnd() -> Bool {
+        let live = connectionIsLive
+        let stream = audioManager.pushStreamState()
+        guard let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int else {
+            return live ? false : holdDownloadEnd(askNow: false)
+        }
+        let decodingIndex = stream.decodingAhead ? index + 1 : index
+
+        if lifeboatUsed && lifeboatActive {
+            // A copy ended; LMS doesn't know where we are: keep going with the copies.
+            // (LMS's own stream played on after an offline Play is cut or ended below.)
+            if startLifeboatTrack(index: decodingIndex + 1) { return true }
+            return holdDownloadEnd(askNow: false)  // the reconnect moves LMS to us
+        }
+        if lifeboatActive {
+            // The copy of LMS's own track ended: a real end of the track.
+            if live {
+                lifeboatActive = false
+                return false  // STMd: LMS carries on as usual
+            }
+            if startLifeboatTrack(index: decodingIndex + 1) { return true }
+            return holdDownloadEnd(askNow: false)
+        }
+
+        // A silent recovery flushing the old stream to replace it isn't a cut.
+        if lifeboatEnabled, !audioManager.isSilentRecoveryMuted,
+           let duration = lifeboat.track(at: decodingIndex)?.duration, duration > 0 {
+            // Online, LMS's duration can be a few seconds off the audio (VBR MP3
+            // without a header, truncated files): only a real gap is a cut.
+            let ended = Self.heldDecodeEndWasTrackEnd(
+                decodingAhead: stream.decodingAhead, decodedEndSeconds: stream.decodedEndSeconds,
+                trackTime: getCurrentInterpolatedTime().time, bufferedSeconds: audioManager.bufferedPlaybackSeconds(),
+                currentDuration: duration, nextDuration: duration,
+                tolerance: live ? Self.onlineCutTolerance : 3.0)
+            if ended {
+                if live { return false }  // normal end of track: STMd now
+                if startLifeboatTrack(index: decodingIndex + 1) { return true }
+            } else {
+                if continueFromCopy(index: decodingIndex, stream: stream) { return true }
+                if live {
+                    // Cut while still connected (Wi-Fi → cellular) and no copy: jump to where we are.
+                    os_log(.info, log: logger, "📬 Download cut while connected - recovering at our position")
+                    decodeEndHeld = true
+                    recoverFromCutDownload(tryCopy: false)
+                    return true
+                }
+            }
+        }
+        // Online with nothing to compare against: a normal end, as before.
+        return live ? false : holdDownloadEnd(askNow: false)
+    }
+
+    /// Hold the STMd; with `askNow`, have LMS's durations settle it now.
+    private func holdDownloadEnd(askNow: Bool) -> Bool {
+        decodeEndHeld = true
+        decodeEndHeldAt = Date()
+        os_log(.info, log: logger, "📬 Download ended - holding STMd until we know the track ended (%{public}s)",
+               askNow ? "asking LMS" : "server unreachable")
+        if askNow { resolveHeldTrackEnd() }
+        return true
+    }
+
+    /// Continue the cut track at playlist `index` from its downloaded copy.
+    private func continueFromCopy(index: Int, stream: AudioStreamDecoder.StreamState) -> Bool {
+        guard lifeboatEnabled, let file = lifeboat.fileURL(forIndex: index),
+              let trackID = lifeboat.track(at: index)?.id, !unusableCopies.contains(trackID) else { return false }
+        let estimate = stream.decodingAhead
+            ? (stream.decodedEndSeconds ?? 0)
+            : getCurrentInterpolatedTime().time + audioManager.bufferedPlaybackSeconds()
+        // Right after a seek (LMS restarts the stream) the tracker may not have
+        // the new position yet (3s poll): search wide. Identical audio (an
+        // original copy of a lossless stream) must match almost perfectly.
+        let recentlyRestarted = lastServerStreamStartAt.map { Date().timeIntervalSince($0) < 8 } ?? false
+        let searchSeconds: Double = recentlyRestarted ? 60 : 8
+        let identicalAudio = !lifeboat.copyIsTranscode(forIndex: index) && Self.streamFormatIsLossless(currentStreamFormat)
+        let minimumConfidence: Float = identicalAudio ? 0.97 : AudioStreamDecoder.minimumMatchConfidence
+        os_log(.info, log: logger, "🛟 Download cut in track %d near %.1fs - continuing from the downloaded copy (%.0fs window)",
+               index, estimate, searchSeconds)
+        clearHeldTrackEnd()
+        lifeboatActive = true
+        audioManager.continueFromLocalFile(path: file.path, estimatedSeconds: estimate, searchSeconds: searchSeconds,
+                                           minimumConfidence: minimumConfidence) { [weak self] outcome in
+            guard let self = self else { return }
+            switch outcome {
+            case .success(let result):
+                if !stream.decodingAhead {
+                    // The match says exactly where the playhead is in the track.
+                    let playhead = result.fileSeconds - self.audioManager.bufferedPlaybackSeconds()
+                    self.simpleTimeTracker.updateFromServer(time: playhead, playing: true)
+                }
+            case .failure(let failure):
+                if case .format = failure {
+                    self.unusableCopies.insert(trackID)  // never usable; a no-match may be next time
+                }
+                self.lifeboatActive = false
+                if self.connectionIsLive {
+                    self.decodeEndHeld = true
+                    self.recoverFromCutDownload(tryCopy: false)
+                } else if self.startLifeboatTrack(index: index + 1) {
+                    // The rest of this track is lost, but the copies that follow still play.
+                    os_log(.info, log: self.logger, "🛟 Skipping the rest of track %d - the next copy follows", index)
+                } else {
+                    _ = self.holdDownloadEnd(askNow: false)
+                }
+            }
+        }
+        return true
+    }
+
+    /// Queue the downloaded copy of the track at `index` behind what's playing.
+    private func startLifeboatTrack(index: Int) -> Bool {
+        guard let file = lifeboat.fileURL(forIndex: index) else {
+            os_log(.info, log: logger, "🛟 No downloaded copy of track %d - waiting for the server", index)
+            return false
+        }
+        let gain = lifeboatGain(index: index)
+        os_log(.info, log: logger, "🛟 Offline: queuing the downloaded copy of track %d (gain %.3f)", index, gain)
+        lifeboatActive = true
+        lifeboatUsed = true
+        connectionManager.persistForPlayback = true
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: gain, isGapless: true, startTime: 0, waitForUnpause: false)
+        return true
+    }
+
+    /// Linear gain for the copy at `index`: LMS sends each track's gain in its
+    /// strm; offline, use the track's ReplayGain tag when LMS applies gain for us.
+    private func lifeboatGain(index: Int) -> Float {
+        guard lastStreamReplayGain > 0, let db = lifeboat.track(at: index)?.replayGainDB else { return 0 }
+        return Float(pow(10, db / 20))
+    }
+
+    /// What the settings screen shows while we play downloaded copies offline.
+    struct OfflinePlaybackStatus: Equatable {
+        let title: String
+        let artist: String
+        let isPaused: Bool
+        /// Saved music left from the playhead, counting only the copies that follow on unbroken.
+        let minutesLeft: Int
+    }
+
+    /// Non-nil while the server can't be reached and a downloaded copy is
+    /// playing (or paused on the phone). Polled by the settings screen.
+    var offlinePlaybackStatus: OfflinePlaybackStatus? {
+        // From the moment iOS reports no network, not only once a copy takes over.
+        guard lifeboatEnabled, lifeboat.server == (sessionServer ?? currentSessionServer), !connectionIsLive,
+              lifeboatActive || lifeboatPausedLocally
+                || ((networkUnavailable || outageHoldActive) && audioManager.getPlayerState() == "Playing"),
+              let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+              let track = lifeboat.track(at: index) else { return nil }
+        var seconds = Self.offlineSecondsLeft(from: index, elapsed: getCurrentInterpolatedTime().time,
+                                              duration: { self.lifeboat.track(at: $0)?.duration },
+                                              hasCopy: { self.lifeboat.fileURL(forIndex: $0) != nil })
+        if !lifeboatActive && lifeboat.fileURL(forIndex: index) == nil {
+            // LMS's stream with no copy to take over: only the buffer is left (review L9).
+            seconds = audioManager.bufferedPlaybackSeconds()
+        }
+        return OfflinePlaybackStatus(title: track.title, artist: track.artist,
+                                     isPaused: lifeboatPausedLocally || audioManager.getPlayerState() == "Paused",
+                                     minutesLeft: Int((seconds / 60).rounded(.down)))
+    }
+
+    /// What the offline player (over Material) shows: Material is a page from
+    /// LMS and freezes on its last state while LMS can't be reached.
+    struct OfflinePlayerState: Equatable {
+        struct Item: Equatable, Identifiable {
+            let index: Int
+            let title: String
+            let artist: String
+            let duration: Double
+            var id: Int { index }
+        }
+        let current: Item
+        let album: String
+        let artworkPath: String?
+        let elapsed: Double
+        let isPlaying: Bool
+        let minutesLeft: Int
+        /// The saved songs after this one, in queue order, while they follow on unbroken.
+        let upNext: [Item]
+    }
+
+    var offlinePlayerState: OfflinePlayerState? {
+        let playing = offlinePlaybackStatus
+        let offer = playing == nil ? savedMusicOffer : nil
+        guard playing != nil || offer != nil,
+              let index = playing != nil ? UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int : offer?.index,
+              let track = lifeboat.track(at: index) else { return nil }
+        func item(_ t: LifeboatCache.Track) -> OfflinePlayerState.Item {
+            OfflinePlayerState.Item(index: t.index, title: t.title, artist: t.artist, duration: t.duration)
+        }
+        var upNext: [OfflinePlayerState.Item] = []
+        var next = index + 1
+        while let t = lifeboat.track(at: next), lifeboat.fileURL(forIndex: next) != nil {
+            upNext.append(item(t))
+            next += 1
+        }
+        return OfflinePlayerState(
+            current: item(track), album: track.album,
+            artworkPath: lifeboat.artworkURL(forIndex: index)?.path,
+            elapsed: playing != nil ? getCurrentInterpolatedTime().time : (offer?.position ?? 0),
+            isPlaying: playing.map { !$0.isPaused } ?? false,
+            minutesLeft: playing?.minutesLeft ?? offer?.minutesLeft ?? 0,
+            upNext: upNext)
+    }
+
+    /// The offline player's buttons: the same handling as the lock screen's.
+    func offlinePlayerCommand(_ command: String) {
+        if offlinePlaybackStatus == nil, let offer = savedMusicOffer {
+            // Nothing playing yet (launched offline): start the saved music.
+            switch command {
+            case "play": playSavedMusicOffline()
+            case "next": playSavedTrackOffline(index: offer.index + 1)
+            case "previous": playSavedTrackOffline(index: offer.index)
+            default: break
+            }
+            return
+        }
+        _ = handleOfflineCommand(command)
+    }
+
+    /// Settings → Keep Playing Offline → Off: drop the copies (and the live plan).
+    func clearSavedMusic() {
+        lifeboat.removeAll()
+    }
+
+    /// Tap on a saved song in the offline player: play it from the start.
+    func playSavedTrackOffline(index: Int) {
+        guard !connectionIsLive, lifeboat.fileURL(forIndex: index) != nil else { return }
+        os_log(.info, log: logger, "📴 Offline: playing the downloaded copy of track %d (chosen in the app)", index)
+        prepareToPlaySavedMusic()
+        _ = playLifeboatTrackNow(index: index)
+    }
+
+    /// Rest of track `index`, plus each following track while its copy is downloaded.
+    static func offlineSecondsLeft(from index: Int, elapsed: Double,
+                                   duration: (Int) -> Double?, hasCopy: (Int) -> Bool) -> Double {
+        var total = max(0, (duration(index) ?? 0) - elapsed)
+        var next = index + 1
+        while hasCopy(next), let length = duration(next) {
+            total += length
+            next += 1
+        }
+        return total
+    }
+
+    /// Lock screen / CarPlay / AirPods buttons while we can't reach the
+    /// server: act on the phone (LMS would never get them), and have the
+    /// reconnect move LMS to what we ended up doing. True = handled.
+    private func handleOfflineCommand(_ command: String) -> Bool {
+        // Only during an outage. A suspended app's connection is dead too, and
+        // there the normal path reconnects and tells LMS (device log 2026-10-19:
+        // Play after a long background played the old buffer, LMS stayed paused).
+        // Playing means not suspended: a silent connection then is an outage.
+        // No network at all (airplane mode) is one too, paused or not.
+        // Not lifeboatUsed alone: after the copies ran out a suspended app with the
+        // network fine must reconnect and tell LMS (review H6).
+        guard networkUnavailable || (!connectionIsLive &&
+              (outageHoldActive || lifeboatPausedLocally || audioManager.getPlayerState() == "Playing")) else { return false }
+        let state = audioManager.getPlayerState()
+        let hasLocalAudio = state == "Playing" || state == "Paused" || audioManager.isPushStreamStalled() || lifeboatActive
+        guard hasLocalAudio, let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int else {
+            return false
+        }
+        switch command {
+        case "pause", "stop":
+            audioManager.pause()
+            lifeboatPausedLocally = true
+            lifeboatUsed = true
+            connectionManager.persistForPlayback = true
+            let position = getCurrentTimeForSaving()
+            simpleTimeTracker.updateFromServer(time: position, playing: false)
+            UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+            UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+            endOutageHold(reason: "paused offline")
+            os_log(.info, log: logger, "📴 Offline: paused on the phone at %.1fs", position)
+            return true
+        case "play":
+            guard state == "Paused" || lifeboatPausedLocally else {
+                // Nothing paused here (the copies ran out): the normal path
+                // reconnects and asks LMS; make sure the attempts haven't given up.
+                connectionManager.resumeReconnecting(reason: "play pressed offline")
+                return false
+            }
+            lifeboatPausedLocally = false
+            // LMS never hears this Play: the reconnect moves it to us, over its older pause.
+            lifeboatUsed = true
+            savedMusicStartedOffline = true
+            connectionManager.persistForPlayback = true
+            beginOutageHold(reason: "playing offline")
+        // Earlier attempts may have given up while nothing played (launched offline).
+        connectionManager.resumeReconnecting(reason: "playing offline")
+            audioManager.play()
+            simpleTimeTracker.updateFromServer(time: getCurrentTimeForSaving(), playing: true)
+            os_log(.info, log: logger, "📴 Offline: resumed on the phone")
+            return true
+        case "next":
+            if playLifeboatTrackNow(index: index + 1) {
+                os_log(.info, log: logger, "📴 Offline: skipped to the downloaded copy of track %d", index + 1)
+            } else {
+                os_log(.info, log: logger, "📴 Offline: no downloaded copy of track %d - staying", index + 1)
+            }
+            return true
+        case "previous":
+            // Back to the start of this song (earlier copies are already deleted).
+            if !playLifeboatTrackNow(index: index) {
+                os_log(.info, log: logger, "📴 Offline: no downloaded copy of track %d to restart", index)
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Copies played or buttons handled offline: LMS doesn't know where we are.
+    var offlinePlaybackOwnsRecovery: Bool { lifeboatUsed || lifeboatPausedLocally }
+
+    /// No network at all (airplane mode, no signal), as iOS reports it.
+    private var networkUnavailable: Bool { connectionManager.networkStatus == .unavailable }
+    private var serverUnreachable: Bool {
+        networkUnavailable || (serverUnreachableSince.map { Date().timeIntervalSince($0) > 8 } ?? false)
+    }
+
+    /// Saved music the app can play with no server (e.g. launched in a dead spot).
+    struct SavedMusicOffer: Equatable {
+        let index: Int
+        let position: Double
+        let title: String
+        let minutesLeft: Int
+    }
+
+    /// Non-nil when the server can't be reached, nothing is playing, and the
+    /// track we were last on has a downloaded copy.
+    var savedMusicOffer: SavedMusicOffer? {
+        let state = audioManager.getPlayerState()
+        guard lifeboatEnabled, !connectionIsLive, !lifeboatActive, !lifeboatPausedLocally,
+              (serverUnreachable && (state == "No Stream" || state == "Stopped")) || (state == "Paused" && networkUnavailable),
+              var index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+              lifeboat.server == (sessionServer ?? currentSessionServer),  // copies from this server (review H7)
+              let saved = lifeboat.track(at: index) else { return nil }
+        var position = state == "Paused" ? getCurrentTimeForSaving()
+            : max(0, UserDefaults.standard.double(forKey: "lyrplay_recovery_position"))
+        if position > saved.duration - 2 {
+            // Saved at the very end: the next track is where playback goes on.
+            index += 1
+            position = 0
+        }
+        guard let track = lifeboat.track(at: index), lifeboat.fileURL(forIndex: index) != nil else { return nil }
+        let seconds = Self.offlineSecondsLeft(from: index, elapsed: position,
+                                              duration: { self.lifeboat.track(at: $0)?.duration },
+                                              hasCopy: { self.lifeboat.fileURL(forIndex: $0) != nil })
+        guard seconds >= 30 else { return nil }
+        return SavedMusicOffer(index: index, position: position, title: track.title,
+                               minutesLeft: Int((seconds / 60).rounded(.down)))
+    }
+
+    /// Play the saved copies from where we left off; the reconnect then moves LMS here.
+    func playSavedMusicOffline() {
+        guard let offer = savedMusicOffer else { return }
+        if audioManager.getPlayerState() == "Paused" {
+            // Paused when the network went: play on from the buffer (then the copy).
+            _ = handleOfflineCommand("play")
+            return
+        }
+        os_log(.info, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
+        prepareToPlaySavedMusic()
+        _ = playLifeboatTrackNow(index: offer.index, from: offer.position)
+    }
+
+    /// Before starting a copy the user chose with no server.
+    private func prepareToPlaySavedMusic() {
+        offlinePlayerRequested = true
+        // This IS the recovery: the app-open jump would start LMS's stream over it.
+        pendingRecoveryTrigger = .none
+        audioManager.cancelPreMute(reason: "playing saved music")
+        // A fresh launch hasn't had a stream from LMS: use what the copies were made for.
+        if currentStreamFormat.isEmpty { currentStreamFormat = lifeboat.streamFormat }
+        // The copies continue the last session on this server: reconnect to it
+        // (with the HELO reconnect bit) so LMS doesn't restart its own stream
+        // over ours, and the reconnect moves LMS here.
+        if sessionServer == nil { sessionServer = currentSessionServer }
+        savedMusicStartedOffline = true
+        if lastStreamReplayGain == 0 && lifeboat.replayGainApplied {
+            lastStreamReplayGain = 1  // only "LMS applies gain" matters to lifeboatGain
+        }
+    }
+
+    /// Start the copy of track `index` now, from `position` (a skip starts at 0).
+    private func playLifeboatTrackNow(index: Int, from position: Double = 0) -> Bool {
+        guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
+        clearHeldTrackEnd()
+        lifeboatActive = true
+        lifeboatUsed = true
+        savedMusicStartedOffline = true  // a skip or a chosen song: newer than LMS's state (review M3)
+        connectionManager.persistForPlayback = true
+        lifeboatPausedLocally = false
+        UserDefaults.standard.set(index, forKey: "lyrplay_recovery_index")
+        UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+        UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+        beginOutageHold(reason: "playing offline")
+        // Earlier attempts may have given up while nothing played (launched offline).
+        connectionManager.resumeReconnecting(reason: "playing offline")
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: lifeboatGain(index: index), isGapless: false,
+                                             startTime: position, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: position, duration: track.duration, playing: true)
+        audioManager.updateTrackMetadata(title: track.title, artist: track.artist, album: track.album,
+                                         artworkURL: lifeboat.artworkURL(forIndex: index)?.absoluteString,
+                                         duration: track.duration)
+        return true
+    }
+
+    /// Back online after playing copies: put LMS where we are (one jump per
+    /// connection). Play or pause comes from what the phone is doing now, not
+    /// from what a caller saw at the disconnect (review 2026-10-19, H1).
+    private func jumpLMSToLifeboatPosition() {
+        guard let connected = lastConnectedAt, lifeboatJumpConnection != connected else { return }
+        // The copies came from one server: on another (backup failover, a server
+        // switch) their ids and indexes mean nothing there.
+        guard lifeboat.server == currentSessionServer else {
+            os_log(.info, log: logger, "🛟 Connected to another server than the downloaded copies came from - following it")
+            abandonLifeboat(stopLocal: true)
+            return
+        }
+        lifeboatJumpConnection = connected
+        // The strm q/s our jump causes is not LMS restarting a forgotten player:
+        // without this it was muted for the 8s ceiling (device log 2026-10-19 05:13:47).
+        reconnectTarget = nil
+        let shouldPlay = !lifeboatPausedLocally && audioManager.getPlayerState() != "Paused"
+        let userActedOffline = savedMusicStartedOffline
+        let position = getCurrentTimeForSaving()
+        let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
+        let playedID = index.flatMap { lifeboat.track(at: $0)?.id }
+        // The queue may have changed while we were away: find the track we
+        // played by its id, near the index we think it has.
+        let lookup: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", 0, 500, "tags:"]]
+        ]
+        sendJSONRPCCommandDirect(lookup) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, self.lifeboatUsed || self.lifeboatPausedLocally else { return }
+                let result = response["result"] as? [String: Any]
+                var target = index
+                if let playedID = playedID, let index = index,
+                   let loop = result?["playlist_loop"] as? [[String: Any]] {
+                    let found = loop.compactMap { item -> Int? in
+                        guard "\(item["id"] ?? "")" == playedID else { return nil }
+                        return Self.playlistIndex(fromStatus: ["playlist_cur_index": item["playlist index"] as Any])
+                    }
+                    guard let nearest = found.min(by: { abs($0 - index) < abs($1 - index) }) else {
+                        // Not in LMS's queue any more (replaced or edited elsewhere):
+                        // an index into the new queue would be an unrelated song.
+                        os_log(.info, log: self.logger, "🛟 The track we played is no longer in LMS's queue - following the server")
+                        self.abandonLifeboat(stopLocal: true)
+                        return
+                    }
+                    target = nearest
+                }
+                if let target = target, target != index {
+                    os_log(.info, log: self.logger, "🛟 The track we played moved in the queue: %d → %d", index ?? -1, target)
+                    UserDefaults.standard.set(target, forKey: "lyrplay_recovery_index")
+                }
+                var position = position
+                if let index = target {
+                    // The copies ran out at the end of a track: the next one, or the
+                    // end of the playlist (a jump to the end leaves LMS in "play" for good).
+                    guard let settled = Self.settledJumpTarget(
+                        index: index, position: position, duration: self.lifeboat.track(at: index)?.duration,
+                        playlistTracks: Self.playlistTracks(fromStatus: result),
+                        repeatMode: Self.playlistRepeat(fromStatus: result)) else {
+                        os_log(.info, log: self.logger, "🛟 Back online after the last copy ended at the end of the playlist - stopping LMS")
+                        self.sendJSONRPCCommandDirect(["id": 1, "method": "slim.request",
+                                                       "params": [self.settings.playerMACAddress, ["stop"]]]) { _ in }
+                        self.abandonLifeboat(stopLocal: false)
+                        return
+                    }
+                    if settled.index != index {
+                        os_log(.info, log: self.logger, "🛟 Track %d ended offline - moving LMS to the start of track %d", index, settled.index)
+                        UserDefaults.standard.set(settled.index, forKey: "lyrplay_recovery_index")
+                    }
+                    position = settled.position
+                    target = settled.index
+                }
+                os_log(.info, log: self.logger, "🛟 Back online after playing downloaded copies - moving LMS to track %{public}s at %.1fs (%{public}s)",
+                       target.map(String.init) ?? "?", position, shouldPlay ? "playing" : "paused")
+                UserDefaults.standard.set(position, forKey: "lyrplay_recovery_position")
+                UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+                self.audibleRecoveryTarget = nil
+                // savedMusicStartedOffline is cleared when the jump's stream arrives
+                // (didStartDirectStream): a flap before that must not lose the offline Play.
+                if !shouldPlay {
+                    // LMS never got the offline pause (it still says "play"): land paused anyway.
+                    self.performPlaylistRecovery(shouldPlay: false, landPausedEvenIfPlaying: true)
+                } else if !userActedOffline, result?["mode"] as? String == "pause" {
+                    // Nobody touched the phone offline, and LMS is paused: someone
+                    // paused it elsewhere during the outage. That wins.
+                    os_log(.info, log: self.logger, "🛟 Paused on the server during the outage - pausing here too")
+                    self.audioManager.pause()
+                    self.abandonLifeboat(stopLocal: false)
+                } else {
+                    // A play pressed offline is newer than LMS's pause.
+                    self.performPlaylistRecovery(shouldPlay: true)
+                }
+            }
+        }
+    }
+
+    /// Give up on the copies and follow the server as it is.
+    private func abandonLifeboat(stopLocal: Bool) {
+        if stopLocal && (lifeboatActive || lifeboatUsed) { audioManager.stop() }
+        clearHeldTrackEnd()
+        lifeboatActive = false
+        lifeboatUsed = false
+        lifeboatPausedLocally = false
+        savedMusicStartedOffline = false
+        reconnectTarget = nil
+        endOutageHold(reason: "following the server")
+        connectionManager.persistForPlayback = false
+    }
+
     // MARK: - Outage Hold (bd 6lvg, 8tjj)
 
     /// Start the outage hold. No-op if already on: the time limit counts from
@@ -3586,12 +4929,24 @@ extension SlimProtoCoordinator {
         audioManager.setOutputKeepAlive(true)
         connectionManager.persistForPlayback = true
         os_log(.info, log: logger, "🔋 Outage hold ON (%{public}s)", reason)
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outageHoldLimit) { [weak self] in
-            guard let self = self, self.outageHoldGeneration == generation else { return }
-            self.endOutageHold(reason: "time limit")
-        }
+        scheduleOutageHoldLimit(generation: generation)
         scheduleOutageHoldWatchdog(generation: generation)
         scheduleOutageHoldClock(generation: generation)
+    }
+
+    /// The hold ends after `outageHoldLimit`, unless a downloaded copy is
+    /// playing: then the outage can last as long as the copies do, and we
+    /// keep reconnecting.
+    private func scheduleOutageHoldLimit(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.outageHoldLimit) { [weak self] in
+            guard let self = self, self.outageHoldGeneration == generation else { return }
+            if self.lifeboatActive && self.audioManager.getPlayerState() == "Playing" {
+                os_log(.info, log: self.logger, "🛟 Outage hold limit reached while playing downloaded copies - keeping it")
+                self.scheduleOutageHoldLimit(generation: generation)
+                return
+            }
+            self.endOutageHold(reason: "time limit")
+        }
     }
 
     /// Every 1s while the hold is on: once local audio stops flowing (buffer
@@ -3616,6 +4971,11 @@ extension SlimProtoCoordinator {
     private func scheduleOutageHoldWatchdog(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) { [weak self] in
             guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
+            if self.audioManager.getPlayerState() == "Playing" && self.serverHeardRecently {
+                // Audio is flowing on a live connection: nothing left to recover.
+                self.endOutageHold(reason: "playing on a live connection")
+                return
+            }
             if self.connectionManager.connectionState.isConnected,
                !self.isRecoveryInProgress,
                !self.serverStartedStreamRecently {
@@ -3640,7 +5000,9 @@ extension SlimProtoCoordinator {
         audibleRecoveryTarget = nil
         holdTimeUntilRecoveryJump = false
         audioManager.setOutputKeepAlive(false)
-        connectionManager.persistForPlayback = false
+        // Out of step with LMS (copies or offline buttons): keep reconnecting
+        // until we can move it to where we are.
+        connectionManager.persistForPlayback = lifeboatUsed
         // Nothing left to resume: a later reconnect must not start playback
         // on its own (wasPlaying is recomputed at the next disconnect).
         wasPlayingBeforeDisconnect = false
@@ -3866,6 +5228,9 @@ extension SlimProtoCoordinator {
     func handleDecoderDidStartPlayback() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // Audio from a downloaded copy while the server is away isn't the
+            // server's playback coming back: keep the hold (and the reconnects).
+            if self.lifeboatHoldsSession { return }
             self.endOutageHold(reason: "playback started")
             if let generation = self.silentRecoveryPauseGeneration {
                 self.sendSilentRecoveryPause(generation: generation, reason: "silent stream playing")

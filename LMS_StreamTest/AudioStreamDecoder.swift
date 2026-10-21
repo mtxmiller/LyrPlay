@@ -142,6 +142,52 @@ class AudioStreamDecoder {
     /// downloaded since the current decoder stream started.
     private var statStreamBufferedBytes: UInt64 = 0
     private var statStreamBytesReceived: UInt64 = 0
+    /// The decoder stream's HTTP connection is open (snapshot, as above).
+    private var statStreamConnected = false
+    /// Where the last natural decode end left the decoding track, in track
+    /// seconds. A cut connection ends exactly like the real end of a track
+    /// (the socket closes), so the coordinator compares this with the track's
+    /// duration when the end came while it couldn't reach the server.
+    /// Guarded by stateLock.
+    private var lastDecodeEndSeconds: Double?
+
+    /// Set by abandonNetworkStream(): the decode loop treats a starved network
+    /// stream as ended, so the coordinator can continue from a downloaded copy
+    /// (a frozen download in a dead spot never closes on its own). Guarded by stateLock.
+    private var abandonNetworkRequested = false
+
+    /// The decoder stream is a downloaded copy (file), whose position is track
+    /// time exactly. Decode queue only.
+    private var decoderIsLocalFile = false
+
+    /// The last ~2s of PCM pushed to the push stream (interleaved float), so
+    /// a continuation from a downloaded copy can find exactly where the
+    /// stream left off. Decode queue only.
+    private var recentPCM = RecentPCM()
+
+    /// The current decoder stream as the control plane may see it.
+    struct StreamState: Equatable {
+        /// The HTTP download is still open.
+        var connected: Bool
+        /// The decode ended at the end of its data (STMd was due).
+        var completedNaturally: Bool
+        /// Track seconds reached when it ended (nil while decoding).
+        var decodedEndSeconds: Double?
+        /// The decoding track is the next one: the current one's tail is still playing.
+        var decodingAhead: Bool
+    }
+
+    func streamState() -> StreamState {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        // decodeCompletedNaturally is consumed by the drain (handleBufferEnd);
+        // lastDecodeEndSeconds survives it, so a drained natural end still reads
+        // as one here and isn't taken for a cut (rig O13: a jump to the end).
+        return StreamState(connected: statStreamConnected,
+                           completedNaturally: decodeCompletedNaturally || lastDecodeEndSeconds != nil,
+                           decodedEndSeconds: lastDecodeEndSeconds,
+                           decodingAhead: trackBoundaryPosition != nil)
+    }
 
     /// Armed by the decode loop's natural-completion exits; consumed by
     /// handleBufferEnd so a buffer STALL only reports end-of-playback (STMu)
@@ -1074,7 +1120,9 @@ class AudioStreamDecoder {
         // BASS_StreamCreateURL completes would report the OLD track's offset
         // against a flushed stream, making the displayed time hunt around
         // after a playlist-jump seek (bd LMS_StreamTest-egd).
-        trackStartTimeOffset = startTime
+        stateLock.lock()
+        trackStartTimeOffset = startTime  // also read on the decode queue (markDecodeCompletedNaturally)
+        stateLock.unlock()
 
         decodeQueue.async { [weak self] in
             self?.performStartDecoding(url, format: format, isNewTrack: isNewTrack,
@@ -1151,16 +1199,28 @@ class AudioStreamDecoder {
         // then waits on the response; a gapless next-track open has the
         // current track's buffered tail to spare. Thread-scoped so the legacy
         // main-thread URL path keeps the 5s default.
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 15000)
-        decoderStream = BASS_StreamCreateURL(
-            urlCString,
-            0,
-            DWORD(BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT),
-            nil,
-            nil
-        )
-        let createError = BASS_ErrorGetCode()  // read before the next BASS call overwrites it
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 0)  // back to global
+        let createError: Int32
+        decoderIsLocalFile = Self.localFilePath(url) != nil
+        if let localPath = Self.localFilePath(url) {
+            // A downloaded copy (offline playback): decode the file directly.
+            decoderStream = BASS_StreamCreateFile(DWORD(BASS_FILE_NAME), localPath, 0, 0,
+                                                  DWORD(BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT))
+            createError = BASS_ErrorGetCode()
+            if decoderStream != 0 && startTime > 0 {
+                BASS_ChannelSetPosition(decoderStream, BASS_ChannelSeconds2Bytes(decoderStream, startTime), DWORD(BASS_POS_BYTE))
+            }
+        } else {
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 15000)
+            decoderStream = BASS_StreamCreateURL(
+                urlCString,
+                0,
+                DWORD(BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT),
+                nil,
+                nil
+            )
+            createError = BASS_ErrorGetCode()  // read before the next BASS call overwrites it
+            BASS_SetConfig(DWORD(BASS_CONFIG_NET_TIMEOUT) | DWORD(BASS_CONFIG_THREAD), 0)  // back to global
+        }
 
         guard decoderStream != 0 else {
             let error = createError
@@ -1310,6 +1370,7 @@ class AudioStreamDecoder {
                 // BASS sync callbacks use absolute positions, so totalBytesPushed must remain cumulative
                 os_log(.info, log: logger, "📊 Continuing cumulative write tracking: totalBytesPushed=%llu", totalBytesPushed)
             } else {
+                recentPCM.reset()  // flushed: what played before is gone
                 // First track: Mark current playback position as track start
                 let currentPlaybackPosition = BASS_ChannelGetPosition(pushStream, DWORD(BASS_POS_BYTE))
                 previousTrackStartPosition = 0  // No previous track
@@ -1328,6 +1389,9 @@ class AudioStreamDecoder {
             manualStop = false  // This is a fresh start, not a manual stop
             decodeCompletedNaturally = false  // New data incoming — a drain now is a stall, not end-of-playback
             stmlBaselineBytes = totalBytesPushed  // STMl threshold measures from THIS track's start
+            lastDecodeEndSeconds = nil
+            statStreamConnected = true  // until the loop's first snapshot says otherwise
+            abandonNetworkRequested = false
         } else {
             pendingTrackBoundary = false
         }
@@ -1360,6 +1424,9 @@ class AudioStreamDecoder {
         manualStop = true       // Mark as manual stop
         isDecoding = false
         decodeCompletedNaturally = false  // Manual stop — drain must not report end-of-playback
+        statStreamConnected = false
+        lastDecodeEndSeconds = nil
+        abandonNetworkRequested = false
         stateLock.unlock()
 
         // Clean up sync start monitoring
@@ -1415,6 +1482,13 @@ class AudioStreamDecoder {
         // half-counted across the reset (bd LMS_StreamTest-433.2.2).
         stateLock.lock()
         BASS_ChannelSetPosition(pushStream, 0, DWORD(BASS_POS_BYTE))
+        // Boundary syncs are byte positions in the old stream's audio: after the
+        // reset they'd fire at the same byte of the new one and count a track
+        // that never started (seen 2026-10-19: index 0→1 ~29s into a new album).
+        for sync in trackBoundarySyncs {
+            BASS_ChannelRemoveSync(pushStream, sync)
+        }
+        trackBoundarySyncs.removeAll()
 
         // Sync mode: don't restart playback here — the sync timer (after 'u' arrives)
         // is responsible for the actual BASS_ChannelPlay. Calling it here would start
@@ -1490,6 +1564,18 @@ class AudioStreamDecoder {
     private func markDecodeCompletedNaturally() {
         stateLock.lock()
         decodeCompletedNaturally = true
+        statStreamConnected = false
+        let bytesPerSecond = Double(sampleRate * channels * 4)
+        lastDecodeEndSeconds = trackStartTimeOffset
+            + Double(totalBytesPushed &- stmlBaselineBytes) / bytesPerSecond
+        if decoderIsLocalFile, decoderStream != 0 {
+            // A copy's position is track time: exact, whatever the stream's
+            // start offset was (rig O22: the tracker had stopped 3.4s early).
+            let end = BASS_ChannelGetPosition(decoderStream, DWORD(BASS_POS_BYTE))
+            if end != QWORD.max {
+                lastDecodeEndSeconds = BASS_ChannelBytes2Seconds(decoderStream, end)
+            }
+        }
         stateLock.unlock()
     }
 
@@ -1547,11 +1633,13 @@ class AudioStreamDecoder {
                 // reads these snapshots instead. -1 (QWORD.max) = not available.
                 let statDownloaded = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
                 let statReadPos = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CURRENT))
+                let statConnected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
                 if statDownloaded != UInt64.max {
                     self.stateLock.lock()
                     self.statStreamBytesReceived = statDownloaded
                     self.statStreamBufferedBytes = (statReadPos != UInt64.max && statDownloaded > statReadPos)
                         ? statDownloaded - statReadPos : 0
+                    self.statStreamConnected = statConnected != 0 && statConnected != UInt64.max
                     self.stateLock.unlock()
                 }
 
@@ -1577,7 +1665,7 @@ class AudioStreamDecoder {
                         // Check if HTTP is done - if so, we're truly finished
                         let connected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
 
-                        if connected == 0 {
+                        if Self.decodeSourceFinished(connected: connected, abandoned: self.abandonRequested()) {
                             // HTTP done AND decoder buffer empty = track complete
                             let totalSeconds = Double(self.totalBytesPushed) / Double(self.sampleRate * self.channels * 4)
                             os_log(.info, log: self.logger, "✅ Decoder finished (ENDED + HTTP disconnected)")
@@ -1636,7 +1724,7 @@ class AudioStreamDecoder {
                     // Check if HTTP stream is also disconnected (truly finished)
                     let connected = BASS_StreamGetFilePosition(self.decoderStream, DWORD(BASS_FILEPOS_CONNECTED))
 
-                    if connected == 0 {
+                    if Self.decodeSourceFinished(connected: connected, abandoned: self.abandonRequested()) {
                         // Like squeezelite: n == 0 && stream.state <= DISCONNECT → return DECODE_COMPLETE
                         let totalSeconds = Double(self.totalBytesPushed) / Double(self.sampleRate * self.channels * 4)
                         os_log(.info, log: self.logger, "✅ Decoder finished (no more frames + HTTP disconnected)")
@@ -1745,6 +1833,8 @@ class AudioStreamDecoder {
                 // write-position math.)
                 self.totalBytesPushed += UInt64(bytesRead)
                 self.stateLock.unlock()
+                self.recentPCM.append(buffer, count: Int(bytesRead) / 4,
+                                      capacity: 2 * self.sampleRate * self.channels)
 
                 // DIAGNOSTIC: Check what "queued" actually means
                 // Per BASS docs: BASS_StreamPutData returns "amount of data currently queued"
@@ -1813,6 +1903,175 @@ class AudioStreamDecoder {
                 BASS_StreamFree(self.decoderStream)
                 self.decoderStream = 0
             }
+    }
+
+    // MARK: - Offline continuation (ride out network loss, phase 2)
+
+    /// "file://" URLs are downloaded copies; returns the path.
+    static func localFilePath(_ url: String) -> String? {
+        guard url.hasPrefix("file://"), let parsed = URL(string: url) else { return nil }
+        return parsed.path
+    }
+
+    /// The decode source has no more data coming: an internet stream whose
+    /// connection closed, a local file (BASS reports CONNECTED only for
+    /// internet streams: -1 otherwise), or a stalled stream given up for a
+    /// downloaded copy.
+    static func decodeSourceFinished(connected: UInt64, abandoned: Bool) -> Bool {
+        connected == 0 || connected == UInt64.max || abandoned
+    }
+
+    private func abandonRequested() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return abandonNetworkRequested
+    }
+
+    /// Give up a network stream that has stopped delivering (dead spot with
+    /// the connection still open): the loop ends it like a cut download as
+    /// soon as it runs out of data.
+    func abandonNetworkStream() {
+        stateLock.lock()
+        abandonNetworkRequested = true
+        stateLock.unlock()
+        os_log(.info, log: logger, "🛟 Giving up the stalled network stream")
+    }
+
+    /// Below this the match is not trusted (identical audio scores ~1.0,
+    /// two lossy encodes of the same track well above 0.9). The caller passes
+    /// a stricter floor for lossless-vs-lossless.
+    static let minimumMatchConfidence: Float = 0.8
+
+    /// Seconds of our last audio matched against the copy. Short enough to
+    /// keep the coarse search cheap over a wide window, long enough that a
+    /// repeated beat doesn't pass for the right place (rig O16: 0.5s matched
+    /// a bar 29s away at 0.964).
+    static let matchReferenceSeconds: Double = 1.0
+
+    struct ContinuationResult {
+        /// Track seconds in the file where playback continues.
+        let fileSeconds: Double
+        /// fileSeconds minus the estimate, in ms (how far the estimate was off).
+        let correctionMs: Double
+        /// Normalized correlation at the match (1 = identical audio).
+        let confidence: Float
+        /// The match was trusted; otherwise the estimate was used.
+        let aligned: Bool
+    }
+
+    /// Why a continuation didn't happen. Only `format` is for good: the
+    /// other two can succeed with another estimate or a later attempt.
+    enum ContinuationFailure: Error {
+        case format            // the copy's rate/channels differ from the push stream
+        case noMatch(Float)    // our last audio wasn't found in the window (best score)
+        case transient         // decoder busy, superseded, file open error
+    }
+
+    /// Continue the track the stream was cut off in from a downloaded copy.
+    /// The stream's position in the track isn't known exactly (LMS never says
+    /// where a stream starts), so `estimatedSeconds` is refined by finding the
+    /// last audio we played in `searchSeconds` of the file around it, and
+    /// playback continues at the very next sample. Call after the decode loop
+    /// ended. The file must have the push stream's rate and channels. The
+    /// decoder's own position stays stream-relative (LMS adds the stream's
+    /// start offset to our STAT elapsed itself, StreamingController.pm
+    /// playingSongElapsed; rig O16/O17: correcting it here doubled a seek);
+    /// the coordinator seeds the time tracker from the match instead.
+    func continueFromLocalFile(path: String, estimatedSeconds: Double, searchSeconds: Double = 8,
+                               minimumConfidence: Float = minimumMatchConfidence,
+                               completion: @escaping (Result<ContinuationResult, ContinuationFailure>) -> Void) {
+        // The generation now, on the caller's thread: a start queued after this
+        // call (a skip, a new strm) supersedes the continuation.
+        stateLock.lock()
+        let generation = decodeGeneration
+        stateLock.unlock()
+        decodeQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            let stopped = self.manualStop || generation != self.decodeGeneration
+            self.stateLock.unlock()
+            let fail = { (why: String, failure: ContinuationFailure) in
+                os_log(.error, log: self.logger, "🛟 Can't continue from the downloaded copy: %{public}s", why)
+                DispatchQueue.main.async { completion(.failure(failure)) }
+            }
+            guard !stopped, self.pushStream != 0, self.decoderStream == 0 else {
+                return fail("decoder busy or stopped", .transient)
+            }
+
+            let file = BASS_StreamCreateFile(DWORD(BASS_FILE_NAME), path, 0, 0, DWORD(BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT))
+            guard file != 0 else { return fail("open error \(BASS_ErrorGetCode())", .transient) }
+            var info = BASS_CHANNELINFO()
+            BASS_ChannelGetInfo(file, &info)
+            guard Int(info.freq) == self.sampleRate, Int(info.chans) == self.channels else {
+                BASS_StreamFree(file)
+                return fail("format \(info.freq)Hz/\(info.chans)ch, playing \(self.sampleRate)Hz/\(self.channels)ch", .format)
+            }
+
+            // Decode a window around the estimate and find our last audio in it.
+            // The window is capped by memory (float PCM): 60s at 48 kHz stereo is 23 MB.
+            let rate = self.sampleRate, chans = self.channels
+            let span = min(searchSeconds, 60.0 * 48000.0 / Double(rate))
+            let windowStart = max(0, estimatedSeconds - span / 2)
+            BASS_ChannelSetPosition(file, BASS_ChannelSeconds2Bytes(file, windowStart), DWORD(BASS_POS_BYTE))
+            let windowFrames = Int(span * Double(rate))
+            var window = [Float](repeating: 0, count: windowFrames * chans)
+            var filled = 0
+            let windowSamples = window.count
+            while filled < windowSamples {
+                let got = window.withUnsafeMutableBufferPointer { buf in
+                    BASS_ChannelGetData(file, buf.baseAddress! + filled, DWORD((windowSamples - filled) * 4))
+                }
+                if got == DWORD.max || got == 0 { break }
+                filled += Int(got) / 4
+            }
+            window.removeSubrange(filled..<windowSamples)
+            let reference = self.recentPCM.last(frames: Int(Self.matchReferenceSeconds * Double(rate)), channels: chans)
+
+            // Coarse search at ~11 kHz whatever the rate (keeps 96/192k affordable).
+            let decimation = max(4, rate / 11025)
+            let match = PCMAligner.find(reference: reference, in: window, channels: chans, decimation: decimation)
+            guard let match = match, match.confidence >= minimumConfidence else {
+                // Continuing at a guess would skip or repeat audibly: let the coordinator recover instead.
+                BASS_StreamFree(file)
+                return fail(String(format: "no reliable match (%.3f, need %.2f, %.0fs window)",
+                                   match?.confidence ?? 0, minimumConfidence, span), .noMatch(match?.confidence ?? 0))
+            }
+            var joinFrame = match.frame + reference.count / chans
+            let seconds = windowStart + Double(joinFrame) / Double(rate)
+            let result = ContinuationResult(fileSeconds: seconds, correctionMs: (seconds - estimatedSeconds) * 1000,
+                                            confidence: match.confidence, aligned: true)
+            joinFrame = min(max(0, joinFrame), window.count / chans)
+
+            // Claim the loop slot for the file, then push the rest of the window.
+            self.stateLock.lock()
+            guard generation == self.decodeGeneration, !self.manualStop else {
+                self.stateLock.unlock()
+                BASS_StreamFree(file)
+                return fail("superseded", .transient)
+            }
+            self.decoderStream = file
+            self.decoderIsLocalFile = true
+            self.isDecoding = true
+            self.decodeCompletedNaturally = false
+            self.lastDecodeEndSeconds = nil
+            self.abandonNetworkRequested = false
+            self.statStreamConnected = false
+            let tail = Array(window[(joinFrame * chans)...])
+            if !tail.isEmpty {
+                let pushed = tail.withUnsafeBytes { ptr in
+                    BASS_StreamPutData(self.pushStream, UnsafeMutableRawPointer(mutating: ptr.baseAddress), DWORD(tail.count * 4))
+                }
+                if pushed != DWORD.max { self.totalBytesPushed += UInt64(tail.count * 4) }
+            }
+            self.stateLock.unlock()
+            self.recentPCM.append(tail, count: tail.count, capacity: 2 * rate * chans)
+
+            os_log(.info, log: self.logger, "🛟 Continuing from the downloaded copy at %.3fs (estimate %.3fs, %+.0f ms, match %.3f, %.0fs window)",
+                   result.fileSeconds, estimatedSeconds, result.correctionMs, result.confidence, span)
+            DispatchQueue.main.async { completion(.success(result)) }
+            self.updateStreamInfoFromDecoder(file)
+            self.runDecoderLoop(generation: generation)
+        }
     }
 
     // MARK: - Stream Info Update

@@ -34,6 +34,59 @@ class SettingsManager: ObservableObject {
     @Published var currentActiveServer: ServerType = .primary
     @Published var audioFormat: AudioFormat = SettingsManager.defaultAudioFormat
     @Published var enableAppOpenRecovery: Bool = true  // Resume position when app returns from background
+
+    /// Hidden developer switch (no UI): reconnect with squeezelite's HELO
+    /// reconnect bit, so LMS keeps the session through a network drop. Off =
+    /// the old fresh HELO (LMS restarts or stops the stream on reconnect).
+    /// Set with `defaults write elm.LMS-StreamTest SeamlessReconnect -bool NO`
+    /// or the launch argument `-SeamlessReconnect NO`.
+    var seamlessReconnect: Bool {
+        // integer/bool(forKey:) also parse launch arguments, which arrive as strings.
+        UserDefaults.standard.object(forKey: "SeamlessReconnect") == nil
+            ? true : UserDefaults.standard.bool(forKey: "SeamlessReconnect")
+    }
+
+    /// The hidden switches given as launch arguments (Xcode scheme, devicectl,
+    /// simctl) are kept, so a later launch from the home screen still has them.
+    /// `-Lifeboat 0` / `-SeamlessReconnect YES` turn them back.
+    private func persistDeveloperSwitchesFromLaunchArguments() {
+        let args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        if let value = args["Lifeboat"] {
+            let mode = Int("\(value)") ?? 0
+            UserDefaults.standard.set(mode, forKey: "Lifeboat")
+            os_log(.info, log: logger, "🛠️ Lifeboat mode %d saved from launch arguments", mode)
+        }
+        if let value = args["SeamlessReconnect"] {
+            let on = ["1", "yes", "true"].contains("\(value)".lowercased())
+            UserDefaults.standard.set(on, forKey: "SeamlessReconnect")
+            os_log(.info, log: logger, "🛠️ Seamless reconnect %{public}s saved from launch arguments", on ? "ON" : "OFF")
+        }
+    }
+
+    /// Offline playback ("Keep Playing Offline"): download the queue ahead
+    /// to play through a dead spot. 0 = off, 1 = download on Wi-Fi only,
+    /// 2 = always. Launch argument `-Lifeboat 2`.
+    var lifeboatMode: Int {
+        get { UserDefaults.standard.integer(forKey: "Lifeboat") }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: "Lifeboat")
+        }
+    }
+
+    static let lifeboatMinuteChoices = [15, 30, 60]
+
+    /// How much music ahead to keep downloaded, in minutes.
+    var lifeboatMinutes: Int {
+        get {
+            let value = UserDefaults.standard.integer(forKey: "LifeboatMinutes")
+            return Self.lifeboatMinuteChoices.contains(value) ? value : 30
+        }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: "LifeboatMinutes")
+        }
+    }
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
@@ -315,6 +368,7 @@ class SettingsManager: ObservableObject {
         os_log(.info, log: logger, "Loading settings from UserDefaults")
         
         migrateSettingsIfNeeded()
+        persistDeveloperSwitchesFromLaunchArguments()
         
         serverHost = UserDefaults.standard.string(forKey: Keys.serverHost) ?? ""
         serverWebPort = UserDefaults.standard.object(forKey: Keys.serverWebPort) as? Int ?? 9000

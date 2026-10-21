@@ -43,8 +43,10 @@ codesign), boots the simulator, pre-seeds UserDefaults so the app launches
 already configured against the test server, and runs the scenarios. Exit
 nonzero on any failure.
 
+The defaults point at the `lms-test` server on ser5 (web 9010, SlimProto 3490; demo library), so test players never land on the production LMS.
+
 Env knobs (defaults): `LYRPLAY_LMS_HOST` (192.168.1.8), `LYRPLAY_LMS_PORT`
-(9000), `LYRPLAY_SLIM_PORT` (3483), `LYRPLAY_SIM_NAME` (iPhone 17),
+(9010), `LYRPLAY_SLIM_PORT` (3490), `LYRPLAY_SIM_NAME` (iPhone 17),
 `LYRPLAY_PLAYER_NAME` (SmokeTest Player), `LYRPLAY_PLAYER_ID` (skips
 discovery), `LYRPLAY_SOAK_SECONDS` (60), `LYRPLAY_APP_PATH` (prebuilt .app,
 skips the build).
@@ -88,6 +90,26 @@ smoke.py — Oracle (JSON-RPC client + assertion vocabulary),
 ```
 
 Python 3 stdlib only; no new dependencies.
+
+## Outage scenarios (O1–O25)
+
+Network drops and offline playback (saved copies). `faultproxy.py` runs on
+the host next to the test LMS and sits between the app and LMS: it freezes,
+refuses, cuts or throttles the app's connections while the oracle talks to
+LMS directly. `outage.py` holds the scenarios; its docstring has the table of
+outages and pass criteria, `faultproxy.py`'s the control API (`:9099`).
+
+```bash
+export LYRPLAY_APP_WEB_PORT=9011 LYRPLAY_APP_SLIM_PORT=3491   # the app goes through the proxy
+LYRPLAY_LAUNCH_ARGS="-Lifeboat 2" scripts/smoke/run.sh        # build + smoke S1–S6
+LYRPLAY_LIFEBOAT=1 python3 scripts/smoke/outage.py O1 O2 O3 O4 O6 O7 O8 O9 O10 O11 O12 O13 O14 O15 O16 O17 O18 O19 O20 O21 O22 O23 O24 O25
+```
+
+O5 (320 s) runs only when named. O25 needs a queue that mixes FLAC and MP3
+songs: `LYRPLAY_MIXED_TRACKS=11,130,12,131,13,132` on the test LMS. Stream format for a run:
+`-AudioFormat <integer>0</integer>` (MP3) or `<integer>2</integer>` (Opus);
+the test LMS needs `prioritizeNative 0` for an Opus stream. The full run
+takes about 2 hours. Design: wiki `Architecture/Offline Playback.md`.
 
 ## Roadmap
 

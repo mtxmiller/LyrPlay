@@ -426,6 +426,31 @@ class AudioManager: NSObject, ObservableObject {
     func hasPushStream() -> Bool {
         return streamDecoder.hasValidStream()  // Check for valid stream (playing OR paused)
     }
+
+    /// The push stream's download as the control plane may see it.
+    func pushStreamState() -> AudioStreamDecoder.StreamState {
+        return streamDecoder.streamState()
+    }
+
+    /// Continue the cut track from a downloaded copy (see AudioStreamDecoder).
+    func continueFromLocalFile(path: String, estimatedSeconds: Double, searchSeconds: Double, minimumConfidence: Float,
+                               completion: @escaping (Result<AudioStreamDecoder.ContinuationResult,
+                                                             AudioStreamDecoder.ContinuationFailure>) -> Void) {
+        streamDecoder.continueFromLocalFile(path: path, estimatedSeconds: estimatedSeconds, searchSeconds: searchSeconds,
+                                            minimumConfidence: minimumConfidence, completion: completion)
+    }
+
+    /// Let the decoder end a stalled network stream (see AudioStreamDecoder).
+    func abandonNetworkStream() {
+        streamDecoder.abandonNetworkStream()
+    }
+
+    /// Seconds of decoded audio queued but not yet played (push stream).
+    func bufferedPlaybackSeconds() -> Double {
+        let bytesPerSecond = streamDecoder.nominalBytesPerSecond
+        guard bytesPerSecond > 0 else { return 0 }
+        return Double(streamDecoder.statTelemetry().outputBufferedBytes) / Double(bytesPerSecond)
+    }
     
     // MARK: - Volume Control
     func setVolume(_ volume: Float) {
