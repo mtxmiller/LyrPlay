@@ -406,8 +406,13 @@ class SlimProtoCoordinator: ObservableObject {
     /// The STMd of a copy queued behind the playing song waits until that copy
     /// plays: at most one song queued behind the playing one.
     private var copyDecodeEndHeld = false
-    /// Our reconnect jump, while its strm may still come (handback).
+    /// A copy plays the song our reconnect jump is about to target: armed for
+    /// real (expectedHandback) only when the jump is sent.
+    private var handbackCandidate: (index: Int, id: String, at: Date)?
+    /// Our reconnect jump, just sent: its 'q' and 's' are due (handback).
     private var expectedHandback: (target: CopyPlaybackDecision.ExpectedHandback, at: Date)?
+    /// The jump's target once its 'q' was deferred: for that strm 's' only.
+    private var deferredHandback: CopyPlaybackDecision.ExpectedHandback?
     /// LMS's strm 'q' for our own jump: the copy keeps playing until the strm 's'.
     private var handbackStopDeferred = false
     /// Asking LMS about a strm 's'; a strm 'p' meanwhile makes it start paused.
@@ -1409,6 +1414,14 @@ class SlimProtoCoordinator: ObservableObject {
         // which doesn't actually seek to the position. So we always play, then pause if needed.
         let noplayFlag = 0  // Always start playing
 
+        // The jump our offline copies asked for: its strm may hand back (bd 5syr).
+        if shouldPlay, let candidate = handbackCandidate, candidate.index == savedIndex,
+           Date().timeIntervalSince(candidate.at) < 15 {
+            expectedHandback = (CopyPlaybackDecision.ExpectedHandback(index: savedIndex, id: candidate.id,
+                                                                      offset: savedPosition), Date())
+        }
+        handbackCandidate = nil
+
         let playlistJumpCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
@@ -2192,8 +2205,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         pausedDuringCopyDecision = false
         let afterDecodeError = decodeErrorSinceStrm
         decodeErrorSinceStrm = false
-        var handback = expectedHandback.flatMap { Date().timeIntervalSince($0.at) < 20 ? $0.target : nil }
+        var handback = deferredHandback
+            ?? expectedHandback.flatMap { Date().timeIntervalSince($0.at) < Self.handbackWindow ? $0.target : nil }
         expectedHandback = nil
+        deferredHandback = nil
         if isGapless { handback = nil }
 
         // A saved copy of the song may play instead of the stream (bd 5syr).
@@ -2202,7 +2217,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // below tells a sync group.)
         guard lifeboatEnabled, lifeboat.server == currentSessionServer,
               handback != nil || lifeboat.hasSavedCopies else {
-            statElapsedOffset = 0
+            if !isGapless { statElapsedOffset = 0 }  // gapless: the handed-back song still plays
             startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
                               waitForUnpause: waitForUnpause, isGapless: isGapless, copy: nil, connectedSent: false)
             return
@@ -2213,12 +2228,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // ask LMS. A non-gapless strm follows a flush, so our STATs report 0
         // elapsed meanwhile (squeezelite does too) and LMS's status time is then
         // the strm's start offset.
+        let staleElapsed = getCurrentAudioTime()  // what LMS may still add to the start offset
         reportZeroElapsedWhileDeciding = !isGapless
         copyDecisionPending = true
         os_log(.info, log: logger, "🔗 strm 's' - sending STMc, asking LMS which song this is")
         client.sendStatus("STMc")
         let generation = copyDecisionGeneration
-        askLMSAboutStrm(generation: generation, startMayBeStale: !isGapless) { [weak self] status in
+        // Only a first answer that may be a stale view of a start from 0, or
+        // of our jump, is worth asking again: a seek streams either way.
+        askLMSAboutStrm(generation: generation, startMayBeStale: !isGapless,
+                        staleElapsed: handback != nil ? nil : staleElapsed) { [weak self] status in
             guard let self = self else { return }
             self.reportZeroElapsedWhileDeciding = false
             self.copyDecisionPending = false
@@ -2229,7 +2248,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                                              handback: self.pausedDuringCopyDecision ? nil : handback,
                                              status: status)
             self.pausedDuringCopyDecision = false
-            self.statElapsedOffset = 0
+            if !isGapless { self.statElapsedOffset = 0 }  // gapless: the handed-back song still plays
             switch decision {
             case .file(let index):
                 if let file = self.lifeboat.fileURL(forIndex: index), let id = self.lifeboat.track(at: index)?.id {
@@ -2259,7 +2278,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// old song's elapsed on top of the start offset. A time of ~0 still
     /// proves a start from 0; anything else is asked again once, when the
     /// STMc has long been read.
-    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, attempt: Int = 0,
+    /// `staleElapsed`: the elapsed our STATs reported before the strm (nil:
+    /// always ask again); a first answer far from it is no stale view of a start from 0.
+    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, staleElapsed: Double?, attempt: Int = 0,
                                  completion: @escaping ([String: Any]?) -> Void) {
         let statusCommand: [String: Any] = [
             "id": 1, "method": "slim.request",
@@ -2274,10 +2295,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 }
                 let result = response["result"] as? [String: Any]
                 let time = (result?["time"] as? Double) ?? (result?["time"] as? Int).map(Double.init)
-                if startMayBeStale, attempt == 0, let time = time, time > CopyPlaybackDecision.startTolerance {
+                if startMayBeStale, attempt == 0, let time = time, time > CopyPlaybackDecision.startTolerance,
+                   staleElapsed.map({ abs(time - $0) < 1 }) ?? true {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                         guard let self = self, generation == self.copyDecisionGeneration else { return }
-                        self.askLMSAboutStrm(generation: generation, startMayBeStale: true, attempt: 1, completion: completion)
+                        self.askLMSAboutStrm(generation: generation, startMayBeStale: true, staleElapsed: staleElapsed,
+                                             attempt: 1, completion: completion)
                     }
                     return
                 }
@@ -2321,6 +2344,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             afterDecodeEnd: afterDecodeEnd, afterDecodeError: afterDecodeError,
             server: server, copies: copies, playing: playing, handback: handback)
     }
+
+    /// From our jump to its strm 'q' (or 's' without one).
+    static let handbackWindow: TimeInterval = 5
 
     /// LMS restarted the song a saved copy is playing, where our reconnect jump
     /// asked: keep the decoder and the time, tell LMS it is connected and
@@ -2502,13 +2528,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         reportZeroElapsedWhileDeciding = false
         copyDecisionPending = false
         copyDecodeEndHeld = false
-        if let expected = expectedHandback, Date().timeIntervalSince(expected.at) < 20,
+        if let expected = expectedHandback, Date().timeIntervalSince(expected.at) < Self.handbackWindow,
            playingCopy?.id == expected.target.id, audioManager.getPlayerState() == "Playing",
            !audioManager.pushStreamState().decodingAhead {
             // LMS stops us for the jump we asked for (StreamingController
             // _JumpToTime: stop, then stream). Its strm 's' follows at once and
             // decides: handback keeps the copy playing, a stream flushes it.
             os_log(.default, log: logger, "📼 LMS stopped us for our jump - the saved copy plays on until its strm")
+            // One stop only: a later one (Stop in Material) stops as usual.
+            deferredHandback = expected.target
+            expectedHandback = nil
             handbackStopDeferred = true
             expectingGaplessTransition = false
             let generation = copyDecisionGeneration
@@ -2516,7 +2545,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 guard let self = self, self.handbackStopDeferred, self.copyDecisionGeneration == generation else { return }
                 os_log(.default, log: self.logger, "📼 No strm after LMS's stop - stopping the saved copy")
                 self.handbackStopDeferred = false
-                self.expectedHandback = nil
+                self.deferredHandback = nil
                 self.didStopStream()
             }
             return
@@ -2742,6 +2771,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func hasActiveStream() -> Bool {
+        // A strm 's' being decided has no decoder yet: a 'u' meanwhile is a
+        // plain resume, not a lost stream to recover.
+        if copyDecisionPending { return true }
         // Check if we have an active BASS stream (not stale after reconnect)
         // This includes both URL streams (audioPlayer) and push streams (streamDecoder)
         let playerState = audioManager.getPlayerState()
@@ -5229,7 +5261,7 @@ extension SlimProtoCoordinator {
                     if stillOnPlayedTrack, let index = target, let playedID = playedID,
                        self.playingCopy?.id == playedID, self.audioManager.getPlayerState() == "Playing" {
                         // A copy of this song plays now: the jump's strm hands back (bd 5syr).
-                        self.expectedHandback = (CopyPlaybackDecision.ExpectedHandback(index: index, id: playedID, offset: position), Date())
+                        self.handbackCandidate = (index, playedID, Date())
                     }
                     self.performPlaylistRecovery(shouldPlay: true)
                 }
