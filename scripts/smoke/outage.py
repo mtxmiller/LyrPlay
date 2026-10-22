@@ -43,6 +43,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O25 | phase 2: a mixed FLAC/MP3 queue (`LYRPLAY_MIXED_TRACKS`), 240s offline across a FLAC → MP3 boundary (Opus copy, then the MP3 original at another rate) | as O6 (±8s) |
 | O26 | phase 2: seek +20s into a 400 kbit/s stream, the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
 | O27 | phase 2: 60s offline with a Next at 20s (the copy of the next track); then web requests held 32s while SlimProto is back and delivered when the hold ends (the reconnect jump times out, its retry goes out, the first jump lands late) | LMS on the continuous position (±8s), "Handback" in the app log, no stream after the outage, time never steps back |
+| O28 | all connections cut (SlimProto reconnects at once) with Material's next cometd request stranded by the proxy (`/strand`): alive, never answered, like a request orphaned by a cellular → Wi-Fi handover | the app restarts Material's link ("Material link restarted" in the app log) and Material reports it back within 25s of the cut; no further loss; time never steps back |
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
@@ -808,6 +809,48 @@ def o27_jump_lost_then_lands_late(oracle, album_id):
         raise CheckFailed(f"a stream was opened after the outage (the copy was flushed): {streams}")
 
 
+def o28_material_link_stranded(oracle, album_id):
+    # Device log 2026-10-21 21:35 (build 17): after airplane mode, SlimProto
+    # reconnected on cellular and Wi-Fi took over two seconds later. Material's
+    # reconnect went out in between and the handover orphaned it (in flight,
+    # never answered), so Material kept its red icon until that request's own
+    # 70s timeout while the song had long moved on; Material's own reconnect
+    # cannot cut an in-flight request. The proxy strands Material's next cometd
+    # request the same way: /kill cuts every connection (SlimProto reconnects
+    # at once), Material retries at once into the strand. The app must restart
+    # Material's link within seconds of its own reconnect (bd toz7); without
+    # that, Material comes back only after 70s.
+    fresh_start(oracle, album_id, settle=15)
+    if app_log_count("Material: connected", minutes=10) < 1:
+        raise CheckFailed("Material never reported its link before the cut (nativeConnectionStatus missing?)")
+    fault("/strand?path=/cometd&count=1")
+    t_cut = time.time()
+    fault("/kill")
+    print("   … every connection cut; Material's reconnect request stranded", flush=True)
+    wait_back(oracle, timeout=30)
+    deadline = t_cut + 25
+    while time.time() < deadline and app_log_count("Material: connected", since=t_cut) < 1:
+        time.sleep(1)
+    took = time.time() - t_cut
+    back = app_log_count("Material: connected", since=t_cut)
+    lost = app_log_count("Material: lost", since=t_cut)
+    restarts = app_log_count("Material link restarted", since=t_cut)
+    stranded = fault("/status").count('"stranded": true')
+    print(f"   … Material reported lost: {lost}, back: {back} ({took:.0f}s after the cut); "
+          f"link restarts: {restarts}; stranded requests at the proxy: {stranded}", flush=True)
+    if stranded < 1:
+        raise CheckFailed("the proxy stranded nothing: Material's reconnect did not go out as expected")
+    if back < 1:
+        raise CheckFailed(f"Material did not report its link back within 25s of the cut (restarts: {restarts})")
+    if restarts < 1:
+        raise CheckFailed("Material came back without the app's link restart (the scenario did not strand its reconnect)")
+    t_back = time.time()
+    time.sleep(15)
+    if app_log_count("Material: lost", since=t_back):
+        raise CheckFailed("Material lost its link again after the restart")
+    watch_monotonic(oracle, seconds=8)
+
+
 def o23_background_foreground_offline(oracle, album_id):
     # Playing copies offline, the app goes to the background (another app in
     # front) and comes back: the foreground recovery must not disturb the
@@ -1300,6 +1343,7 @@ SCENARIOS = [
     ("O25", "mixed FLAC/MP3 queue offline", o25_mixed_formats),
     ("O26", "failed match restarts the copy", o26_failed_match_restarts_copy),
     ("O27", "jump lost, lands late", o27_jump_lost_then_lands_late),
+    ("O28", "Material link stranded", o28_material_link_stranded),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),

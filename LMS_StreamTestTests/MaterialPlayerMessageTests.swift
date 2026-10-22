@@ -51,4 +51,50 @@ final class MaterialPlayerMessageTests: XCTestCase {
         XCTAssertEqual(msg?.id, "aa:bb:cc:dd:ee:ff")
         XCTAssertEqual(msg?.ip, "10.0.0.2")
     }
+
+    func testPlayerParserRejectsConnectionStatus() {
+        XCTAssertNil(MaterialPlayerMessage.parse("MATERIAL-CONNETIONSTATUS\nCONNECTED false"))
+    }
+}
+
+/// Material's link report (bd toz7), lms-material server.js:
+/// `emitNative("MATERIAL-CONNETIONSTATUS\nCONNECTED " + connected, ...)`
+/// when loaded with ?nativeConnectionStatus=w. Material's own spelling.
+final class MaterialConnectionMessageTests: XCTestCase {
+
+    func testParseConnected() {
+        XCTAssertEqual(MaterialConnectionMessage.parse("MATERIAL-CONNETIONSTATUS\nCONNECTED true"),
+                       MaterialConnectionMessage(connected: true))
+    }
+
+    func testParseLost() {
+        XCTAssertEqual(MaterialConnectionMessage.parse("MATERIAL-CONNETIONSTATUS\nCONNECTED false"),
+                       MaterialConnectionMessage(connected: false))
+    }
+
+    func testParseRejectsPlayerMessage() {
+        XCTAssertNil(MaterialConnectionMessage.parse("MATERIAL-PLAYER\nID aa:bb:cc:dd:ee:ff"))
+    }
+
+    func testParseRejectsMissingOrOddValue() {
+        XCTAssertNil(MaterialConnectionMessage.parse("MATERIAL-CONNETIONSTATUS"))
+        XCTAssertNil(MaterialConnectionMessage.parse("MATERIAL-CONNETIONSTATUS\nCONNECTED maybe"))
+    }
+}
+
+/// The restart script only acts on Material's own objects (MaterialReconnect).
+final class MaterialReconnectTests: XCTestCase {
+
+    func testScriptCarriesTheForceFlagAndMaterialsOwnRestart() {
+        let forced = MaterialReconnect.script(force: true)
+        let gentle = MaterialReconnect.script(force: false)
+        XCTAssertTrue(forced.hasSuffix("})(true);"))
+        XCTAssertTrue(gentle.hasSuffix("})(false);"))
+        for script in [forced, gentle] {
+            XCTAssertTrue(script.contains("clearListeners()"))
+            XCTAssertTrue(script.contains("disconnect()"))
+            XCTAssertTrue(script.contains("connectToCometD()"))
+            XCTAssertTrue(script.contains("typeof lmsIsConnected === 'undefined'"))
+        }
+    }
 }
