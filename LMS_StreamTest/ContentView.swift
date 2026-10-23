@@ -85,9 +85,27 @@ struct ContentView: View {
             }
         }
         .onReceive(settings.$isConfigured) { isConfigured in
-            if isConfigured && !hasConnected {
-                hasShownError = false  // Reset error flag
-                hasConnectionError = false
+            guard isConfigured else { return }
+            hasShownError = false  // Reset error flag
+            hasConnectionError = false
+            // Setup just finished: on first run, or after Reset All Settings and
+            // setup again. A connection that already exists (from before the
+            // reset, or made at launch from the old settings) carries the old
+            // server, name or player ID, so drop it and connect with the values
+            // just entered. Keeping it left the player off the new server until
+            // the next background/foreground cycle reconnected (bd t4o5).
+            if hasConnected || slimProtoCoordinator.isConnected {
+                os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
+                       "🔄 Setup finished with a connection already up - reconnecting with the new settings")
+                hasConnected = true   // mainAppView's onAppear must not start a second connect
+                audioManager.setSlimClient(slimProtoCoordinator)
+                slimProtoCoordinator.resetConnectionManager()
+                Task {
+                    // Drops the socket, waits half a second, connects with the
+                    // settings as they are now (host, port, name, player ID).
+                    await slimProtoCoordinator.restartConnection()
+                }
+            } else {
                 connectToLMS()
             }
         }
@@ -98,6 +116,16 @@ struct ContentView: View {
             hasShownError = false
             hasHandledError = false
             loadError = nil
+
+            // Reset All Settings: there is no server to reconnect to until setup
+            // finishes (the isConfigured publisher above connects then). Without
+            // this the empty host counted as a change and started a connection
+            // to "" (bd t4o5).
+            guard settings.isConfigured else {
+                slimProtoCoordinator.disconnect()
+                hasConnected = false
+                return
+            }
 
             // IMPROVED: Force update server settings and reconnect if ANY server setting changed
             let currentHost = settings.activeServerHost

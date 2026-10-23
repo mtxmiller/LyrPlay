@@ -431,6 +431,20 @@ class SettingsManager: ObservableObject {
             os_log(.info, log: logger, "✅ Loaded primary server credentials from Keychain (username: %{public}s)", primaryCreds.username)
         }
 
+        // Rig seed: credentials written to the defaults domain (`defaults write …
+        // ServerUsername/ServerPassword`, like the other settings the smoke
+        // harness seeds) are adopted once, moved to the Keychain and removed
+        // from the defaults so they never stay there in plain text.
+        if serverUsername.isEmpty,
+           let seededUser = UserDefaults.standard.string(forKey: "ServerUsername"), !seededUser.isEmpty {
+            serverUsername = seededUser
+            serverPassword = UserDefaults.standard.string(forKey: "ServerPassword") ?? ""
+            _ = KeychainManager.shared.save(username: serverUsername, password: serverPassword, for: .primary)
+            UserDefaults.standard.removeObject(forKey: "ServerUsername")
+            UserDefaults.standard.removeObject(forKey: "ServerPassword")
+            os_log(.info, log: logger, "🛠️ Primary server credentials seeded from defaults (user: %{public}s)", seededUser)
+        }
+
         if let backupCreds = KeychainManager.shared.load(for: .backup) {
             backupServerUsername = backupCreds.username
             backupServerPassword = backupCreds.password
