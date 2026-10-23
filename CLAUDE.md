@@ -34,7 +34,7 @@ For the CLI build → install → launch loop on a connected iPhone, see the wik
 Unit test targets exist on both platforms (Swift Testing + XCTest). Run them before claiming a change works:
 
 ```bash
-# tvOS — use -only-testing: the UITests runner has a known dlopen failure (bd LMS_StreamTest-39m)
+# tvOS — -only-testing keeps it to the unit suite (the UI runner also loads since 2026-10-23, bd 39m fixed)
 xcodebuild test -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest-tvOS \
   -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation)' \
   -only-testing:LMS_StreamTest-tvOSTests
