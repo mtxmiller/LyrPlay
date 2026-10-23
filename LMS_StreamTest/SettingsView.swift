@@ -24,6 +24,7 @@ struct SettingsView: View {
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
+    @State private var playbackSource: String?   // "streaming" / "playing saved copy" while audio plays
     private let connectionPoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     // Server-side Fixed Output + ReplayGain prefs (bd x19i)
@@ -280,7 +281,9 @@ struct SettingsView: View {
             return "Offline · \(offline.isPaused ? "paused" : "playing saved music") · \(left)"
         }
         if isConnectedNow {
-            return settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
+            let server = settings.currentActiveServer == .backup ? "Connected to backup" : "Connected"
+            // Online, a song can come from its saved copy instead of the stream (bd 5syr).
+            return playbackSource.map { "\(server) · \($0)" } ?? server
         }
         switch connectionStateText {
         case "Connecting", "Reconnecting": return "\(connectionStateText)…"
@@ -304,6 +307,12 @@ struct SettingsView: View {
         offlineStatus = coordinator.offlinePlaybackStatus
         savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
+        switch audioPlayer.getPlayerState() {
+        case "Playing", "Buffering":
+            playbackSource = audioPlayer.currentStreamInfo?.isSavedCopy == true ? "playing saved copy" : "streaming"
+        default:
+            playbackSource = nil
+        }
     }
 
     // MARK: - Audio
@@ -331,7 +340,7 @@ struct SettingsView: View {
         } header: {
             Text("Offline")
         } footer: {
-            Text("Downloads the next songs in your queue so music keeps playing through dead spots, then picks up on the server where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
+            Text("Saves the next songs in your queue on the phone. Saved songs play from the phone instead of streaming, so music keeps playing through dead spots, and the server picks up where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
         }
         .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
     }
@@ -434,7 +443,8 @@ struct SettingsView: View {
         case .native: alterations = []
         case .nativeRate(let a), .resampled(let a): alterations = a
         }
-        let path = "\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
+        let source = stream.isSavedCopy ? "Saved copy · " : ""
+        let path = "\(source)\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
         return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text("Signal Path")

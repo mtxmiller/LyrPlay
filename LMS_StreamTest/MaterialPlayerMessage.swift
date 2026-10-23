@@ -38,3 +38,29 @@ struct MaterialPlayerMessage: Equatable {
         return MaterialPlayerMessage(id: id, name: name, ip: ip)
     }
 }
+
+/// Material's report of its own (cometd) link to LMS, posted to the same
+/// `mskNative` handler when loaded with `?nativeConnectionStatus=w`
+/// (lms-material server.js, on every `networkStatus` change). The header is
+/// Material's spelling:
+///
+///     MATERIAL-CONNETIONSTATUS
+///     CONNECTED true
+///
+/// `connected` false is what puts the red icon in Material's toolbar (bd toz7).
+struct MaterialConnectionMessage: Equatable {
+    let connected: Bool
+
+    static func parse(_ raw: String) -> MaterialConnectionMessage? {
+        let lines = raw.components(separatedBy: "\n")
+        guard lines.first == "MATERIAL-CONNETIONSTATUS" else { return nil }
+        for line in lines.dropFirst() where line.hasPrefix("CONNECTED ") {
+            switch line.dropFirst(10).trimmingCharacters(in: .whitespaces) {
+            case "true": return MaterialConnectionMessage(connected: true)
+            case "false": return MaterialConnectionMessage(connected: false)
+            default: return nil
+            }
+        }
+        return nil
+    }
+}

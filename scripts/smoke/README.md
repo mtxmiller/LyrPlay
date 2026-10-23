@@ -91,7 +91,7 @@ smoke.py — Oracle (JSON-RPC client + assertion vocabulary),
 
 Python 3 stdlib only; no new dependencies.
 
-## Outage scenarios (O1–O25)
+## Outage scenarios (O1–O26, P1–P9)
 
 Network drops and offline playback (saved copies). `faultproxy.py` runs on
 the host next to the test LMS and sits between the app and LMS: it freezes,
@@ -102,8 +102,16 @@ outages and pass criteria, `faultproxy.py`'s the control API (`:9099`).
 ```bash
 export LYRPLAY_APP_WEB_PORT=9011 LYRPLAY_APP_SLIM_PORT=3491   # the app goes through the proxy
 LYRPLAY_LAUNCH_ARGS="-Lifeboat 2" scripts/smoke/run.sh        # build + smoke S1–S6
-LYRPLAY_LIFEBOAT=1 python3 scripts/smoke/outage.py O1 O2 O3 O4 O6 O7 O8 O9 O10 O11 O12 O13 O14 O15 O16 O17 O18 O19 O20 O21 O22 O23 O24 O25
+LYRPLAY_LIFEBOAT=1 python3 scripts/smoke/outage.py O1 O2 O3 O4 O6 O7 O8 O9 O10 O11 O12 O13 O14 O15 O16 O17 O18 O19 O20 O21 O22 O23 O24 O25 O26
+LYRPLAY_LIFEBOAT=1 python3 scripts/smoke/outage.py P1 P2 P3 P4 P5 P6 P7 P8 P9
 ```
+
+Saved copies played online (bd 5syr): `P1`–`P9` (table in `outage.py`).
+They count the app's `.default` log lines and the proxy's request log
+(`/requests`: every HTTP request line the app sent, so a scenario can tell
+which songs were streamed). P8 starts `fakeplayer.py` (a silent SlimProto
+player) on the LMS host over ssh (`LYRPLAY_FAKE_HOST`, default ser5) for a
+sync group; P9 counts transcoder processes in the `lms-test` container.
 
 O5 (320 s) runs only when named. O25 needs a queue that mixes FLAC and MP3
 songs: `LYRPLAY_MIXED_TRACKS=11,130,12,131,13,132` on the test LMS. Stream format for a run:

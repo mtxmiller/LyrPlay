@@ -111,10 +111,26 @@ class SlimProtoCoordinator: ObservableObject {
 
     /// Which target a recovery jumps to. A retry within the same outage hold
     /// keeps the original target: nothing has played since, so the user is
-    /// still where it was.
+    /// still where it was — unless a saved copy kept playing (see
+    /// retargetRetryToPlayingCopy).
     static func resolveRecoveryTarget(saved: RecoveryTarget?, kept: RecoveryTarget?, isAudibleRetry: Bool) -> RecoveryTarget? {
         if isAudibleRetry, let kept = kept { return kept }
         return saved
+    }
+
+    /// A saved copy of the kept target's song kept playing while the failed
+    /// jump was out: the retry moves LMS to where the copy is now, and its
+    /// strm may hand back too (device log 2026-10-21 15:52: the retry re-sent
+    /// a target 15 s behind the copy, and the stream restarted the song there).
+    private func retargetRetryToPlayingCopy() {
+        guard let copy = playingCopy, audioManager.getPlayerState() == "Playing",
+              let kept = audibleRecoveryTarget, kept.index == copy.index else { return }
+        let position = audioManager.getAudioPlayerTimeForFallback()
+        guard position > 0 else { return }
+        audibleRecoveryTarget = RecoveryTarget(index: kept.index, position: position)
+        handbackCandidate = (kept.index, copy.id, Date())
+        os_log(.info, log: logger, "🔁 Retry targets the saved copy where it plays now: track %d at %.1fs (was %.1fs)",
+               kept.index, position, kept.position)
     }
 
     /// Media services reset (bd 27ye): what playback looked like at the loss
@@ -382,6 +398,47 @@ class SlimProtoCoordinator: ObservableObject {
     /// in this case prematurely jumps the server's controller state machine to
     /// PLAYING, which then drops the subsequent STMl and never issues 'u'.
     private var pendingUnpauseSTMs: Bool = false
+
+    // MARK: - Playing saved copies online (bd 5syr)
+    /// A saved copy of a song, as played in place of LMS's stream.
+    struct CopySource: Equatable {
+        let index: Int
+        let id: String
+    }
+    /// The song being decoded comes from a saved copy (queued or playing).
+    private var decodingCopy: CopySource?
+    /// The song playing now comes from a saved copy (Signal Path, handback).
+    private(set) var playingCopy: CopySource?
+    /// One per strm 's' / stop: a status reply for an older one is dropped.
+    private var copyDecisionGeneration = 0
+    /// STATs report 0 elapsed while we ask LMS where the strm starts (its
+    /// status time is then the start offset), as squeezelite does after a flush.
+    private var reportZeroElapsedWhileDeciding = false
+    /// Subtracted from STAT elapsed after a handback: LMS adds the strm's
+    /// start offset itself, our copy reports song time.
+    private var statElapsedOffset: Double = 0
+    /// The last STAT since the last strm was STMn: LMS skips ahead from the failed song.
+    private var decodeErrorSinceStrm = false
+    /// The STMd of a copy queued behind the playing song waits until that copy
+    /// plays: at most one song queued behind the playing one.
+    private var copyDecodeEndHeld = false
+    /// A copy plays the song our reconnect jump is about to target: armed for
+    /// real (expectedHandbacks) only when the jump is sent.
+    private var handbackCandidate: (index: Int, id: String, at: Date)?
+    /// Our reconnect jumps whose 'q' and 's' may still come (handback): the one
+    /// just sent, and any that got no reply — LMS can still run such a jump
+    /// much later, on top of its retry (device log 2026-10-21 15:52: the first
+    /// jump landed 25 s after it was sent, 8 s after the retry's strm). Each
+    /// expires at `until`; a strm 's' consumes the one it answers to.
+    private var expectedHandbacks: [(target: CopyPlaybackDecision.ExpectedHandback, until: Date)] = []
+    /// LMS's strm 'q' for our own jump: the copy keeps playing until the strm 's'.
+    private var handbackStopDeferred = false
+    /// Asking LMS about a strm 's'; a strm 'p' meanwhile makes it start paused.
+    private var copyDecisionPending = false
+    private var pausedDuringCopyDecision = false
+    /// The output drained (STMu) while we asked LMS about a gapless strm:
+    /// nothing is left to queue behind, the song starts fresh (rig O22).
+    private var drainedDuringCopyDecision = false
 
     // MARK: - Legacy Timer (for compatibility)
     private var serverTimeTimer: Timer?
@@ -694,7 +751,10 @@ class SlimProtoCoordinator: ObservableObject {
     var isConnected: Bool {
         return connectionManager.connectionState.isConnected
     }
-    
+
+    /// When the current SlimProto connection was established (nil before the first).
+    var connectedAt: Date? { lastConnectedAt }
+
     var streamState: String {
         return commandHandler.streamState
     }
@@ -1375,6 +1435,15 @@ class SlimProtoCoordinator: ObservableObject {
         // which doesn't actually seek to the position. So we always play, then pause if needed.
         let noplayFlag = 0  // Always start playing
 
+        // The jump our offline copies asked for: its strm may hand back (bd 5syr).
+        var armedHandback: CopyPlaybackDecision.ExpectedHandback?
+        if shouldPlay, let candidate = handbackCandidate, candidate.index == savedIndex,
+           Date().timeIntervalSince(candidate.at) < 15 {
+            armedHandback = CopyPlaybackDecision.ExpectedHandback(index: savedIndex, id: candidate.id, offset: savedPosition)
+            expectHandback(armedHandback!, for: Self.handbackWindow)
+        }
+        handbackCandidate = nil
+
         let playlistJumpCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
@@ -1407,6 +1476,10 @@ class SlimProtoCoordinator: ObservableObject {
                     os_log(.error, log: self.logger, "[APP-RECOVERY] ❌ Playlist jump failed (no server response) - keeping recovery data")
                     self.isRecoveryInProgress = false
                     if shouldPlay {
+                        // The request may still reach LMS (a dead link retransmits
+                        // it once it is back): its strm must hand back, not restart
+                        // the copy the retry has meanwhile handed back.
+                        if let armed = armedHandback { self.expectHandback(armed, for: Self.lateJumpWindow) }
                         self.retryAudibleRecovery(reason: "jump failed")
                     } else {
                         self.silentRecoveryPauseGeneration = nil
@@ -1695,6 +1768,18 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         serverUnreachableSince = serverUnreachableSince ?? Date()
+        // A strm being decided died with the connection: its status reply is
+        // void, and hasActiveStream must not call the reconnect's 'u' a resume.
+        copyDecisionGeneration += 1
+        copyDecisionPending = false
+        reportZeroElapsedWhileDeciding = false
+        pausedDuringCopyDecision = false
+        if copyDecodeEndHeld, !audioManager.pushStreamState().decodingAhead {
+            // The playing song's decode end was held for that decision: let it
+            // take the usual path now (a copy queued behind keeps its hold).
+            copyDecodeEndHeld = false
+            DispatchQueue.main.async { [weak self] in self?.sendTrackDecodeComplete() }  // after this handler's bookkeeping
+        }
 
         // UNIFIED RECOVERY: Capture playback state for networkRestored recovery (LMS_StreamTest-6lb)
         let playerState = audioManager.getPlayerState()
@@ -2060,6 +2145,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
         lastServerStreamStartAt = Date()
         clearHeldTrackEnd()
+        decodingCopy = nil
+        playingCopy = nil
+        statElapsedOffset = 0
+        // An HTTP stream is never a copy: void a pending decision, and the
+        // deferred stop's timer must not stop this stream 5 s from now.
+        copyDecisionGeneration += 1
+        copyDecisionPending = false
+        reportZeroElapsedWhileDeciding = false
+        copyDecodeEndHeld = false
+        handbackStopDeferred = false
         os_log(.info, log: logger, "🎵 Starting stream: %{public}s from %.2f with replayGain %.4f", format, startTime, replayGain)
 
         // Stop any existing playback and timers first
@@ -2098,7 +2193,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         lastServerStreamStartAt = Date()
         // A stream that starts while we play is the next track's (LMS sends it
         // after our STMd); a start, seek or jump flushes playback first.
-        streamIsForNextTrack = audioManager.getPlayerState() == "Playing"
+        // (A copy kept playing over our own jump's stop is not a next track.)
+        streamIsForNextTrack = audioManager.getPlayerState() == "Playing" && !handbackStopDeferred
         clearHeldTrackEnd()
         currentStreamFormat = format
         lastStreamReplayGain = replayGain
@@ -2143,18 +2239,248 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         if isGapless {
             os_log(.info, log: logger, "🎵 Gapless transition detected - queuing next track while old audio plays")
         }
+        // Reset gapless flag after use
+        expectingGaplessTransition = false
+
+        copyDecisionGeneration += 1
+        copyDecodeEndHeld = false
+        reportZeroElapsedWhileDeciding = false
+        handbackStopDeferred = false
+        copyDecisionPending = false
+        pausedDuringCopyDecision = false
+        drainedDuringCopyDecision = false
+        let afterDecodeError = decodeErrorSinceStrm
+        decodeErrorSinceStrm = false
+        // Our jumps still awaiting their strm: the status below says which one this is.
+        let handbacks = isGapless ? [] : liveHandbacks()
+
+        // A saved copy of the song may play instead of the stream (bd 5syr).
+        // With no copy at all there is nothing to ask. (autostart '0' is not
+        // only sync groups: LMS starts a playlist jump with it too. The status
+        // below tells a sync group.)
+        guard lifeboatEnabled, lifeboat.server == currentSessionServer,
+              !handbacks.isEmpty || lifeboat.hasSavedCopies else {
+            if !isGapless { statElapsedOffset = 0 }  // gapless: the handed-back song still plays
+            startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
+                              waitForUnpause: waitForUnpause, isGapless: isGapless, copy: nil, connectedSent: false)
+            return
+        }
+
+        // LMS needs STMc after every strm 's' (Squeezebox2.pm statHandler ignores
+        // every other STAT until then). The strm names no song and no start time:
+        // ask LMS. A non-gapless strm follows a flush, so our STATs report 0
+        // elapsed meanwhile (squeezelite does too) and LMS's status time is then
+        // the strm's start offset.
+        let staleElapsed = getCurrentAudioTime()  // what LMS may still add to the start offset
+        reportZeroElapsedWhileDeciding = !isGapless
+        copyDecisionPending = true
+        os_log(.info, log: logger, "🔗 strm 's' - sending STMc, asking LMS which song this is")
+        client.sendStatus("STMc")
+        let generation = copyDecisionGeneration
+        // Only a first answer that may be a stale view of a start from 0, or
+        // of our jump, is worth asking again: a seek streams either way.
+        askLMSAboutStrm(generation: generation, startMayBeStale: !isGapless,
+                        staleElapsed: handbacks.isEmpty ? staleElapsed : nil) { [weak self] status in
+            guard let self = self else { return }
+            self.reportZeroElapsedWhileDeciding = false
+            self.copyDecisionPending = false
+            // A decode end held while we asked is moot: a start flushes it, a
+            // handback works it out again below.
+            self.copyDecodeEndHeld = false
+            // LMS paused us meanwhile: start, but play only on its 'u'.
+            let paused = self.pausedDuringCopyDecision || waitForUnpause
+            let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
+                                             afterDecodeError: afterDecodeError,
+                                             handbacks: self.pausedDuringCopyDecision ? [] : handbacks,
+                                             status: status)
+            self.pausedDuringCopyDecision = false
+            // The old song drained while we asked: queued "gaplessly" onto a
+            // drained push stream its boundary never fires (no STMs, rig O22).
+            let gapless = isGapless && !self.drainedDuringCopyDecision
+            if isGapless && !gapless {
+                os_log(.default, log: self.logger, "📼 The song before drained while asking LMS - starting the next one fresh")
+            }
+            if !gapless { self.statElapsedOffset = 0 }  // gapless: the handed-back song still plays
+            switch decision {
+            case .file(let index):
+                if let file = self.lifeboat.fileURL(forIndex: index), let id = self.lifeboat.track(at: index)?.id {
+                    // .default: persisted, so the rig can count it (P1-P9).
+                    os_log(.default, log: self.logger, "📼 Playing the saved copy of track %d instead of the stream (%{public}s)",
+                           index, isGapless ? "next song" : "from the start")
+                    self.startDirectStream(url: file.absoluteString, format: format, startTime: 0, replayGain: replayGain,
+                                           waitForUnpause: paused, isGapless: gapless,
+                                           copy: CopySource(index: index, id: id), connectedSent: true)
+                    return
+                }
+                os_log(.default, log: self.logger, "📼 Streaming: the copy of track %d is gone", index)
+            case .handback(let startOffset):
+                self.handBackToServer(startOffset: startOffset, waitForUnpause: waitForUnpause)
+                return
+            case .stream(let reason):
+                os_log(.default, log: self.logger, "📼 Streaming: %{public}s", reason)
+            }
+            self.startDirectStream(url: url, format: format, startTime: startTime, replayGain: replayGain,
+                                   waitForUnpause: paused, isGapless: gapless, copy: nil, connectedSent: true)
+        }
+    }
+
+    /// `status - 2` for a strm 's', on main (nil = no answer). LMS reads our
+    /// STATs and the JSON request in whatever order its select loop finds
+    /// them, so the first answer may predate the 0-elapsed STMc and show the
+    /// old song's elapsed on top of the start offset. A time of ~0 still
+    /// proves a start from 0; anything else is asked again once, when the
+    /// STMc has long been read.
+    /// `staleElapsed`: the elapsed our STATs reported before the strm (nil:
+    /// always ask again); a first answer far from it is no stale view of a start from 0.
+    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, staleElapsed: Double?, attempt: Int = 0,
+                                 completion: @escaping ([String: Any]?) -> Void) {
+        let statusCommand: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 2, "tags:o"]]
+        ]
+        sendJSONRPCCommandDirect(statusCommand, timeout: 2.0) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard generation == self.copyDecisionGeneration else {
+                    os_log(.info, log: self.logger, "📼 Status reply for an older strm - ignored")
+                    return
+                }
+                let result = response["result"] as? [String: Any]
+                let time = (result?["time"] as? Double) ?? (result?["time"] as? Int).map(Double.init)
+                if startMayBeStale, attempt == 0, let time = time, time > CopyPlaybackDecision.startTolerance,
+                   staleElapsed.map({ abs(time - $0) < 1 }) ?? true {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        guard let self = self, generation == self.copyDecisionGeneration else { return }
+                        self.askLMSAboutStrm(generation: generation, startMayBeStale: true, staleElapsed: staleElapsed,
+                                             attempt: 1, completion: completion)
+                    }
+                    return
+                }
+                completion(result)
+            }
+        }
+    }
+
+    /// The facts for `CopyPlaybackDecision` from a fresh `status - 2` (nil = no answer).
+    private func copyDecision(strmFormat: String, afterDecodeEnd: Bool, afterDecodeError: Bool,
+                              handbacks: [CopyPlaybackDecision.ExpectedHandback],
+                              status result: [String: Any]?) -> CopyPlaybackDecision {
+        guard let result = result else { return .stream("no answer from LMS") }
+        func number(_ v: Any?) -> Double? { (v as? Double) ?? (v as? Int).map(Double.init) ?? (v as? String).flatMap(Double.init) }
+        var ids: [Int: String] = [:]
+        for item in result["playlist_loop"] as? [[String: Any]] ?? [] {
+            if let index = number(item["playlist index"]).map({ Int($0) }), let id = item["id"] {
+                ids[index] = "\(id)"
+            }
+        }
+        let server = CopyPlaybackDecision.ServerState(
+            index: Self.playlistIndex(fromStatus: result),
+            tracks: Self.playlistTracks(fromStatus: result) ?? 0,
+            repeatMode: Self.playlistRepeat(fromStatus: result) ?? 0,
+            time: number(result["time"]),
+            duration: number(result["duration"]),
+            remote: (number(result["remote"]) ?? 0) != 0,
+            synced: result["sync_master"] != nil || result["sync_slaves"] != nil,
+            ids: ids)
+        var copies: [Int: CopyPlaybackDecision.SavedCopy] = [:]
+        for index in Set(ids.keys).union([0]) {
+            copies[index] = lifeboat.savedCopy(forIndex: index)
+        }
+        // A copy plays now (and nothing is queued behind it): the handback candidate.
+        let playing = playingCopy.flatMap { copy -> CopyPlaybackDecision.PlayingCopy? in
+            guard audioManager.getPlayerState() == "Playing", !audioManager.pushStreamState().decodingAhead else { return nil }
+            return CopyPlaybackDecision.PlayingCopy(id: copy.id, position: audioManager.getAudioPlayerTimeForFallback())
+        }
+        // Several of our jumps may be out (a retry on top of one that got no
+        // reply): this strm answers the one LMS's time is nearest to.
+        let handback = CopyPlaybackDecision.expectedJump(handbacks, nearest: server.time)
+        let decision = CopyPlaybackDecision.decide(
+            strmFormat: strmFormat, enabled: lifeboatEnabled, sameServer: lifeboat.server == currentSessionServer,
+            afterDecodeEnd: afterDecodeEnd, afterDecodeError: afterDecodeError,
+            server: server, copies: copies, playing: playing, handback: handback)
+        if case .handback = decision, let handback = handback {
+            expectedHandbacks.removeAll { $0.target == handback }  // answered; the others may still come
+        }
+        return decision
+    }
+
+    /// From our jump to its strm 'q' (or 's' without one): the reply can take
+    /// seconds on a link that just came back, and the strm follows it.
+    static let handbackWindow: TimeInterval = 15
+    /// A jump that got no reply may still reach LMS once the link carries
+    /// again (TCP keeps resending it): expect its strm this long.
+    static let lateJumpWindow: TimeInterval = 60
+
+    /// Expect the 'q' and 's' of this jump of ours for `window` seconds (a
+    /// renewed expectation replaces the old one).
+    private func expectHandback(_ target: CopyPlaybackDecision.ExpectedHandback, for window: TimeInterval) {
+        expectedHandbacks.removeAll { $0.target == target }
+        expectedHandbacks.append((target, Date().addingTimeInterval(window)))
+    }
+
+    /// Our jumps whose strm may still come; expired ones are dropped.
+    private func liveHandbacks() -> [CopyPlaybackDecision.ExpectedHandback] {
+        let now = Date()
+        expectedHandbacks.removeAll { $0.until < now }
+        return expectedHandbacks.map { $0.target }
+    }
+
+    /// LMS restarted the song a saved copy is playing, where our reconnect jump
+    /// asked: keep the decoder and the time, tell LMS it is connected and
+    /// playing. Our STATs report song time; LMS adds the strm's start offset.
+    /// A jump comes with autostart '0': LMS starts it with 'u' once we report
+    /// the buffer loaded (STMl), and STMs answers the 'u' as for any start.
+    private func handBackToServer(startOffset: Double, waitForUnpause: Bool) {
+        os_log(.default, log: logger, "📼 Handback: LMS restarted track %{public}s at %.1fs where the saved copy plays - keeping it, no stream",
+               playingCopy.map { String($0.index) } ?? "?", startOffset)
+        statElapsedOffset = startOffset
+        // The recovery's hold waits for a playback start that never comes now.
+        endOutageHold(reason: "handed back to LMS")
+        // The copy may have finished decoding already (offline): LMS needs that
+        // STMd after the STMs, to send the next song.
+        let stream = audioManager.pushStreamState()
+        copyDecodeEndHeld = stream.completedNaturally && !stream.decodingAhead
+        if waitForUnpause {
+            pendingUnpauseSTMs = true
+            client.sendStatus("STMl")
+        } else {
+            client.sendStatus("STMs")
+            releaseHeldCopyDecodeEnd()
+        }
+        startServerTimeFetching()
+        startPlaybackHeartbeat()
+        startRadioMetadataRefreshTimer()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.fetchCurrentTrackMetadata()
+        }
+    }
+
+    /// A copy's STMd held until its STMs went out: send it now (on main, once
+    /// the decoder has cleared any boundary it is reporting).
+    private func releaseHeldCopyDecodeEnd() {
+        guard copyDecodeEndHeld else { return }
+        copyDecodeEndHeld = false
+        DispatchQueue.main.async { [weak self] in self?.sendTrackDecodeComplete() }
+    }
+
+    /// Start decoding the strm's song: LMS's stream, or the saved copy chosen for it.
+    private func startDirectStream(url: String, format: String, startTime: Double, replayGain: Float,
+                                   waitForUnpause: Bool, isGapless: Bool, copy: CopySource?, connectedSent: Bool) {
+        decodingCopy = copy
+        if !isGapless {
+            playingCopy = copy  // flushed: nothing else plays
+        }
 
         // Start push stream playback with AudioStreamDecoder
         // isGapless: true means DON'T flush buffer, let old audio finish
         // waitForUnpause: true means defer BASS_ChannelPlay until 'u' with sync jiffies arrives
         audioManager.startPushStreamPlayback(url: url, format: format, replayGain: replayGain, isGapless: isGapless, startTime: startTime, waitForUnpause: waitForUnpause)
 
-        // Reset gapless flag after use
-        expectingGaplessTransition = false
-
-        // Send STMc (stream connected) - matches URL stream behavior
-        os_log(.info, log: logger, "🔗 Push stream connected - sending STMc")
-        client.sendStatus("STMc")
+        if !connectedSent {
+            // Send STMc (stream connected) - matches URL stream behavior
+            os_log(.info, log: logger, "🔗 Push stream connected - sending STMc")
+            client.sendStatus("STMc")
+        }
 
         // Send STMs only when BASS actually starts producing audio — mirrors
         // squeezelite's output.track_started. The decoder fires the
@@ -2211,6 +2537,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
+        if copyDecisionPending { pausedDuringCopyDecision = true }
         syncControllerReset(reason: "didPauseStream")
         endOutageHold(reason: "paused")
         // Paused on purpose (Material, another controller): don't treat the
@@ -2239,6 +2566,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
+        pausedDuringCopyDecision = false
 
         // STMs flush for sync-wait tracks now happens in
         // handleDecoderDidStartPlayback (fired by the decoder when BASS_ChannelPlay
@@ -2273,6 +2601,40 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        copyDecisionGeneration += 1  // a status reply for the strm before this stop is void
+        reportZeroElapsedWhileDeciding = false
+        copyDecisionPending = false
+        copyDecodeEndHeld = false
+        if let copy = playingCopy, liveHandbacks().contains(where: { $0.id == copy.id }),
+           audioManager.getPlayerState() == "Playing", !audioManager.pushStreamState().decodingAhead {
+            // LMS stops us for a jump we asked for (StreamingController
+            // _JumpToTime: stop, then stream). Its strm 's' follows at once and
+            // decides: handback keeps the copy playing, a stream flushes it.
+            // (While a jump that got no reply may still land, a Stop in
+            // Material waits the 5 s below too: the strm tells them apart.)
+            os_log(.default, log: logger, "📼 LMS stopped us for our jump - the saved copy plays on until its strm")
+            handbackStopDeferred = true
+            expectingGaplessTransition = false
+            let generation = copyDecisionGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self = self, self.handbackStopDeferred, self.copyDecisionGeneration == generation else { return }
+                self.handbackStopDeferred = false
+                self.expectedHandbacks = []  // nothing to hand back once the copy stops
+                if !self.connectionIsLive {
+                    // The link died before the strm came: the copy rides out
+                    // the outage as before, the next reconnect jumps to it again.
+                    os_log(.default, log: self.logger, "📼 No strm after LMS's stop and the connection is gone - the saved copy plays on")
+                    return
+                }
+                os_log(.default, log: self.logger, "📼 No strm after LMS's stop - stopping the saved copy")
+                self.didStopStream()
+            }
+            return
+        }
+        handbackStopDeferred = false
+        statElapsedOffset = 0
+        decodingCopy = nil
+        playingCopy = nil
         // LMS's forgotten-player restart is q then s: decide before the flags clear.
         muteForgottenRestartOverCopies()
         clearHeldTrackEnd()
@@ -2334,6 +2696,28 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// Send STMd message when decoder completes naturally (like squeezelite DECODE_COMPLETE)
     /// This tells the server the track finished decoding and triggers next track queueing
     func sendTrackDecodeComplete(mayHold: Bool = true) {
+        if handbackStopDeferred {
+            // Our jump's strm decides: a handback sends this STMd after its STMs.
+            os_log(.info, log: logger, "📼 Decode ended while LMS restarts us - the handback sends the STMd")
+            return
+        }
+        if copyDecisionPending {
+            // LMS's strm 's' is being decided: an STMd now would come before
+            // its STMs (a handback near the song's end sends it after; a
+            // start flushes the song, so the hold is dropped then).
+            copyDecodeEndHeld = true
+            os_log(.default, log: logger, "📼 Decode ended while asking LMS about the strm - STMd waits")
+            return
+        }
+        if mayHold, let copy = decodingCopy, Self.holdsCopyDecodeEnd(
+            live: connectionIsLive, decodingCopy: true, decodingAhead: audioManager.pushStreamState().decodingAhead) {
+            // A copy decodes in a moment, not in real time like a stream: its
+            // STMd now would make LMS send the song after it while the one
+            // before still plays. One song queued behind the playing one at most.
+            copyDecodeEndHeld = true
+            os_log(.default, log: logger, "📼 Saved copy of track %d decoded behind the playing song - STMd waits for its STMs", copy.index)
+            return
+        }
         if mayHold && settings.seamlessReconnect && handleDownloadEnd() {
             return
         }
@@ -2358,6 +2742,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     /// Send STMn message when decoder encounters error (like squeezelite DECODE_ERROR)
     func sendTrackDecodeError(keepGaplessQueue: Bool = false) {
+        decodeErrorSinceStrm = true
         // A gapless start that failed to open pushed nothing: the previous
         // track's tail is still playing. After STMn in PLAYING the server
         // sends the replacement strm 's' with no 'q' first (_SyncStopNext),
@@ -2388,6 +2773,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // "gaplessly" onto a drained push stream its boundary never fires, so
         // no STMs goes out and LMS stays on the old track (rig O22).
         expectingGaplessTransition = false
+        if copyDecisionPending { drainedDuringCopyDecision = true }  // the strm already came; its start is fresh
     }
 
     /// Send STMs message when playback reaches track boundary (like squeezelite output.track_started)
@@ -2397,6 +2783,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 🎯🎯🎯 SENDING STMs TO SERVER - Material UI should update NOW")
         os_log(.error, log: logger, "[BOUNDARY-DRIFT] 📊 Timestamp: %{public}s", timestamp.description)
         syncControllerReset(reason: "sendTrackStarted/STMs")
+        playingCopy = decodingCopy
+        statElapsedOffset = 0
 
         // UNIFIED RECOVERY: Increment track index on boundary (LMS_StreamTest-6lb)
         // This works even when disconnected - ensures our local index tracks gapless transitions
@@ -2421,6 +2809,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
         client.sendStatus("STMs")
+        // The copy queued behind the last song plays now: its STMd may go.
+        releaseHeldCopyDecodeEnd()
 
         // CRITICAL FIX: Delay metadata fetch to avoid race condition with server
         // Server needs time to process STMs before we query metadata, otherwise it may
@@ -2448,7 +2838,21 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // IMPORTANT: This is for SlimProto status reporting - use AudioPlayer time
         // AudioPlayer time resets to 0 for new tracks, which is what SlimProto expects
         // For recovery operations, use getCurrentInterpolatedTime() instead
-        return audioManager.getAudioPlayerTimeForFallback()
+        return Self.statElapsed(decoderSeconds: audioManager.getAudioPlayerTimeForFallback(),
+                                startOffset: statElapsedOffset, deciding: reportZeroElapsedWhileDeciding)
+    }
+
+    /// STAT elapsed: relative to the strm's start (LMS adds the start offset,
+    /// StreamingController playingSongElapsed). 0 while we ask LMS about a new
+    /// strm; after a handback the copy's song time minus the strm's start offset.
+    static func statElapsed(decoderSeconds: Double, startOffset: Double, deciding: Bool) -> Double {
+        deciding ? 0 : max(0, decoderSeconds - startOffset)
+    }
+
+    /// A copy's decode end waits while the song before it still plays (online):
+    /// STMd then would queue a second song behind the playing one.
+    static func holdsCopyDecodeEnd(live: Bool, decodingCopy: Bool, decodingAhead: Bool) -> Bool {
+        live && decodingCopy && decodingAhead
     }
 
     /// Real STAT buffer/byte telemetry for status packets (bd LMS_StreamTest-433.4.3).
@@ -2457,6 +2861,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func hasActiveStream() -> Bool {
+        // A strm 's' being decided has no decoder yet: a 'u' meanwhile is a
+        // plain resume, not a lost stream to recover.
+        if copyDecisionPending { return true }
         // Check if we have an active BASS stream (not stale after reconnect)
         // This includes both URL streams (audioPlayer) and push streams (streamDecoder)
         let playerState = audioManager.getPlayerState()
@@ -4398,6 +4805,13 @@ extension SlimProtoCoordinator {
     private func handleDownloadEnd() -> Bool {
         let live = connectionIsLive
         let stream = audioManager.pushStreamState()
+        if let copy = decodingCopy, !lifeboatActive {
+            // A saved copy played in place of the stream ended: the end of the
+            // song (a file isn't cut). Offline, the next copies carry on.
+            if live { return false }
+            if startLifeboatTrack(index: copy.index + 1) { return true }
+            return holdDownloadEnd(askNow: false)
+        }
         guard let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int else {
             return live ? false : holdDownloadEnd(askNow: false)
         }
@@ -4475,6 +4889,7 @@ extension SlimProtoCoordinator {
                index, estimate, searchSeconds)
         clearHeldTrackEnd()
         lifeboatActive = true
+        decodingCopy = nil  // spliced mid-song: positions stay the stream's
         audioManager.continueFromLocalFile(path: file.path, estimatedSeconds: estimate, searchSeconds: searchSeconds,
                                            minimumConfidence: minimumConfidence) { [weak self] outcome in
             guard let self = self else { return }
@@ -4490,7 +4905,21 @@ extension SlimProtoCoordinator {
                     self.unusableCopies.insert(trackID)  // never usable; a no-match may be next time
                 }
                 self.lifeboatActive = false
-                if self.connectionIsLive {
+                // A fresh start flushes what is buffered, so it begins at the
+                // playhead, not at the estimate (= playhead + buffered): O26 landed 12 s ahead.
+                let playhead = self.getCurrentInterpolatedTime().time
+                if self.restartCopy(index: index, at: playhead) {
+                    // No sample-exact splice, but the copy still plays: restart it near
+                    // where the audio stopped (a small jump) rather than lose the rest
+                    // of the song (tester 2026-10-21: "it just skipped a track"). The
+                    // connection can look live for 10 s after a real cut, so this does
+                    // not depend on liveness: online, LMS's elapsed follows the copy
+                    // as after a successful splice. A rate mismatch only blocks the
+                    // splice; a fresh start is fine.
+                    // .default: persisted, so the rig can count it (O26); .info is memory-only.
+                    os_log(.default, log: self.logger, "🛟 Restarting the copy of track %d at %.1fs (no splice: %{public}s)",
+                           index, playhead, String(describing: failure))
+                } else if self.connectionIsLive {
                     self.decodeEndHeld = true
                     self.recoverFromCutDownload(tryCopy: false)
                 } else if self.startLifeboatTrack(index: index + 1) {
@@ -4512,11 +4941,29 @@ extension SlimProtoCoordinator {
         }
         let gain = lifeboatGain(index: index)
         os_log(.info, log: logger, "🛟 Offline: queuing the downloaded copy of track %d (gain %.3f)", index, gain)
+        decodingCopy = lifeboat.track(at: index).map { CopySource(index: index, id: $0.id) }
         lifeboatActive = true
         lifeboatUsed = true
         connectionManager.persistForPlayback = true
         audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
                                              replayGain: gain, isGapless: true, startTime: 0, waitForUnpause: false)
+        return true
+    }
+
+    /// The splice into the copy failed but the copy is playable: start it fresh at
+    /// `position` (a small jump). Same flags as `startLifeboatTrack`; not a user
+    /// action, so a pause made elsewhere still wins at the reconnect.
+    private func restartCopy(index: Int, at position: Double) -> Bool {
+        guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
+        decodingCopy = CopySource(index: index, id: track.id)
+        playingCopy = decodingCopy
+        lifeboatActive = true
+        lifeboatUsed = true
+        connectionManager.persistForPlayback = true
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: lifeboatGain(index: index), isGapless: false,
+                                             startTime: position, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: position, duration: track.duration, playing: true)
         return true
     }
 
@@ -4786,6 +5233,8 @@ extension SlimProtoCoordinator {
     private func playLifeboatTrackNow(index: Int, from position: Double = 0) -> Bool {
         guard let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
         clearHeldTrackEnd()
+        decodingCopy = CopySource(index: index, id: track.id)
+        playingCopy = decodingCopy
         lifeboatActive = true
         lifeboatUsed = true
         savedMusicStartedOffline = true  // a skip or a chosen song: newer than LMS's state (review M3)
@@ -4859,6 +5308,7 @@ extension SlimProtoCoordinator {
                     UserDefaults.standard.set(target, forKey: "lyrplay_recovery_index")
                 }
                 var position = position
+                var stillOnPlayedTrack = false
                 if let index = target {
                     // The copies ran out at the end of a track: the next one, or the
                     // end of the playlist (a jump to the end leaves LMS in "play" for good).
@@ -4876,6 +5326,7 @@ extension SlimProtoCoordinator {
                         os_log(.info, log: self.logger, "🛟 Track %d ended offline - moving LMS to the start of track %d", index, settled.index)
                         UserDefaults.standard.set(settled.index, forKey: "lyrplay_recovery_index")
                     }
+                    stillOnPlayedTrack = settled.index == index
                     position = settled.position
                     target = settled.index
                 }
@@ -4897,6 +5348,11 @@ extension SlimProtoCoordinator {
                     self.abandonLifeboat(stopLocal: false)
                 } else {
                     // A play pressed offline is newer than LMS's pause.
+                    if stillOnPlayedTrack, let index = target, let playedID = playedID,
+                       self.playingCopy?.id == playedID, self.audioManager.getPlayerState() == "Playing" {
+                        // A copy of this song plays now: the jump's strm hands back (bd 5syr).
+                        self.handbackCandidate = (index, playedID, Date())
+                    }
                     self.performPlaylistRecovery(shouldPlay: true)
                 }
             }
@@ -4905,7 +5361,11 @@ extension SlimProtoCoordinator {
 
     /// Give up on the copies and follow the server as it is.
     private func abandonLifeboat(stopLocal: Bool) {
-        if stopLocal && (lifeboatActive || lifeboatUsed) { audioManager.stop() }
+        if stopLocal && (lifeboatActive || lifeboatUsed) {
+            audioManager.stop()
+            decodingCopy = nil
+            playingCopy = nil
+        }
         clearHeldTrackEnd()
         lifeboatActive = false
         lifeboatUsed = false
@@ -4971,8 +5431,10 @@ extension SlimProtoCoordinator {
     private func scheduleOutageHoldWatchdog(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) { [weak self] in
             guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
-            if self.audioManager.getPlayerState() == "Playing" && self.serverHeardRecently {
+            if self.audioManager.getPlayerState() == "Playing" && self.serverHeardRecently && !self.lifeboatUsed {
                 // Audio is flowing on a live connection: nothing left to recover.
+                // (Not while copies play that LMS has yet to be moved to: ending
+                // the hold here dropped the pending retry of a lost jump, rig O27.)
                 self.endOutageHold(reason: "playing on a live connection")
                 return
             }
@@ -5079,6 +5541,7 @@ extension SlimProtoCoordinator {
                 return
             }
             self.unlessPausedOnServer {
+                self.retargetRetryToPlayingCopy()
                 self.performPlaylistRecovery(shouldPlay: true)
             }
         }
@@ -5240,6 +5703,7 @@ extension SlimProtoCoordinator {
             os_log(.info, log: logger, "🎵 Flushing deferred STMs (BASS playback started)")
             client.sendStatus("STMs")
             pendingUnpauseSTMs = false
+            DispatchQueue.main.async { [weak self] in self?.releaseHeldCopyDecodeEnd() }  // a handback's
         }
     }
 

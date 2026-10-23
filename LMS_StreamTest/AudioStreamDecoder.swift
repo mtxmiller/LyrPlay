@@ -221,6 +221,10 @@ class AudioStreamDecoder {
     /// Track start time offset (seconds into track where this stream starts)
     /// Used for server-side seeks where stream starts at non-zero track position
     private var trackStartTimeOffset: Double = 0.0
+    /// The playing track's start offset while the next one is queued behind
+    /// it: a gapless start overwrites trackStartTimeOffset at once, but the
+    /// old track's position is reported until the boundary is crossed.
+    private var previousTrackStartTimeOffset: Double = 0.0
 
     /// Metadata for next track (applied at boundary)
     private var nextTrackMetadata: TrackMetadata?
@@ -335,6 +339,14 @@ class AudioStreamDecoder {
     /// shows through as the fallback.
     func sampleMeasuredBitrate() -> String? {
         guard decoderStream != 0 else { return nil }
+
+        if decoderIsLocalFile {
+            // A saved copy: its average bitrate (LMS's is the source file's).
+            let size = BASS_StreamGetFilePosition(decoderStream, DWORD(BASS_FILEPOS_END))
+            let seconds = BASS_ChannelBytes2Seconds(decoderStream, BASS_ChannelGetLength(decoderStream, DWORD(BASS_POS_BYTE)))
+            guard size != UInt64.max, seconds > 0 else { return nil }
+            return "\(Int(Double(size) * 8 / seconds / 1000))kbps"
+        }
 
         let now = ProcessInfo.processInfo.systemUptime
         let bytes = BASS_StreamGetFilePosition(decoderStream, DWORD(BASS_FILEPOS_DOWNLOAD))
@@ -1121,6 +1133,7 @@ class AudioStreamDecoder {
         // against a flushed stream, making the displayed time hunt around
         // after a playlist-jump seek (bd LMS_StreamTest-egd).
         stateLock.lock()
+        if isNewTrack { previousTrackStartTimeOffset = trackStartTimeOffset }  // the playing track keeps its offset
         trackStartTimeOffset = startTime  // also read on the decode queue (markDecodeCompletedNaturally)
         stateLock.unlock()
 
@@ -2115,7 +2128,8 @@ class AudioStreamDecoder {
             sampleRate: Int(info.freq),
             channels: Int(info.chans),
             bitDepth: bitDepth > 0 ? bitDepth : 16,  // Default to 16-bit if not specified
-            bitrateText: audioPlayer?.carryOverBitrateText
+            bitrateText: audioPlayer?.carryOverBitrateText,
+            isSavedCopy: decoderIsLocalFile
         )
 
         setCurrentStreamInfoOnMain(streamInfo)
@@ -2538,6 +2552,10 @@ class AudioStreamDecoder {
         let trackStart = trackStartPosition
         let previousStart = previousTrackStartPosition
         let skippedSeconds = skippedSecondsThisTrack
+        // The next track is queued but its boundary isn't marked yet: the
+        // playing track's offset still applies (trackStartTimeOffset is the new one).
+        let startOffset = pendingTrackBoundary ? previousTrackStartTimeOffset : trackStartTimeOffset
+        let previousOffset = previousTrackStartTimeOffset
         stateLock.unlock()
 
         // CRITICAL: For gapless, keep reporting OLD track's position until boundary crossed
@@ -2557,7 +2575,7 @@ class AudioStreamDecoder {
             let trackBytes = playbackBytes - previousStart
             let bytesPerSecond = sampleRate * channels * 4
             let seconds = Double(trackBytes) / Double(bytesPerSecond)
-            let trackPosition = seconds + trackStartTimeOffset + skippedSeconds
+            let trackPosition = seconds + previousOffset + skippedSeconds
 
             // Log "before boundary" position, but throttle to every 4 seconds to prevent duplicate spam
             let now = Date()
@@ -2585,7 +2603,7 @@ class AudioStreamDecoder {
         let bytesPerSecond = sampleRate * channels * 4  // 4 bytes per float sample
         let seconds = Double(trackBytes) / Double(bytesPerSecond)
 
-        let trackPosition = seconds + trackStartTimeOffset + skippedSeconds
+        let trackPosition = seconds + startOffset + skippedSeconds
         return max(0, trackPosition)  // Ensure non-negative
     }
 

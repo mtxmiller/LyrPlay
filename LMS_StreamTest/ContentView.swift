@@ -25,6 +25,9 @@ struct ContentView: View {
     @State private var hasShownError = false
     @State private var previousActiveServer: SettingsManager.ServerType?
     @State private var coldLaunchRecoveryChecked = false
+    // bd toz7: Material link restarts (see nudgeMaterial)
+    @State private var slimProtoConnections = 0
+    @State private var lastMaterialRestart: Date?
     // True top safe-area inset, captured by a normally-placed GeometryReader (below).
     // Drives reactive topPad injection in WebView.updateUIView: when this changes
     // (cold launch / CarPlay foreground 0→59, rotation), updateUIView re-injects.
@@ -34,6 +37,7 @@ struct ContentView: View {
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var offlinePlayer: SlimProtoCoordinator.OfflinePlayerState?
     @State private var showingOfflinePlayer = false
+    @State private var materialPlayerID: String?   // last player Material reported (bd vdb6)
     /// Opening the app while offline opens the offline player (Material is
     /// frozen then); a network drop while the app is in use only shows the banner.
     @State private var openOfflinePlayerUntil: Date?
@@ -81,9 +85,27 @@ struct ContentView: View {
             }
         }
         .onReceive(settings.$isConfigured) { isConfigured in
-            if isConfigured && !hasConnected {
-                hasShownError = false  // Reset error flag
-                hasConnectionError = false
+            guard isConfigured else { return }
+            hasShownError = false  // Reset error flag
+            hasConnectionError = false
+            // Setup just finished: on first run, or after Reset All Settings and
+            // setup again. A connection that already exists (from before the
+            // reset, or made at launch from the old settings) carries the old
+            // server, name or player ID, so drop it and connect with the values
+            // just entered. Keeping it left the player off the new server until
+            // the next background/foreground cycle reconnected (bd t4o5).
+            if hasConnected || slimProtoCoordinator.isConnected {
+                os_log(.info, log: OSLog(subsystem: "com.lmsstream", category: "ContentView"),
+                       "🔄 Setup finished with a connection already up - reconnecting with the new settings")
+                hasConnected = true   // mainAppView's onAppear must not start a second connect
+                audioManager.setSlimClient(slimProtoCoordinator)
+                slimProtoCoordinator.resetConnectionManager()
+                Task {
+                    // Drops the socket, waits half a second, connects with the
+                    // settings as they are now (host, port, name, player ID).
+                    await slimProtoCoordinator.restartConnection()
+                }
+            } else {
                 connectToLMS()
             }
         }
@@ -94,6 +116,16 @@ struct ContentView: View {
             hasShownError = false
             hasHandledError = false
             loadError = nil
+
+            // Reset All Settings: there is no server to reconnect to until setup
+            // finishes (the isConfigured publisher above connects then). Without
+            // this the empty host counted as a change and started a connection
+            // to "" (bd t4o5).
+            guard settings.isConfigured else {
+                slimProtoCoordinator.disconnect()
+                hasConnected = false
+                return
+            }
 
             // IMPROVED: Force update server settings and reconnect if ANY server setting changed
             let currentHost = settings.activeServerHost
@@ -170,6 +202,32 @@ struct ContentView: View {
                         // WebView reference may have been recreated (reload).
                         volumeRocker.webView = webView
                         volumeRocker.materialPlayerChanged(player)
+                        // Material moves to its default player when the list
+                        // refreshes after a reconnect; put LyrPlay back (bd vdb6).
+                        let previous = materialPlayerID
+                        materialPlayerID = player?.id
+                        if MaterialPlayerRestore.shouldRestore(
+                            previousID: previous, newID: player?.id, localID: settings.playerMACAddress,
+                            reconnectedAgo: slimProtoCoordinator.connectedAt.map { Date().timeIntervalSince($0) },
+                            playing: audioManager.getPlayerState() == "Playing") {
+                            os_log(.info, log: logger, "🔁 Material switched to %{public}s after the reconnect - selecting LyrPlay again",
+                                   player?.name ?? player?.id ?? "?")
+                            webView?.evaluateJavaScript("setCurrentPlayer('\(settings.playerMACAddress)')", completionHandler: nil)
+                        }
+                    },
+                    onMaterialConnectionChanged: { connected in
+                        if connected {
+                            os_log(.default, log: logger, "🌐 Material: connected to LMS")
+                        } else {
+                            os_log(.default, log: logger, "🌐 Material: lost its LMS connection")
+                        }
+                        // bd toz7: Material gave up while our own link is fine (its
+                        // long-poll died with the old network path, or LMS went silent
+                        // on it): restart Material's link, since it cannot itself.
+                        guard !connected, slimProtoCoordinator.isConnected else { return }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            nudgeMaterial(force: false, reason: "Material lost LMS while SlimProto is connected")
+                        }
                     }
                 )
                 // WebView fills edge-to-edge; Material's topPad CSS var handles status bar spacing.
@@ -224,6 +282,11 @@ struct ContentView: View {
             }
         )
         .onAppear {
+            // bd toz7: a connect that beat this view (CarPlay launched the process)
+            // counts as the first, so the next one is treated as a reconnect.
+            if slimProtoConnections == 0, slimProtoCoordinator.isConnected {
+                slimProtoConnections = 1
+            }
             // Cold-launch recovery: willEnterForegroundNotification doesn't fire on Not Running → Active,
             // so the warm-resume handler below misses cold launches after a process kill. Set the trigger
             // here on first appear when persisted state shows a long background + saved recovery data.
@@ -318,26 +381,11 @@ struct ContentView: View {
                     verifyTopPad(in: webView, expected: Int(materialTopPad), source: "foreground+1s")
                 }
 
-                // Check if Material's Cometd connection is still alive after backgrounding.
-                // If dead, trigger reconnect via Material's own bus event (same path as
-                // Material's built-in visibilitychange handler in server.js).
-                let cometdHealthCheck = """
-                (function() {
-                    if (typeof lmsIsConnected !== 'undefined' && !lmsIsConnected) {
-                        console.log('LyrPlay: Cometd disconnected after background - reconnecting');
-                        if (typeof bus !== 'undefined' && bus.$emit) {
-                            bus.$emit('reconnect');
-                        }
-                        return 'reconnecting';
-                    }
-                    return 'connected';
-                })();
-                """
-                webView.evaluateJavaScript(cometdHealthCheck) { result, error in
-                    if let status = result as? String {
-                        os_log(.info, log: self.logger, "Cometd health check: %{public}s", status)
-                    }
-                }
+                // Material's cometd link may have died while we were in the background.
+                // Its own visibilitychange handler only asks for a new connect, which
+                // throws while the dead one is still in flight (bd toz7): restart the
+                // link ourselves when Material reports it lost.
+                nudgeMaterial(force: false, reason: "foreground")
             }
 
             // bd 34l: t=0 pre-mute, synchronous. A stream that stalled during
@@ -421,6 +469,17 @@ struct ContentView: View {
                         slimProtoCoordinator.connect()
                     }
                 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .slimProtoDidConnect)) { _ in
+            // bd toz7: whatever cut our SlimProto socket (a dead spot, a Wi-Fi ↔
+            // cellular handover, a suspension) has likely orphaned Material's
+            // long-poll too, and Material would not notice for 70 s. The first
+            // connect is skipped: Material is still loading beside it.
+            slimProtoConnections += 1
+            guard slimProtoConnections > 1 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                nudgeMaterial(force: true, reason: "SlimProto reconnected")
             }
         }
         .onReceive(settings.$shouldReloadWebView) { shouldReload in
@@ -604,6 +663,25 @@ struct ContentView: View {
     }
 
     // MARK: - Material Integration URL
+    /// bd toz7: restart Material's cometd link to LMS when Material cannot
+    /// (MaterialReconnect has the why). `force` false only acts when Material
+    /// reports the link lost. At most one restart per 10 s: a flapping network
+    /// reconnects SlimProto over and over, and each restart costs Material a
+    /// handshake and a handful of requests.
+    private func nudgeMaterial(force: Bool, reason: String) {
+        guard let webView = webView else { return }
+        if let last = lastMaterialRestart, Date().timeIntervalSince(last) < 10 { return }
+        webView.evaluateJavaScript(MaterialReconnect.script(force: force)) { result, error in
+            let outcome = (result as? String) ?? error.map { "error: \($0.localizedDescription)" } ?? "?"
+            if outcome.hasPrefix("reconnected") {
+                lastMaterialRestart = Date()
+                os_log(.default, log: logger, "🌐 Material link restarted (%{public}s): %{public}s", reason, outcome)
+            } else {
+                os_log(.info, log: logger, "🌐 Material link check (%{public}s): %{public}s", reason, outcome)
+            }
+        }
+    }
+
     private var materialWebURL: String {
         let baseURL = settings.webURL
         let settingsURL = "lmsstream://settings"
@@ -641,10 +719,13 @@ struct ContentView: View {
         //   Verified against Material 6.4.2's served bundle. Must be in BOTH
         //   branches; in Player Focus mode only LyrPlay is visible so the rocker
         //   feature is intentionally inert there.
+        // - nativeConnectionStatus=w: Material posts MATERIAL-CONNETIONSTATUS (its
+        //   spelling) to the same handler whenever its cometd link to LMS comes or
+        //   goes (bd toz7: we restart that link when Material cannot).
         if settings.iOSPlayerFocus {
-            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?player=\(playerName)&single&hide=mediaControls&nativePlayer=w&nativeConnectionStatus=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         } else {
-            return "\(baseURL)?hide=mediaControls&nativePlayer=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
+            return "\(baseURL)?hide=mediaControls&nativePlayer=w&nativeConnectionStatus=w\(topPadParam)&appSettings=\(encodedSettingsURL)&appSettingsName=\(encodedSettingsName)"
         }
     }
 
@@ -1065,6 +1146,8 @@ struct WebView: UIViewRepresentable {
     let onSettingsPressed: () -> Void
     /// GH#75: Material's selected player changed (nil = unknown — reload/process kill).
     let onMaterialPlayerChanged: (MaterialPlayerMessage?) -> Void
+    /// bd toz7: Material's cometd link to LMS came (true) or went (false).
+    let onMaterialConnectionChanged: (Bool) -> Void
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "WebView")
     
@@ -1195,6 +1278,14 @@ struct WebView: UIViewRepresentable {
             // GH#75: player-switch reports from Material's native bridge
             if message.name == "mskNative" {
                 if let body = message.body as? String {
+                    // bd toz7: the same bridge carries Material's link status; it
+                    // must not reach the player parser (nil there = player unknown).
+                    if let link = MaterialConnectionMessage.parse(body) {
+                        DispatchQueue.main.async {
+                            self.parent.onMaterialConnectionChanged(link.connected)
+                        }
+                        return
+                    }
                     let player = MaterialPlayerMessage.parse(body)
                     DispatchQueue.main.async {
                         self.parent.onMaterialPlayerChanged(player)

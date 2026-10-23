@@ -21,12 +21,23 @@ Control (plain HTTP GET, e.g. with curl):
         blip where TCP survives.
     /kill[?scope=...]   Reset matching connections now (Wi-Fi → cellular: the
                         old address is gone).
+    /strand?path=/cometd[&count=1]
+                        The next `count` web requests whose path starts with
+                        `path` are swallowed: read, never forwarded, never
+                        answered, until /kill resets the connection. A
+                        request sent over an interface that then went away
+                        (cellular → Wi-Fi) looks like this to the app: alive
+                        but silent until its own timeout.
     /shape?kbps=N       Cap each web/stream connection's download to N kbit/s
                         (0 = no cap). On a LAN, LMS sends a whole track in a
                         second and it sits in socket buffers; a mobile link
                         keeps only a little ahead.
     /end                End the current outage now (applies its `after`).
     /status             JSON: outage state and open connections.
+    /requests[?since=T] JSON: HTTP requests the player sent through the proxy
+                        (every request line, also on kept-alive connections),
+                        with the proxy's clock `t` (epoch) and its `now`, so
+                        a harness can tell which songs were streamed.
 
 Run on the host that reaches the LMS (ser5 for lms-test):
     python3 faultproxy.py [--lms-host 127.0.0.1] [--web 9011:9010] [--slim 3491:3490] [--ctl 9099]
@@ -35,6 +46,7 @@ app's log and the oracle.
 """
 import argparse
 import asyncio
+import collections
 import itertools
 import json
 import socket
@@ -76,14 +88,17 @@ class Conn:
         self.opened = time.time()
         self.up_bytes = self.down_bytes = 0
         self.frozen = False      # caught by the current outage (dropped at its end if after=drop)
+        self.stranded = False    # swallowed by /strand: nothing forwarded or answered until reset
         self.first_line = ""
 
     def describe(self):
         return {"id": self.id, "kind": self.kind, "peer": f"{self.peer[0]}:{self.peer[1]}",
                 "age_s": round(time.time() - self.opened, 1), "to_lms": self.up_bytes,
-                "to_player": self.down_bytes, "frozen": self.frozen, "request": self.first_line}
+                "to_player": self.down_bytes, "frozen": self.frozen, "stranded": self.stranded,
+                "request": self.first_line}
 
     def reset(self):
+        self.stranded = False
         for w in (self.cw, self.uw):
             if w is None:
                 continue
@@ -103,6 +118,8 @@ class Proxy:
         self.outage = Outage()
         self.conns = {}
         self.kbps = 0
+        self.requests = collections.deque(maxlen=5000)
+        self.strand = None       # {"path": prefix, "left": n} from /strand
 
     # -- data path ------------------------------------------------------------
     async def gate(self, conn):
@@ -123,6 +140,19 @@ class Proxy:
                     conn.up_bytes += len(data)
                     if not conn.first_line and conn.kind == "http":
                         conn.first_line = data.split(b"\r\n", 1)[0].decode("latin1")[:120]
+                    if conn.kind == "http" and data[:5] in (b"GET /", b"POST ", b"HEAD "):
+                        line = data.split(b"\r\n", 1)[0].decode("latin1")[:200]
+                        self.requests.append({"t": round(time.time(), 3), "conn": conn.id, "request": line})
+                        if line.startswith("GET /stream"):
+                            log(f"#{conn.id} {line}")
+                        st = self.strand
+                        if st and st["left"] > 0 and line.split(" ")[1:2] and line.split(" ")[1].startswith(st["path"]):
+                            st["left"] -= 1
+                            conn.stranded = True
+                            log(f"#{conn.id} {line} stranded (never forwarded, never answered)")
+                            while conn.stranded:    # until /kill resets the connection
+                                await asyncio.sleep(0.2)
+                            break
                 else:
                     conn.down_bytes += len(data)
                 writer.write(data)
@@ -229,15 +259,23 @@ class Proxy:
                 self.kill(scope)
             elif url.path == "/end":
                 self.end_outage()
+            elif url.path == "/strand":
+                self.strand = {"path": q.get("path", "/cometd"), "left": max(0, int(q.get("count", "1")))}
+                log(f"STRAND the next {self.strand['left']} request(s) for {self.strand['path']}")
             elif url.path == "/shape":
                 self.kbps = max(0, int(q.get("kbps", "0")))
                 log(f"SHAPE http download cap {self.kbps} kbit/s" if self.kbps else "SHAPE off")
+            elif url.path == "/requests":
+                since = float(q.get("since", "0"))
+                body = {"now": round(time.time(), 3), "requests": [r for r in self.requests if r["t"] >= since]}
             elif url.path != "/status":
-                raise ValueError("paths: /outage /kill /end /status")
+                raise ValueError("paths: /outage /kill /end /strand /shape /status /requests")
             o = self.outage
-            body = {"kbps": self.kbps, "outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
-                               "remaining_s": round(max(0.0, o.ends_at - time.time()), 1) if o.active else 0},
-                    "connections": [c.describe() for c in self.conns.values()]}
+            if url.path != "/requests":
+                body = {"kbps": self.kbps,
+                        "outage": {"active": o.active, "scope": o.scope, "after": o.after, "new": o.new,
+                                   "remaining_s": round(max(0.0, o.ends_at - time.time()), 1) if o.active else 0},
+                        "connections": [c.describe() for c in self.conns.values()]}
             status = "200 OK"
         except Exception as e:
             body, status = {"error": str(e)}, "400 Bad Request"

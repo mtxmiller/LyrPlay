@@ -114,6 +114,7 @@
 				AudioPlayer.swift,
 				AudioStreamDecoder.swift,
 				Connections.swift,
+				CopyPlaybackDecision.swift,
 				KeychainManager.swift,
 				LifeboatCache.swift,
 				MonotonicGate.swift,
@@ -956,6 +957,10 @@
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-dead_strip_dylibs",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -979,6 +984,10 @@
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-dead_strip_dylibs",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTest.tvOSUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1120,7 +1129,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 20;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
@@ -1189,7 +1198,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = LMS_StreamTest.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 20;
 				DEVELOPMENT_ASSET_PATHS = "\"LMS_StreamTest/Preview Content\"";
 				DEVELOPMENT_TEAM = 74BKX23N3K;
 				ENABLE_PREVIEWS = YES;
@@ -1310,6 +1319,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-dead_strip_dylibs",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTestUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -1329,6 +1342,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-dead_strip_dylibs",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "elm.LMS-StreamTestUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;

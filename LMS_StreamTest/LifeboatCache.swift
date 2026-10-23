@@ -1,8 +1,9 @@
 // File: LifeboatCache.swift
 // Ride out network loss, phase 2: while online, keep downloaded copies of the
 // current track and the next ~30 minutes of the queue, so playback can go on
-// through a long dead spot. Normal playback still streams; these files are
-// only played when the stream dies. Owned by SlimProtoCoordinator (main thread).
+// through a long dead spot. A song with a complete copy plays from the file
+// when LMS asks for it (CopyPlaybackDecision); the others stream, and a copy
+// takes over when the stream dies. Owned by SlimProtoCoordinator (main thread).
 import Foundation
 import os.log
 
@@ -69,7 +70,7 @@ final class LifeboatCache {
     }
 
     /// How far ahead to keep copies by default, in seconds of music from the
-    /// playhead (the setting chooses 15, 30 or 60 minutes).
+    /// playhead (the setting chooses 15, 30, 60 or 120 minutes).
     static let lookahead: TimeInterval = 30 * 60
     static let maxTracks = 40
     static let maxBytes: Int64 = 600 * 1024 * 1024
@@ -189,6 +190,38 @@ final class LifeboatCache {
     func fileURL(forIndex index: Int) -> URL? {
         guard let track = track(at: index), hasFile(track) else { return nil }
         return directory.appendingPathComponent(fileName(for: track))
+    }
+
+    /// Some song of the plan has a complete copy.
+    var hasSavedCopies: Bool { plan.contains { hasFile($0) } }
+
+    /// The complete copy of the track at playlist `index`, with the strm
+    /// formats it is the same audio as (nil = no complete copy).
+    func savedCopy(forIndex index: Int) -> CopyPlaybackDecision.SavedCopy? {
+        guard let track = track(at: index), hasFile(track) else { return nil }
+        return CopyPlaybackDecision.SavedCopy(id: track.id, formats: Self.strmFormats(
+            variant: variant(for: track), sourceType: track.sourceType))
+    }
+
+    /// The strm format names (SlimProtoCommandHandler.formatName) a copy plays
+    /// as: a transcode as its codec, an original as its file type (LMS
+    /// streams non-FLAC files as they are). Unknown types match nothing.
+    static func strmFormats(variant: Variant, sourceType: String?) -> Set<String> {
+        switch variant {
+        case .opus: return ["Opus"]
+        case .mp3: return ["MP3"]
+        case .ogg: return ["OGG"]
+        case .original:
+            switch sourceType {
+            case "flc": return ["FLAC"]
+            case "mp3": return ["MP3"]
+            case "ogg": return ["OGG"]
+            case "ops": return ["Opus"]
+            case "aac", "mp4": return ["AAC"]
+            case "wav": return ["WAV", "PCM"]
+            default: return []
+            }
+        }
     }
 
     /// The copy of the track at `index` is a lossy transcode: a match against
