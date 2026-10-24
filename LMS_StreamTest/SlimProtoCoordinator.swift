@@ -83,6 +83,24 @@ class SlimProtoCoordinator: ObservableObject {
     var pendingRecoveryTrigger: RecoveryTrigger = .none
     /// Was audio playing when connection was lost? (for networkRestored recovery)
     private var wasPlayingBeforeDisconnect: Bool = false
+
+    // Slow link (bd jbbf, tes3; policies in LinkStarvationPolicy.swift)
+    /// When the user's pause was applied on the phone and LMS has yet to confirm it (strm 'p').
+    private var userPausePendingSince: Date?
+    static let userPausePendingWindow: TimeInterval = 60
+    /// Pauses re-sent on a held 'u' and on a poll that still says "play" (each bounded on its own).
+    private var userPauseHolds = 0
+    private var userPausePollResends = 0
+    static let maxUserPauseResends = 3
+    /// Our STMo for the playing stream that LMS has not answered with 'p' yet.
+    private var outputUnderrunReportedAt: Date?
+    private var outputUnderrunReportsThisStream = 0
+    /// LMS paused us to rebuffer after our STMo: playing, as far as the user is concerned.
+    private var rebufferPausedByServer = false
+    /// BASS has produced audio for the current strm: a drain before that is
+    /// the initial buffering (LMS is BUFFERING too and would ignore STMo).
+    private var streamPlaybackStarted = false
+    private var lastRebufferTelemetryLog: Date?
     /// Was audio paused when connection was lost? (for networkRestored recovery)
     private var wasPausedBeforeDisconnect: Bool = false
     /// Outage hold (bd 6lvg, 8tjj): on while we're trying to get back to
@@ -1787,7 +1805,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // active outage hold means a previous drop interrupted playback we're
         // still trying to resume (bd 6lvg).
         wasPlayingBeforeDisconnect = (playerState == "Playing" || playerState == "Buffering"
-                                      || audioManager.isPushStreamStalled() || outageHoldActive)
+                                      || audioManager.isPushStreamStalled() || outageHoldActive
+                                      || rebufferPausedByServer)  // LMS paused us only to refill
         wasPausedBeforeDisconnect = (playerState == "Paused") && !wasPlayingBeforeDisconnect
         os_log(.info, log: logger, "📊 Disconnect state: wasPlaying=%{public}s, wasPaused=%{public}s (player: %{public}s, hold: %{public}s)",
                wasPlayingBeforeDisconnect ? "YES" : "NO", wasPausedBeforeDisconnect ? "YES" : "NO",
@@ -2144,6 +2163,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
         lastServerStreamStartAt = Date()
+        resetSlowLinkStateForNewStream()
         clearHeldTrackEnd()
         decodingCopy = nil
         playingCopy = nil
@@ -2537,6 +2557,16 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didPauseStream() {
         os_log(.info, log: logger, "⏸️ Server pause command")
+        if userPausePendingSince != nil {
+            os_log(.default, log: logger, "⏸️ LMS confirmed the user's pause")
+            userPausePendingSince = nil
+            rebufferPausedByServer = false
+        } else {
+            rebufferPausedByServer = OutputUnderrunPolicy.pauseIsRebuffer(reportedAt: outputUnderrunReportedAt, now: Date())
+            if rebufferPausedByServer {
+                os_log(.default, log: logger, "📉 LMS paused us to rebuffer - it resumes us when the buffer has refilled")
+            }
+        }
         if copyDecisionPending { pausedDuringCopyDecision = true }
         syncControllerReset(reason: "didPauseStream")
         endOutageHold(reason: "paused")
@@ -2566,6 +2596,12 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
+        if rebufferPausedByServer {
+            os_log(.default, log: logger, "📉 Rebuffer done - LMS resumed us (%d so far on this song)", outputUnderrunReportsThisStream)
+            rebufferPausedByServer = false
+        }
+        outputUnderrunReportedAt = nil   // a later drain on this song is a new underrun
+        streamPlaybackStarted = true
         pausedDuringCopyDecision = false
 
         // STMs flush for sync-wait tracks now happens in
@@ -2601,6 +2637,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        resetSlowLinkStateForNewStream()
         copyDecisionGeneration += 1  // a status reply for the strm before this stop is void
         reportZeroElapsedWhileDeciding = false
         copyDecisionPending = false
@@ -2878,6 +2915,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // STAT from here doubled STAT volume and perturbed the sync math.
         // bd LMS_StreamTest-433.3.3
         connectionManager.recordHeartbeatResponse()
+        if rebufferPausedByServer, lastRebufferTelemetryLog.map({ Date().timeIntervalSince($0) >= 2 }) ?? true {
+            // What LMS's rebuffer check (Player.pm _buffering) sees in our STATs.
+            let t = audioManager.statTelemetry()
+            lastRebufferTelemetryLog = Date()
+            os_log(.default, log: logger, "📉 Rebuffering: %llu KB downloaded ahead of the decoder, %llu KB of audio queued for output",
+                   t.streamBufferedBytes / 1024, t.outputBufferedBytes / 1024)
+        }
     }
     
     
@@ -3058,7 +3102,22 @@ extension SlimProtoCoordinator {
             let serverTime = result["time"] as? Double ?? 0.0
             let duration = result["duration"] as? Double ?? 0.0
             let mode = result["mode"] as? String ?? "stop"
-            let isPlaying = (mode == "play")
+            // Rebuffering: LMS says "play" while nothing sounds; keep the clock still.
+            let isPlaying = (mode == "play") && !rebufferPausedByServer
+
+            if UserPausePolicy.resendsOnPoll(pendingSince: userPausePendingSince, now: Date(), serverMode: mode,
+                                             minimumAge: 4, resends: userPausePollResends,
+                                             maxResends: Self.maxUserPauseResends) {
+                userPausePollResends += 1
+                os_log(.default, log: logger, "⏸️ User pause: LMS still playing - sending the pause again (%d/%d)",
+                       userPausePollResends, Self.maxUserPauseResends)
+                sendNormalJSONRPCCommand("pause")
+            }
+            if userPausePendingSince != nil {
+                // The phone is paused where the user pressed; LMS's running clock is not ours yet.
+                os_log(.info, log: logger, "⏱️ Ignoring server-time poll while the user's pause awaits LMS (server=%.2f)", serverTime)
+                return
+            }
 
             // During a playlist-jump recovery the server's reported time is
             // poisoned by our own stale STATs (startOffset + dead stream's
@@ -3235,6 +3294,11 @@ extension SlimProtoCoordinator {
             remotePlayIntent = nil
         }
 
+        if command.lowercased() != "pause" {
+            // Play, next, previous, stop: LMS's next 'u' is wanted again.
+            userPausePendingSince = nil
+        }
+
         // Save position on pause commands (creates save point for future recovery)
         if command.lowercased() == "pause" {
             // Local save first (instant, survives network transitions like CarPlay disconnect)
@@ -3249,6 +3313,8 @@ extension SlimProtoCoordinator {
         }
 
         if handleOfflineCommand(command.lowercased()) { return }
+
+        if command.lowercased() == "pause" { pauseLocallyForUser() }
 
         #if os(iOS)
         // CRITICAL: Always activate audio session for lock screen commands (ensures iOS readiness)
@@ -5691,6 +5757,7 @@ extension SlimProtoCoordinator {
     func handleDecoderDidStartPlayback() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.streamPlaybackStarted = true
             // Audio from a downloaded copy while the server is away isn't the
             // server's playback coming back: keep the hold (and the reconnects).
             if self.lifeboatHoldsSession { return }
@@ -5804,5 +5871,88 @@ enum PlaylistModeCycle {
         case 1: return 0   // one → off
         default: return 2  // off (or unknown) → all
         }
+    }
+}
+
+// MARK: - Slow link: user pause first, STMo on starvation (bd jbbf, tes3)
+extension SlimProtoCoordinator {
+
+    /// A new stream or a stop from LMS: the underrun bookkeeping starts over.
+    /// A user pause still awaiting LMS stays pending: LMS restarts a song by
+    /// itself (its rebuffer gives up after 30s and jumps to the same place),
+    /// and that restart's 'u' must not undo a pause the user just pressed.
+    func resetSlowLinkStateForNewStream() {
+        userPauseHolds = 0
+        userPausePollResends = 0
+        outputUnderrunReportedAt = nil
+        outputUnderrunReportsThisStream = 0
+        rebufferPausedByServer = false
+        streamPlaybackStarted = false
+        lastRebufferTelemetryLog = nil
+    }
+
+    /// The user pressed pause (lock screen, CarPlay, tvOS remote): stop the
+    /// sound now and remember that LMS has yet to agree. The JSON-RPC pause
+    /// follows in sendLockScreenCommand; its reply used to be the only thing
+    /// that paused us, and on a slow link it comes late or not at all
+    /// (device log 2026-10-24: 12s of buffering, pause pressed, LMS dropped it).
+    private func pauseLocallyForUser() {
+        // Pending whatever the engine holds: a song LMS is still buffering has
+        // no playing stream here yet, and that is exactly the pause LMS drops.
+        userPausePendingSince = Date()
+        userPauseHolds = 0
+        userPausePollResends = 0
+        rebufferPausedByServer = false
+        let state = audioManager.getPlayerState()
+        guard UserPausePolicy.pausesLocally(playerState: state) else {
+            os_log(.default, log: logger, "⏸️ User pause: engine already %{public}s - telling LMS", state)
+            return
+        }
+        audioManager.pause()
+        let time = simpleTimeTracker.getCurrentTimeDouble()
+        simpleTimeTracker.updateFromServer(time: time, playing: false)
+        os_log(.default, log: logger, "⏸️ User pause: paused on the phone at %.1fs (was %{public}s) - telling LMS", time, state)
+    }
+
+    /// strm 'u' while the user's pause awaits LMS: keep the engine paused and
+    /// send the pause again (LMS is PLAYING now, so this one lands). Returns
+    /// true when the unpause was held.
+    func holdUnpauseForPendingUserPause() -> Bool {
+        guard UserPausePolicy.holdsUnpause(pendingSince: userPausePendingSince, now: Date(),
+                                           window: Self.userPausePendingWindow,
+                                           resends: userPauseHolds, maxResends: Self.maxUserPauseResends) else {
+            if userPausePendingSince != nil {
+                os_log(.error, log: logger, "⏸️ User pause: LMS keeps resuming us - giving up on the pause, following LMS")
+                userPausePendingSince = nil
+            }
+            return false
+        }
+        userPauseHolds += 1
+        os_log(.default, log: logger, "⏸️ User pause: LMS resumed before confirming it (a pause while buffering is dropped) - staying paused, sending it again (%d/%d)",
+               userPauseHolds, Self.maxUserPauseResends)
+        sendNormalJSONRPCCommand("pause")
+        return true
+    }
+
+    /// The output buffer ran dry while the song is still being decoded
+    /// (AudioStreamDecoder STALL). If the server's download is still open this
+    /// is squeezelite's STMo: LMS pauses us, waits for our STAT buffer fullness
+    /// to reach its threshold (Player.pm rebuffer/_buffering) and resumes with
+    /// 'u'. Without it BASS plays each fragment as it arrives: chopping.
+    func reportMidTrackUnderrun() {
+        let stream = audioManager.pushStreamState()
+        guard streamPlaybackStarted,
+              OutputUnderrunPolicy.reports(playerState: audioManager.getPlayerState(),
+                                           downloadOpen: stream.connected, decodeComplete: stream.completedNaturally,
+                                           playingCopy: playingCopy != nil || decodingCopy != nil,
+                                           deciding: copyDecisionPending,
+                                           serverConnected: connectionManager.connectionState.isConnected,
+                                           awaitingServer: outputUnderrunReportedAt != nil,
+                                           reportsSoFar: outputUnderrunReportsThisStream) else { return }
+        outputUnderrunReportedAt = Date()
+        outputUnderrunReportsThisStream += 1
+        os_log(.default, log: logger, "📉 Output ran dry mid-track with the download still open - sending STMo so LMS rebuffers (%d/%d on this song)",
+               outputUnderrunReportsThisStream, OutputUnderrunPolicy.maxReportsPerStream)
+        client.sendStatus("STMo")
     }
 }

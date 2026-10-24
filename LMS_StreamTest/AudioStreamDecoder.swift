@@ -2408,7 +2408,8 @@ class AudioStreamDecoder {
                 os_log(.info, log: logger, "🏁 Output drained after natural decode completion - playback finished")
                 delegate?.audioStreamDecoderDidDrainAfterTrackComplete(self)
             } else {
-                os_log(.info, log: logger, "📊 No pending track - buffer naturally ended")
+                os_log(.info, log: logger, "📊 No pending track - buffer ran dry mid-track")
+                delegate?.audioStreamDecoderDidUnderrunMidTrack(self)
             }
             return
         }
@@ -2422,6 +2423,7 @@ class AudioStreamDecoder {
         // bd LMS_StreamTest-433.5.2
         guard consumeDecodeCompletedNaturally() else {
             os_log(.error, log: logger, "⏳ Buffer stalled mid-track (network underrun?) with deferred track queued - waiting, NOT starting it early")
+            delegate?.audioStreamDecoderDidUnderrunMidTrack(self)
             return
         }
 
@@ -2632,12 +2634,16 @@ class AudioStreamDecoder {
         guard pushStream != 0 else { return false }
         let state = BASS_ChannelIsActive(pushStream)
         // PLAYING / PAUSED: actively in use.
+        // STALLED: playing, out of data (a slow link). Left out, a server pause
+        //   during a stall went to the idle URL player and the push stream played
+        //   on as data trickled in, so LMS's rebuffer never filled (bd tes3).
         // STOPPED + waiting for sync: fresh stream created via 's' command, queued for
         //   synchronized start by the upcoming 'u'. Without this case, the 'u' command's
         //   hasActiveStream check sees "STOPPED" and incorrectly routes to playlist-jump
         //   recovery instead of letting the sync timer fire.
         return state == DWORD(BASS_ACTIVE_PLAYING)
             || state == DWORD(BASS_ACTIVE_PAUSED)
+            || state == DWORD(BASS_ACTIVE_STALLED)
             || (state == DWORD(BASS_ACTIVE_STOPPED) && isWaitingForUnpause)
     }
 
@@ -2669,6 +2675,12 @@ protocol AudioStreamDecoderDelegate: AnyObject {
     /// end-of-playlist this is the only signal that playback actually finished;
     /// without it the server stays in "play" forever. bd LMS_StreamTest-nzj
     func audioStreamDecoderDidDrainAfterTrackComplete(_ decoder: AudioStreamDecoder)
+
+    /// Called when the output buffer drains while the track is still being
+    /// decoded: data is not arriving fast enough. squeezelite's STMo moment
+    /// (output empty, stream still STREAMING_HTTP); the coordinator decides
+    /// whether this stall is the server's stream to report. bd LMS_StreamTest-tes3
+    func audioStreamDecoderDidUnderrunMidTrack(_ decoder: AudioStreamDecoder)
 
     /// Called when decoder encounters an error
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int)

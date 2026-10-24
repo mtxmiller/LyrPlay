@@ -1038,6 +1038,12 @@ extension AudioManager: AudioStreamDecoderDelegate {
         slimClient?.sendPlaybackComplete()
     }
 
+    func audioStreamDecoderDidUnderrunMidTrack(_ decoder: AudioStreamDecoder) {
+        // Like squeezelite: output empty while still streaming → STMo, and LMS
+        // rebuffers (pause, refill, resume) instead of us playing fragments.
+        slimClient?.reportMidTrackUnderrun()
+    }
+
     func audioStreamDecoderDidEncounterError(_ decoder: AudioStreamDecoder, error: Int) {
         os_log(.error, log: logger, "❌ Decoder error: %d - sending STMn to server", error)
         // Like squeezelite: DECODE_ERROR → send STMn

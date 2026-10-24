@@ -117,6 +117,7 @@
 				CopyPlaybackDecision.swift,
 				KeychainManager.swift,
 				LifeboatCache.swift,
+				LinkStarvationPolicy.swift,
 				MonotonicGate.swift,
 				NowPlayingManager.swift,
 				PCMAlign.swift,
