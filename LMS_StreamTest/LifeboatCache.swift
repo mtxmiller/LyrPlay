@@ -85,6 +85,10 @@ final class LifeboatCache {
     private var queue: [Track] = []
     private var active: URLSessionDownloadTask?
     private var activeID: String?
+    /// Downloads wait while the stream needs the link (SlimProtoCoordinator
+    /// decides once a second, bd xrvg): the task in flight is suspended, not
+    /// cancelled, and no new one starts.
+    private(set) var downloadsHeld = false
     /// "server|variant" the server answered 400 for (no download rule): those
     /// tracks get originals. Per launch, so installing the rule takes effect.
     private var unavailable: Set<String> = []
@@ -342,8 +346,21 @@ final class LifeboatCache {
         }
     }
 
+    /// Suspend or resume the downloads (a suspended URLSession task moves no
+    /// bytes and has no timeout; it goes on from where it was).
+    func holdDownloads(_ hold: Bool) {
+        guard hold != downloadsHeld else { return }
+        downloadsHeld = hold
+        if hold {
+            active?.suspend()
+        } else {
+            active?.resume()
+            downloadNext()
+        }
+    }
+
     private func downloadNext() {
-        guard active == nil, !queue.isEmpty else { return }
+        guard active == nil, !queue.isEmpty, !downloadsHeld else { return }
         guard mayDownload() else {
             os_log(.info, log: logger, "🛟 Not downloading now (metered network)")
             return

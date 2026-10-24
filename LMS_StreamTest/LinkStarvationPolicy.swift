@@ -72,3 +72,31 @@ enum OutputUnderrunPolicy {
         return now.timeIntervalSince(at) < window
     }
 }
+
+/// The saved copies download over the same link as the stream, at the same
+/// bitrate, so on a thin link the first song competes with its own copy and
+/// the next songs' (bd LMS_StreamTest-xrvg). While the stream is behind, the
+/// downloads wait; they go on once the output queue is comfortably full.
+/// Checked once a second (SlimProtoCoordinator's lifeboat watch).
+enum DownloadHoldPolicy {
+    /// Under this much decoded audio queued for output, the stream is behind.
+    /// On a fast link the queue passes it within a second of a song's start.
+    static let holdBelow: TimeInterval = 15
+    /// Above this the link has room again. The queue holds about 30 s
+    /// (AudioStreamDecoder.maxBufferSize), so a healthy stream always gets here.
+    static let releaseAbove: TimeInterval = 25
+
+    /// Hold (or keep holding) the downloads this second? Only a network stream
+    /// still downloading needs the link: a saved copy playing, a download
+    /// that has ended, or a decode that finished (the whole song is on the
+    /// phone) frees it. LMS rebuffering us is the stream behind by definition,
+    /// whatever the engine's state; a pause the user asked for drains nothing,
+    /// so the downloads may use the idle link.
+    static func holds(holding: Bool, playerState: String, downloadOpen: Bool, decodeComplete: Bool,
+                      playingCopy: Bool, rebuffering: Bool, bufferedSeconds: Double) -> Bool {
+        guard !playingCopy, downloadOpen, !decodeComplete else { return false }
+        if rebuffering { return true }
+        guard playerState == "Playing" || playerState == "Buffering" else { return false }
+        return bufferedSeconds < (holding ? releaseAbove : holdBelow)
+    }
+}

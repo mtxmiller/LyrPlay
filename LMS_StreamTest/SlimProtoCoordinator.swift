@@ -4850,13 +4850,16 @@ extension SlimProtoCoordinator {
         }
     }
 
-    /// Once a second: a network stream that stopped delivering while we
-    /// can't reach the server (dead spot, connection still open) is given up
-    /// before the buffer runs dry, so the downloaded copy takes over in time.
+    /// Once a second: the copy downloads yield the link to a stream that is
+    /// behind; and a network stream that stopped delivering while we can't
+    /// reach the server (dead spot, connection still open) is given up before
+    /// the buffer runs dry, so the downloaded copy takes over in time.
     private func startLifeboatWatch() {
         guard lifeboatWatchTimer == nil else { return }
         lifeboatWatchTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.lifeboatEnabled, !self.lifeboatActive, !self.connectionIsLive,
+            guard let self = self, self.lifeboatEnabled else { return }
+            self.updateDownloadHold()
+            guard !self.lifeboatActive, !self.connectionIsLive,
                   self.audioManager.getPlayerState() == "Playing" || self.audioManager.isPushStreamStalled() else { return }
             let stream = self.audioManager.pushStreamState()
             guard stream.connected, !stream.completedNaturally,
@@ -4865,6 +4868,26 @@ extension SlimProtoCoordinator {
                   self.lifeboat.fileURL(forIndex: stream.decodingAhead ? index + 1 : index) != nil else { return }
             self.audioManager.abandonNetworkStream()
         }
+    }
+
+    /// The copies download over the stream's link at the stream's bitrate: on
+    /// a thin link (cellular, device log 2026-10-24) the first song competes
+    /// with its own copy. While the stream is behind the downloads wait (bd xrvg).
+    private func updateDownloadHold() {
+        let stream = audioManager.pushStreamState()
+        let buffered = audioManager.bufferedPlaybackSeconds()
+        let hold = DownloadHoldPolicy.holds(
+            holding: lifeboat.downloadsHeld, playerState: audioManager.getPlayerState(),
+            downloadOpen: stream.connected, decodeComplete: stream.completedNaturally,
+            playingCopy: playingCopy != nil || lifeboatActive,
+            rebuffering: rebufferPausedByServer, bufferedSeconds: buffered)
+        guard hold != lifeboat.downloadsHeld else { return }
+        if hold {
+            os_log(.default, log: logger, "🛟 Holding copy downloads - %.0fs of audio queued, the stream needs the link", buffered)
+        } else {
+            os_log(.default, log: logger, "🛟 Copy downloads go on - %.0fs of audio queued", buffered)
+        }
+        lifeboat.holdDownloads(hold)
     }
 
     /// Buffered audio left when a stalled stream is given up for its copy:

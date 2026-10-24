@@ -56,6 +56,7 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | C1 | slow link (bd tes3): the stream capped at half the song's bitrate from the start, 75s | the output runs dry and the app reports it (STMo in the app log), LMS pauses to rebuffer and resumes at least once; LMS still in play, time advancing once the cap is lifted |
 | C2 | slow link (bd jbbf): a song loaded at an eighth of its bitrate, lock-screen Pause right away (LMS still BUFFERING, where it drops a Pause) | LMS paused within 60s, time not moving; the app paused on the phone at the press (app log) and LMS confirmed; Play resumes |
 | C3 | slow link (bd jbbf): the 2026-10-24 car log — a starved stream, lock-screen Pause mid-rebuffering | the phone pauses at once (app log), LMS paused within 45s, time not moving; Play resumes |
+| C4 | slow link (bd xrvg), `-Lifeboat 2`, saved copies cleared first: three times the song's bitrate until a copy download starts (held until the queue is 25s ahead), then half of it for 40s, then uncapped | the app holds the downloads once the queue drains (app log), no new download starts meanwhile; released within 30s of the cap lifting and the suspended copy completes within 60s |
 """
 import glob
 import json
@@ -956,6 +957,13 @@ def stream_requests(since):
     return [r for r in reply["requests"] if r["request"].startswith("GET /stream")]
 
 
+def download_requests(since):
+    """Copy downloads the app started through the proxy since `since`."""
+    offset = json.loads(fault("/requests?since=9e12"))["now"] - time.time()
+    reply = json.loads(fault(f"/requests?since={since + offset}"))
+    return [r for r in reply["requests"] if r["request"].startswith("GET /music/")]
+
+
 def lifeboat_dir():
     container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
                                capture_output=True, text=True, check=True).stdout.strip()
@@ -1441,6 +1449,65 @@ def c3_pause_while_starved(oracle, album_id):
     play_resumes(oracle)
 
 
+def c4_downloads_wait_for_the_stream(oracle, album_id):
+    # The copies download over the stream's link at the stream's bitrate (bd
+    # xrvg). Needs -Lifeboat 2. A link of three times the song's bitrate: the
+    # downloads are held until the stream is 25s ahead (~20s), then the first
+    # song's copy downloads (slowly: minutes). Then the link drops to half the
+    # bitrate: the queue drains, the app suspends the download in flight and
+    # starts no other; the stream has the link. The cap lifted, the downloads
+    # go on and the copy completes.
+    base = slow_kbps(oracle, album_id, 1)
+    wide, narrow = base * 3, base // 2
+    for saved in glob.glob(os.path.join(lifeboat_dir(), "*audio")):   # earlier scenarios saved this album
+        os.remove(saved)
+    fault(f"/shape?kbps={wide}")
+    t0 = time.time()
+    try:
+        smoke.load_album(oracle, album_id)
+        oracle.wait_until_advancing(timeout=60)
+        ids = play_order_ids(oracle)
+        print(f"   … playing through a {wide} kbit/s link: the stream fills its queue, then a copy downloads", flush=True)
+        deadline = time.time() + 75
+        while time.time() < deadline and not download_requests(t0):
+            time.sleep(2)
+        started = download_requests(t0)
+        held0 = app_log_count("Holding copy downloads", since=t0)
+        print(f"   … first download {time.time() - t0:.0f}s after the load (held {held0}× before it)", flush=True)
+        if not started:
+            raise CheckFailed("no copy download started within 75s (plan or -Lifeboat 2 missing?)")
+        time.sleep(5)   # let it get going
+        if glob.glob(os.path.join(lifeboat_dir(), f"{ids[0]}.*audio")):
+            raise CheckFailed("the first copy was complete before the link narrowed: nothing in flight to suspend "
+                              "(a longer song or a slower link is needed)")
+        fault(f"/shape?kbps={narrow}")
+        t_narrow = time.time()
+        print(f"   … link narrowed to {narrow} kbit/s with a download in flight; watching 40s", flush=True)
+        time.sleep(40)
+        held = app_log_count("Holding copy downloads", since=t_narrow)
+        new = download_requests(t_narrow)
+        copies = [i for i in range(len(ids)) if glob.glob(os.path.join(lifeboat_dir(), f"{ids[i]}.*audio"))]
+        print(f"   … app held the downloads {held}×; new downloads meanwhile {len(new)}; copies complete {copies}", flush=True)
+        if held < 1:
+            raise CheckFailed("the stream ran behind on the narrow link but the downloads were never held")
+        if new:
+            raise CheckFailed(f"a copy download started while the stream was behind: {new}")
+    finally:
+        fault("/shape?kbps=0")
+    t_lift = time.time()
+    deadline = t_lift + 30
+    while time.time() < deadline and app_log_count("Copy downloads go on", since=t_lift) < 1:
+        time.sleep(2)
+    released = app_log_count("Copy downloads go on", since=t_lift)
+    print(f"   … cap lifted: downloads released {released}× within {time.time() - t_lift:.0f}s", flush=True)
+    if released < 1:
+        raise CheckFailed("the downloads were not released once the stream caught up")
+    wait_for_copies(oracle, [0], timeout=60)   # the suspended download went on to completion
+    print("   … the suspended copy completed", flush=True)
+    oracle.wait_until_advancing(timeout=30)
+    oracle.assert_time_advancing()
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -1486,6 +1553,7 @@ SCENARIOS = [
     ("C1", "starved stream rebuffers", c1_starved_stream_rebuffers),
     ("C2", "pause while LMS buffers", c2_pause_while_buffering),
     ("C3", "pause on a starved stream", c3_pause_while_starved),
+    ("C4", "downloads wait for the stream", c4_downloads_wait_for_the_stream),   # -Lifeboat 2
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

@@ -101,3 +101,44 @@ struct OutputUnderrunPolicyTests {
         #expect(!OutputUnderrunPolicy.pauseIsRebuffer(reportedAt: nil, now: now))
     }
 }
+
+struct DownloadHoldPolicyTests {
+    private func holds(holding: Bool = false, state: String = "Playing", open: Bool = true, complete: Bool = false,
+                       copy: Bool = false, rebuffering: Bool = false, buffered: Double) -> Bool {
+        DownloadHoldPolicy.holds(holding: holding, playerState: state, downloadOpen: open, decodeComplete: complete,
+                                 playingCopy: copy, rebuffering: rebuffering, bufferedSeconds: buffered)
+    }
+
+    @Test func aStreamBehindHoldsTheDownloads() {
+        #expect(holds(buffered: 6))
+        // BASS stalled waiting for data: the stream is as far behind as it gets.
+        #expect(holds(state: "Buffering", buffered: 0))
+    }
+
+    @Test func aHealthyStreamLetsThemRun() {
+        #expect(!holds(buffered: 28))
+        // Between the marks and not holding: no reason to start.
+        #expect(!holds(buffered: 20))
+    }
+
+    @Test func aHoldLastsUntilTheQueueIsComfortablyFull() {
+        #expect(holds(holding: true, buffered: 20))
+        #expect(!holds(holding: true, buffered: 26))
+    }
+
+    @Test func lmsRebufferingUsHoldsWhateverTheEngineSays() {
+        #expect(holds(state: "Paused", rebuffering: true, buffered: 2))
+    }
+
+    @Test func theUsersPauseFreesTheLink() {
+        #expect(!holds(state: "Paused", buffered: 2))
+        #expect(!holds(holding: true, state: "Paused", buffered: 2))
+    }
+
+    @Test func nothingToCompeteWithNeverHolds() {
+        #expect(!holds(open: false, buffered: 2))            // the download ended
+        #expect(!holds(complete: true, buffered: 2))         // the whole song is decoded
+        #expect(!holds(copy: true, buffered: 2))             // a saved copy plays, no stream
+        #expect(!holds(holding: true, copy: true, rebuffering: true, buffered: 0))
+    }
+}
