@@ -248,3 +248,45 @@ struct CopyPlaybackTimingTests {
         #expect(SlimProtoCoordinator.statElapsed(decoderSeconds: 95.5, startOffset: 0, deciding: true) == 0)
     }
 }
+
+// LMS's first status answer after a strm can still show the previous song's
+// elapsed (it predates our STMc). Device log 2026-10-24: skipping through
+// saved songs on cellular streamed every one of them as a "seek".
+struct CopyPlaybackAskAgainTests {
+    private func delay(attempt: Int = 0, time: Double? = 150, before: Int? = 3, index: Int? = 4,
+                       stale: Double? = 236) -> TimeInterval? {
+        Decision.askAgainDelay(attempt: attempt, time: time, indexBefore: before, index: index, staleElapsed: stale)
+    }
+
+    @Test func aStartFromZeroIsTakenAtOnce() {
+        #expect(delay(time: 0) == nil)
+        #expect(delay(time: 1.2) == nil)
+        #expect(delay(time: nil) == nil)
+    }
+
+    @Test func anotherSongWithAStaleTimeIsAskedTwiceMore() {
+        // LMS's elapsed for the old song lags ours by 19s: the old 1s match would not have asked again.
+        #expect(delay(attempt: 0) == 0.3)
+        #expect(delay(attempt: 1) == 0.7)
+        #expect(delay(attempt: 2) == nil)
+    }
+
+    @Test func theSameSongIsAskedOnceOnlyWhenTheTimeMatchesOurs() {
+        // A seek: LMS's time is nowhere near our last elapsed.
+        #expect(delay(time: 95, before: 1, index: 1, stale: 30) == nil)
+        // The old song's elapsed echoed back: one more ask.
+        #expect(delay(time: 30.4, before: 1, index: 1, stale: 30) == 0.3)
+        #expect(delay(attempt: 1, time: 30.4, before: 1, index: 1, stale: 30) == nil)
+    }
+
+    @Test func withoutOurElapsedOneMoreAskIsAlwaysWorthIt() {
+        // Our jumps awaiting their strm: the time tells them apart, so take a fresh one.
+        #expect(delay(time: 95, before: 1, index: 1, stale: nil) == 0.3)
+    }
+
+    @Test func noIndexBeforeTheStrmFallsBackToTheTimeMatch() {
+        // A strm without a stop before it (gapless): nothing to compare the index with.
+        #expect(delay(time: 150, before: nil, index: 4, stale: 236) == nil)
+        #expect(delay(time: 236.5, before: nil, index: 4, stale: 236) == 0.3)
+    }
+}

@@ -92,6 +92,8 @@ class SlimProtoCoordinator: ObservableObject {
     private var userPauseHolds = 0
     private var userPausePollResends = 0
     static let maxUserPauseResends = 3
+    /// Playlist index we were on at LMS's last strm 'q' (nil once its 's' used it).
+    private var indexAtLastStop: Int?
     /// Our STMo for the playing stream that LMS has not answered with 'p' yet.
     private var outputUnderrunReportedAt: Date?
     private var outputUnderrunReportsThisStream = 0
@@ -2299,8 +2301,10 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         let generation = copyDecisionGeneration
         // Only a first answer that may be a stale view of a start from 0, or
         // of our jump, is worth asking again: a seek streams either way.
+        let indexBefore = indexAtLastStop   // the song we were on when LMS stopped us for this strm
+        indexAtLastStop = nil
         askLMSAboutStrm(generation: generation, startMayBeStale: !isGapless,
-                        staleElapsed: handbacks.isEmpty ? staleElapsed : nil) { [weak self] status in
+                        staleElapsed: handbacks.isEmpty ? staleElapsed : nil, indexBefore: indexBefore) { [weak self] status in
             guard let self = self else { return }
             self.reportZeroElapsedWhileDeciding = false
             self.copyDecisionPending = false
@@ -2352,8 +2356,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     /// STMc has long been read.
     /// `staleElapsed`: the elapsed our STATs reported before the strm (nil:
     /// always ask again); a first answer far from it is no stale view of a start from 0.
-    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, staleElapsed: Double?, attempt: Int = 0,
-                                 completion: @escaping ([String: Any]?) -> Void) {
+    private func askLMSAboutStrm(generation: Int, startMayBeStale: Bool, staleElapsed: Double?, indexBefore: Int?,
+                                 attempt: Int = 0, completion: @escaping ([String: Any]?) -> Void) {
         let statusCommand: [String: Any] = [
             "id": 1, "method": "slim.request",
             "params": [settings.playerMACAddress, ["status", "-", 2, "tags:o"]]
@@ -2367,12 +2371,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 }
                 let result = response["result"] as? [String: Any]
                 let time = (result?["time"] as? Double) ?? (result?["time"] as? Int).map(Double.init)
-                if startMayBeStale, attempt == 0, let time = time, time > CopyPlaybackDecision.startTolerance,
-                   staleElapsed.map({ abs(time - $0) < 1 }) ?? true {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                if startMayBeStale,
+                   let delay = CopyPlaybackDecision.askAgainDelay(attempt: attempt, time: time, indexBefore: indexBefore,
+                                                                  index: Self.playlistIndex(fromStatus: result),
+                                                                  staleElapsed: staleElapsed) {
+                    os_log(.info, log: self.logger, "📼 LMS's time %.1fs may be the song before (track %{public}s → %{public}s) - asking again in %.1fs",
+                           time ?? -1, indexBefore.map(String.init) ?? "?",
+                           Self.playlistIndex(fromStatus: result).map(String.init) ?? "?", delay)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self = self, generation == self.copyDecisionGeneration else { return }
                         self.askLMSAboutStrm(generation: generation, startMayBeStale: true, staleElapsed: staleElapsed,
-                                             attempt: 1, completion: completion)
+                                             indexBefore: indexBefore, attempt: attempt + 1, completion: completion)
                     }
                     return
                 }
@@ -2637,6 +2646,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didStopStream() {
         os_log(.info, log: logger, "⏹️ Server stop command")
+        // The strm after this stop may be another song: its first status
+        // answer can still carry this song's elapsed (CopyPlaybackDecision.askAgainDelay).
+        indexAtLastStop = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int
         resetSlowLinkStateForNewStream()
         copyDecisionGeneration += 1  // a status reply for the strm before this stop is void
         reportZeroElapsedWhileDeciding = false
