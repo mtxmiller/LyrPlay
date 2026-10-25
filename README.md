@@ -4,7 +4,7 @@
 
 
 
-A Squeezebox player for iOS devices that transforms your iPhone or iPad into a high-quality network audio player for Lyrion Media Server (LMS).
+A Squeezebox player that turns your iPhone, iPad or Apple TV into a high-quality network audio player for Lyrion Media Server (LMS).
 
 ---
 
@@ -14,39 +14,46 @@ A Squeezebox player for iOS devices that transforms your iPhone or iPad into a h
 - **Native FLAC / Opus Support** - High-quality lossless or efficiently compressed audio streaming with native decoding
 - **Material Web Interface** - Embedded Material skin for full LMS control
 - **Background Audio** - Continuous playback with lock screen integration and position recovery
+- **Keep Playing Offline** *(1.7.9)* - Saves the next songs in your queue on the phone and plays them from there, so music keeps going through dead spots and the server picks up where you are. Settings → Offline: Off, On Wi-Fi or Always, with Download Ahead up to 120 minutes. Library music only, not radio
+- **Rides Out Network Drops** *(1.7.9)* - A short drop no longer restarts the song; on a slow link the stream rebuffers instead of chopping, and saved-song downloads wait while the stream catches up
 - **Interruption Handling** - Smart pause/resume for phone calls and other app interruptions
 - **Server Discovery** - Automatic LMS server detection with failover support
 - **iOS Optimized** - Native SwiftUI app with BASS-managed audio sessions
-- **Custom CarPlay Interface** - Native CarPlay interface with album browsing, track lists, and playback controls
+- **Custom CarPlay Interface** - Native CarPlay interface with album browsing, track lists, playback controls, Hits, and Go to Artist
 - **Siri Voice Commands** - "Hey Siri, play [artist/album/song] on LyrPlay" with automatic LMS search
 - **Player Synchronization** - Sync playback across multiple LMS players
 - **HTTP Authentication** - Support for password-protected LMS servers
+- **HTTPS** *(1.7.9)* - Works with HTTPS-only setups such as a reverse proxy in front of LMS (contributed by [@magicus](https://github.com/magicus))
 - **Native Sample Rate Output for USB DACs** - Switches the DAC to each track's sample rate (no resampling). For an unaltered signal, turn on Fixed Output and set ReplayGain to Off in Settings → Audio, and control volume on your DAC
+- **Apple TV App** - Native tvOS player with library browsing, search and a visualizer, in the same App Store listing as the iOS app
 - **Premium Icon Pack** - 11 alternate app icons available as optional in-app purchase
 
 ## Audio Format Support
 
-- **FLAC, AAC, M4A, Opus, OGG Vorbis, WAV** - All formats supported with native BASS codecs
+- **FLAC, MP3, AAC, M4A, Opus, OGG Vorbis, WAV** - All formats supported with native BASS codecs
 - **Gapless Playback** - Supported across all formats using push stream architecture
 - **Maximum Bitrate Selection for Transcoding** - Adjustable in App Settings
 
 ## Requirements
 
 - **iOS 15.6 or later** (iPad app also runs on macOS via "Designed for iPad")
+- **tvOS 26 or later** for the Apple TV app
 - **Lyrion Media Server** (LMS/Lyrion Music Server)
 - **Material Skin plugin** (install from LMS Settings → Plugins)
 - Network connection to your LMS server
 
 ## Remote Access
 
-For remote access outside your home network, you'll need a secure VPN solution like Tailscale Etc. 
+For remote access outside your home network, you'll need a secure VPN solution such as Tailscale.
 
 1. Install Tailscale on your iOS device and your server.
 2. Enable MagicDNS - ensure server and iOS device have MagicDNS enabled.
 3. Enter the MagicDNS name of your server into LyrPlay during app setup.
 4. Listen to LyrPlay on cellular!
 
-**Important**: Direct internet exposure of LMS servers is not recommended due to security risks. 
+If you already run LMS behind an HTTPS reverse proxy, turn on **Use HTTPS for web interface** in LyrPlay's server settings.
+
+**Important**: Direct internet exposure of LMS servers is not recommended due to security risks.
 
 ## Enabling Mobile Transcode (Required for Opus / WAV)
 
@@ -61,7 +68,8 @@ LyrPlay can play MP3/AAC/WAV and FLAC without additional plugins, but the Mobile
 **Benefits:**
 - **Opus 256kbps** - Bandwidth efficient modern codec with working seek/scrub support
 - **Lower Data Usage** - Smaller file sizes for mobile streaming
-- **Full Seeking** - For manual seek and auto position reccovery on App-open
+- **Full Seeking** - For manual seek and auto position recovery on App-open
+- **Small Offline Copies** - With MobileTranscode **1.4 or later**, songs saved by Keep Playing Offline download in the stream's format (Opus or Ogg) instead of full-size FLAC
 
 ### NOTE — Opus Tools (required for Opus transcoding):
 
