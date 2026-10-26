@@ -245,8 +245,13 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             return
         }
 
-        os_log(.info, log: logger, "✅ Attempting playlist recovery with playback enabled...")
-        coordinator.performPlaylistRecovery(shouldPlay: true)
+        // The same path as lock-screen Play: it takes over a silent recovery in
+        // flight, plays saved copies offline, and resumes in place when LMS still
+        // holds our paused stream (it only recovers by jump when LMS forgot us).
+        // A direct audible jump here was skipped 3s after an app-open recovery
+        // (device log 2026-10-25) and jumped LMS during offline playback.
+        os_log(.info, log: logger, "✅ Resuming like lock-screen Play...")
+        coordinator.sendLockScreenCommand("play")
     }
 
     private func initializeCoordinator() {

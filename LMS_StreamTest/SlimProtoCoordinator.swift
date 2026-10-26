@@ -222,6 +222,9 @@ class SlimProtoCoordinator: ObservableObject {
     /// the new stream waiting forever (bd 6lvg, captured in the outage rig).
     private var lastConnectedAt: Date?
     private var lastServerStreamStartAt: Date?
+    /// When our own silent recovery sent its jump (main thread). The stream LMS
+    /// starts right after is that jump's, not LMS restarting a playing client.
+    private var silentRecoveryJumpSentAt: Date?
     /// The server ("host:port") of the last connection in this process: a
     /// reconnect HELO is only for the server that has our session.
     private var sessionServer: String?
@@ -1231,7 +1234,7 @@ class SlimProtoCoordinator: ObservableObject {
             // the wait above can outlast the first check in handlePendingRecovery.
             // A jump on top of a stream the server just started collides (one
             // stream per player); the hold watchdog retries if it fails.
-            if shouldPlay && self.serverStartedStreamRecently {
+            if shouldPlay && self.serverRestartedStreamRecently {
                 os_log(.info, log: self.logger, "[APP-RECOVERY] 🔄 Server started a stream recently - skipping jump")
                 self.liftPreMuteForAudibleRecovery()
                 return
@@ -1448,6 +1451,7 @@ class SlimProtoCoordinator: ObservableObject {
         // Arm the pause before the jump: the stream can start before its reply arrives.
         if !shouldPlay {
             silentRecoveryPauseGeneration = generation
+            silentRecoveryJumpSentAt = Date()
         }
 
         // CRITICAL: Always use noplay=0 (play) because noplay=1 doesn't work on STOPPED clients
@@ -5541,7 +5545,7 @@ extension SlimProtoCoordinator {
             }
             if self.connectionManager.connectionState.isConnected,
                !self.isRecoveryInProgress,
-               !self.serverStartedStreamRecently {
+               !self.serverRestartedStreamRecently {
                 self.retryAudibleRecovery(reason: "still no playback")
             }
             self.scheduleOutageHoldWatchdog(generation: generation)
@@ -5553,6 +5557,22 @@ extension SlimProtoCoordinator {
     private var serverStartedStreamRecently: Bool {
         guard let started = lastServerStreamStartAt else { return false }
         return Date().timeIntervalSince(started) < 15
+    }
+
+    /// The same, minus the stream of our own silent recovery's jump: that one
+    /// is paused (or being paused), not opening, so an audible recovery must
+    /// jump. Device log 2026-10-25: a CarPlay Resume 3s after the app-open
+    /// jump was skipped as "server started a stream", and nothing played.
+    private var serverRestartedStreamRecently: Bool {
+        guard serverStartedStreamRecently, let started = lastServerStreamStartAt else { return false }
+        return !Self.streamStartIsOurSilentJump(started: started, silentJumpSentAt: silentRecoveryJumpSentAt)
+    }
+
+    /// A stream start within 5s after our silent jump went out is that jump's.
+    static func streamStartIsOurSilentJump(started: Date, silentJumpSentAt: Date?) -> Bool {
+        guard let sent = silentJumpSentAt else { return false }
+        let gap = started.timeIntervalSince(sent)
+        return gap >= 0 && gap < 5
     }
 
     /// End the outage hold. Main thread only; no-op when not active.
@@ -5637,7 +5657,7 @@ extension SlimProtoCoordinator {
             guard let self = self, self.outageHoldActive else { return }
             // A timed-out jump may still have reached the server and started a
             // stream; don't jump on top of it (the watchdog re-checks later).
-            guard !self.serverStartedStreamRecently else {
+            guard !self.serverRestartedStreamRecently else {
                 os_log(.info, log: self.logger, "🔁 Skipping retry - server started a stream recently")
                 return
             }

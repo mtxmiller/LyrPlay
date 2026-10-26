@@ -18,6 +18,9 @@ struct ContentView: View {
     @State private var showingSettings = false
     private let logger = OSLog(subsystem: "com.lmsstream", category: "ContentView")
     @State private var isAppInBackground = false
+    /// When the first appear ran the cold-launch recovery check: the scene's
+    /// willEnterForeground of the same launch must not run it again.
+    @State private var coldLaunchCheckedAt: Date?
     @State private var hasLoadedInitially = false
     @State private var webView: WKWebView?
     @State private var hasConnectionError = false
@@ -287,8 +290,8 @@ struct ContentView: View {
             if slimProtoConnections == 0, slimProtoCoordinator.isConnected {
                 slimProtoConnections = 1
             }
-            // Cold-launch recovery: willEnterForegroundNotification doesn't fire on Not Running → Active,
-            // so the warm-resume handler below misses cold launches after a process kill. Set the trigger
+            // Cold-launch recovery: the app-wide willEnterForegroundNotification doesn't fire on
+            // Not Running → Active, so cold launches after a process kill are checked here. Set the trigger
             // here on first appear when persisted state shows a long background + saved recovery data.
             // Only set if no other path (e.g., racing lock-screen play) already set a trigger.
             // A new process holds no stream, so LMS no longer has ours (even if
@@ -296,17 +299,35 @@ struct ContentView: View {
             // saved position, restore it. A server already playing us skips it later.
             if !coldLaunchRecoveryChecked {
                 coldLaunchRecoveryChecked = true
-                // Unless this process already holds a stream (CarPlay launched it and
-                // played): that session is live, and the warm-resume route handles it.
-                let localState = audioManager.getPlayerState()
-                if slimProtoCoordinator.pendingRecoveryTrigger == .none,
-                   localState == "No Stream" || localState == "Stopped",
-                   settings.enableAppOpenRecovery,
-                   UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil {
-                    os_log(.info, log: logger, "❄️ Cold launch + recovery data → setting appOpen trigger")
-                    slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
-                    if slimProtoCoordinator.isConnected {
-                        slimProtoCoordinator.handlePendingRecovery()
+                // CarPlay can launch the process and connect this window in the
+                // background, or the phone opens while CarPlay shows: neither is the
+                // user opening LyrPlay on the phone (device log 2026-10-25). A later
+                // phone open runs the check from the scene's willEnterForeground.
+                // (Scene state read in onAppear, an action, not in body.)
+                let scenes = UIApplication.shared.connectedScenes
+                let phoneInForeground = scenes.contains {
+                    $0.session.role == .windowApplication && $0.activationState != .background
+                }
+                let otherInForeground = scenes.contains {
+                    $0.session.role != .windowApplication && PhoneOpenPolicy.isForeground($0.activationState)
+                }
+                os_log(.info, log: logger, "❄️ First appear: phone screen in foreground: %{public}s, another scene in foreground: %{public}s",
+                       phoneInForeground ? "yes" : "no", otherInForeground ? "yes" : "no")
+                if PhoneOpenPolicy.isColdPhoneOpen(phoneSceneInForeground: phoneInForeground,
+                                                   anotherSceneInForeground: otherInForeground) {
+                    coldLaunchCheckedAt = Date()
+                    // Unless this process already holds a stream (CarPlay launched it and
+                    // played): that session is live, and the warm-resume route handles it.
+                    let localState = audioManager.getPlayerState()
+                    if slimProtoCoordinator.pendingRecoveryTrigger == .none,
+                       localState == "No Stream" || localState == "Stopped",
+                       settings.enableAppOpenRecovery,
+                       UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil {
+                        os_log(.info, log: logger, "❄️ Cold launch + recovery data → setting appOpen trigger")
+                        slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
+                        if slimProtoCoordinator.isConnected {
+                            slimProtoCoordinator.handlePendingRecovery()
+                        }
                     }
                 }
             }
@@ -318,8 +339,8 @@ struct ContentView: View {
             // seconds while Material is in use gets the banner, not the player.
             openOfflinePlayerUntil = slimProtoCoordinator.connectionIsLive ? nil : Date().addingTimeInterval(15)
 
-            // App open recovery for warm resume is handled by willEnterForegroundNotification below.
-            // Cold launches don't get that notification, so the block above handles them on first appear.
+            // App open recovery for warm resume is handled by the phone scene's
+            // UIScene.willEnterForegroundNotification below; cold launches by the block above.
         }
         .onReceive(audioManager.audioPlayer.$currentStreamInfo) { _ in
             pushStreamInfoToWebView()
@@ -387,89 +408,22 @@ struct ContentView: View {
                 // link ourselves when Material reports it lost.
                 nudgeMaterial(force: false, reason: "foreground")
             }
-
-            // bd 34l: t=0 pre-mute, synchronous. A stream that stalled during
-            // suspension auto-resumes at full volume the moment the thawed socket
-            // delivers data — inside the 0.5s window before the recovery check
-            // below runs — and VOLDSP muting can't silence samples already in the
-            // playback buffer. Instantly VOL-mute in-flight audio now; restored by
-            // the skip branches below, recovery's settle paths, or a 10s ceiling.
-            // Recovery is only needed when LMS has dropped our connection (it closes
-            // a player it hasn't heard from for 15s; a suspended app can't answer).
-            let connectionWasLive = slimProtoCoordinator.connectionIsLive
-            // Offline playback owns the audio and the reconnect (review H3).
-            let offlineOwns = slimProtoCoordinator.offlinePlaybackOwnsRecovery
-            if settings.enableAppOpenRecovery, !offlineOwns,
-               !slimProtoCoordinator.isRecoveryActive,  // an in-flight (lock-screen) recovery owns the audio
-               !connectionWasLive,
-               audioManager.getPlayerState() != "Playing" {
-                os_log(.info, log: logger, "🔇 App Foreground: pre-muting in-flight audio (connection not live)")
-                audioManager.preMuteForPossibleRecovery()
-            }
-
-            // App foreground recovery: Use backgrounding duration to determine if recovery needed
-            // Wait 2 seconds to ensure connection is stable after foregrounding
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if slimProtoCoordinator.offlinePlaybackOwnsRecovery {
-                    os_log(.info, log: logger, "📱 App Foreground: offline playback owns recovery - skipping")
-                    return
-                }
-                // Skip recovery if already playing (background audio kept connection alive)
-                let currentState = audioManager.getPlayerState()
-                if currentState == "Playing" {
-                    os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
-                    audioManager.cancelPreMute(reason: "already playing")
-                    return
-                }
-
-                // Check settings first: the pre-mute above only engaged with it on.
-                guard settings.enableAppOpenRecovery else {
-                    os_log(.info, log: logger, "📱 App Foreground: Recovery disabled in settings - skipping")
-                    return
-                }
-
-                // Nothing saved to restore (never played, or already restored).
-                guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
-                    audioManager.cancelPreMute(reason: "no recovery data")
-                    return
-                }
-
-                // A lock-screen / CarPlay recovery already under way owns this.
-                guard slimProtoCoordinator.pendingRecoveryTrigger == .none else {
-                    os_log(.info, log: logger, "📱 App Foreground: a recovery is already pending - leaving it")
-                    audioManager.cancelPreMute(reason: "recovery already pending")
-                    return
-                }
-
-                slimProtoCoordinator.decideResumeRoute { route in
-                    guard route == .recover else {
-                        // LMS still has our paused stream: nothing to restore.
-                        os_log(.info, log: logger, "📱 App Foreground: paused stream still on the server - no recovery needed")
-                        audioManager.cancelPreMute(reason: "stream still on server")
-                        return
-                    }
-                    // A lock-screen / CarPlay play is being decided: it owns this.
-                    guard slimProtoCoordinator.pendingRecoveryTrigger == .none,
-                          !slimProtoCoordinator.remotePlayPending else { return }
-
-                    os_log(.error, log: logger, "[APP-RECOVERY] 🎯 APP OPEN RECOVERY TRIGGERED (connection live: %{public}s)",
-                           connectionWasLive ? "yes" : "no")
-                    os_log(.error, log: logger, "[APP-RECOVERY] 📊 Audio format: %{public}s", settings.audioFormat.displayName)
-                    os_log(.error, log: logger, "[APP-RECOVERY] 📊 Current player state: %{public}s", audioManager.getPlayerState())
-
-                    // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
-                    slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
-
-                    if slimProtoCoordinator.connectionIsLive {
-                        // Live connection, LMS just doesn't hold our stream: recover on it.
-                        slimProtoCoordinator.handlePendingRecovery()
-                    } else {
-                        // Reconnect - slimProtoDidConnect (or a kept socket) runs handlePendingRecovery().
-                        // connect() replaces a quiet old socket (possible zombie).
-                        slimProtoCoordinator.connect()
-                    }
-                }
-            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIScene.willEnterForegroundNotification)) { note in
+            // The app-open recovery belongs to the PHONE screen coming forward,
+            // not to the app leaving the background: in this multi-scene app a
+            // CarPlay launch does that too (device log 2026-10-25: the silent
+            // recovery ran with the phone in a pocket, and CarPlay Resume did nothing).
+            guard let scene = note.object as? UIScene else { return }
+            let otherForeground = PhoneOpenPolicy.anotherSceneInForeground(than: scene)
+            os_log(.info, log: logger, "📱 Scene entering foreground: %{public}s (another scene in foreground: %{public}s)",
+                   String(describing: scene.session.role.rawValue), otherForeground ? "yes" : "no")
+            guard PhoneOpenPolicy.isPhoneOpen(sceneRole: scene.session.role, anotherSceneInForeground: otherForeground) else { return }
+            // A cold launch posts this too: if the first appear just ran the
+            // check, don't run it twice. (If this comes first, the trigger
+            // guards in both checks keep it to one recovery.)
+            if let checked = coldLaunchCheckedAt, Date().timeIntervalSince(checked) < 3 { return }
+            appOpenRecoveryCheck()
         }
         .onReceive(NotificationCenter.default.publisher(for: .slimProtoDidConnect)) { _ in
             // bd toz7: whatever cut our SlimProto socket (a dead spot, a Wi-Fi ↔
@@ -544,6 +498,93 @@ struct ContentView: View {
     }
 
     // MARK: - Helper Functions
+    /// The app-open recovery check: the phone screen came forward (see the
+    /// UIScene.willEnterForegroundNotification receiver).
+    private func appOpenRecoveryCheck() {
+        // bd 34l: t=0 pre-mute, synchronous. A stream that stalled during
+        // suspension auto-resumes at full volume the moment the thawed socket
+        // delivers data — inside the 0.5s window before the recovery check
+        // below runs — and VOLDSP muting can't silence samples already in the
+        // playback buffer. Instantly VOL-mute in-flight audio now; restored by
+        // the skip branches below, recovery's settle paths, or a 10s ceiling.
+        // Recovery is only needed when LMS has dropped our connection (it closes
+        // a player it hasn't heard from for 15s; a suspended app can't answer).
+        let connectionWasLive = slimProtoCoordinator.connectionIsLive
+        // Offline playback owns the audio and the reconnect (review H3).
+        let offlineOwns = slimProtoCoordinator.offlinePlaybackOwnsRecovery
+        if settings.enableAppOpenRecovery, !offlineOwns,
+           !slimProtoCoordinator.isRecoveryActive,  // an in-flight (lock-screen) recovery owns the audio
+           !connectionWasLive,
+           audioManager.getPlayerState() != "Playing" {
+            os_log(.info, log: logger, "🔇 App Foreground: pre-muting in-flight audio (connection not live)")
+            audioManager.preMuteForPossibleRecovery()
+        }
+
+        // App foreground recovery: Use backgrounding duration to determine if recovery needed
+        // Wait 2 seconds to ensure connection is stable after foregrounding
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if slimProtoCoordinator.offlinePlaybackOwnsRecovery {
+                os_log(.info, log: logger, "📱 App Foreground: offline playback owns recovery - skipping")
+                return
+            }
+            // Skip recovery if already playing (background audio kept connection alive)
+            let currentState = audioManager.getPlayerState()
+            if currentState == "Playing" {
+                os_log(.info, log: logger, "📱 App Foreground: Skipping recovery - already playing (state: %{public}s)", currentState)
+                audioManager.cancelPreMute(reason: "already playing")
+                return
+            }
+
+            // Check settings first: the pre-mute above only engaged with it on.
+            guard settings.enableAppOpenRecovery else {
+                os_log(.info, log: logger, "📱 App Foreground: Recovery disabled in settings - skipping")
+                return
+            }
+
+            // Nothing saved to restore (never played, or already restored).
+            guard UserDefaults.standard.object(forKey: "lyrplay_recovery_timestamp") != nil else {
+                audioManager.cancelPreMute(reason: "no recovery data")
+                return
+            }
+
+            // A lock-screen / CarPlay recovery already under way owns this.
+            guard slimProtoCoordinator.pendingRecoveryTrigger == .none else {
+                os_log(.info, log: logger, "📱 App Foreground: a recovery is already pending - leaving it")
+                audioManager.cancelPreMute(reason: "recovery already pending")
+                return
+            }
+
+            slimProtoCoordinator.decideResumeRoute { route in
+                guard route == .recover else {
+                    // LMS still has our paused stream: nothing to restore.
+                    os_log(.info, log: logger, "📱 App Foreground: paused stream still on the server - no recovery needed")
+                    audioManager.cancelPreMute(reason: "stream still on server")
+                    return
+                }
+                // A lock-screen / CarPlay play is being decided: it owns this.
+                guard slimProtoCoordinator.pendingRecoveryTrigger == .none,
+                      !slimProtoCoordinator.remotePlayPending else { return }
+
+                os_log(.error, log: logger, "[APP-RECOVERY] 🎯 APP OPEN RECOVERY TRIGGERED (connection live: %{public}s)",
+                       connectionWasLive ? "yes" : "no")
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Audio format: %{public}s", settings.audioFormat.displayName)
+                os_log(.error, log: logger, "[APP-RECOVERY] 📊 Current player state: %{public}s", audioManager.getPlayerState())
+
+                // UNIFIED RECOVERY: Set trigger and let slimProtoDidConnect handle recovery (LMS_StreamTest-6lb)
+                slimProtoCoordinator.pendingRecoveryTrigger = .appOpen
+
+                if slimProtoCoordinator.connectionIsLive {
+                    // Live connection, LMS just doesn't hold our stream: recover on it.
+                    slimProtoCoordinator.handlePendingRecovery()
+                } else {
+                    // Reconnect - slimProtoDidConnect (or a kept socket) runs handlePendingRecovery().
+                    // connect() replaces a quiet old socket (possible zombie).
+                    slimProtoCoordinator.connect()
+                }
+            }
+        }
+    }
+
     private func getLyrPlayPlayerName() -> String {
         return settings.effectivePlayerName
     }
@@ -1719,5 +1760,34 @@ struct WebView: UIViewRepresentable {
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
+    }
+}
+
+
+/// Which foregrounding counts as "the user opened LyrPlay on the phone": only
+/// that runs the silent app-open recovery. LyrPlay has several scenes (the phone
+/// window, CarPlay, iPad windows), and the app leaves the background when the
+/// first of them comes forward, so the app-wide foreground event also fires for
+/// a CarPlay launch with the phone in a pocket (device log 2026-10-25).
+enum PhoneOpenPolicy {
+    static func isForeground(_ state: UIScene.ActivationState) -> Bool {
+        state == .foregroundActive || state == .foregroundInactive
+    }
+
+    /// A scene came forward: a phone open when it is a phone/iPad window and
+    /// nothing else was showing. Unlocking the phone while CarPlay shows was
+    /// never one (the app never left the foreground) and must not become one:
+    /// app-open recovery in the car can jump and play.
+    static func isPhoneOpen(sceneRole: UISceneSession.Role, anotherSceneInForeground: Bool) -> Bool {
+        sceneRole == .windowApplication && !anotherSceneInForeground
+    }
+
+    /// The first appear of the phone window on a cold launch.
+    static func isColdPhoneOpen(phoneSceneInForeground: Bool, anotherSceneInForeground: Bool) -> Bool {
+        phoneSceneInForeground && !anotherSceneInForeground
+    }
+
+    static func anotherSceneInForeground(than scene: UIScene) -> Bool {
+        UIApplication.shared.connectedScenes.contains { $0 !== scene && isForeground($0.activationState) }
     }
 }
