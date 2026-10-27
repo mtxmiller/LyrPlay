@@ -37,15 +37,17 @@ Unit test targets exist on both platforms (Swift Testing + XCTest). Run them bef
 # tvOS — -only-testing keeps it to the unit suite (the UI runner also loads since 2026-10-23, bd 39m fixed)
 xcodebuild test -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest-tvOS \
   -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation)' \
-  -only-testing:LMS_StreamTest-tvOSTests
+  -parallel-testing-enabled NO -only-testing:LMS_StreamTest-tvOSTests
 
 # iOS — device name must exist on the LATEST installed iOS runtime
 # (xcodebuild implies OS:latest; a name that only exists on an older runtime
 # fails with "Unable to find a device matching"). Check: xcrun simctl list devices available
 xcodebuild test -workspace LMS_StreamTest.xcworkspace -scheme LMS_StreamTest \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
-  -only-testing:LMS_StreamTestTests
+  -parallel-testing-enabled NO -only-testing:LMS_StreamTestTests
 ```
+
+Always `-parallel-testing-enabled NO` (the shared schemes have it off too): with parallel testing, xcodebuild runs on a *clone* of the simulator ("Clone 2 of iPhone 17" in `~/Library/Developer/XCTestDevices`) that Xcode 27 does not reliably delete — 93 clones had piled up by 2026-10-25. The suites are small, so nothing is lost. `scripts/smoke/sweep_clones.sh` removes leftovers from interrupted runs; the cut-build gate runs it.
 
 The full unit suites pass on both platforms. If a test fails, investigate — don't pre-attribute it to a known-failing list.
 
