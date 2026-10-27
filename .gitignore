@@ -151,3 +151,6 @@ __pycache__/
 
 # Dev wiki (Obsidian vault) — private notes, never commit to this public repo
 wiki/
+
+# bd gate locks
+*.gate.lock*
