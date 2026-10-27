@@ -88,3 +88,7 @@ daemon-*.log.gz
 # bd gate locks and per-machine server config
 *.gate.lock*
 dolt-server-config.yaml
+
+# bd backup destination and state (per-machine)
+dolt-backup.json
+dolt-backup-state.json
