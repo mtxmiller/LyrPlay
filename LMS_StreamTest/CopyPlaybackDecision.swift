@@ -112,6 +112,25 @@ enum CopyPlaybackDecision: Equatable {
         return fileIfSaved(current, strmFormat: strmFormat, server: server, copies: copies)
     }
 
+    /// LMS's first status answer after a strm can predate our STMc and show
+    /// the previous song's elapsed on top of the start offset. Ask again
+    /// after this delay (nil: take the answer) when it may be that stale view:
+    /// LMS is on another song than before the strm (a new song starts at 0,
+    /// and on a slow link its stale elapsed lags ours by many seconds:
+    /// device log 2026-10-24 streamed four saved songs as "seeks"), or the
+    /// time is near the elapsed our STATs last reported (`staleElapsed` nil:
+    /// always worth one more ask). A seek on the same song streams either
+    /// way and is not worth the wait.
+    static func askAgainDelay(attempt: Int, time: Double?, indexBefore: Int?, index: Int?,
+                              staleElapsed: Double?) -> TimeInterval? {
+        guard let time = time, time > startTolerance else { return nil }
+        if let before = indexBefore, let now = index, now != before {
+            return attempt < 2 ? [0.3, 0.7][attempt] : nil
+        }
+        guard attempt == 0, staleElapsed.map({ abs(time - $0) < 1 }) ?? true else { return nil }
+        return 0.3
+    }
+
     /// Of our jumps still awaiting their strm (a retry on top of one that
     /// got no reply), the one LMS's status time answers to: the nearest
     /// start offset. Without a time there is nothing to tell them apart.

@@ -53,9 +53,14 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | P7 | Next twice mid-song (`playlist index +1`, what Material sends) | the right song from 0, from its copy, no stream |
 | P8 | a sync group with a fake second player (`fakeplayer.py` on the LMS host), a jump and Next | both stream although copies exist ("in a sync group") |
 | P9 | ten songs from copies (jumps) | no stream; LMS's idle transcoder for each song is closed at the next strm (at most one pipeline at once, none after stop) |
+| C1 | slow link (bd tes3): the stream capped at half the song's bitrate from the start, 75s | the output runs dry and the app reports it (STMo in the app log), LMS pauses to rebuffer and resumes at least once; LMS still in play, time advancing once the cap is lifted |
+| C2 | slow link (bd jbbf): a song loaded at an eighth of its bitrate, lock-screen Pause right away (LMS still BUFFERING, where it drops a Pause) | LMS paused within 60s, time not moving; the app paused on the phone at the press (app log) and LMS confirmed; Play resumes |
+| C3 | slow link (bd jbbf): the 2026-10-24 car log — a starved stream, lock-screen Pause mid-rebuffering | the phone pauses at once (app log), LMS paused within 45s, time not moving; Play resumes |
+| C4 | slow link (bd xrvg), `-Lifeboat 2`, saved copies cleared first: three times the song's bitrate until a copy download starts (held until the queue is 25s ahead), then half of it for 40s, then uncapped | the app holds the downloads once the queue drains (app log), no new download starts meanwhile; released within 30s of the cap lifting and the suspended copy completes within 60s |
 """
 import glob
 import json
+import re
 import shutil
 import os
 import subprocess
@@ -952,6 +957,13 @@ def stream_requests(since):
     return [r for r in reply["requests"] if r["request"].startswith("GET /stream")]
 
 
+def download_requests(since):
+    """Copy downloads the app started through the proxy since `since`."""
+    offset = json.loads(fault("/requests?since=9e12"))["now"] - time.time()
+    reply = json.loads(fault(f"/requests?since={since + offset}"))
+    return [r for r in reply["requests"] if r["request"].startswith("GET /music/")]
+
+
 def lifeboat_dir():
     container = subprocess.run(["xcrun", "simctl", "get_app_container", SIM_NAME, "elm.LMS-StreamTest", "data"],
                                capture_output=True, text=True, check=True).stdout.strip()
@@ -1313,6 +1325,189 @@ def p9_no_transcoder_leak(oracle, album_id):
         raise CheckFailed(f"transcoders pile up: {most} at once, {left} left after stop")
 
 
+# Fallback cap when LMS does not report the song's bitrate. The cap must be
+# below the stream's bitrate but above a sixth of it: LMS gives a rebuffer 30s
+# before it restarts the song, and its threshold is 5s of the stream.
+SLOW_KBPS = int(os.environ.get("LYRPLAY_SLOW_KBPS", "64"))
+
+
+def slow_kbps(oracle, album_id, divisor):
+    """A link cap of the first song's bitrate / divisor (LMS's status `r` tag,
+    read from an uncapped load of the album), or LYRPLAY_SLOW_KBPS."""
+    smoke.load_album(oracle, album_id)
+    loop = oracle.player_rpc(["status", "-", 1, "tags:r"]).get("playlist_loop") or [{}]
+    m = re.match(r"(\d+)", str(loop[0].get("bitrate", "")))
+    kbps = max(16, int(m.group(1)) // divisor) if m else SLOW_KBPS
+    print(f"   … song bitrate {loop[0].get('bitrate', '?')}: capping the link at {kbps} kbit/s", flush=True)
+    return kbps
+
+
+def wait_for_mode(oracle, mode, timeout):
+    deadline = time.time() + timeout
+    s = oracle.status()
+    while time.time() < deadline and s["mode"] != mode:
+        time.sleep(1)
+        s = oracle.status()
+    return s
+
+
+def assert_frozen(oracle, s, secs=3):
+    time.sleep(secs)
+    s2 = oracle.status()
+    if s2["mode"] != "pause" or abs(s2["time"] - s["time"]) > 0.5:
+        raise CheckFailed(f"not holding still while paused: {s['time']:.1f}s → {s2['time']:.1f}s ({s2['mode']})")
+
+
+def play_resumes(oracle):
+    press("play")
+    oracle.wait_until_advancing(timeout=40)
+    time.sleep(8)   # a thin buffer at the resume may rebuffer once more
+    oracle.assert_time_advancing()
+
+
+def c1_starved_stream_rebuffers(oracle, album_id):
+    # A link slower than the stream (a car on cellular): the output buffer
+    # runs dry. squeezelite reports STMo and LMS rebuffers (pause, refill,
+    # resume); the app used to let BASS play each fragment as it arrived.
+    kbps = slow_kbps(oracle, album_id, 2)
+    fault(f"/shape?kbps={kbps}")
+    t0 = time.time()
+    try:
+        smoke.load_album(oracle, album_id)
+        oracle.wait_until_advancing(timeout=60)
+        print(f"   … playing through a {kbps} kbit/s link; watching 75s", flush=True)
+        time.sleep(75)
+        reports = app_log_count("sending STMo", since=t0)
+        paused = app_log_count("LMS paused us to rebuffer", since=t0)
+        resumed = app_log_count("Rebuffer done", since=t0)
+        mode = oracle.status()["mode"]
+    finally:
+        fault("/shape?kbps=0")
+    print(f"   … STMo sent {reports}×, rebuffer pauses {paused}, resumes {resumed}; LMS mode {mode}", flush=True)
+    if reports < 1:
+        raise CheckFailed("the output never ran dry at this cap, or the app did not report it (no STMo)")
+    if paused < 1:
+        raise CheckFailed("LMS did not pause us after STMo")
+    if resumed < 1:
+        raise CheckFailed("LMS never resumed us after a rebuffer (its 30s give-up restarts the song instead)")
+    if mode != "play":
+        raise CheckFailed(f"LMS mode {mode} after the rebuffers, expected play")
+    oracle.wait_until_advancing(timeout=30)
+    oracle.assert_time_advancing()
+
+
+def pause_checks(oracle, t_press, s):
+    local = app_log_count("User pause:", since=t_press - 1)
+    held = app_log_count("staying paused, sending it again", since=t_press - 1)
+    confirmed = app_log_count("LMS confirmed the user's pause", since=t_press - 1)
+    print(f"   … LMS {s['mode']} at {s['time']:.1f}s, {time.time() - t_press:.0f}s after the press; "
+          f"app: paused locally {local}, held LMS's unpause {held}, confirmed {confirmed}", flush=True)
+    if s["mode"] != "pause":
+        raise CheckFailed(f"LMS still {s['mode']} after the pause")
+    if local < 1:
+        raise CheckFailed("the pause did not take effect on the phone at the press")
+    if confirmed < 1:
+        raise CheckFailed("LMS never confirmed the pause (no strm p)")
+    assert_frozen(oracle, s)
+
+
+def c2_pause_while_buffering(oracle, album_id):
+    # LMS drops a Pause while the player is BUFFERING (StreamingController.pm
+    # state table: Pause × BUFFERING → _NoOp). On a slow link a song buffers
+    # for many seconds, and a listener hearing nothing presses pause right then.
+    kbps = slow_kbps(oracle, album_id, 8)   # a long buffering: the press lands in it
+    fault(f"/shape?kbps={kbps}")
+    try:
+        smoke.load_album(oracle, album_id)
+        time.sleep(0.5)
+        before = oracle.status()
+        press("pause")
+        t_press = time.time()
+        s = wait_for_mode(oracle, "pause", 60)
+        print(f"   … LMS was {before['mode']} at {before['time']:.1f}s when pause was pressed", flush=True)
+        pause_checks(oracle, t_press, s)
+    finally:
+        fault("/shape?kbps=0")
+    play_resumes(oracle)
+
+
+def c3_pause_while_starved(oracle, album_id):
+    # The 2026-10-24 car log: the stream starved on cellular and the pause did
+    # nothing for the rest of the drive.
+    kbps = slow_kbps(oracle, album_id, 2)
+    fault(f"/shape?kbps={kbps}")
+    try:
+        smoke.load_album(oracle, album_id)
+        oracle.wait_until_advancing(timeout=60)
+        time.sleep(25)   # the buffer drains; rebuffers begin
+        press("pause")
+        t_press = time.time()
+        s = wait_for_mode(oracle, "pause", 45)
+        pause_checks(oracle, t_press, s)
+    finally:
+        fault("/shape?kbps=0")
+    play_resumes(oracle)
+
+
+def c4_downloads_wait_for_the_stream(oracle, album_id):
+    # The copies download over the stream's link at the stream's bitrate (bd
+    # xrvg). Needs -Lifeboat 2. A link of three times the song's bitrate: the
+    # downloads are held until the stream is 25s ahead (~20s), then the first
+    # song's copy downloads (slowly: minutes). Then the link drops to half the
+    # bitrate: the queue drains, the app suspends the download in flight and
+    # starts no other; the stream has the link. The cap lifted, the downloads
+    # go on and the copy completes.
+    base = slow_kbps(oracle, album_id, 1)
+    wide, narrow = base * 3, base // 2
+    for saved in glob.glob(os.path.join(lifeboat_dir(), "*audio")):   # earlier scenarios saved this album
+        os.remove(saved)
+    fault(f"/shape?kbps={wide}")
+    t0 = time.time()
+    try:
+        smoke.load_album(oracle, album_id)
+        oracle.wait_until_advancing(timeout=60)
+        ids = play_order_ids(oracle)
+        print(f"   … playing through a {wide} kbit/s link: the stream fills its queue, then a copy downloads", flush=True)
+        deadline = time.time() + 75
+        while time.time() < deadline and not download_requests(t0):
+            time.sleep(2)
+        started = download_requests(t0)
+        held0 = app_log_count("Holding copy downloads", since=t0)
+        print(f"   … first download {time.time() - t0:.0f}s after the load (held {held0}× before it)", flush=True)
+        if not started:
+            raise CheckFailed("no copy download started within 75s (plan or -Lifeboat 2 missing?)")
+        time.sleep(5)   # let it get going
+        if glob.glob(os.path.join(lifeboat_dir(), f"{ids[0]}.*audio")):
+            raise CheckFailed("the first copy was complete before the link narrowed: nothing in flight to suspend "
+                              "(a longer song or a slower link is needed)")
+        fault(f"/shape?kbps={narrow}")
+        t_narrow = time.time()
+        print(f"   … link narrowed to {narrow} kbit/s with a download in flight; watching 40s", flush=True)
+        time.sleep(40)
+        held = app_log_count("Holding copy downloads", since=t_narrow)
+        new = download_requests(t_narrow)
+        copies = [i for i in range(len(ids)) if glob.glob(os.path.join(lifeboat_dir(), f"{ids[i]}.*audio"))]
+        print(f"   … app held the downloads {held}×; new downloads meanwhile {len(new)}; copies complete {copies}", flush=True)
+        if held < 1:
+            raise CheckFailed("the stream ran behind on the narrow link but the downloads were never held")
+        if new:
+            raise CheckFailed(f"a copy download started while the stream was behind: {new}")
+    finally:
+        fault("/shape?kbps=0")
+    t_lift = time.time()
+    deadline = t_lift + 30
+    while time.time() < deadline and app_log_count("Copy downloads go on", since=t_lift) < 1:
+        time.sleep(2)
+    released = app_log_count("Copy downloads go on", since=t_lift)
+    print(f"   … cap lifted: downloads released {released}× within {time.time() - t_lift:.0f}s", flush=True)
+    if released < 1:
+        raise CheckFailed("the downloads were not released once the stream caught up")
+    wait_for_copies(oracle, [0], timeout=60)   # the suspended download went on to completion
+    print("   … the suspended copy completed", flush=True)
+    oracle.wait_until_advancing(timeout=30)
+    oracle.assert_time_advancing()
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -1354,6 +1549,11 @@ SCENARIOS = [
     ("P7", "Next mid-song, from copy", p7_next_mid_song),
     ("P8", "sync group streams", p8_sync_group_streams),
     ("P9", "no transcoder leak", p9_no_transcoder_leak),
+    # A slow link (bd jbbf, tes3), only when named:
+    ("C1", "starved stream rebuffers", c1_starved_stream_rebuffers),
+    ("C2", "pause while LMS buffers", c2_pause_while_buffering),
+    ("C3", "pause on a starved stream", c3_pause_while_starved),
+    ("C4", "downloads wait for the stream", c4_downloads_wait_for_the_stream),   # -Lifeboat 2
 ]
 DEFAULT = {"O1", "O2", "O3", "O4"}
 

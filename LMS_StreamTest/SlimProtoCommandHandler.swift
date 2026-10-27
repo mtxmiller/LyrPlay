@@ -431,6 +431,14 @@ class SlimProtoCommandHandler: ObservableObject {
     func handleUnpauseCommand(jiffies: UInt32 = 0) {
         os_log(.info, log: logger, "▶️ Server unpause command (jiffies: %u)", jiffies)
 
+        // The user paused on the phone and LMS has not confirmed it: this 'u'
+        // is LMS finishing a buffer it was filling when the pause reached it
+        // (dropped: StreamingController Pause × BUFFERING is a no-op). Stay
+        // paused; the coordinator sends the pause again (bd LMS_StreamTest-jbbf).
+        if let coordinator = delegate as? SlimProtoCoordinator, coordinator.holdUnpauseForPendingUserPause() {
+            return
+        }
+
         // CRITICAL FIX: Check if we have an active stream before unpausing
         // If no stream (e.g., after disconnect/reconnect), use playlist jump to recover position
         if let coordinator = delegate as? SlimProtoCoordinator {
