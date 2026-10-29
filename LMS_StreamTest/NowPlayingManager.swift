@@ -367,7 +367,7 @@ class NowPlayingManager: ObservableObject {
     }
 
     private func loadArtwork(from url: URL, urlString: String, generation: Int) {
-        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s (gen %d)", url.absoluteString, generation)
+        os_log(.info, log: logger, "🖼️ Loading artwork from: %{public}s (gen %d)", url.absoluteString.maskingURLCredentials, generation)
 
         // Cancel any prior in-flight artwork download. On Apple TV covers can be
         // 2048px; without this, superseded loads still download in full before

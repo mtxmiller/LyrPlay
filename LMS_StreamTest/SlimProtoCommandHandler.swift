@@ -226,7 +226,7 @@ class SlimProtoCommandHandler: ObservableObject {
                         let url = SettingsManager.shared.injectCredentialsIntoURL(extractedURL)
 
                         // Log URL with masked credentials for security
-                        let maskedURL = url.replacingOccurrences(of: #"://[^:]+:[^@]+@"#, with: "://***:***@", options: .regularExpression)
+                        let maskedURL = url.maskingURLCredentials
                         os_log(.info, log: logger, "✅ Accepting %{public}s stream: %{public}s", formatName, maskedURL)
 
                         // Check if this is a direct stream (autostart < '2') or HTTP stream (autostart >= '2')

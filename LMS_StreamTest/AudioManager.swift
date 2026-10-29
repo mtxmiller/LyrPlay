@@ -182,7 +182,7 @@ class AudioManager: NSObject, ObservableObject {
     func startPushStreamPlayback(url: String, format: String, replayGain: Float = 0.0, isGapless: Bool = false, startTime: Double = 0.0, waitForUnpause: Bool = false) {
         guard !isOutputSuspended else { dropWhileOutputSuspended("push stream start"); return }
         os_log(.info, log: logger, "📊 Starting push stream playback: %{public}s (gapless: %d, waitForSync: %{public}s)", format, isGapless, waitForUnpause ? "YES" : "NO")
-        os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url)
+        os_log(.debug, log: logger, "📊 Decoder URL: %{public}s", url.maskingURLCredentials)
 
         // Configure audio session
         configureAudioSessionForFormat(format)
