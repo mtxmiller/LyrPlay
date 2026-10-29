@@ -214,7 +214,9 @@ class Oracle:
 def pick_album(oracle):
     """Choose a library album with >= 2 tracks whose OPENING track (true track
     order, sort:tracknum) is short enough for a fast S5 boundary test, and
-    which contains at least one track >= 45s for S4's provable seek.
+    which contains at least one track >= 45s for S4's provable seek, and
+    lasts >= 10 min so the outage scenarios (150-420s) don't run off its end
+    (lms-test's short probe album "Odd Files" was picked otherwise).
     No hardcoded IDs — works against any populated server."""
     titles = oracle.rpc(["titles", 0, 500, "tags:de"]).get("titles_loop", [])
     albums = {}
@@ -223,7 +225,7 @@ def pick_album(oracle):
         if album_id is not None:
             albums.setdefault(album_id, []).append(float(t.get("duration", 0) or 0))
     candidates = sorted(
-        (a for a, d in albums.items() if len(d) >= 2 and max(d) >= 45),
+        (a for a, d in albums.items() if len(d) >= 2 and max(d) >= 45 and sum(d) >= 600),
         key=lambda a: sum(sorted(albums[a])[:2]),
     )
     for album_id in candidates[:10]:

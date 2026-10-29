@@ -270,8 +270,10 @@ class SlimProtoCoordinator: ObservableObject {
     private var savedMusicStartedOffline = false
     /// Saved music was started from a button: the UI opens the offline player.
     var offlinePlayerRequested = false
-    /// Set by a lost connection or failed connect, cleared on connect: the
-    /// first second of a normal launch (not yet connected) isn't "offline".
+    /// Set by a lost connection or failed connect, cleared when the server is
+    /// heard: the first second of a normal launch (not yet connected) isn't
+    /// "offline". Not cleared by a connect alone: on a weak link the socket
+    /// connects but the server is never heard (bd kpu0).
     private var serverUnreachableSince: Date?
     /// Format of the last stream LMS sent (picks the copies' format).
     private var currentStreamFormat = ""
@@ -402,6 +404,9 @@ class SlimProtoCoordinator: ObservableObject {
     /// start offset (device log 2026-10-17: 234 → 0 → 227 → 234). The jump's
     /// own window takes over; ends with the outage hold.
     private var holdTimeUntilRecoveryJump = false
+    /// A remote play that reconnects is waiting for the server; a pause or
+    /// stop clears it (bd kpu0).
+    private var copyFallbackForPlay: UUID?
 
     // MARK: - Player Synchronization (Multi-room Audio)
     private var jiffiesEpoch: TimeInterval = 0  // Offset between server time and local jiffies
@@ -1189,6 +1194,7 @@ class SlimProtoCoordinator: ObservableObject {
                     }
                     let connectionStamp = self.lastConnectedAt
                     let generationAtWait = self.recoveryGeneration
+                    let copiesOwnedAtWait = self.offlinePlaybackOwnsRecovery
                     if !shouldPlay {
                         self.silentRecoveryWaiting = true
                     }
@@ -1208,7 +1214,10 @@ class SlimProtoCoordinator: ObservableObject {
                         // the engine is already muted, so keep waiting on the new
                         // connection (simulator log 2026-10-16: dropped here, recovery
                         // never ran, muted until the 20s ceiling).
-                        guard !shouldPlay || (self.lastConnectedAt == connectionStamp && self.outageHoldActive) else {
+                        // Copies took over during the wait (bd kpu0): the lifeboat jump
+                        // moves LMS. (A wait that is the lifeboat jump's own goes on.)
+                        guard !shouldPlay || (self.lastConnectedAt == connectionStamp && self.outageHoldActive
+                                              && (copiesOwnedAtWait || !self.offlinePlaybackOwnsRecovery)) else {
                             os_log(.info, log: self.logger, "[APP-RECOVERY] ⏳ Dropping stale wait (connection changed or playback started)")
                             return
                         }
@@ -1745,7 +1754,6 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidConnect() {
         os_log(.info, log: logger, "✅ Connection established")
         lastConnectedAt = Date()
-        serverUnreachableSince = nil
         audibleRecoveryRetries = 0  // retry budget is per connection (bd 6lvg)
         connectionManager.didConnect()
         syncControllerReset(reason: "slimProtoDidConnect")
@@ -1851,6 +1859,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         // Record that we received a command (shows connection is alive)
         let silence = lastServerMessageAt.map { Date().timeIntervalSince($0) } ?? 0
         lastServerMessageAt = Date()
+        serverUnreachableSince = nil
         if offlinePlaybackOwnsRecovery && silence > Self.liveConnectionWindow {
             // The socket never dropped (no reconnect will run), but we played or
             // paused offline meanwhile: move LMS to us now (review M4).
@@ -1978,6 +1987,9 @@ extension SlimProtoCoordinator: SlimProtoConnectionManagerDelegate {
     func connectionManagerDidEnterForeground() {
         isAppInBackground = false
         backgroundedWhilePlaying = false
+        // A suspended app couldn't try: give this foreground's reconnect 8 s
+        // before the offer shows (no flash over a healthy reconnect, bd kpu0).
+        if serverUnreachableSince != nil { serverUnreachableSince = Date() }
         // Note: Don't clear wasDisconnectedWhileInBackground here - let recovery handle it
         
         os_log(.info, log: logger, "📱 App foregrounded")
@@ -3308,6 +3320,7 @@ extension SlimProtoCoordinator {
             endOutageHold(reason: "user \(command.lowercased())")
             resumeInPlaceCheck = nil
             remotePlayIntent = nil
+            copyFallbackForPlay = nil
         }
 
         if command.lowercased() != "pause" {
@@ -3453,6 +3466,8 @@ extension SlimProtoCoordinator {
         // Stay awake until the reconnect + recovery gets audio going:
         // in the car the network may not be up yet (bd 8tjj).
         beginOutageHold(reason: "remote play, connection not live")
+        // A weak link may never let the server answer: then the copies play.
+        scheduleCopyFallbackForPlay()
 
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
         if savedPosition > 0 && outageHoldActive {
@@ -5231,17 +5246,7 @@ extension SlimProtoCoordinator {
                 connectionManager.resumeReconnecting(reason: "play pressed offline")
                 return false
             }
-            lifeboatPausedLocally = false
-            // LMS never hears this Play: the reconnect moves it to us, over its older pause.
-            lifeboatUsed = true
-            savedMusicStartedOffline = true
-            connectionManager.persistForPlayback = true
-            beginOutageHold(reason: "playing offline")
-        // Earlier attempts may have given up while nothing played (launched offline).
-        connectionManager.resumeReconnecting(reason: "playing offline")
-            audioManager.play()
-            simpleTimeTracker.updateFromServer(time: getCurrentTimeForSaving(), playing: true)
-            os_log(.info, log: logger, "📴 Offline: resumed on the phone")
+            resumeOfflineFromPause()
             return true
         case "next":
             if playLifeboatTrackNow(index: index + 1) {
@@ -5259,6 +5264,127 @@ extension SlimProtoCoordinator {
         default:
             return false
         }
+    }
+
+    /// Play on the phone from the paused buffer, then the copies: LMS isn't
+    /// asked (it can't be reached).
+    private func resumeOfflineFromPause() {
+        lifeboatPausedLocally = false
+        // LMS never hears this Play: the reconnect moves it to us, over its older pause.
+        lifeboatUsed = true
+        savedMusicStartedOffline = true
+        connectionManager.persistForPlayback = true
+        beginOutageHold(reason: "playing offline")
+        // Earlier attempts may have given up while nothing played (launched offline).
+        connectionManager.resumeReconnecting(reason: "playing offline")
+        audioManager.play()
+        simpleTimeTracker.updateFromServer(time: getCurrentTimeForSaving(), playing: true)
+        os_log(.info, log: logger, "📴 Offline: resumed on the phone")
+    }
+
+    /// How long a remote play waits for the server before the copies may play.
+    /// A healthy reconnect is heard within a second or two (rig O11).
+    static let copyFallbackDelay: TimeInterval = 6
+    /// With no sign of a weak link yet (no connect that stayed silent), wait
+    /// this long: a lost SYN on a waking cellular radio costs ~7 s (review).
+    static let copyFallbackNoEvidenceDelay: TimeInterval = 12
+    /// Heard once after the press, then nothing played: the link stalled.
+    static let copyFallbackStalledDelay: TimeInterval = 25
+    /// Stop checking after this long (the hold's own limit is longer).
+    static let copyFallbackGiveUp: TimeInterval = 120
+
+    /// A play pressed while paused with no live connection asks the server
+    /// first: a suspended app with the network fine must reach LMS (rig O11).
+    /// On a weak link (Wi-Fi gone, a cellular edge) the socket may connect but
+    /// the server is never heard, and iOS still reports a network, so the
+    /// offline buttons never took over (bd kpu0, forum 2026-10-29). The copies
+    /// play when there is evidence the server can't be reached: a connect
+    /// since the press that stayed silent 3 s, or 12 s of silence, or 25 s
+    /// with no audio although the server was heard once (the link stalled).
+    struct SilentPlayFacts: Equatable {
+        var stillWaiting = true          // the outage hold of this play is on
+        var localState = "Paused"
+        var recoveryInProgress = false   // a jump is in flight: its completion owns the lock
+        var connectionLive = false
+        var copiesCoverLastPosition = true
+        var sincePress: TimeInterval = 6
+        var serverHeardSincePress = false
+        var silentConnectFor: TimeInterval?  // a connect since the press, silent this long
+    }
+
+    static func playFromCopiesAfterSilentPlay(_ f: SilentPlayFacts) -> Bool {
+        guard f.stillWaiting, !f.recoveryInProgress, !f.connectionLive, f.copiesCoverLastPosition,
+              ["Paused", "Stopped", "No Stream"].contains(f.localState),
+              f.sincePress >= copyFallbackDelay else { return false }
+        if f.serverHeardSincePress { return f.sincePress >= copyFallbackStalledDelay }
+        return (f.silentConnectFor ?? 0) >= 3 || f.sincePress >= copyFallbackNoEvidenceDelay
+    }
+
+    private func scheduleCopyFallbackForPlay() {
+        let state = audioManager.getPlayerState()
+        guard lifeboatEnabled, ["Paused", "Stopped", "No Stream"].contains(state) else { return }
+        let check = UUID()
+        copyFallbackForPlay = check
+        checkCopyFallbackForPlay(check: check, pressedAt: Date(), after: Self.copyFallbackDelay)
+    }
+
+    private func checkCopyFallbackForPlay(check: UUID, pressedAt: Date, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.copyFallbackForPlay == check else { return }
+            let now = Date()
+            let sincePress = now.timeIntervalSince(pressedAt)
+            let state = self.audioManager.getPlayerState()
+            let heard = self.lastServerMessageAt.map { $0 >= pressedAt } ?? false
+            var silentConnectFor: TimeInterval?
+            if let connected = self.lastConnectedAt, connected >= pressedAt,
+               self.connectionManager.connectionState.isConnected, !heard {
+                silentConnectFor = now.timeIntervalSince(connected)
+            }
+            let facts = SilentPlayFacts(
+                stillWaiting: self.outageHoldActive, localState: state,
+                recoveryInProgress: self.isRecoveryInProgress, connectionLive: self.connectionIsLive,
+                copiesCoverLastPosition: self.savedMusicFromLastPosition() != nil,
+                sincePress: sincePress, serverHeardSincePress: heard, silentConnectFor: silentConnectFor)
+            guard Self.playFromCopiesAfterSilentPlay(facts) else {
+                // Not yet: keep checking while this play still waits for audio.
+                if self.outageHoldActive, ["Paused", "Stopped", "No Stream"].contains(state),
+                   sincePress < Self.copyFallbackGiveUp {
+                    self.checkCopyFallbackForPlay(check: check, pressedAt: pressedAt, after: 1)
+                } else {
+                    self.copyFallbackForPlay = nil
+                }
+                return
+            }
+            os_log(.info, log: self.logger, "📴 Play: server not reachable %.0fs after the press (heard %{public}s) - playing the saved copies",
+                   sincePress, heard ? "once" : "never")
+            self.playCopiesForUserPlay()
+        }
+    }
+
+    /// The user asked for audio and the server can't give it: the copies play,
+    /// from the paused buffer or (nothing local) from the saved position.
+    private func playCopiesForUserPlay() {
+        if audioManager.getPlayerState() == "Paused" {
+            cancelServerRecoveryForCopies()
+            resumeOfflineFromPause()
+            return
+        }
+        guard let offer = savedMusicFromLastPosition() else { return }
+        cancelServerRecoveryForCopies()
+        os_log(.info, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
+        prepareToPlaySavedMusic()
+        _ = playLifeboatTrackNow(index: offer.index, from: offer.position)
+    }
+
+    /// A reconnect's recovery waiting for the server would jump LMS to the old
+    /// pause over the copies; the lifeboat jump moves LMS to us instead.
+    /// Not recoveryGeneration: only a jump's completion or timeout clears
+    /// the recovery lock, and both check it (review: the lock stayed stuck).
+    private func cancelServerRecoveryForCopies() {
+        copyFallbackForPlay = nil
+        pendingRecoveryTrigger = .none
+        audibleRecoveryTarget = nil
+        holdTimeUntilRecoveryJump = false
     }
 
     /// Copies played or buttons handled offline: LMS doesn't know where we are.
@@ -5279,11 +5405,21 @@ extension SlimProtoCoordinator {
     }
 
     /// Non-nil when the server can't be reached, nothing is playing, and the
-    /// track we were last on has a downloaded copy.
+    /// track we were last on has a downloaded copy. Paused counts too: a
+    /// weak link (connects, never heard) is unreachable while iOS still
+    /// reports a network (bd kpu0).
     var savedMusicOffer: SavedMusicOffer? {
         let state = audioManager.getPlayerState()
-        guard lifeboatEnabled, !connectionIsLive, !lifeboatActive, !lifeboatPausedLocally,
-              (serverUnreachable && (state == "No Stream" || state == "Stopped")) || (state == "Paused" && networkUnavailable),
+        guard !connectionIsLive, serverUnreachable,
+              state == "No Stream" || state == "Stopped" || state == "Paused" else { return nil }
+        return savedMusicFromLastPosition()
+    }
+
+    /// The copies from where we left off (paused: the paused position), with
+    /// at least 30 s of saved music, whatever the server's state.
+    private func savedMusicFromLastPosition() -> SavedMusicOffer? {
+        let state = audioManager.getPlayerState()
+        guard lifeboatEnabled, !lifeboatActive, !lifeboatPausedLocally,
               var index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
               lifeboat.server == (sessionServer ?? currentSessionServer),  // copies from this server (review H7)
               let saved = lifeboat.track(at: index) else { return nil }
@@ -5307,8 +5443,11 @@ extension SlimProtoCoordinator {
     func playSavedMusicOffline() {
         guard let offer = savedMusicOffer else { return }
         if audioManager.getPlayerState() == "Paused" {
-            // Paused when the network went: play on from the buffer (then the copy).
-            _ = handleOfflineCommand("play")
+            // Paused when the server went: play on from the buffer (then the copy).
+            // Not handleOfflineCommand: on a weak link iOS reports a network and
+            // no outage hold is on yet (bd kpu0).
+            cancelServerRecoveryForCopies()
+            resumeOfflineFromPause()
             return
         }
         os_log(.info, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
