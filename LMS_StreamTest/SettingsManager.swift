@@ -1052,3 +1052,12 @@ class SettingsManager: ObservableObject {
         return urlString
     }
 }
+
+extension String {
+    /// The URL with its user:password@ replaced by ***:***@, for logs: stream,
+    /// artwork and Material URLs carry the server password (injectCredentialsIntoURL),
+    /// and the diagnostic log users post on GitHub is built from these logs.
+    var maskingURLCredentials: String {
+        replacingOccurrences(of: #"://[^/@]+@"#, with: "://***:***@", options: .regularExpression)
+    }
+}

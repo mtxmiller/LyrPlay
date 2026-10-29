@@ -2255,7 +2255,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         pendingUnpauseSTMs = false
         os_log(.info, log: logger, "📊 Starting DIRECT stream (gapless mode): %{public}s from %.2f with replayGain %.4f (autostart='%c', waitForSync=%{public}s)",
                format, startTime, replayGain, Int32(autostart), waitForUnpause ? "YES" : "NO")
-        os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url)
+        os_log(.debug, log: logger, "📊 Stream URL: %{public}s", url.maskingURLCredentials)
 
         // Stop any existing playback and timers first
         stopPlaybackHeartbeat()

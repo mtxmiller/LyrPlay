@@ -1194,7 +1194,7 @@ struct WebView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> WKWebView {
         // Mask credentials in URL for logging (security)
-        let maskedURL = url.absoluteString.replacingOccurrences(of: #"://[^:]+:[^@]+@"#, with: "://***:***@", options: .regularExpression)
+        let maskedURL = url.absoluteString.maskingURLCredentials
         os_log(.info, log: logger, "Creating WKWebView with Material Integration for URL: %{public}s", maskedURL)
         
         
@@ -1647,11 +1647,11 @@ struct WebView: UIViewRepresentable {
             if let url = navigationAction.request.url {
                 let urlString = url.absoluteString
                 
-                os_log(.info, log: logger, "🔍 Navigation decision for URL: %{public}s", urlString)
+                os_log(.info, log: logger, "🔍 Navigation decision for URL: %{public}s", urlString.maskingURLCredentials)
                 
                 // ONLY intercept our custom settings URL scheme
                 if urlString.hasPrefix("lmsstream://settings") {
-                    os_log(.info, log: logger, "✅ Intercepted Material settings URL: %{public}s", urlString)
+                    os_log(.info, log: logger, "✅ Intercepted Material settings URL: %{public}s", urlString.maskingURLCredentials)
                     
                     // Handle the settings navigation
                     DispatchQueue.main.async {
@@ -1669,7 +1669,7 @@ struct WebView: UIViewRepresentable {
                     
                     // Allow navigation within the same LMS server
                     if host == serverHost || host.hasSuffix(".\(serverHost)") {
-                        os_log(.info, log: logger, "✅ Allowing navigation within LMS server: %{public}s", urlString)
+                        os_log(.info, log: logger, "✅ Allowing navigation within LMS server: %{public}s", urlString.maskingURLCredentials)
                         decisionHandler(.allow)
                         return
                     }
@@ -1677,7 +1677,7 @@ struct WebView: UIViewRepresentable {
                     // Allow localhost and local network addresses
                     if host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("172.") ||
                        host == "localhost" || host.hasSuffix(".local") {
-                        os_log(.info, log: logger, "✅ Allowing local network navigation: %{public}s", urlString)
+                        os_log(.info, log: logger, "✅ Allowing local network navigation: %{public}s", urlString.maskingURLCredentials)
                         decisionHandler(.allow)
                         return
                     }
@@ -1685,7 +1685,7 @@ struct WebView: UIViewRepresentable {
                 
                 // For external links, open in an in-app Safari sheet on a user-initiated link click
                 if navigationAction.navigationType == .linkActivated {
-                    os_log(.info, log: logger, "🌐 Opening external link in in-app Safari sheet: %{public}s", urlString)
+                    os_log(.info, log: logger, "🌐 Opening external link in in-app Safari sheet: %{public}s", urlString.maskingURLCredentials)
 
                     // In-app Safari sheet (keeps player controls one Done-tap away)
                     presentInAppBrowser(url, from: webView)
@@ -1704,7 +1704,7 @@ struct WebView: UIViewRepresentable {
             
             if let url = navigationAction.request.url {
                 let urlString = url.absoluteString
-                os_log(.info, log: logger, "📄 Material requesting iframe/popup for: %{public}s", urlString)
+                os_log(.info, log: logger, "📄 Material requesting iframe/popup for: %{public}s", urlString.maskingURLCredentials)
                 
                 // Check if this is a server administration page (like server.log)
                 if let host = url.host {
@@ -1712,7 +1712,7 @@ struct WebView: UIViewRepresentable {
                     
                     // If it's from our LMS server, load it in the main WebView
                     if host == serverHost || host.hasSuffix(".\(serverHost)") {
-                        os_log(.info, log: logger, "✅ Loading LMS admin page in main WebView: %{public}s", urlString)
+                        os_log(.info, log: logger, "✅ Loading LMS admin page in main WebView: %{public}s", urlString.maskingURLCredentials)
                         
                         // Load the URL in the main WebView instead of creating a new one
                         webView.load(navigationAction.request)
@@ -1722,7 +1722,7 @@ struct WebView: UIViewRepresentable {
                 
                 // For external URLs (Material weblinks open via window.open, which routes here),
                 // present an in-app Safari sheet instead of ejecting to the system Safari app.
-                os_log(.info, log: logger, "🌐 Opening external URL in in-app Safari sheet: %{public}s", urlString)
+                os_log(.info, log: logger, "🌐 Opening external URL in in-app Safari sheet: %{public}s", urlString.maskingURLCredentials)
                 presentInAppBrowser(url, from: webView)
             }
 

@@ -1153,7 +1153,7 @@ class AudioStreamDecoder {
         let superseded = (generation != decodeGeneration)
         stateLock.unlock()
         guard !superseded else {
-            os_log(.info, log: logger, "⏭️ Skipping superseded decode start for %{public}s", url)
+            os_log(.info, log: logger, "⏭️ Skipping superseded decode start for %{public}s", url.maskingURLCredentials)
             return
         }
         // A start can pass AudioManager's check just before a media services
@@ -1162,11 +1162,11 @@ class AudioStreamDecoder {
         let suspended = outputSuspended
         stateLock.unlock()
         guard !suspended else {
-            os_log(.error, log: logger, "🔄 Media services down - skipping decode start for %{public}s", url)
+            os_log(.error, log: logger, "🔄 Media services down - skipping decode start for %{public}s", url.maskingURLCredentials)
             return
         }
 
-        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url, startTime, replayGain)
+        os_log(.info, log: logger, "🎵 Starting decoder for %{public}s: %{public}s (startTime: %.2f, replayGain: %.4f)", format, url.maskingURLCredentials, startTime, replayGain)
 
         // Reset measured-bitrate state — new track means a new decoder stream
         // with a new BASS_FILEPOS_DOWNLOAD counter starting at 0.
@@ -2443,7 +2443,7 @@ class AudioStreamDecoder {
     /// Uses existing decoder to preserve HTTP connection and get track from 0:00
     private func startDeferredTrack(_ track: PendingTrackInfo) {
         os_log(.error, log: logger, "[APP-RECOVERY] 🎵 STARTING DEFERRED TRACK (format mismatch recovery)")
-        os_log(.error, log: logger, "[APP-RECOVERY] 📊 Using existing decoder: %{public}s", track.url)
+        os_log(.error, log: logger, "[APP-RECOVERY] 📊 Using existing decoder: %{public}s", track.url.maskingURLCredentials)
         os_log(.error, log: logger, "[APP-RECOVERY] 📊 Mute state BEFORE stream recreation: muteNextStream=%{public}s", muteNextStream ? "TRUE" : "FALSE")
 
         // CRITICAL FIX: Clear sync wait state - deferred tracks are NOT synchronized starts

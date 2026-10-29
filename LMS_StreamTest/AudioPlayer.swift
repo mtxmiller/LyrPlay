@@ -374,7 +374,7 @@ class AudioPlayer: NSObject, ObservableObject {
             return
         }
         
-        os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString)
+        os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString.maskingURLCredentials)
         
         // Track current URL for potential recovery scenarios
         currentStreamURL = urlString
@@ -401,7 +401,7 @@ class AudioPlayer: NSObject, ObservableObject {
 
         guard currentStream != 0 else {
             let errorCode = BASS_ErrorGetCode()
-            os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString)
+            os_log(.error, log: logger, "❌ BASS_StreamCreateURL failed: %d for URL: %{public}s", errorCode, urlString.maskingURLCredentials)
 
             // Handle format errors (permanent failures)
             if errorCode == DWORD(41) {  // BASS_ERROR_FILEFORM - unsupported format
@@ -499,7 +499,7 @@ class AudioPlayer: NSObject, ObservableObject {
     
     func playStreamWithFormat(urlString: String, format: String, replayGain: Float = 0.0,
                               afterOpen: (() -> OpenedStreamAction)? = nil) {
-        os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s with replayGain %.4f", format, urlString, replayGain)
+        os_log(.info, log: logger, "🎵 Playing %{public}s stream: %{public}s with replayGain %.4f", format, urlString.maskingURLCredentials, replayGain)
 
         // CRITICAL: Store format for plugin-specific stream creation
         currentStreamFormat = format
