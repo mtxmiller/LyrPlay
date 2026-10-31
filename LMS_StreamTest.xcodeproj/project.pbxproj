@@ -115,6 +115,7 @@
 				AudioStreamDecoder.swift,
 				Connections.swift,
 				CopyPlaybackDecision.swift,
+				DownloadPlanPolicy.swift,
 				KeychainManager.swift,
 				LifeboatCache.swift,
 				LinkStarvationPolicy.swift,

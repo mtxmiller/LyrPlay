@@ -22,6 +22,7 @@ struct SettingsView: View {
     // Status card (bd x19i)
     @State private var isConnectedNow = false
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var downloadStatus: OfflineDownloadStatus?
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
     @State private var playbackSource: String?   // "streaming" / "playing saved copy" while audio plays
@@ -305,6 +306,11 @@ struct SettingsView: View {
     private func refreshConnectionStatus() {
         isConnectedNow = coordinator.isConnected
         offlineStatus = coordinator.offlinePlaybackStatus
+        let savedBefore = downloadStatus?.savedCount
+        downloadStatus = coordinator.offlineDownloadStatus
+        if let status = downloadStatus, status.savedCount != savedBefore {
+            offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed())  // a copy landed or left
+        }
         savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
         switch audioPlayer.getPlayerState() {
@@ -335,6 +341,16 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
 
+                // Live while the screen is open (the 1 s poll): what the plan
+                // holds, what's downloading, or why nothing is.
+                HStack(alignment: .top) {
+                    Text("Saved for Offline")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Text(downloadStatus?.text ?? "—")
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.trailing)
+                }
                 valueRow("Storage Used", offlineStorageText)
             }
         } header: {
@@ -343,6 +359,7 @@ struct SettingsView: View {
             Text("Saves the next songs in your queue on the phone. Saved songs play from the phone instead of streaming, so music keeps playing through dead spots, and the server picks up where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
         }
         .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
+        .onChange(of: settings.lifeboatMinutes) { _ in coordinator.savedMusicSettingChanged() }
     }
 
     private var lifeboatModeBinding: Binding<Int> {
@@ -354,6 +371,7 @@ struct SettingsView: View {
                     coordinator.clearSavedMusic()  // off: drop the downloads and the live plan (review M8)
                     offlineStorageText = Self.formatStorage(0)
                 }
+                coordinator.savedMusicSettingChanged()
             }
         )
     }

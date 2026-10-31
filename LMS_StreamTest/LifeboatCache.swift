@@ -199,6 +199,27 @@ final class LifeboatCache {
     /// Some song of the plan has a complete copy.
     var hasSavedCopies: Bool { plan.contains { hasFile($0) } }
 
+    /// How much of the plan is on the phone, for the settings screen (bd tcr5).
+    struct DownloadSummary: Equatable {
+        let savedSeconds: Double
+        let plannedSeconds: Double
+        let savedCount: Int
+        let plannedCount: Int
+        /// Downloads still to do, the one in flight included.
+        let pendingCount: Int
+        let storageFull: Bool
+    }
+
+    var downloadSummary: DownloadSummary {
+        let saved = plan.filter { hasFile($0) }
+        return DownloadSummary(
+            savedSeconds: saved.reduce(0) { $0 + $1.duration },
+            plannedSeconds: plan.reduce(0) { $0 + $1.duration },
+            savedCount: saved.count, plannedCount: plan.count,
+            pendingCount: queue.count + (activeID == nil ? 0 : 1),
+            storageFull: !queue.isEmpty && activeID == nil && directorySize() >= Self.maxBytes)
+    }
+
     /// The complete copy of the track at playlist `index`, with the strm
     /// formats it is the same audio as (nil = no complete copy).
     func savedCopy(forIndex index: Int) -> CopyPlaybackDecision.SavedCopy? {

@@ -254,6 +254,16 @@ class SlimProtoCoordinator: ObservableObject {
     private var lifeboatUsed = false
     private var lifeboatWatchTimer: Timer?
     private var lifeboatPlanAt: Date?
+    /// Asks LMS for the queue's `playlist_timestamp` while the 3 s status
+    /// poll isn't running (connected, idle), so the copies follow the queue
+    /// without a stream (bd tcr5); seen/last: the first reply of a connection
+    /// and every change re-plan (avt6).
+    private var queueWatchTimer: Timer?
+    private var queueTimestampSeen = false
+    private var lastQueueTimestamp: Double?
+    /// `lifeboatMayDownload` at the last lifeboat watch tick (a false → true
+    /// edge restarts the downloads).
+    private var lifeboatCouldDownload = true
     /// When the current decode end was held (a server restart after it supersedes it).
     private var decodeEndHeldAt: Date?
     /// Copies that couldn't be switched to (format, no match): never retried.
@@ -835,6 +845,7 @@ class SlimProtoCoordinator: ObservableObject {
     
     deinit {
         stopServerTimeFetching()  // Stop our simplified server time fetching
+        stopQueueWatch()
         // Use position-saving disconnect when app is being deallocated
         client.disconnectWithPositionSave()
     }
@@ -1772,6 +1783,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
 
         let reconnectHelo = client.lastHeloWasReconnect
         sessionServer = currentSessionServer
+        queueTimestampSeen = false  // this connection's first status reply plans the copies
+        startQueueWatch()
 
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
         // This replaces separate recovery calls in ContentView and sendLockScreenCommand
@@ -1800,6 +1813,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         serverUnreachableSince = serverUnreachableSince ?? Date()
+        stopQueueWatch()
         // A strm being decided died with the connection: its status reply is
         // void, and hasActiveStream must not call the reconnect's 'u' a resume.
         copyDecisionGeneration += 1
@@ -3126,6 +3140,8 @@ extension SlimProtoCoordinator {
                 return
             }
             
+            noteQueueTimestamp(result)
+
             // Extract REAL server time from server response
             let serverTime = result["time"] as? Double ?? 0.0
             let duration = result["duration"] as? Double ?? 0.0
@@ -4814,13 +4830,82 @@ extension SlimProtoCoordinator {
         }
     }
 
+    /// The copies follow the queue while nothing plays (bd tcr5): the 3 s
+    /// status poll runs only from a stream start to a stop, so a connected
+    /// idle player asks for the queue's timestamp every 10 s instead.
+    private func startQueueWatch() {
+        guard lifeboatEnabled, queueWatchTimer == nil else { return }
+        queueWatchTimer = Timer.scheduledTimer(withTimeInterval: QueueWatchPolicy.idleInterval, repeats: true) { [weak self] _ in
+            self?.fetchQueueTimestamp()
+        }
+        fetchQueueTimestamp()
+    }
+
+    private func stopQueueWatch() {
+        queueWatchTimer?.invalidate()
+        queueWatchTimer = nil
+    }
+
+    private func fetchQueueTimestamp() {
+        // The 3 s poll reports the timestamp itself while it runs.
+        guard lifeboatEnabled, serverTimeTimer == nil, connectionManager.connectionState.isConnected else { return }
+        let command: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["status", "-", 1, "tags:"]]
+        ]
+        sendJSONRPCCommandDirect(command) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self, let result = response["result"] as? [String: Any] else { return }
+                self.noteQueueTimestamp(result)
+            }
+        }
+    }
+
+    /// LMS's `playlist_timestamp` from a status reply (absent: empty queue).
+    /// The first one of a connection and every change re-plan the copies, so
+    /// a queue built while stopped downloads, and a song deleted mid-track is
+    /// no longer the offline "next" (avt6). The timestamp is recorded by the
+    /// plan that runs, not here: a plan that is skipped or deduplicated
+    /// leaves the change for the next reply to notice.
+    private func noteQueueTimestamp(_ result: [String: Any]) {
+        guard lifeboatEnabled, connectionIsLive else { return }  // not live: the plan would skip
+        // A queue just loaded: the stream-start plan (+3 s) covers it, after
+        // the hold watch has seen the stream's first seconds (rig C4).
+        if let started = lastServerStreamStartAt, Date().timeIntervalSince(started) < 3.5 { return }
+        let stamp = Self.queueTimestamp(from: result)
+        guard QueueWatchPolicy.replans(seen: queueTimestampSeen, last: lastQueueTimestamp, current: stamp) else { return }
+        os_log(.debug, log: logger, "🛟 Queue %{public}s - updating the copies", queueTimestampSeen ? "changed" : "seen")
+        scheduleLifeboatPlan(after: queueTimestampSeen ? 0.5 : 1)
+    }
+
+    static func queueTimestamp(from result: [String: Any]) -> Double? {
+        (result["playlist_timestamp"] as? Double)
+            ?? (result["playlist_timestamp"] as? Int).map(Double.init)
+            ?? (result["playlist_timestamp"] as? String).flatMap(Double.init)
+    }
+
+    /// Settings › Offline changed (mode or Download Ahead): follow the queue
+    /// now, or stop asking.
+    func savedMusicSettingChanged() {
+        queueTimestampSeen = false
+        if lifeboatEnabled {
+            startQueueWatch()
+            scheduleLifeboatPlan(after: 0.5)
+        } else {
+            stopQueueWatch()
+        }
+    }
+
     /// Ask LMS for the queue ahead and keep the copies up to date.
     private func scheduleLifeboatPlan(after delay: TimeInterval) {
         // Not in a sync group: nothing would play the copies.
         guard lifeboatEnabled else { return }
         startLifeboatWatch()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self = self, self.lifeboatMayDownload, self.connectionIsLive, !self.lifeboatActive else { return }
+            // The plan runs on cellular too with "On Wi-Fi": it drops songs that
+            // left the queue and keeps the index map right; only the bytes wait
+            // (LifeboatCache checks mayDownload before each download).
+            guard let self = self, self.connectionIsLive, !self.lifeboatActive else { return }
             if let last = self.lifeboatPlanAt, Date().timeIntervalSince(last) < 1.5 { return }
             self.lifeboatPlanAt = Date()
             let command: [String: Any] = [
@@ -4830,6 +4915,9 @@ extension SlimProtoCoordinator {
             self.sendJSONRPCCommandDirect(command) { [weak self] response in
                 DispatchQueue.main.async {
                     guard let self = self, let result = response["result"] as? [String: Any] else { return }
+                    self.queueTimestampSeen = true
+                    self.lastQueueTimestamp = Self.queueTimestamp(from: result)
+                    self.updateDownloadHold()  // the plan may start a download: hold first if the stream is behind
                     let upcoming = Self.lifeboatTracks(fromStatus: result)
                     let elapsed = (result["time"] as? Double) ?? 0
                     // The stream (and its format) is the next track's while that one waits
@@ -4878,6 +4966,11 @@ extension SlimProtoCoordinator {
         lifeboatWatchTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self, self.lifeboatEnabled else { return }
             self.updateDownloadHold()
+            // Back on Wi-Fi with "On Wi-Fi": the downloads stopped where they
+            // were and nothing else restarts them (bd tcr5 review).
+            let mayDownload = self.lifeboatMayDownload
+            if mayDownload && !self.lifeboatCouldDownload { self.scheduleLifeboatPlan(after: 0.5) }
+            self.lifeboatCouldDownload = mayDownload
             guard !self.lifeboatActive, !self.connectionIsLive,
                   self.audioManager.getPlayerState() == "Playing" || self.audioManager.isPushStreamStalled() else { return }
             let stream = self.audioManager.pushStreamState()
@@ -5101,6 +5194,32 @@ extension SlimProtoCoordinator {
         let isPaused: Bool
         /// Saved music left from the playhead, counting only the copies that follow on unbroken.
         let minutesLeft: Int
+    }
+
+    /// How the copies stand against the queue, for Settings › Offline (bd
+    /// tcr5). nil with Keep Playing Offline off.
+    var offlineDownloadStatus: OfflineDownloadStatus? {
+        guard settings.lifeboatMode != 0 else { return nil }
+        let summary = lifeboat.downloadSummary
+        let idle: OfflineDownloadStatus.Idle?
+        if settings.loadSyncGroupID() != nil {
+            idle = .syncGroup
+        } else if !connectionManager.connectionState.isConnected {
+            idle = .notConnected
+        } else if summary.pendingCount == 0 {
+            idle = .upToDate
+        } else if !lifeboatMayDownload {
+            idle = .waitingForWiFi
+        } else if lifeboat.downloadsHeld {
+            idle = .streamFirst
+        } else if summary.storageFull {
+            idle = .storageFull
+        } else {
+            idle = nil
+        }
+        return OfflineDownloadStatus(savedSeconds: summary.savedSeconds, plannedSeconds: summary.plannedSeconds,
+                                     savedCount: summary.savedCount, plannedCount: summary.plannedCount,
+                                     pendingCount: summary.pendingCount, idle: idle)
     }
 
     /// Non-nil while the server can't be reached and a downloaded copy is
