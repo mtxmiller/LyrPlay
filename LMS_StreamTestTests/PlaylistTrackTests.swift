@@ -43,6 +43,20 @@ final class PlaylistTrackTests: XCTestCase {
         XCTAssertEqual(tracks[1].playlistIndex, 1)
     }
 
+    func testParseLoopKeepsFirstRowWithStringIndex() {
+        // `playlists tracks` on LMS 9.2: the first row's "playlist index" is the
+        // string "0". Dropping that row hid every playlist's first song in CarPlay.
+        let raw: [[String: Any]] = [
+            ["id": 11, "title": "First", "playlist index": "0"],
+            ["id": 12, "title": "Second", "playlist index": 1]
+        ]
+
+        let tracks = PlaylistTrack.parseLoop(raw)
+
+        XCTAssertEqual(tracks.map(\.title), ["First", "Second"])
+        XCTAssertEqual(tracks.map(\.playlistIndex), [0, 1])
+    }
+
     func testParseLoopMissingArtist() {
         let raw: [[String: Any]] = [
             [
