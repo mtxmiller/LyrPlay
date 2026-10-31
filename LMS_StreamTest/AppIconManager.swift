@@ -28,8 +28,10 @@ class AppIconManager: ObservableObject {
         case outrun = "AppIcon-Outrun"
         case red = "AppIcon-Red"
         case retrowave = "AppIcon-Retro"
-        case reverseOut = "AppIcon-Reverse"
-        case white = "AppIcon-White"
+        // The file names are the other way round: AppIcon-White is white bars
+        // on dark (reverse out), AppIcon-Reverse black bars on white.
+        case reverseOut = "AppIcon-White"
+        case white = "AppIcon-Reverse"
         case wordmarkWhite = "AppIcon-WordmarkWhite"
         case wordmark = "AppIcon-Wordmark"
 
