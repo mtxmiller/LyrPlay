@@ -39,19 +39,47 @@ struct OfflineDownloadStatus: Equatable {
 
     /// "18 of 30 min saved · downloading 5 of 9", or the reason it isn't.
     var text: String {
-        let minutes = plannedCount == 0 ? "Nothing queued"
-            : "\(Self.minutes(savedSeconds)) of \(Self.minutes(plannedSeconds)) min saved"
-        let state: String
+        let minutes = plannedCount == 0 ? "Nothing queued" : "\(numbersText) saved"
+        return stateText.isEmpty ? minutes : "\(minutes) · \(stateText)"
+    }
+
+    /// "18 of 30 min" (the ring's label); "Nothing queued" with an empty plan.
+    var numbersText: String {
+        plannedCount == 0 ? "Nothing queued" : "\(Self.minutes(savedSeconds)) of \(Self.minutes(plannedSeconds)) min"
+    }
+
+    /// "downloading 5 of 9", or the reason nothing downloads; "" for an empty plan that is up to date.
+    var stateText: String {
         switch idle {
-        case nil: state = "downloading \(pendingCount) of \(plannedCount)"
-        case .notConnected?: state = "not connected"
-        case .syncGroup?: state = "off in a sync group"
-        case .waitingForWiFi?: state = "waiting for Wi-Fi"
-        case .streamFirst?: state = "waiting for the stream to catch up"
-        case .storageFull?: state = "storage full"
-        case .upToDate?: state = plannedCount == 0 ? "" : "up to date"
+        case nil: return "downloading \(pendingCount) of \(plannedCount)"
+        case .notConnected?: return "not connected"
+        case .syncGroup?: return "off in a sync group"
+        case .waitingForWiFi?: return "waiting for Wi-Fi"
+        case .streamFirst?: return "waiting for the stream to catch up"
+        case .storageFull?: return "storage full"
+        case .upToDate?: return plannedCount == 0 ? "" : "up to date"
         }
-        return state.isEmpty ? minutes : "\(minutes) · \(state)"
+    }
+
+    /// Saved share of the plan, 0…1, for the ring.
+    var fraction: Double {
+        plannedSeconds > 0 ? min(1, savedSeconds / plannedSeconds) : 0
+    }
+
+    var isDownloading: Bool { idle == nil && pendingCount > 0 }
+
+    /// SF Symbol in the ring's centre when nothing is in flight; nil = empty plan.
+    var glyph: String? {
+        guard plannedCount > 0 else { return nil }
+        switch idle {
+        case nil: return nil
+        case .upToDate?: return "checkmark"
+        case .notConnected?: return "bolt.slash"
+        case .syncGroup?: return "person.2"
+        case .waitingForWiFi?: return "wifi.slash"
+        case .streamFirst?: return "pause.fill"
+        case .storageFull?: return "externaldrive"
+        }
     }
 
     private static func minutes(_ seconds: Double) -> Int { Int((seconds / 60).rounded()) }

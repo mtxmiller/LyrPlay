@@ -47,6 +47,24 @@ struct OfflineDownloadStatusTests {
         #expect(status(saved: 0, planned: 1800, pending: 9, idle: .syncGroup).text == "0 of 30 min saved · off in a sync group")
     }
 
+    @Test func ringValues() {
+        let downloading = status(saved: 18 * 60, planned: 30 * 60, pending: 5, idle: nil)
+        #expect(abs(downloading.fraction - 0.6) < 0.001)
+        #expect(downloading.isDownloading)
+        #expect(downloading.glyph == nil)
+        #expect(downloading.numbersText == "18 of 30 min")
+        #expect(downloading.stateText == "downloading 5 of 9")
+        let done = status(saved: 1800, planned: 1800, idle: .upToDate)
+        #expect(done.fraction == 1)
+        #expect(!done.isDownloading)
+        #expect(done.glyph == "checkmark")
+        #expect(status(saved: 600, planned: 1800, pending: 6, idle: .waitingForWiFi).glyph == "wifi.slash")
+        let empty = status(saved: 0, planned: 0, plannedCount: 0, idle: .upToDate)
+        #expect(empty.fraction == 0)
+        #expect(empty.glyph == nil)
+        #expect(empty.stateText.isEmpty)
+    }
+
     @Test func emptyQueue() {
         #expect(status(saved: 0, planned: 0, plannedCount: 0, idle: .upToDate).text == "Nothing queued")
         #expect(status(saved: 0, planned: 0, plannedCount: 0, idle: .notConnected).text == "Nothing queued · not connected")
