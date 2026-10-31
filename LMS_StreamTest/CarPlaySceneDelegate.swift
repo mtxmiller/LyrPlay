@@ -15,6 +15,9 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     /// raises NSException (clientExceededHierarchyDepthLimit) and crashes, so
     /// every push must go through pushTemplateSafely().
     private static let maxTemplateDepth = 5
+    /// Pushes sent to CarPlay that haven't completed: `templates` may not count
+    /// them yet, so two replies landing together could both pass the cap check.
+    private var pushesInFlight = 0
 
     // Cached data for fast template updates
     private var cachedNewMusic: [Album] = []
@@ -188,6 +191,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         os_log(.info, log: logger, "  Interface Controller: %{public}s", String(describing: interfaceController))
 
         self.interfaceController = nil
+        pushesInFlight = 0  // a push cut off by the disconnect never completes
         // Clean up connection observer
         if let observer = connectionObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -317,15 +321,30 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion?(false, nil)
             return
         }
-        let stackDepth = interfaceController.templates.count
-        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
-            os_log(.error, log: logger, "⛔ Refusing template push — CarPlay stack at cap (%d)", stackDepth)
+        let stackDepth = interfaceController.templates.count + pushesInFlight
+        let limit = depthLimit(pushingNowPlaying: template is CPNowPlayingTemplate)
+        guard stackDepth < limit else {
+            os_log(.error, log: logger, "⛔ Refusing %{public}s push — CarPlay stack at %d (%d in flight), limit %d",
+                   String(describing: type(of: template)), stackDepth, pushesInFlight, limit)
             completion?(false, nil)
             return
         }
-        interfaceController.pushTemplate(template, animated: animated) { success, error in
+        pushesInFlight += 1
+        interfaceController.pushTemplate(template, animated: animated) { [weak self] success, error in
+            if let self = self { self.pushesInFlight = max(0, self.pushesInFlight - 1) }
             completion?(success, error)
         }
+    }
+
+    /// The stack depth a push may reach. Now Playing counts as a template, and
+    /// CarPlay puts it on top by itself (its Now Playing button, the iOS 27
+    /// MiniPlayer) without asking us, which crashed 1.8.0 (1) at the cap. So our
+    /// lists stop one short of the cap while Now Playing isn't in the stack.
+    private func depthLimit(pushingNowPlaying: Bool) -> Int {
+        let nowPlayingInStack = interfaceController?.templates.contains { $0 is CPNowPlayingTemplate } ?? false
+        return pushingNowPlaying || nowPlayingInStack
+            ? CarPlaySceneDelegate.maxTemplateDepth
+            : CarPlaySceneDelegate.maxTemplateDepth - 1
     }
 
     /// Re-pull server-driven Now Playing button state (shuffle mode + DSTM
@@ -1214,8 +1233,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     private func drillIntoFolder(_ folder: FavoriteItem) {
         os_log(.info, log: logger, "📂 Drill into favorites folder: %{public}s", folder.name)
 
-        let stackDepth = interfaceController?.templates.count ?? 0
-        guard stackDepth < CarPlaySceneDelegate.maxTemplateDepth else {
+        let stackDepth = (interfaceController?.templates.count ?? 0) + pushesInFlight
+        guard stackDepth < depthLimit(pushingNowPlaying: false) else {
             // Present modally — a push here would itself exceed the cap and crash
             let alert = CPAlertTemplate(
                 titleVariants: ["Can’t go deeper here — open this folder in the LyrPlay app"],
