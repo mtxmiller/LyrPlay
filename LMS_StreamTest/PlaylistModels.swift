@@ -130,7 +130,14 @@ struct PlaylistTrack: Identifiable, Codable {
         }
 
         trackNumber = try container.decodeIfPresent(Int.self, forKey: .trackNumber)
-        playlistIndex = try container.decodeIfPresent(Int.self, forKey: .playlistIndex)
+        // LMS sends the first row's index as the string "0" and the rest as numbers.
+        if let index = try? container.decode(Int.self, forKey: .playlistIndex) {
+            playlistIndex = index
+        } else if let indexString = try? container.decode(String.self, forKey: .playlistIndex) {
+            playlistIndex = Int(indexString)
+        } else {
+            playlistIndex = nil
+        }
 
         // Build artwork URL if coverid is available
         if let coverID = try? container.decodeIfPresent(String.self, forKey: .artworkURL) {
