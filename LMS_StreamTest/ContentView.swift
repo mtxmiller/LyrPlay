@@ -946,12 +946,12 @@ struct ContentView: View {
             let left = offline.minutesLeft < 1 ? "under 1 min" : "\(offline.minutesLeft) min"
             return (offline.isPaused ? "Offline · paused" : "Offline · playing saved music", "· \(left) left")
         }
-        // Paused (or stopped) with no network: the copies can take over.
+        // Paused (or stopped) and the server unreachable: the copies can take over.
         return ("Offline · saved music ready", "· \(savedMusicOffer?.minutesLeft ?? 0) min")
     }
 
     /// Material can't reach the server and freezes, but the music goes on from
-    /// downloaded copies: say so, and open Settings (which shows the details).
+    /// downloaded copies: say so, and open the offline player.
     private var offlineBanner: some View {
         VStack(spacing: 0) {
             Button {

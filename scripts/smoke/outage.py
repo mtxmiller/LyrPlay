@@ -44,6 +44,9 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O26 | phase 2: seek +20s into a 400 kbit/s stream, the cut track's copy holds the wrong audio (another copy written over it), 60s offline | the splice can't match, so the copy restarts near the cut instead of being skipped: LMS back on the same track at the wall-clock position (±10s), "Restarting the copy" in the app log |
 | O27 | phase 2: 60s offline with a Next at 20s (the copy of the next track); then web requests held 32s while SlimProto is back and delivered when the hold ends (the reconnect jump times out, its retry goes out, the first jump lands late) | LMS on the continuous position (±8s), "Handback" in the app log, no stream after the outage, time never steps back |
 | O28 | all connections cut (SlimProto reconnects at once) with Material's next cometd request stranded by the proxy (`/strand`): alive, never answered, like a request orphaned by a cellular → Wi-Fi handover | the app restarts Material's link ("Material link restarted" in the app log) and Material reports it back within 25s of the cut; no further loss; time never steps back |
+| O29 | phase 2 (bd kpu0): paused online (LMS knows), then 150s with every connection reset and new ones accepted but silent (a weak cellular link: iOS still reports a network); lock-screen Play 20s in | LMS playing where the saved music got to, counted from when the copies started (they wait 6-12s for the server first) |
+| O30 | as O29, new connections refused (no route) | as O29 |
+| O31 | as O29, but LyrPlay is backgrounded and opened on the weak link before Play (app-open recovery runs) | as O29; screenshot of what the user sees |
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
@@ -856,6 +859,62 @@ def o28_material_link_stranded(oracle, album_id):
     watch_monotonic(oracle, seconds=8)
 
 
+def paused_then_weak_link(oracle, album_id, new, reopen=False):
+    # bd kpu0 (forum 2026-10-29): paused while still online (LMS knows the
+    # pause), then the Wi-Fi goes and the cellular link is too weak to reach
+    # the server, but iOS still reports a network. Play (lock screen /
+    # CarPlay) must play the saved copies, and LMS must land there once back.
+    s0 = fresh_start(oracle, album_id, settle=10)
+    durations = oracle.playlist_durations()
+    wait_for_copies(oracle, [s0["index"], s0["index"] + 1])
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    s_p = oracle.status()
+    fault(f"/outage?secs=150&after=drop&new={new}")
+    fault("/kill")   # the Wi-Fi is gone: its connections with it
+    print(f"   … paused at track {s_p['index']} {s_p['time']:.1f}s; outage 150s (new connections {new})", flush=True)
+    t0 = time.time()
+    if reopen:
+        # The user opens LyrPlay first: its app-open recovery runs on the weak
+        # link, and the banner should offer the saved music (review finding 4).
+        subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+        time.sleep(20)
+        subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "elm.LMS-StreamTest"], capture_output=True)
+        print("   … LyrPlay in the background 20s, then in front", flush=True)
+        time.sleep(12)
+        shot = os.path.join(os.environ.get("LYRPLAY_SHOT_DIR", "/tmp"), "o31-weak-link-opened.png")
+        subprocess.run(["xcrun", "simctl", "io", SIM_NAME, "screenshot", shot], capture_output=True)
+        print(f"   … screenshot {shot}", flush=True)
+    else:
+        time.sleep(20)
+    press("play"); t_play = time.time()
+    time.sleep(max(0, 150 - (time.time() - t0)))
+    deadline = time.time() + 60
+    while time.time() < deadline and not connected(oracle):
+        time.sleep(1)
+    time.sleep(10)
+    s = oracle.status()
+    idx, t = expected_position(durations, s_p["index"], s_p["time"], time.time() - t_play)
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s; saved music would be at track {idx} {t:.1f}s")
+    # The copies start 6-12s after the press (the app first waits for the
+    # server: a connect that stays silent, or 12s with none), so LMS may be up
+    # to that much behind the press-based estimate, never ahead of it.
+    if s["mode"] != "play" or s["index"] != idx or not (t - 16 <= s["time"] <= t + 4):
+        raise CheckFailed(f"LMS {s['mode']} at track {s['index']} {s['time']:.1f}s, expected play at track {idx} {t - 16:.1f}-{t + 4:.1f}s")
+
+
+def o29_paused_then_weak_link(oracle, album_id):
+    paused_then_weak_link(oracle, album_id, "hold")
+
+
+def o30_paused_then_no_route(oracle, album_id):
+    paused_then_weak_link(oracle, album_id, "refuse")
+
+
+def o31_paused_weak_link_app_opened(oracle, album_id):
+    paused_then_weak_link(oracle, album_id, "hold", reopen=True)
+
+
 def o23_background_foreground_offline(oracle, album_id):
     # Playing copies offline, the app goes to the background (another app in
     # front) and comes back: the foreground recovery must not disturb the
@@ -1539,6 +1598,9 @@ SCENARIOS = [
     ("O26", "failed match restarts the copy", o26_failed_match_restarts_copy),
     ("O27", "jump lost, lands late", o27_jump_lost_then_lands_late),
     ("O28", "Material link stranded", o28_material_link_stranded),
+    ("O29", "paused, then a weak link", o29_paused_then_weak_link),
+    ("O30", "paused, then no route", o30_paused_then_no_route),
+    ("O31", "paused, weak link, app opened", o31_paused_weak_link_app_opened),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),
