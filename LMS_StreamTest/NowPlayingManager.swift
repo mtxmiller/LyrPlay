@@ -62,7 +62,18 @@ class NowPlayingManager: ObservableObject {
     // (bd LMS_StreamTest-a7r, forum report). Matching URL → repaint text only.
     private var lastLoadedArtworkURL: String?
 
+    // The now-playing artwork object for `currentArtwork`, built once per cover
+    // and reused by every now-playing update. A new MPMediaItemArtwork on each
+    // 1 s position update made the cover look changed every second; the lock
+    // screen draws it in-process and coped, CarPlay has to fetch the image and
+    // send it to the car at the size it asks for and showed its placeholder
+    // (bd fri6). nil = no cover: the artwork entry is removed.
+    private var currentArtworkItem: MPMediaItemArtwork?
+
     #if DEBUG
+    /// Test-only: the reused artwork object (same instance across updates).
+    var artworkItemForTesting: MPMediaItemArtwork? { currentArtworkItem }
+
     /// Test-only read access to the current track generation so unit tests can
     /// assert the last-write-wins artwork guard without driving real downloads.
     var currentTrackGenerationForTesting: Int { trackGeneration }
@@ -282,12 +293,10 @@ class NowPlayingManager: ObservableObject {
         nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = currentAlbum
         
         // Add artwork if available
-        if let artwork = currentArtwork {
-            nowPlayingInfo[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in
-                return artwork
-            }
+        if let item = currentArtworkItem {
+            nowPlayingInfo[MPMediaItemPropertyArtwork] = item
         }
-        
+
         nowPlayingInfoCenter.nowPlayingInfo = nowPlayingInfo
         os_log(.info, log: logger, "✅ Initial now playing info configured")
     }
@@ -332,6 +341,7 @@ class NowPlayingManager: ObservableObject {
         } else {
             // No artwork for this track — clear (guarded so a late stale load
             // can't repaint), then refresh now-playing immediately.
+            os_log(.default, log: logger, "🖼️ No cover for this track (gen %d)", generation)
             applyArtwork(nil, forGeneration: generation)
             let (currentTime, isPlaying, _) = getCurrentPlaybackInfo()
             updateNowPlayingInfo(isPlaying: isPlaying, currentTime: currentTime)
@@ -349,7 +359,36 @@ class NowPlayingManager: ObservableObject {
             return false
         }
         currentArtwork = image
+        currentArtworkItem = image.map(Self.artworkItem)
         return true
+    }
+
+    /// The now-playing artwork object for one cover. CarPlay asks for the
+    /// size it will show (and ships the image to the car); the lock screen asks
+    /// for its own. Full covers can be several thousand pixels across, so the
+    /// handler returns a copy scaled down to the requested size when the cover
+    /// is larger, and the cover itself otherwise. The handler may run on any
+    /// thread; UIGraphicsImageRenderer is safe there.
+    static func artworkItem(for image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { requested in
+            fitted(image, to: requested)
+        }
+    }
+
+    /// `image` scaled to fit `requested` (points, at the main screen's scale),
+    /// or `image` itself when it is already no larger than that in pixels.
+    static func fitted(_ image: UIImage, to requested: CGSize) -> UIImage {
+        guard requested.width > 0, requested.height > 0, image.size.width > 0, image.size.height > 0 else { return image }
+        let format = UIGraphicsImageRendererFormat.default()
+        let targetPixels = CGSize(width: requested.width * format.scale, height: requested.height * format.scale)
+        let imagePixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        guard imagePixels.width > targetPixels.width || imagePixels.height > targetPixels.height else { return image }
+        let ratio = min(targetPixels.width / imagePixels.width, targetPixels.height / imagePixels.height)
+        let size = CGSize(width: max(1, (imagePixels.width * ratio / format.scale).rounded()),
+                          height: max(1, (imagePixels.height * ratio / format.scale).rounded()))
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     /// Synchronous completion step of an artwork download: last-write-wins apply
@@ -391,7 +430,10 @@ class NowPlayingManager: ObservableObject {
                     os_log(.error, log: self.logger, "❌ Failed to load artwork: %{public}s", error.localizedDescription)
                     image = nil
                 } else if let data = data, let decoded = UIImage(data: data) {
-                    os_log(.info, log: self.logger, "✅ Artwork loaded successfully")
+                    // .default so Copy Diagnostic Log keeps it (info lines are patchy there).
+                    os_log(.default, log: self.logger, "🖼️ Cover loaded: %.0fx%.0f px, %d KB, %{public}s (gen %d)",
+                           decoded.size.width * decoded.scale, decoded.size.height * decoded.scale, data.count / 1024,
+                           url.isFileURL ? "saved copy" : "server", generation)
                     image = decoded
                 } else {
                     os_log(.error, log: self.logger, "❌ Invalid artwork data")
@@ -433,13 +475,14 @@ class NowPlayingManager: ObservableObject {
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
         nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         
-        // Add artwork if available
-        if let artwork = currentArtwork {
-            nowPlayingInfo[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in
-                return artwork
-            }
+        // The cover: one object per cover, reused. No cover: remove the entry,
+        // or the previous track's cover stays on the lock screen (bd fri6).
+        if let item = currentArtworkItem {
+            nowPlayingInfo[MPMediaItemPropertyArtwork] = item
+        } else {
+            nowPlayingInfo.removeValue(forKey: MPMediaItemPropertyArtwork)
         }
-        
+
         // Set duration using metadata duration for progress display
         if metadataDuration > 0 {
             nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = metadataDuration
@@ -528,6 +571,7 @@ class NowPlayingManager: ObservableObject {
         currentArtist = "Unknown Artist"
         currentAlbum = "Lyrion Music Server"
         currentArtwork = nil
+        currentArtworkItem = nil
         lastLoadedArtworkURL = nil
         metadataDuration = 0.0
         hasTrackLoaded = false

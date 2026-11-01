@@ -792,20 +792,33 @@ struct ContentView: View {
                 .padding(.horizontal)
 
             if let offline = offlineStatus {
-                // No server, but the downloaded copies are playing.
-                VStack(spacing: 4) {
-                    Label(offline.isPaused ? "Offline · paused" : "Playing saved music", systemImage: "wifi.slash")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.orange)
-                    Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    Text(offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                // No server, but the downloaded copies are playing (or paused).
+                // A button, like the banner over Material: once a copy plays the
+                // Play Saved Music offer is gone, and this is the only way back
+                // to the offline player from here (bd gqyn, forum #815).
+                Button {
+                    withAnimation { showingOfflinePlayer = true }
+                } label: {
+                    VStack(spacing: 4) {
+                        Label(offline.isPaused ? "Offline · paused" : "Playing saved music", systemImage: "wifi.slash")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.orange)
+                        Text(offline.artist.isEmpty ? offline.title : "\(offline.title) · \(offline.artist)")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Text(offline.minutesLeft < 1 ? "under 1 min left" : "\(offline.minutesLeft) min left")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Label("Open Player", systemImage: "chevron.up")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.orange)
+                            .padding(.top, 2)
+                    }
+                    .padding(.horizontal)
                 }
-                .padding(.horizontal)
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens the offline player")
             } else if let offer = savedMusicOffer {
                 Button("Play Saved Music · \(offer.minutesLeft) min") {
                     slimProtoCoordinator.playSavedMusicOffline()
