@@ -1,4 +1,5 @@
 import XCTest
+import MediaPlayer
 @testable import LMS_StreamTest
 
 /// Regression tests for the intermittent "synced tvOS player shows stale/wrong
@@ -222,5 +223,54 @@ final class MetadataArtworkRaceTests: XCTestCase {
         npm.updateTrackMetadata(title: "No Art Track", artist: "x", album: "y", artworkURL: nil)
         XCTAssertNil(npm.currentArtwork, "nil-URL track must clear the cover even when a latch is set")
         XCTAssertNil(npm.lastLoadedArtworkURLForTesting)
+    }
+
+    // MARK: - Now-playing artwork object (bd fri6: CarPlay placeholder, stale cover)
+
+    func testArtworkObjectIsReusedAcrossNowPlayingUpdates() {
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "B", artist: "x", album: "y")
+        XCTAssertTrue(npm.applyArtwork(makeImage(.red), forGeneration: npm.currentTrackGenerationForTesting))
+        guard let item = npm.artworkItemForTesting else { return XCTFail("a cover must have an artwork object") }
+
+        // Position updates must not mint a new artwork object (CarPlay refetches on each).
+        npm.updateFromSlimProto(currentTime: 5, duration: 100, isPlaying: true)
+        npm.updateFromSlimProto(currentTime: 7, duration: 100, isPlaying: true)
+        XCTAssertTrue(npm.artworkItemForTesting === item)
+        let published = MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
+        XCTAssertTrue(published === item, "now-playing must carry the same artwork object")
+    }
+
+    func testTrackWithNoArtworkRemovesTheNowPlayingArtworkEntry() {
+        let npm = NowPlayingManager()
+        npm.updateTrackMetadata(title: "B", artist: "x", album: "y")
+        XCTAssertTrue(npm.applyArtwork(makeImage(.red), forGeneration: npm.currentTrackGenerationForTesting))
+        npm.updateFromSlimProto(currentTime: 5, duration: 100, isPlaying: true)
+        XCTAssertNotNil(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork])
+
+        npm.updateTrackMetadata(title: "C", artist: "x", album: "y", artworkURL: nil)
+        XCTAssertNil(npm.artworkItemForTesting)
+        XCTAssertNil(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork],
+                     "the previous track's cover must not stay in now-playing")
+    }
+
+    func testFittedScalesDownOnlyCoversLargerThanRequested() {
+        let small = makeImage(.red)  // 4x4
+        XCTAssertTrue(NowPlayingManager.fitted(small, to: CGSize(width: 100, height: 100)) === small)
+
+        let big = UIGraphicsImageRenderer(size: CGSize(width: 2000, height: 1000)).image { ctx in
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 2000, height: 1000))
+        }
+        let fitted = NowPlayingManager.fitted(big, to: CGSize(width: 100, height: 100))
+        XCTAssertLessThanOrEqual(fitted.size.width, 100)
+        XCTAssertLessThanOrEqual(fitted.size.height, 100)
+        XCTAssertEqual(fitted.size.width / fitted.size.height, 2, accuracy: 0.05, "aspect ratio kept")
+
+        // The handler built for a cover honours the requested size too.
+        let item = NowPlayingManager.artworkItem(for: big)
+        let forCar = item.image(at: CGSize(width: 50, height: 50))
+        XCTAssertNotNil(forCar)
+        XCTAssertLessThanOrEqual(forCar?.size.width ?? 999, 50)
     }
 }
