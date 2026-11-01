@@ -195,8 +195,8 @@ class SettingsManager: ObservableObject {
             case .compressed: return "mp3,aac"
             case .aacPreferred: return "aac,mp3"
             case .wavSeekable: return "wav,flc,ops,ogg,mp3"
-            case .oggVorbis: return "ogg,flc,mp3,aac"
-            case .opus: return "ops,ogg,flc,mp3,aac"
+            case .oggVorbis: return "ogg,mp3,aac"
+            case .opus: return "ops,ogg,mp3,aac"
             case .flac: return "flc,ops,ogg,alc,aac,mp3"
             case .custom: return ""  // Will use customFormatCodes instead
             }

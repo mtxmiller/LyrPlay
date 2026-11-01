@@ -75,19 +75,11 @@ LyrPlay can play MP3/AAC/WAV and FLAC without additional plugins, but the Mobile
 
 The official Lyrion Docker image (`lmscommunity/lyrionmusicserver`) includes `opus-tools` since November 2025 — just use a current image. On older images or non-Docker installs, install `opus-tools` with your package manager (e.g. `apt-get install opus-tools`).
 
-### NOTE — Disable "Prioritize Native Format" in LMS:
+### NOTE — Leave "Prefer native format" on in LMS (LyrPlay 1.8.0 and later):
 
-LMS ships with **Prioritize Native Format** enabled by default on some installs. When on, LMS keeps the source format (FLAC) and skips the Opus transcode rule — even when opus-tools is installed and the player advertises Opus support.
+LMS's **Prefer native format (decoding on the player) whenever possible** (Settings → File Types) is on by default, and from LyrPlay 1.8.0 it should stay on. The Opus and Ogg Vorbis settings no longer advertise FLAC to the server, so FLAC files stream as Opus or Ogg with the MobileTranscode rules (as MP3 on a server without them) whatever the option says, and with the option on, files LyrPlay can play as they are (MP3, AAC, Opus, Ogg) reach it untouched. With the option **off**, LMS's stock rules transcode Opus, Ogg, AAC and ALAC files to FLAC for the Lossless (FLAC) setting, which costs bandwidth for nothing. If you turned it off for an earlier LyrPlay, turn it back on. Other players are not affected by LyrPlay's change: it only alters what LyrPlay says about itself.
 
-**To disable:** LMS Web → **Settings → File Types** → under **File Format Conversion Setup**, uncheck **"Prefer native format (decoding on the player) whenever possible"** → Apply.
-
-If you'd rather flip it directly:
-```bash
-docker exec lms sed -i 's/^prioritizeNative: 1/prioritizeNative: 0/' /config/prefs/server.prefs
-docker restart lms
-```
-
-After this, the LMS log should show `Matched: flc->ops via: [flac] ... | [opusenc] ...` when playing FLAC tracks.
+Earlier LyrPlay versions listed FLAC among their formats, and with the option on LMS kept FLAC and skipped the Opus rule; that is why older instructions said to uncheck it. If you still run one of those versions, uncheck it under **File Format Conversion Setup** and the LMS log shows `Matched: flc->ops via: [flac] ... | [opusenc] ...` when playing FLAC tracks.
 
 ## Usage
 
