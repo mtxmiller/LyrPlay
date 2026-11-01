@@ -187,6 +187,11 @@ struct CopyFormatSeedTests {
         #expect(LifeboatCache.Variant.forCapabilities("aac,mp3") == .mp3)  // no FLAC → AAC rule: LMS streams MP3
         #expect(LifeboatCache.Variant.forCapabilities("flc,ops,ogg,alc,aac,mp3") == .original)
         #expect(LifeboatCache.Variant.forCapabilities("wav,flc,ops,ogg,mp3") == .original)
+        // The presets as shipped (bd qtqa, y9kp: only Lossless (FLAC) advertises flc).
+        #expect(LifeboatCache.Variant.forCapabilities(SettingsManager.AudioFormat.opus.capabilities) == .opus)
+        #expect(LifeboatCache.Variant.forCapabilities(SettingsManager.AudioFormat.oggVorbis.capabilities) == .ogg)
+        #expect(LifeboatCache.Variant.forCapabilities(SettingsManager.AudioFormat.wavSeekable.capabilities) == .original)
+        #expect(LifeboatCache.Variant.forCapabilities(SettingsManager.AudioFormat.flac.capabilities) == .original)
     }
 
     @Test func customCodesSkipWhatLMSWouldNotPick() {

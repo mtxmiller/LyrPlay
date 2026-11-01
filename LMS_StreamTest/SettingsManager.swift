@@ -182,9 +182,9 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "Compressed formats: mp3, aac"
             case .aacPreferred: return "Compressed formats: aac, mp3"
-            case .wavSeekable: return "Lossless (higher data useage): wav, flc, ops, ogg, mp3"
-            case .oggVorbis: return "High quality: ogg, mp3, aac"
-            case .opus: return "Premium quality: ops, ogg, mp3, aac"
+            case .wavSeekable: return "Lossless (higher data usage): wav, ops, ogg, alc, aac, mp3"
+            case .oggVorbis: return "High quality: ogg, aac, mp3"
+            case .opus: return "Premium quality: ops, ogg, aac, mp3"
             case .flac: return "Lossless: flc, ops, ogg, alc, aac, mp3"
             case .custom: return "User-defined format codes"
             }
@@ -194,9 +194,9 @@ class SettingsManager: ObservableObject {
             switch self {
             case .compressed: return "mp3,aac"
             case .aacPreferred: return "aac,mp3"
-            case .wavSeekable: return "wav,flc,ops,ogg,mp3"
-            case .oggVorbis: return "ogg,mp3,aac"
-            case .opus: return "ops,ogg,mp3,aac"
+            case .wavSeekable: return "wav,ops,ogg,alc,aac,mp3"
+            case .oggVorbis: return "ogg,aac,mp3"
+            case .opus: return "ops,ogg,aac,mp3"
             case .flac: return "flc,ops,ogg,alc,aac,mp3"
             case .custom: return ""  // Will use customFormatCodes instead
             }
