@@ -176,3 +176,42 @@ struct LifeboatVariantTests {
         #expect(LifeboatCache.isImplausiblySmall(bytes: 10_000, duration: 0))
     }
 }
+
+/// What FLAC copies are made as before and after a FLAC has streamed
+/// (tester 2026-11-01: a queue added while stopped downloaded originals).
+struct CopyFormatSeedTests {
+    @Test func theFirstCodeWithAFLACRuleIsTheGuess() {
+        #expect(LifeboatCache.Variant.forCapabilities("ops,ogg,flc,mp3,aac") == .opus)
+        #expect(LifeboatCache.Variant.forCapabilities("ogg,flc,mp3,aac") == .ogg)
+        #expect(LifeboatCache.Variant.forCapabilities("mp3,aac") == .mp3)
+        #expect(LifeboatCache.Variant.forCapabilities("aac,mp3") == .mp3)  // no FLAC → AAC rule: LMS streams MP3
+        #expect(LifeboatCache.Variant.forCapabilities("flc,ops,ogg,alc,aac,mp3") == .original)
+        #expect(LifeboatCache.Variant.forCapabilities("wav,flc,ops,ogg,mp3") == .original)
+    }
+
+    @Test func customCodesSkipWhatLMSWouldNotPick() {
+        #expect(LifeboatCache.Variant.forCapabilities(" OPS , mp3") == .opus)
+        #expect(LifeboatCache.Variant.forCapabilities("wma,ops") == .opus)  // unknown code: the next decides
+        #expect(LifeboatCache.Variant.forCapabilities("alc,ops") == .opus)
+        #expect(LifeboatCache.Variant.forCapabilities("") == .original)
+    }
+
+    @Test func seedFollowsLMSsChoice() {
+        // prioritizeNative on (LMS default): a player that advertises FLAC gets FLAC natively.
+        #expect(LifeboatCache.seedVariant(capabilities: "ops,ogg,flc,mp3,aac", prioritizeNative: true) == .original)
+        #expect(LifeboatCache.seedVariant(capabilities: "ops,ogg,flc,mp3,aac", prioritizeNative: false) == .opus)
+        // No FLAC advertised: the first format with a rule, either way.
+        #expect(LifeboatCache.seedVariant(capabilities: "mp3,aac", prioritizeNative: true) == .mp3)
+        #expect(LifeboatCache.seedVariant(capabilities: "aac,mp3", prioritizeNative: true) == .mp3)
+        #expect(LifeboatCache.seedVariant(capabilities: "ogg,flc,mp3,aac", prioritizeNative: false) == .ogg)
+        #expect(LifeboatCache.seedVariant(capabilities: "", prioritizeNative: false) == .original)
+    }
+
+    @Test func serverPrefValues() {
+        #expect(SlimProtoCoordinator.prefIsOn("1"))
+        #expect(!SlimProtoCoordinator.prefIsOn("0"))
+        #expect(SlimProtoCoordinator.prefIsOn(1))
+        #expect(!SlimProtoCoordinator.prefIsOn(0))
+        #expect(SlimProtoCoordinator.prefIsOn(nil))  // unset: LMS's default is on
+    }
+}

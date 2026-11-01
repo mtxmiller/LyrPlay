@@ -1567,6 +1567,97 @@ def c4_downloads_wait_for_the_stream(oracle, album_id):
     oracle.assert_time_advancing()
 
 
+def saved_copies():
+    return glob.glob(os.path.join(lifeboat_dir(), "*audio"))
+
+
+def o32_queue_filled_while_stopped(oracle, album_id):
+    # Download before you go (bd tcr5): the queue is built while the player is
+    # stopped, and the copies download without a stream. Clearing the queue
+    # drops them; an album inserted after the current song downloads too.
+    fresh_start(oracle, album_id, settle=5)
+    wait_for_copies(oracle, [0, 1], timeout=120)
+    oracle.player_rpc(["stop"])
+    oracle.player_rpc(["playlist", "clear"])
+    time.sleep(14)   # the idle queue watch asks every 10s, the plan runs 0.5s later
+    if saved_copies():
+        raise CheckFailed(f"{len(saved_copies())} copies kept after the queue was cleared")
+    print("   … copies dropped with the queue", flush=True)
+    w = time.time()
+    oracle.player_rpc(["playlistcontrol", "cmd:add", f"album_id:{album_id}"])
+    ids = wait_for_copies(oracle, [0, 1], timeout=90)
+    s = oracle.status()
+    if s["mode"] != "stop":
+        raise CheckFailed(f"the player is in mode {s['mode']!r}: filling the queue must not start playback")
+    if not download_requests(w):
+        raise CheckFailed("the copies did not come through the proxy")
+    print(f"   … {len(saved_copies())} copies saved while stopped", flush=True)
+    others = [a["id"] for a in oracle.rpc(["albums", 0, 50]).get("albums_loop", []) if a["id"] != album_id]
+    if not others:
+        raise CheckFailed("the library has only one album: nothing to insert")
+    other = others[0]
+    oracle.player_rpc(["playlistcontrol", "cmd:insert", f"album_id:{other}"])
+    new_ids = play_order_ids(oracle)
+    if new_ids[1] == ids[1]:
+        raise CheckFailed(f"inserting album {other} did not change the queue")
+    wait_for_copies(oracle, [1, 2], timeout=90)
+    if oracle.status()["mode"] != "stop":
+        raise CheckFailed("the player started playing on the queue edit")
+    print(f"   … copies follow the inserted album (song 1 is now id {new_ids[1]})", flush=True)
+
+
+def o33_next_song_deleted_online_then_cut(oracle, album_id):
+    # avt6: the next song is deleted from the queue while the current one
+    # streams, then the network dies before the boundary. Offline the phone
+    # must play the new next song (the old track 2), not the deleted one; back
+    # online LMS is on that song (found by id) at the time played there.
+    # The seek comes first: it starts a stream, and a stream start re-plans
+    # anyway (+3s). After that only the queue watch can drop the deleted copy.
+    # The link is capped so the seek's stream is still open at the cut (on
+    # the LAN the remainder buffers in a second, the decode ends and the STMd
+    # goes out on a link that is already dead: bd 690q, another case).
+    fresh_start(oracle, album_id, settle=10)
+    ids = play_order_ids(oracle)
+    wait_for_copies(oracle, [0, 1, 2], timeout=120)
+    durations = oracle.playlist_durations()
+    if durations[0] < 130:
+        raise CheckFailed(f"opening track too short for a seek to 70s before its end ({durations[0]:.0f}s)")
+    fault("/shape?kbps=1200")   # above FLAC's rate (no starving), well below the LAN's
+    try:
+        oracle.player_rpc(["time", f"{durations[0] - 70:.1f}"])
+        oracle.wait_until_advancing(timeout=15)
+        time.sleep(4)   # past the stream-start plan
+        w_del = time.time()
+        oracle.player_rpc(["playlist", "delete", 1])
+        new_ids = play_order_ids(oracle)
+        if new_ids[1] != ids[2]:
+            raise CheckFailed(f"delete left the queue as {new_ids[:3]}, expected {[ids[0], ids[2]]}…")
+        durations = oracle.playlist_durations()
+        deadline = time.time() + 20
+        while glob.glob(os.path.join(lifeboat_dir(), f"{ids[1]}.*audio")):
+            if time.time() > deadline:
+                raise CheckFailed(f"the deleted song's copy (id {ids[1]}) was kept {time.time() - w_del:.0f}s after the delete")
+            time.sleep(1)
+        print(f"   … deleted song's copy dropped {time.time() - w_del:.0f}s after the delete", flush=True)
+        w0 = time.time()
+        t0 = oracle.status()["time"]
+        fault("/kill?scope=http")
+    finally:
+        fault("/shape?kbps=0")
+    outage(90, "drop")
+    wait_back(oracle, timeout=45)
+    time.sleep(6)
+    s = watch_monotonic(oracle)
+    idx, t = expected_position(durations, 0, t0, time.time() - w0)
+    got = current_track_id(oracle)
+    print(f"   … LMS on id {got} at track {s['index']} {s['time']:.1f}s; expected id {new_ids[idx]} (track {idx}) {t:.1f}s", flush=True)
+    if idx != 1:
+        raise CheckFailed(f"the outage did not cross the boundary (expected track {idx})")
+    if got != new_ids[1] or abs(s["time"] - t) > 8:
+        raise CheckFailed(f"LMS on id {got} {s['time']:.1f}s, expected id {new_ids[1]} {t:.1f}±8s "
+                          "(offline the phone played the wrong next song)")
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -1601,6 +1692,9 @@ SCENARIOS = [
     ("O29", "paused, then a weak link", o29_paused_then_weak_link),
     ("O30", "paused, then no route", o30_paused_then_no_route),
     ("O31", "paused, weak link, app opened", o31_paused_weak_link_app_opened),
+    # Download before you go (bd tcr5, avt6), -Lifeboat 2, only when named:
+    ("O32", "queue filled while stopped", o32_queue_filled_while_stopped),
+    ("O33", "next song deleted, then cut", o33_next_song_deleted_online_then_cut),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),

@@ -22,6 +22,7 @@ struct SettingsView: View {
     // Status card (bd x19i)
     @State private var isConnectedNow = false
     @State private var offlineStatus: SlimProtoCoordinator.OfflinePlaybackStatus?
+    @State private var downloadStatus: OfflineDownloadStatus?
     @State private var savedMusicOffer: SlimProtoCoordinator.SavedMusicOffer?
     @State private var connectionStateText = ""
     @State private var playbackSource: String?   // "streaming" / "playing saved copy" while audio plays
@@ -305,6 +306,11 @@ struct SettingsView: View {
     private func refreshConnectionStatus() {
         isConnectedNow = coordinator.isConnected
         offlineStatus = coordinator.offlinePlaybackStatus
+        let savedBefore = downloadStatus?.savedCount
+        downloadStatus = coordinator.offlineDownloadStatus
+        if let status = downloadStatus, status.savedCount != savedBefore {
+            offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed())  // a copy landed or left
+        }
         savedMusicOffer = coordinator.savedMusicOffer
         connectionStateText = coordinator.connectionState
         switch audioPlayer.getPlayerState() {
@@ -335,6 +341,27 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
 
+                // Live while the screen is open (the 1 s poll): what the plan
+                // holds, what's downloading, or why nothing is.
+                HStack(spacing: 12) {
+                    Text("Saved for Offline")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    if let status = downloadStatus {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(status.numbersText)
+                                .foregroundColor(.secondary)
+                            if !status.stateText.isEmpty {
+                                Text(status.stateText)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        OfflineDownloadRing(status: status)
+                    } else {
+                        Text("—").foregroundColor(.secondary)
+                    }
+                }
                 valueRow("Storage Used", offlineStorageText)
             }
         } header: {
@@ -343,6 +370,7 @@ struct SettingsView: View {
             Text("Saves the next songs in your queue on the phone. Saved songs play from the phone instead of streaming, so music keeps playing through dead spots, and the server picks up where you are. \"On Wi-Fi\" only downloads on Wi-Fi; \"Always\" also uses cellular data. Library music only, not radio.")
         }
         .onAppear { offlineStorageText = Self.formatStorage(LifeboatCache.storageUsed()) }
+        .onChange(of: settings.lifeboatMinutes) { _ in coordinator.savedMusicSettingChanged() }
     }
 
     private var lifeboatModeBinding: Binding<Int> {
@@ -354,6 +382,7 @@ struct SettingsView: View {
                     coordinator.clearSavedMusic()  // off: drop the downloads and the live plan (review M8)
                     offlineStorageText = Self.formatStorage(0)
                 }
+                coordinator.savedMusicSettingChanged()
             }
         )
     }
@@ -533,6 +562,45 @@ struct SettingsView: View {
 
 // MARK: - Server Settings View
 // Server, backup/failover and player identity — reached from the status card.
+/// The "Saved for Offline" ring: minutes saved over minutes planned. A dot
+/// rides the arc while a copy downloads; otherwise a glyph in the centre says
+/// why not (check when up to date), grey when waiting. Determinate rings
+/// need a trimmed circle on iOS 15 (ProgressView's circular style spins).
+private struct OfflineDownloadRing: View {
+    let status: OfflineDownloadStatus
+    @State private var orbit = false
+
+    private var active: Bool { status.isDownloading || status.idle == .upToDate }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.secondary.opacity(0.25), lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: status.fraction)
+                .stroke(active ? Color.accentColor : Color.secondary,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.4), value: status.fraction)
+            if status.isDownloading {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 5, height: 5)
+                    .offset(y: -11)
+                    .rotationEffect(.degrees(orbit ? 360 : 0))
+                    .animation(.linear(duration: 2).repeatForever(autoreverses: false), value: orbit)
+                    .onAppear { orbit = true }
+            } else if let glyph = status.glyph {
+                Image(systemName: glyph)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(active ? .accentColor : .secondary)
+            }
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityLabel(Text(status.text))
+    }
+}
+
 struct ServerSettingsView: View {
     @StateObject private var settings = SettingsManager.shared
     @State private var showingConnectionTest = false
@@ -1890,6 +1958,7 @@ struct AudioFormatConfigView: View {
         }
 
         settings.saveSettings()
+        coordinator.audioFormatSettingChanged()
 
         // Restart connection if currently connected
         if coordinator.isConnected {
@@ -1912,6 +1981,7 @@ struct AudioFormatConfigView: View {
 
         settings.customFormatCodes = editedFormatCodes
         settings.saveSettings()
+        coordinator.audioFormatSettingChanged()  // the first code is the copies' guess
 
         // Restart connection if connected
         if coordinator.isConnected {
