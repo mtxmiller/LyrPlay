@@ -264,6 +264,16 @@ class SlimProtoCoordinator: ObservableObject {
     /// `lifeboatMayDownload` at the last lifeboat watch tick (a false → true
     /// edge restarts the downloads).
     private var lifeboatCouldDownload = true
+    /// The server's prioritizeNative, asked once per connection when no FLAC
+    /// stream has said yet what FLAC copies should be (bd xfk7). No answer:
+    /// LMS's default is assumed for one plan only (`prioritizeNativeOneShot`),
+    /// so the next plan asks again.
+    private var serverPrioritizeNative: Bool?
+    private var prioritizeNativeOneShot: Bool?
+    private var prioritizeNativeFetchInFlight = false
+    /// Settings › Audio Format changed at: a stream started before it must
+    /// not teach the copies' format (LMS keeps the stream across the reconnect).
+    private var formatChangedAt: Date?
     /// When the current decode end was held (a server restart after it supersedes it).
     private var decodeEndHeldAt: Date?
     /// Copies that couldn't be switched to (format, no match): never retried.
@@ -1784,6 +1794,8 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         let reconnectHelo = client.lastHeloWasReconnect
         sessionServer = currentSessionServer
         queueTimestampSeen = false  // this connection's first status reply plans the copies
+        serverPrioritizeNative = nil  // another server, or the setting changed meanwhile
+        prioritizeNativeOneShot = nil
         startQueueWatch()
 
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
@@ -4896,6 +4908,50 @@ extension SlimProtoCoordinator {
         }
     }
 
+    /// Settings › Audio Format changed: FLAC copies may need another format.
+    func audioFormatSettingChanged() {
+        formatChangedAt = Date()
+        lifeboat.audioFormatSettingChanged()
+        savedMusicSettingChanged()
+    }
+
+    /// `pref prioritizeNative ?` — the server pref that decides whether a
+    /// player advertising FLAC gets FLAC natively (LMS default: on). Missing
+    /// or failed → assume the default. Completion on the main thread.
+    private func fetchServerPrioritizeNative(completion: @escaping () -> Void) {
+        let command: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": ["", ["pref", "prioritizeNative", "?"]]
+        ]
+        let askedServer = currentSessionServer
+        prioritizeNativeFetchInFlight = true
+        sendJSONRPCCommandDirect(command) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.prioritizeNativeFetchInFlight = false
+                guard self.currentSessionServer == askedServer else { return }  // switched meanwhile: not this server's answer
+                let value = (response["result"] as? [String: Any])?["_p2"]
+                if let value = value {
+                    self.serverPrioritizeNative = Self.prefIsOn(value)
+                } else {
+                    self.prioritizeNativeOneShot = true  // LMS's default, for this plan only
+                }
+                os_log(.info, log: self.logger, "🛟 Server prioritizeNative %{public}s%{public}s",
+                       Self.prefIsOn(value) ? "on" : "off", value == nil ? " (no answer: assumed)" : "")
+                completion()
+            }
+        }
+    }
+
+    /// LMS prefs come back as "1"/"0", a number, or nothing (unset = default on).
+    static func prefIsOn(_ value: Any?) -> Bool {
+        switch value {
+        case let s as String: return !["0", "", "false"].contains(s.trimmingCharacters(in: .whitespaces).lowercased())
+        case let n as NSNumber: return n.intValue != 0
+        default: return true
+        }
+    }
+
     /// Ask LMS for the queue ahead and keep the copies up to date.
     private func scheduleLifeboatPlan(after delay: TimeInterval) {
         // Not in a sync group: nothing would play the copies.
@@ -4907,6 +4963,22 @@ extension SlimProtoCoordinator {
             // (LifeboatCache checks mayDownload before each download).
             guard let self = self, self.connectionIsLive, !self.lifeboatActive else { return }
             if let last = self.lifeboatPlanAt, Date().timeIntervalSince(last) < 1.5 { return }
+            // No FLAC has streamed from this server yet (fresh install, feature
+            // turned back on, Audio Format changed): ask the server and guess
+            // as LMS would before downloading anything.
+            let server = self.currentSessionServer
+            if !self.lifeboat.flacVariantLearned(for: server),
+               self.serverPrioritizeNative == nil, self.prioritizeNativeOneShot == nil {
+                guard !self.prioritizeNativeFetchInFlight else { return }  // its completion re-plans
+                self.fetchServerPrioritizeNative { [weak self] in
+                    self?.lifeboatPlanAt = nil
+                    self?.scheduleLifeboatPlan(after: 0)
+                }
+                return
+            }
+            let prioritizeNative = self.serverPrioritizeNative ?? self.prioritizeNativeOneShot
+            self.prioritizeNativeOneShot = nil
+            self.lifeboat.resolveFlacVariant(server: server, prioritizeNative: prioritizeNative)
             self.lifeboatPlanAt = Date()
             let command: [String: Any] = [
                 "id": 1, "method": "slim.request",
@@ -4924,8 +4996,11 @@ extension SlimProtoCoordinator {
                     // its turn. LMS moved on in the last seconds: can't tell which, don't learn.
                     let streamTrack = self.streamIsForNextTrack ? 1 : 0
                     let clear = !self.streamIsForNextTrack || elapsed > 4
+                    // A stream from before an Audio Format change (LMS keeps it across
+                    // the reconnect) says nothing about what FLAC streams as now.
+                    let streamIsCurrent = (self.lastServerStreamStartAt ?? .distantPast) >= (self.formatChangedAt ?? .distantPast)
                     self.lifeboat.update(upcoming: upcoming, elapsed: elapsed, streamFormat: self.currentStreamFormat,
-                                         streamSourceType: clear && upcoming.indices.contains(streamTrack)
+                                         streamSourceType: clear && streamIsCurrent && upcoming.indices.contains(streamTrack)
                                              ? upcoming[streamTrack].sourceType : nil,
                                          replayGainApplied: self.lastStreamReplayGain > 0,
                                          server: self.currentSessionServer,

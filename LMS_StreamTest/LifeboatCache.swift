@@ -45,6 +45,23 @@ final class LifeboatCache {
             }
         }
 
+        /// The first advertised format LMS has a FLAC rule for (stock LMS:
+        /// mp3, pcm, flc; MobileTranscode adds ops, ogg): what a FLAC file is
+        /// streamed as when prioritizeNative doesn't put FLAC first (see
+        /// `seedVariant`). The first FLAC stream corrects the guess.
+        static func forCapabilities(_ codes: String) -> Variant {
+            for code in codes.lowercased().split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                switch code {
+                case "ops": return .opus
+                case "mp3": return .mp3
+                case "ogg": return .ogg
+                case "flc", "wav", "pcm", "aif": return .original
+                default: continue  // no FLAC → AAC/ALAC rule (nor for unknown codes): LMS takes the next code
+                }
+            }
+            return .original
+        }
+
         /// Appended to `/music/<id>/download`. Downloads carry no player, so
         /// only "* *" rules match them. Opus and Ogg come from MobileTranscode
         /// 1.4+ as private types (lyo, lyv): a "* *" ops/ogg rule would also
@@ -73,7 +90,11 @@ final class LifeboatCache {
     /// playhead (the setting chooses 15, 30, 60 or 120 minutes).
     static let lookahead: TimeInterval = 30 * 60
     static let maxTracks = 40
-    static let maxBytes: Int64 = 600 * 1024 * 1024
+    /// Room for 120 min of hi-res FLAC originals (tester 2026-11-01: 600 MB
+    /// filled at a quarter of the queue). The folder is purgeable Caches.
+    static let maxBytes: Int64 = 2 * 1024 * 1024 * 1024
+    /// Never squeeze the phone: no download below this much free space.
+    static let minFreeBytes: Int64 = 1024 * 1024 * 1024
 
     private let logger = OSLog(subsystem: "com.lmsstream", category: "Lifeboat")
     private let settings = SettingsManager.shared
@@ -81,6 +102,10 @@ final class LifeboatCache {
     private(set) var plan: [Track] = []
     /// What FLAC files are streamed as, learned from the stream of a FLAC
     /// track (the setting and the server's prioritizeNative decide it).
+    /// Kept per server in UserDefaults so clearing the copies (feature off, a
+    /// relaunch with no plan) doesn't forget it; before anything is learned,
+    /// the plan guesses as LMS would (tester 2026-11-01: a queue added while
+    /// stopped downloaded originals, then Opus again at play; bd xfk7).
     private var flacVariant: Variant = .original
     private var queue: [Track] = []
     private var active: URLSessionDownloadTask?
@@ -120,7 +145,64 @@ final class LifeboatCache {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         directory = caches.appendingPathComponent("Lifeboat", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        loadPlan()
+        // The saved plan's variant names this launch's files until the first
+        // plan resolves it (learned for the server, or guessed).
+        flacVariant = loadPlan().flatMap(Variant.init(rawValue:)) ?? .original
+    }
+
+    /// What FLAC streamed as, per server ("host:slimport" → variant raw value).
+    /// Not promoted from plan.json: a build 3 plan made while stopped holds
+    /// the unlearned default.
+    private static let learnedFlacVariantsKey = "LifeboatFlacVariants"
+    private static func learnedFlacVariants() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: learnedFlacVariantsKey) as? [String: String] ?? [:]
+    }
+    private static func learnedKey(_ server: String?) -> String { server ?? "" }
+
+    /// A FLAC stream from `server` has said what FLAC becomes, and the Audio
+    /// Format setting hasn't changed since.
+    func flacVariantLearned(for server: String?) -> Bool {
+        Self.learnedFlacVariants()[Self.learnedKey(server)] != nil
+    }
+
+    /// Before a plan: the value learned from this server or, given the
+    /// server's prioritizeNative, a guess as LMS would make it. Nothing to
+    /// go on → unchanged.
+    func resolveFlacVariant(server: String?, prioritizeNative: Bool?) {
+        let resolved: Variant
+        let why: String
+        if let learned = Self.learnedFlacVariants()[Self.learnedKey(server)].flatMap(Variant.init(rawValue:)) {
+            resolved = learned
+            why = "learned"
+        } else if let prioritizeNative = prioritizeNative {
+            resolved = Self.seedVariant(capabilities: seedCapabilities, prioritizeNative: prioritizeNative)
+            why = "guessed, prioritizeNative \(prioritizeNative ? "on" : "off")"
+        } else {
+            return
+        }
+        guard resolved != flacVariant else { return }
+        os_log(.info, log: logger, "🛟 FLAC copies as %{public}s (%{public}s)", resolved.name, why)
+        flacVariant = resolved
+    }
+
+    private var seedCapabilities: String {
+        settings.audioFormat == .custom ? settings.customFormatCodes : settings.audioFormat.capabilities
+    }
+
+    /// LMS's own choice (TranscodingHelper.pm): with prioritizeNative (the
+    /// default) a player that advertises FLAC gets FLAC as it is; otherwise
+    /// the first advertised format with a rule. The 400 fallback covers a
+    /// missing rule; the first FLAC stream corrects a wrong guess.
+    static func seedVariant(capabilities: String, prioritizeNative: Bool) -> Variant {
+        let codes = capabilities.lowercased().split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        if prioritizeNative && codes.contains("flc") { return .original }
+        return Variant.forCapabilities(capabilities)
+    }
+
+    /// Settings › Audio Format changed: what FLAC streams as may have too, on
+    /// every server. The next plan guesses again until a FLAC streams.
+    func audioFormatSettingChanged() {
+        UserDefaults.standard.removeObject(forKey: Self.learnedFlacVariantsKey)
     }
 
     // MARK: - Planning
@@ -158,6 +240,9 @@ final class LifeboatCache {
                 os_log(.info, log: logger, "🛟 FLAC files stream as %{public}s: their copies follow", learned.name)
                 flacVariant = learned
             }
+            var learnedAll = Self.learnedFlacVariants()
+            learnedAll[Self.learnedKey(server)] = learned.rawValue
+            UserDefaults.standard.set(learnedAll, forKey: Self.learnedFlacVariantsKey)
         }
         plan = wanted
         self.streamFormat = streamFormat
@@ -217,7 +302,7 @@ final class LifeboatCache {
             plannedSeconds: plan.reduce(0) { $0 + $1.duration },
             savedCount: saved.count, plannedCount: plan.count,
             pendingCount: queue.count + (activeID == nil ? 0 : 1),
-            storageFull: !queue.isEmpty && activeID == nil && directorySize() >= Self.maxBytes)
+            storageFull: !queue.isEmpty && activeID == nil && !storageHasRoom())
     }
 
     /// The complete copy of the track at playlist `index`, with the strm
@@ -337,15 +422,17 @@ final class LifeboatCache {
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
 
-    private func loadPlan() {
+    /// Returns the FLAC variant the plan was saved with, if any.
+    @discardableResult
+    private func loadPlan() -> String? {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.planFileName)),
-              let saved = try? JSONDecoder().decode(SavedPlan.self, from: data) else { return }
+              let saved = try? JSONDecoder().decode(SavedPlan.self, from: data) else { return nil }
         plan = saved.tracks
         streamFormat = saved.streamFormat
         replayGainApplied = saved.replayGainApplied
         server = saved.server
-        flacVariant = saved.flacVariant.flatMap(Variant.init(rawValue:)) ?? .original
-        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks (FLAC as %{public}s)", plan.count, flacVariant.name)
+        os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks", plan.count)
+        return saved.flacVariant
     }
 
     private func hasFile(_ track: Track) -> Bool {
@@ -367,6 +454,22 @@ final class LifeboatCache {
         }
     }
 
+    /// What the phone would free for important data (purgeable space counts).
+    private func freeSpace() -> Int64 {
+        #if os(tvOS)
+        let values = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        return values.flatMap { $0.volumeAvailableCapacity.map(Int64.init) } ?? Int64.max
+        #else
+        let values = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage ?? Int64.max
+        #endif
+    }
+
+    /// Under the copies cap and leaving the phone its headroom.
+    private func storageHasRoom() -> Bool {
+        directorySize() < Self.maxBytes && freeSpace() > Self.minFreeBytes
+    }
+
     /// Suspend or resume the downloads (a suspended URLSession task moves no
     /// bytes and has no timeout; it goes on from where it was).
     func holdDownloads(_ hold: Bool) {
@@ -386,8 +489,9 @@ final class LifeboatCache {
             os_log(.info, log: logger, "🛟 Not downloading now (metered network)")
             return
         }
-        guard directorySize() < Self.maxBytes else {
-            os_log(.info, log: logger, "🛟 Cache full (%lld MB) - not downloading more", directorySize() / 1_048_576)
+        guard storageHasRoom() else {
+            os_log(.info, log: logger, "🛟 No room (%lld MB of copies, %lld MB free) - not downloading more",
+                   directorySize() / 1_048_576, freeSpace() / 1_048_576)
             return
         }
         let track = queue.removeFirst()

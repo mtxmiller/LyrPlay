@@ -1958,6 +1958,7 @@ struct AudioFormatConfigView: View {
         }
 
         settings.saveSettings()
+        coordinator.audioFormatSettingChanged()
 
         // Restart connection if currently connected
         if coordinator.isConnected {
@@ -1980,6 +1981,7 @@ struct AudioFormatConfigView: View {
 
         settings.customFormatCodes = editedFormatCodes
         settings.saveSettings()
+        coordinator.audioFormatSettingChanged()  // the first code is the copies' guess
 
         // Restart connection if connected
         if coordinator.isConnected {
