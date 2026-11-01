@@ -183,8 +183,8 @@ class SettingsManager: ObservableObject {
             case .compressed: return "Compressed formats: mp3, aac"
             case .aacPreferred: return "Compressed formats: aac, mp3"
             case .wavSeekable: return "Lossless (higher data useage): wav, flc, ops, ogg, mp3"
-            case .oggVorbis: return "High quality: ogg, flac, mp3, aac"
-            case .opus: return "Premium quality: ops, ogg, flac, mp3, aac"
+            case .oggVorbis: return "High quality: ogg, mp3, aac"
+            case .opus: return "Premium quality: ops, ogg, mp3, aac"
             case .flac: return "Lossless: flc, ops, ogg, alc, aac, mp3"
             case .custom: return "User-defined format codes"
             }
