@@ -12,6 +12,9 @@ import AVFoundation
 
 extension Notification.Name {
     static let slimProtoDidConnect = Notification.Name("SlimProtoDidConnect")
+    /// Settings changed the player's ReplayGain mode; `userInfo["mode"]` is the
+    /// raw value. The offline copies' gain follows (bd i1qs).
+    static let replayGainModeChanged = Notification.Name("LyrPlayReplayGainModeChanged")
 }
 
 // MARK: - Recovery Trigger Types
@@ -271,6 +274,13 @@ class SlimProtoCoordinator: ObservableObject {
     private var serverPrioritizeNative: Bool?
     private var prioritizeNativeOneShot: Bool?
     private var prioritizeNativeFetchInFlight = false
+    /// The player's `replayGainMode` (0 off, 1 track, 2 album, 3 smart), asked
+    /// once per connection for the copies' offline gain (bd i1qs); Settings
+    /// posts a change (`PlayerAudioPrefs`). nil until answered: the plan then
+    /// falls back to "track" when LMS applied a gain to the last stream.
+    private var serverReplayGainMode: Int?
+    private var replayGainModeFetchInFlight = false
+    private var replayGainModeObserver: NSObjectProtocol?
     /// Settings › Audio Format changed at: a stream started before it must
     /// not teach the copies' format (LMS keeps the stream across the reconnect).
     private var formatChangedAt: Date?
@@ -506,6 +516,10 @@ class SlimProtoCoordinator: ObservableObject {
         setupAudioCallbacks()
         setupAudioPlayerIntegration()
         setupSyncController()
+        replayGainModeObserver = NotificationCenter.default.addObserver(
+            forName: .replayGainModeChanged, object: nil, queue: .main) { [weak self] note in
+            self?.replayGainModeChanged(note)
+        }
 
         #if DEBUG
         os_log(.info, log: logger, "SlimProtoCoordinator initialized with Material-style time tracking")
@@ -856,6 +870,7 @@ class SlimProtoCoordinator: ObservableObject {
     deinit {
         stopServerTimeFetching()  // Stop our simplified server time fetching
         stopQueueWatch()
+        if let observer = replayGainModeObserver { NotificationCenter.default.removeObserver(observer) }
         // Use position-saving disconnect when app is being deallocated
         client.disconnectWithPositionSave()
     }
@@ -1796,6 +1811,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
         queueTimestampSeen = false  // this connection's first status reply plans the copies
         serverPrioritizeNative = nil  // another server, or the setting changed meanwhile
         prioritizeNativeOneShot = nil
+        serverReplayGainMode = nil
         startQueueWatch()
 
         // UNIFIED RECOVERY: Handle based on trigger type (LMS_StreamTest-6lb)
@@ -2262,6 +2278,9 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         clearHeldTrackEnd()
         currentStreamFormat = format
         lastStreamReplayGain = replayGain
+        // The player's ReplayGain mode may have changed in Material or the LMS
+        // web UI (no notification reaches us): ask again at this song's plan.
+        serverReplayGainMode = nil
         if settings.lifeboatMode == 0 && !lifeboatCacheCleared {
             lifeboatCacheCleared = true
             lifeboat.removeAll()  // switched off: don't keep copies around
@@ -2856,6 +2875,17 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         if decodeEndHeld {
             drainHeld = true
             os_log(.info, log: logger, "📬 Output drained after a held decode end - holding STMu too")
+            return
+        }
+        // The link died in the 10 s before the decode ended, so the STMd went out
+        // as if online and LMS's next strm never came (bd sqat): with the server
+        // unreachable and the next song's copy on disk, play it from the start
+        // instead of holding the STMu in silence until the reconnect (which then
+        // moves LMS to us, as after any copy played offline). Fresh, not gapless:
+        // queued onto the drained push stream its boundary never fires (rig O22).
+        if !connectionIsLive, lifeboatEnabled, !lifeboatActive,
+           let index = decodingCopy?.index ?? UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+           startCopyAfterDrain(index: index + 1) {
             return
         }
         os_log(.info, log: logger, "🏁 Playback complete (output drained) - sending STMu to server")
@@ -4943,6 +4973,40 @@ extension SlimProtoCoordinator {
         }
     }
 
+    /// `playerpref replayGainMode ?` for the copies' offline gain (bd i1qs).
+    /// No answer: "track" when LMS applied a gain to the last stream, else
+    /// off, so the plan never waits on it. Completion on the main thread.
+    private func fetchServerReplayGainMode(completion: @escaping () -> Void) {
+        let command: [String: Any] = [
+            "id": 1, "method": "slim.request",
+            "params": [settings.playerMACAddress, ["playerpref", "replayGainMode", "?"]]
+        ]
+        let askedServer = currentSessionServer
+        replayGainModeFetchInFlight = true
+        sendJSONRPCCommandDirect(command) { [weak self] response in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.replayGainModeFetchInFlight = false
+                guard self.currentSessionServer == askedServer else { return }
+                // `playerpref <name> ?` answers `{"result": {"_p2": "1"}}`.
+                let p2 = (response["result"] as? [String: Any])?["_p2"]
+                let answered = (p2 as? Int) ?? (p2 as? String).flatMap { Int($0) }
+                self.serverReplayGainMode = answered ?? (self.lastStreamReplayGain > 0 ? 1 : 0)
+                os_log(.info, log: self.logger, "🛟 Player replayGainMode %d%{public}s",
+                       self.serverReplayGainMode ?? 0, answered == nil ? " (no answer: assumed)" : "")
+                completion()
+            }
+        }
+    }
+
+    /// Settings › Audio changed the player's ReplayGain mode: the copies' gain follows.
+    private func replayGainModeChanged(_ note: Notification) {
+        guard let mode = note.userInfo?["mode"] as? Int else { return }
+        serverReplayGainMode = mode
+        lifeboatPlanAt = nil
+        scheduleLifeboatPlan(after: 0)
+    }
+
     /// LMS prefs come back as "1"/"0", a number, or nothing (unset = default on).
     static func prefIsOn(_ value: Any?) -> Bool {
         switch value {
@@ -4976,13 +5040,22 @@ extension SlimProtoCoordinator {
                 }
                 return
             }
+            // The player's ReplayGain mode decides the copies' offline gain (bd i1qs).
+            if self.serverReplayGainMode == nil {
+                guard !self.replayGainModeFetchInFlight else { return }  // its completion re-plans
+                self.fetchServerReplayGainMode { [weak self] in
+                    self?.lifeboatPlanAt = nil
+                    self?.scheduleLifeboatPlan(after: 0)
+                }
+                return
+            }
             let prioritizeNative = self.serverPrioritizeNative ?? self.prioritizeNativeOneShot
             self.prioritizeNativeOneShot = nil
             self.lifeboat.resolveFlacVariant(server: server, prioritizeNative: prioritizeNative)
             self.lifeboatPlanAt = Date()
             let command: [String: Any] = [
                 "id": 1, "method": "slim.request",
-                "params": [self.settings.playerMACAddress, ["status", "-", LifeboatCache.maxTracks + 1, "tags:acdlxuYo"]]
+                "params": [self.settings.playerMACAddress, ["status", "-", LifeboatCache.maxTracks + 1, "tags:acdeltxuXYo"]]
             ]
             self.sendJSONRPCCommandDirect(command) { [weak self] response in
                 DispatchQueue.main.async {
@@ -5003,6 +5076,7 @@ extension SlimProtoCoordinator {
                                          streamSourceType: clear && streamIsCurrent && upcoming.indices.contains(streamTrack)
                                              ? upcoming[streamTrack].sourceType : nil,
                                          replayGainApplied: self.lastStreamReplayGain > 0,
+                                         replayGainMode: self.serverReplayGainMode ?? (self.lastStreamReplayGain > 0 ? 1 : 0),
                                          server: self.currentSessionServer,
                                          lookahead: TimeInterval(self.settings.lifeboatMinutes * 60),
                                          mayDownload: { [weak self] in self?.lifeboatMayDownload ?? false },
@@ -5028,7 +5102,10 @@ extension SlimProtoCoordinator {
                 remote: (number(item["remote"]) ?? 0) != 0 || ((item["url"] as? String)?.contains("#") ?? false),
                 replayGainDB: number(item["replay_gain"]),
                 coverID: item["coverid"].map { "\($0)" },
-                sourceType: (item["type"] as? String)?.lowercased())
+                sourceType: (item["type"] as? String)?.lowercased(),
+                albumID: item["album_id"].map { "\($0)" },
+                trackNumber: number(item["tracknum"]).map { Int($0) },
+                albumReplayGainDB: number(item["album_replay_gain"]))
         }
     }
 
@@ -5255,11 +5332,45 @@ extension SlimProtoCoordinator {
         return true
     }
 
+    /// The output drained with the server unreachable (bd sqat): play the copy
+    /// of `index` from the start, with the bookkeeping a chosen song gets in
+    /// `playLifeboatTrackNow` (recovery index and position, lock-screen
+    /// metadata) so the next copy follows once and the reconnect moves LMS to
+    /// this song (review 2026-11-03, H1). Not "newer than LMS": a drain is no
+    /// user action, so a pause made elsewhere still wins at the reconnect.
+    private func startCopyAfterDrain(index: Int) -> Bool {
+        guard lifeboat.server == currentSessionServer, !connectionManager.isUserInitiatedDisconnect,
+              let file = lifeboat.fileURL(forIndex: index), let track = lifeboat.track(at: index) else { return false }
+        os_log(.default, log: logger, "🛟 Drained with the server unreachable - starting the next song's copy (track %d)", index)
+        // Drained and stalled: the copy needs a fresh push stream (as sendHeldTrackEnd).
+        audioManager.stopPushStreamPlayback()
+        // A strm 's' arriving late starts fresh, not queued behind this copy (review M2).
+        expectingGaplessTransition = false
+        decodingCopy = CopySource(index: index, id: track.id)
+        playingCopy = decodingCopy
+        lifeboatActive = true
+        lifeboatUsed = true
+        connectionManager.persistForPlayback = true
+        UserDefaults.standard.set(index, forKey: "lyrplay_recovery_index")
+        UserDefaults.standard.set(0.0, forKey: "lyrplay_recovery_position")
+        UserDefaults.standard.set(Date(), forKey: "lyrplay_recovery_timestamp")
+        audioManager.startPushStreamPlayback(url: file.absoluteString, format: currentStreamFormat,
+                                             replayGain: lifeboatGain(index: index), isGapless: false,
+                                             startTime: 0, waitForUnpause: false)
+        simpleTimeTracker.updateFromServer(time: 0, duration: track.duration, playing: true)
+        audioManager.updateTrackMetadata(title: track.title, artist: track.artist, album: track.album,
+                                         artworkURL: lifeboat.artworkURL(forIndex: index)?.absoluteString,
+                                         duration: track.duration)
+        return true
+    }
+
     /// Linear gain for the copy at `index`: LMS sends each track's gain in its
-    /// strm; offline, use the track's ReplayGain tag when LMS applies gain for us.
+    /// strm; offline, what LMS would send from the plan's tags and the player's
+    /// ReplayGain mode, capped at 0 dB (`LifeboatCache.ReplayGain`, bd i1qs).
     private func lifeboatGain(index: Int) -> Float {
-        guard lastStreamReplayGain > 0, let db = lifeboat.track(at: index)?.replayGainDB else { return 0 }
-        return Float(pow(10, db / 20))
+        guard let track = lifeboat.track(at: index) else { return 0 }
+        return LifeboatCache.ReplayGain.linear(mode: lifeboat.replayGainMode, track: track,
+                                               before: lifeboat.track(at: index - 1), after: lifeboat.track(at: index + 1))
     }
 
     /// What the settings screen shows while we play downloaded copies offline.
