@@ -82,12 +82,18 @@ final class PlayerAudioPrefsModel: ObservableObject {
     func setReplayGainMode(_ mode: ReplayGainMode) {
         let previous = replayGainMode
         replayGainMode = mode
+        Self.postReplayGainMode(mode)
         send(["playerpref", "replayGainMode", mode.rawValue]) { [weak self] response in
             // Empty response = request failed; show the server's value again.
             guard response.isEmpty, let self else { return }
             os_log(.error, log: self.logger, "❌ replayGainMode write failed — reverting UI")
             self.replayGainMode = previous
+            if let previous { Self.postReplayGainMode(previous) }
         }
+    }
+
+    private static func postReplayGainMode(_ mode: ReplayGainMode) {
+        NotificationCenter.default.post(name: .replayGainModeChanged, object: nil, userInfo: ["mode": mode.rawValue])
     }
 
     /// Extracts a `playerpref <name> ?` answer: `{"result": {"_p2": "1"}}`.

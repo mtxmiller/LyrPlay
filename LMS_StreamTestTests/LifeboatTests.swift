@@ -177,6 +177,45 @@ struct LifeboatVariantTests {
     }
 }
 
+/// The gain a copy plays with offline, against what LMS sends online
+/// (Slim/Player/ReplayGain.pm; bd i1qs: the raw track tag was applied, 6 dB
+/// louder than LMS's peak-limited value for the probe album's +8 dB track).
+struct OfflineReplayGainTests {
+    typealias RG = LifeboatCache.ReplayGain
+    static func track(_ index: Int, gain: Double?, album: Double? = -2, albumID: String? = "20", number: Int? = nil) -> LifeboatCache.Track {
+        LifeboatCache.Track(index: index, id: "\(150 + index)", title: "", artist: "", album: "", duration: 60, remote: false,
+                            replayGainDB: gain, albumID: albumID, trackNumber: number ?? index + 1, albumReplayGainDB: album)
+    }
+
+    @Test func trackModeUsesTheTrackGainCappedAtZeroDB() {
+        #expect(RG.linear(mode: 1, track: Self.track(0, gain: -6), before: nil, after: nil) == Float(pow(10, -6.0 / 20)))
+        #expect(RG.linear(mode: 1, track: Self.track(1, gain: 3), before: nil, after: nil) == 1)   // peak unknown: never louder
+        #expect(RG.linear(mode: 1, track: Self.track(2, gain: 8), before: nil, after: nil) == 1)   // LMS: 1.25 with peak .8
+        #expect(RG.linear(mode: 1, track: Self.track(0, gain: nil), before: nil, after: nil) == 0)  // no tag: none, as LMS's strm
+    }
+
+    @Test func offAppliesNothing() {
+        #expect(RG.linear(mode: 0, track: Self.track(0, gain: -6), before: nil, after: nil) == 0)
+    }
+
+    @Test func albumModeUsesTheAlbumGain() {
+        #expect(RG.gainDB(mode: 2, track: Self.track(1, gain: 3, album: -2), before: nil, after: nil) == -2)
+        #expect(RG.gainDB(mode: 2, track: Self.track(1, gain: 3, album: nil), before: nil, after: nil) == nil)
+    }
+
+    @Test func smartModeTakesTheAlbumGainOnlyNextToTheSameAlbumsNeighbouringTrack() {
+        let t0 = Self.track(0, gain: -6), t1 = Self.track(1, gain: 3), t2 = Self.track(2, gain: 8)
+        #expect(RG.gainDB(mode: 3, track: t1, before: t0, after: t2) == -2)
+        #expect(RG.gainDB(mode: 3, track: t0, before: nil, after: t1) == -2)        // first of the album: the next matches
+        #expect(RG.gainDB(mode: 3, track: t1, before: nil, after: nil) == 3)         // alone: track gain
+        let other = Self.track(2, gain: 8, albumID: "21")
+        #expect(RG.gainDB(mode: 3, track: t1, before: Self.track(0, gain: -6, albumID: "21"), after: other) == 3)
+        let shuffled = Self.track(2, gain: 8, number: 7)                              // same album, not the next track
+        #expect(RG.gainDB(mode: 3, track: t1, before: nil, after: shuffled) == 3)
+        #expect(RG.gainDB(mode: 3, track: Self.track(1, gain: 3, album: nil), before: t0, after: t2) == 3)  // no album gain
+    }
+}
+
 /// What FLAC copies are made as before and after a FLAC has streamed
 /// (tester 2026-11-01: a queue added while stopped downloaded originals).
 struct CopyFormatSeedTests {

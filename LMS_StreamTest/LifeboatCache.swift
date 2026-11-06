@@ -20,6 +20,47 @@ final class LifeboatCache {
         var replayGainDB: Double? = nil
         var coverID: String? = nil  // LMS artwork id (status tag c), shared by an album's tracks
         var sourceType: String? = nil  // LMS content type of the file (status tag o): flc, mp3, ...
+        // For LMS's album and smart ReplayGain modes offline (bd i1qs):
+        var albumID: String? = nil           // status tag e
+        var trackNumber: Int? = nil          // status tag t
+        var albumReplayGainDB: Double? = nil  // status tag X
+    }
+
+    /// What LMS would send as a copy's gain (Slim/Player/ReplayGain.pm
+    /// `fetchGainMode`), from the tags the plan keeps and the player's
+    /// `replayGainMode` (0 off, 1 track, 2 album, 3 smart). Smart uses the
+    /// album gain when the song before or after is the same album and the
+    /// next track number, else the track gain. LMS also lowers a gain so the
+    /// track's peak can't clip (`preventClipping`); the CLI doesn't give the
+    /// peak, so the gain is capped at 0 dB (what LMS does for a peak of 1):
+    /// offline is never louder than online and can't clip, quiet songs with a
+    /// positive gain play a little quieter than they would online.
+    enum ReplayGain {
+        static func gainDB(mode: Int, track: Track, before: Track?, after: Track?) -> Double? {
+            switch mode {
+            case 1: return track.replayGainDB
+            case 2: return track.albumReplayGainDB
+            case 3:
+                if let album = track.albumReplayGainDB,
+                   neighbourMatches(track, before, offset: -1) || neighbourMatches(track, after, offset: 1) {
+                    return album
+                }
+                return track.replayGainDB
+            default: return nil
+            }
+        }
+
+        private static func neighbourMatches(_ track: Track, _ other: Track?, offset: Int) -> Bool {
+            guard let other = other, let album = track.albumID, let otherAlbum = other.albumID, album == otherAlbum,
+                  let n = track.trackNumber, let m = other.trackNumber else { return false }
+            return n + offset == m
+        }
+
+        /// Linear multiplier for the push stream (0 = none, as the strm field).
+        static func linear(mode: Int, track: Track, before: Track?, after: Track?) -> Float {
+            guard let db = gainDB(mode: mode, track: track, before: before, after: after) else { return 0 }
+            return Float(pow(10, min(db, 0) / 20))
+        }
     }
 
     /// Which file to fetch for a track. The copy must be the audio LMS
@@ -126,6 +167,8 @@ final class LifeboatCache {
     /// ReplayGain to it: what a cold launch without a server needs to play them.
     private(set) var streamFormat = ""
     private(set) var replayGainApplied = false
+    /// The player's `replayGainMode` when the plan was made (bd i1qs).
+    private(set) var replayGainMode = 0
     /// The server ("host:slimport") the plan's ids and indexes belong to.
     private(set) var server: String?
     private var artworkInFlight: Set<String> = []
@@ -138,6 +181,7 @@ final class LifeboatCache {
         let replayGainApplied: Bool
         var server: String? = nil
         var flacVariant: String? = nil
+        var replayGainMode: Int? = nil
     }
     private static let planFileName = "plan.json"
 
@@ -226,7 +270,7 @@ final class LifeboatCache {
     /// `streamSourceType`: the file type of the track the current stream
     /// belongs to (the next track's while it decodes ahead).
     func update(upcoming: [Track], elapsed: Double, streamFormat: String, streamSourceType: String? = nil,
-                replayGainApplied: Bool = false, server: String? = nil,
+                replayGainApplied: Bool = false, replayGainMode: Int = 0, server: String? = nil,
                 lookahead: TimeInterval = lookahead,
                 mayDownload: @escaping () -> Bool = { true }, allowExpensive: Bool = true) {
         self.mayDownload = mayDownload
@@ -247,6 +291,7 @@ final class LifeboatCache {
         plan = wanted
         self.streamFormat = streamFormat
         self.replayGainApplied = replayGainApplied
+        self.replayGainMode = replayGainMode
         self.server = server
         savePlan()
         let keep = Set(wanted.map { fileName(for: $0) } + wanted.compactMap { $0.coverID.map(artFileName) })
@@ -417,7 +462,7 @@ final class LifeboatCache {
     private func savePlan() {
         let saved = SavedPlan(tracks: plan, streamFormat: streamFormat,
                               replayGainApplied: replayGainApplied, server: server,
-                              flacVariant: flacVariant.rawValue)
+                              flacVariant: flacVariant.rawValue, replayGainMode: replayGainMode)
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
@@ -430,6 +475,7 @@ final class LifeboatCache {
         plan = saved.tracks
         streamFormat = saved.streamFormat
         replayGainApplied = saved.replayGainApplied
+        replayGainMode = saved.replayGainMode ?? (saved.replayGainApplied ? 1 : 0)  // plans from before bd i1qs
         server = saved.server
         os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks", plan.count)
         return saved.flacVariant
