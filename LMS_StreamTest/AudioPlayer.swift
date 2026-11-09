@@ -241,8 +241,15 @@ class AudioPlayer: NSObject, ObservableObject {
             os_log(.error, log: logger, "❌ Failed to load BASSOPUS plugin: %d", BASS_ErrorGetCode())
         }
 
-        // Enable ICY metadata for radio streams
-        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 1)  // Enable Shoutcast metadata requests
+        // Don't ask for ICY (Shoutcast) metadata. LMS answers the request with
+        // an `icy-name` header holding its localised welcome string, and sizes
+        // the header block in characters while writing it in bytes, so with a
+        // non-ASCII UI language (Chinese, Japanese, Russian, Hebrew, Hungarian,
+        // Polish, Czech, Swedish) the headers arrive cut short: FLAC fails with
+        // BASS_ERROR_FILEFORM at once and MP3 stutters at every unstripped 32 KB
+        // title block (GH #140, #119; bd udx7). Titles and cover art come from
+        // JSON-RPC, and every stream is proxied by LMS, so nothing needs the tags.
+        BASS_SetConfig(DWORD(BASS_CONFIG_NET_META), 0)
 
         // Network buffer configuration - optimized for both LAN and mobile streaming
         //BASS_SetConfig(DWORD(BASS_CONFIG_NET_BUFFER), DWORD(10000))  // 10s buffer (balanced for LAN/cellular)
