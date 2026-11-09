@@ -382,7 +382,8 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         os_log(.info, log: logger, "🎵 Playing stream with CBass: %{public}s", urlString.maskingURLCredentials)
-        
+        clearMetadataDuration()
+
         // Track current URL for potential recovery scenarios
         currentStreamURL = urlString
         
@@ -1429,6 +1430,15 @@ class AudioPlayer: NSObject, ObservableObject {
             // Keep existing duration, don't overwrite with 0.0
             os_log(.debug, log: logger, "🎵 Preserving existing duration %.0f seconds (ignoring 0.0)", metadataDuration)
         }
+    }
+
+    /// A fresh stream (not a gapless successor) starts with no known duration;
+    /// the new track's `updateTrackMetadata` supplies it. Without this, a radio
+    /// station started after a song kept the song's length (`setMetadataDuration`
+    /// ignores the station's 0), so the radio title refresh timer stopped at its
+    /// first tick and the lock screen showed the old length (bd ftqv).
+    func clearMetadataDuration() {
+        metadataDuration = 0.0
     }
     
 

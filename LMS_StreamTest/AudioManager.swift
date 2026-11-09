@@ -188,6 +188,12 @@ class AudioManager: NSObject, ObservableObject {
         configureAudioSessionForFormat(format)
         activateAudioSession()
 
+        // A fresh start replaces the playing track, so its duration is stale; a
+        // gapless successor keeps it until the boundary (bd ftqv).
+        if !isGapless {
+            audioPlayer.clearMetadataDuration()
+        }
+
         // Check if we need to initialize push stream (first time or after cleanup)
         let hasValidStream = streamDecoder.hasValidStream()
 
