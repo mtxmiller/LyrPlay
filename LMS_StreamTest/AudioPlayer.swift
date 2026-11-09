@@ -15,7 +15,6 @@ protocol AudioPlayerDelegate: AnyObject {
     func audioPlayerTimeDidUpdate(_ time: Double)
     func audioPlayerDidStall()
     func audioPlayerRequestsSeek(_ timeOffset: Double)  // For transcoding pipeline fixes
-    func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?))  // ICY metadata from radio streams
 }
 
 class AudioPlayer: NSObject, ObservableObject {
@@ -169,9 +168,6 @@ class AudioPlayer: NSObject, ObservableObject {
 
     weak var commandHandler: SlimProtoCommandHandler?
     weak var audioManager: AudioManager?  // Reference to notify about media control refresh
-
-    // MARK: - ICY Metadata Handling
-    private var metadataSync: HSYNC = 0
 
     // MARK: - Initialization
     override init() {
@@ -1273,84 +1269,6 @@ class AudioPlayer: NSObject, ObservableObject {
                 player.delegate?.audioPlayerTimeDidUpdate(currentTime)
             }
         }, selfPtr)
-
-        // ICY metadata callback for radio streams
-        setupMetadataCallback()
-    }
-
-    // MARK: - ICY Metadata Handling
-    private func setupMetadataCallback() {
-        guard currentStream != 0 else { return }
-
-        // Remove any existing metadata sync
-        if metadataSync != 0 {
-            BASS_ChannelRemoveSync(currentStream, metadataSync)
-            metadataSync = 0
-        }
-
-        // Only set up metadata callback for HTTP streams (radio/streaming)
-        if currentStreamURL.hasPrefix("http") {
-            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-
-            metadataSync = BASS_ChannelSetSync(currentStream, DWORD(BASS_SYNC_META), 0, { handle, channel, data, user in
-                guard let user = user else { return }
-                let player = Unmanaged<AudioPlayer>.fromOpaque(user).takeUnretainedValue()
-
-                DispatchQueue.main.async {
-                    player.handleMetadataUpdate()
-                }
-            }, selfPtr)
-
-            if metadataSync != 0 {
-                os_log(.info, log: logger, "🎵 ICY metadata callback set up for radio stream")
-            }
-        }
-    }
-
-    private func handleMetadataUpdate() {
-        guard currentStream != 0 else { return }
-
-        // Get ICY metadata from BASS
-        guard let metaPtr = BASS_ChannelGetTags(currentStream, DWORD(BASS_TAG_META)) else {
-            os_log(.debug, log: logger, "🎵 No ICY metadata available")
-            return
-        }
-
-        let metaString = String(cString: metaPtr)
-        // Parse ICY metadata format: StreamTitle='Artist - Title';StreamUrl='xxx';
-        let metadata = parseICYMetadata(metaString)
-
-        if metadata.title != nil || metadata.artist != nil {
-            delegate?.audioPlayerDidReceiveMetadata(metadata)
-        }
-    }
-
-    private func parseICYMetadata(_ metaString: String) -> (title: String?, artist: String?) {
-        var title: String?
-        var artist: String?
-
-        // Look for StreamTitle='...' in the metadata
-        if let titleRange = metaString.range(of: "StreamTitle='") {
-            let startIndex = titleRange.upperBound
-            if let endRange = metaString[startIndex...].range(of: "';") {
-                let titleContent = String(metaString[startIndex..<endRange.lowerBound])
-
-                // Try to split "Artist - Title" format
-                if titleContent.contains(" - ") {
-                    let components = titleContent.components(separatedBy: " - ")
-                    if components.count >= 2 {
-                        artist = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                        title = components[1...].joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
-                    } else {
-                        title = titleContent
-                    }
-                } else {
-                    title = titleContent
-                }
-            }
-        }
-
-        return (title: title, artist: artist)
     }
 
     // MARK: - Unified Stream Creation (per Ian@un4seen - uses plugin system)
