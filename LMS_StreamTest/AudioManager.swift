@@ -937,11 +937,6 @@ extension AudioManager: AudioPlayerDelegate {
         os_log(.info, log: logger, "🔧 Audio player requested seek to %{public}.2f seconds (transcoding fallback disabled)", timeOffset)
         // Intentionally no-op: rely on larger BASS verification window instead of server seek
     }
-    
-    func audioPlayerDidReceiveMetadata(_ metadata: (title: String?, artist: String?)) {
-        // Forward ICY metadata to SlimProto coordinator (logging handled there)
-        slimClient?.handleICYMetadata(metadata)
-    }
 }
 
 #if os(iOS)

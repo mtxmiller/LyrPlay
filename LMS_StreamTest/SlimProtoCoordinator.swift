@@ -48,11 +48,9 @@ class SlimProtoCoordinator: ObservableObject {
     private(set) var lastKnownPort: UInt16 = 3483
     private var playbackHeartbeatTimer: Timer?
 
-    // 15s polling timer for radio (duration=0) streams. Necessary because LMS
-    // typically transcodes radio source streams (Shoutcast/AAC with ICY) into
-    // FLAC for mobile clients, which strips ICY metadata before BASS sees it.
-    // BASS_SYNC_META therefore never fires for transcoded radio, leaving lock
-    // screen / Now Playing artwork stale on track changes. The timer polls
+    // 15s polling timer for radio (duration=0) streams. The app does not read
+    // in-band ICY metadata (it stopped requesting it in 1.8.1, bd udx7), so a
+    // station's track changes are only visible server-side. The timer polls
     // fetchCurrentTrackMetadata() so LMS-side metadata (which Material WebView
     // already sees via cometd) reaches NowPlayingManager. Self-disables when
     // the stream turns out to have a known duration (file/podcast).
@@ -60,8 +58,8 @@ class SlimProtoCoordinator: ObservableObject {
 
     // MARK: - Metadata Last-Write-Wins Guard
     //
-    // fetchCurrentTrackMetadata() fires from ~6 sites (initial stream, track
-    // start, resume, radio-refresh tick, boundary-drift, ICY change). Around a
+    // fetchCurrentTrackMetadata() fires from several sites (initial stream, track
+    // start, resume, radio-refresh tick, boundary-drift). Around a
     // sync-group track boundary several overlap, so their HTTP responses can land
     // out of order. Without a guard, a stale response repaints the PREVIOUS
     // track's title/artist/album/position/bitrate — the intermittent staleness
@@ -444,9 +442,6 @@ class SlimProtoCoordinator: ObservableObject {
     private var syncGroupID: String?  // 10-digit sync group ID from serv packet (PHASE 5)
     private let syncController: SyncController  // BASS_ATTRIB_FREQ rate matching for sub-100ms drift
 
-    // MARK: - ICY Metadata Tracking
-    private var lastSentICYMetadata: (title: String?, artist: String?) = (nil, nil)
-
     // MARK: - Gapless Playback Tracking
     private var expectingGaplessTransition: Bool = false  // Set to true after sending STMd, false when STRM received
 
@@ -636,95 +631,6 @@ class SlimProtoCoordinator: ObservableObject {
         os_log(.info, log: logger, "✅ Connection manager reset - all reconnection tracking cleared")
     }
 
-    /// Request server-side seek for transcoding pipeline fixes
-    func requestFreshMetadata() {
-        os_log(.info, log: logger, "🔄 Requesting fresh metadata due to stream change")
-        fetchCurrentTrackMetadata()
-    }
-
-    /// Whether ICY metadata should be pushed back to LMS via the squeezelite META command.
-    /// Rule #11: ICY metadata for duration=0 (infinite radio) streams crashes LMS
-    /// XMLBrowser.pm line 1975 ("Can't call method 'duration' on an undefined value").
-    /// Only file/streamable content with a known duration can safely receive META.
-    /// Extracted as a pure predicate so the rule-#11 invariant is unit-testable
-    /// without constructing a full SlimProtoCoordinator.
-    internal static func shouldSendICYToLMS(streamDuration: TimeInterval) -> Bool {
-        return streamDuration > 0
-    }
-
-    func handleICYMetadata(_ metadata: (title: String?, artist: String?)) {
-        // Filter duplicate metadata to prevent spam
-        let isDuplicate = (metadata.title == lastSentICYMetadata.title &&
-                          metadata.artist == lastSentICYMetadata.artist)
-
-        if isDuplicate {
-            // Skip duplicate without logging (happens constantly)
-            return
-        }
-
-        os_log(.info, log: logger, "🎵 New ICY metadata: title=%{public}s, artist=%{public}s",
-               metadata.title ?? "nil", metadata.artist ?? "nil")
-
-        // Store metadata to prevent future duplicates
-        lastSentICYMetadata = metadata
-
-        // Conditionally push ICY back to LMS for file streams (squeezelite META).
-        // Skip for duration=0 (radio) per rule #11 — would crash LMS XMLBrowser.pm.
-        let duration = audioManager.getDuration()
-        if Self.shouldSendICYToLMS(streamDuration: duration) {
-            os_log(.info, log: logger, "🎵 Stream has duration (%.2fs) - sending ICY metadata to LMS", duration)
-            sendICYMetadataToLMS(title: metadata.title, artist: metadata.artist)
-        } else {
-            os_log(.info, log: logger, "🎵 Stream has no duration (infinite stream) - skipping ICY metadata send (prevents server crash)")
-        }
-
-        // Always refresh OUR view of metadata regardless of duration. ICY arrival
-        // signals a track change; LMS-side metadata (artwork URL, album, etc.) is
-        // updated by the source plugin (Radio Paradise, etc.) on its own schedule.
-        // Hybrid timing: 0.5s catches plugins that update metadata before our BASS
-        // callback fires; 2.5s safety net catches plugins that poll their source
-        // slightly after us. Two cheap JSON-RPC calls per ~3-5 minute radio track.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.requestFreshMetadata()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            self?.requestFreshMetadata()
-        }
-    }
-
-    private func sendICYMetadataToLMS(title: String?, artist: String?) {
-        let playerID = settings.playerMACAddress
-
-        // Create metadata string in the format LMS expects
-        var metadataArray: [String] = []
-
-        if let title = title {
-            metadataArray.append("title")
-            metadataArray.append(title)
-        }
-
-        if let artist = artist {
-            metadataArray.append("artist")
-            metadataArray.append(artist)
-        }
-
-        guard !metadataArray.isEmpty else {
-            os_log(.debug, log: logger, "🎵 No metadata to send to LMS")
-            return
-        }
-
-        // Send ICY metadata update to LMS (similar to squeezelite META command)
-        let metadataCommand: [String: Any] = [
-            "id": 1,
-            "method": "slim.request",
-            "params": [playerID, ["icy"] + metadataArray]
-        ]
-
-        sendJSONRPCCommandDirect(metadataCommand) { [weak self] response in
-            os_log(.info, log: self?.logger ?? OSLog.default, "🎵 ICY metadata sent to LMS server")
-        }
-    }
-    
     private func startPlaybackHeartbeat() {
         stopPlaybackHeartbeat()
 
@@ -845,8 +751,6 @@ class SlimProtoCoordinator: ObservableObject {
     var timeSourceInfo: String {
         return audioManager.getTimeSourceInfo()
     }
-    
-    // REMOVED: Timer-based metadata refresh - replaced with BASS ICY metadata callbacks
     
     // REMOVED: ensureRadioMetadataRefreshIsRunning - redundant with fetchCurrentTrackMetadata
     
@@ -2794,8 +2698,6 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Stop radio metadata refresh poll
         stopRadioMetadataRefreshTimer()
-
-        // Note: ICY metadata callbacks are handled automatically by BASS
 
         // STMf is sent by the command handler (handleStopCommand/
         // handleFlushCommand) — one owner per protocol reply. bd LMS_StreamTest-433.3.3
