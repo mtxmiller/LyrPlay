@@ -498,6 +498,15 @@ class NowPlayingManager: ObservableObject {
         #endif
     }
 
+    /// A live stream has no length: forget the previous song's, so the lock
+    /// screen and CarPlay stop showing its progress bar (GH #96). The next
+    /// now-playing update removes the duration entry.
+    func clearMetadataDuration() {
+        if metadataDuration != 0.0 {
+            metadataDuration = 0.0
+        }
+    }
+
     // MARK: - Backward Compatibility Methods (keeping existing interface)
     func updatePlaybackState(isPlaying: Bool, currentTime: Double) {
         // SIMPLIFIED: Always update but with throttling

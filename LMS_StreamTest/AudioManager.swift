@@ -825,6 +825,13 @@ class AudioManager: NSObject, ObservableObject {
         )
     }
 
+    /// LMS says the playing item is a live stream: drop the duration kept from
+    /// the previous song, in the player and on the lock screen (GH #96).
+    func clearTrackDuration() {
+        audioPlayer.clearMetadataDuration()
+        nowPlayingManager.clearMetadataDuration()
+    }
+
     // Update playlist position for CarPlay button states
     func updatePlaylistPosition(currentIndex: Int, totalTracks: Int) {
         nowPlayingManager.updatePlaylistPosition(currentIndex: currentIndex, totalTracks: totalTracks)
