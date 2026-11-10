@@ -69,6 +69,19 @@ struct ResumeRouteTests {
         #expect(SlimProtoCoordinator.statusPlayerConnected(["player_connected": "0"]) == false)
         #expect(SlimProtoCoordinator.statusPlayerConnected(nil) == nil)
     }
+
+    // GH #96: a live stream must drop the previous song's duration.
+    @Test func liveStreamIsRemoteWithoutDuration() {
+        #expect(SlimProtoCoordinator.statusIsLiveStream(["remote": 1]))
+        #expect(SlimProtoCoordinator.statusIsLiveStream(["remote": "1", "duration": 0]))
+        // A streaming-service track: remote, but it has a length.
+        #expect(!SlimProtoCoordinator.statusIsLiveStream(["remote": 1, "duration": 210.5]))
+        #expect(!SlimProtoCoordinator.statusIsLiveStream(["remote": 1, "duration": "210.5"]))
+        // A local song that briefly reports no length keeps its bar.
+        #expect(!SlimProtoCoordinator.statusIsLiveStream(["duration": 0]))
+        #expect(!SlimProtoCoordinator.statusIsLiveStream([:]))
+        #expect(!SlimProtoCoordinator.statusIsLiveStream(nil))
+    }
 }
 
 // LMS stops a paused player right after it reconnects; the lock screen should

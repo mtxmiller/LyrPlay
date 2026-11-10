@@ -76,6 +76,12 @@ class SimpleTimeTracker {
         return trackDuration
     }
 
+    /// A live stream has no length. `updateFromServer` ignores a 0 duration, so
+    /// the previous song's length has to be dropped explicitly (GH #96).
+    func clearTrackDuration() {
+        trackDuration = 0.0
+    }
+
     // MARK: - Cleanup
     deinit {
         os_log(.info, log: logger, "SimpleTimeTracker deinitialized")

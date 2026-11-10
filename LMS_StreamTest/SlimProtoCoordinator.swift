@@ -366,6 +366,17 @@ class SlimProtoCoordinator: ObservableObject {
         return nil
     }
 
+    /// A status result for a live stream: LMS marks the playing song `remote`
+    /// and sends no `duration` (Queries.pm statusQuery adds it only when the
+    /// song has one). A remote song with a length (a streaming-service track)
+    /// is not live, and a local song that briefly reports no length is not
+    /// remote, so neither loses its progress bar.
+    static func statusIsLiveStream(_ result: [String: Any]?) -> Bool {
+        let remote = (result?["remote"] as? Int) == 1 || (result?["remote"] as? String) == "1"
+        let duration = (result?["duration"] as? Double) ?? Double("\(result?["duration"] ?? "")") ?? 0.0
+        return remote && duration <= 0.0
+    }
+
     private var secondsSinceServerHeardOnThisConnection: TimeInterval? {
         guard let connected = lastConnectedAt, let heard = lastServerMessageAt, heard >= connected else { return nil }
         return Date().timeIntervalSince(heard)
@@ -3138,6 +3149,24 @@ extension SlimProtoCoordinator {
             let currentJiffies = gettime_ms()
             // Update epoch tracking with server timestamp and local jiffies
             trackJiffiesEpoch(jiffies: currentJiffies, serverTimestamp: serverTime)
+
+            // A live stream has no length, and every duration store keeps its
+            // last positive value when told 0, so the previous song's length
+            // stayed on the lock screen and in CarPlay (GH #96).
+            if Self.statusIsLiveStream(result) {
+                if simpleTimeTracker.getTrackDuration() > 0 {
+                    os_log(.default, log: logger, "⏱️ Live stream: dropping the previous song's duration (%.0fs)",
+                           simpleTimeTracker.getTrackDuration())
+                }
+                simpleTimeTracker.clearTrackDuration()
+                audioManager.clearTrackDuration()
+                // A station queued behind a song: the title poll was started
+                // while the song still played, saw its duration and stopped.
+                if isPlaying && metadataRefreshTimer == nil {
+                    os_log(.default, log: logger, "🔄 Live stream without a title poll - starting it")
+                    startRadioMetadataRefreshTimer()
+                }
+            }
 
             // Update our time tracking with REAL server time
             updateServerTime(position: serverTime, duration: duration, isPlaying: isPlaying)
