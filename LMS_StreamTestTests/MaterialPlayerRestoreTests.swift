@@ -49,4 +49,11 @@ final class MaterialPlayerRestoreTests: XCTestCase {
         XCTAssertFalse(MaterialPlayerRestore.shouldRestore(previousID: ours, newID: kitchen, localID: "",
                                                            reconnectedAgo: 3, playing: true))
     }
+
+    func testRestoreScriptLeavesAUserChoiceAloneAndCarriesOnlyTheMAC() {
+        let script = MaterialPlayerRestore.restoreScript(localID: "aa:bb:cc:dd:ee:ff');alert(1);('")
+        XCTAssertTrue(script.contains("__lyrPlayerSwitchBy === 'setPlayer'"))
+        XCTAssertTrue(script.contains("('aa:bb:cc:dd:ee:ffae1');"))
+        XCTAssertFalse(script.contains("alert"))
+    }
 }

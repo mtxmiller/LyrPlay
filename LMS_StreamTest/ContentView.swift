@@ -213,9 +213,15 @@ struct ContentView: View {
                             previousID: previous, newID: player?.id, localID: settings.playerMACAddress,
                             reconnectedAgo: slimProtoCoordinator.connectedAt.map { Date().timeIntervalSince($0) },
                             playing: audioManager.getPlayerState() == "Playing") {
-                            os_log(.info, log: logger, "🔁 Material switched to %{public}s after the reconnect - selecting LyrPlay again",
-                                   player?.name ?? player?.id ?? "?")
-                            webView?.evaluateJavaScript("setCurrentPlayer('\(settings.playerMACAddress)')", completionHandler: nil)
+                            let name = player?.name ?? player?.id ?? "?"
+                            webView?.evaluateJavaScript(MaterialPlayerRestore.restoreScript(localID: settings.playerMACAddress)) { result, _ in
+                                if (result as? String) == "user" {
+                                    os_log(.info, log: logger, "🔁 Material switched to %{public}s after the reconnect - the user chose it, left alone", name)
+                                } else {
+                                    os_log(.info, log: logger, "🔁 Material switched to %{public}s after the reconnect - selecting LyrPlay again (%{public}s)",
+                                           name, (result as? String) ?? "?")
+                                }
+                            }
                         }
                     },
                     onMaterialConnectionChanged: { connected in
@@ -1221,6 +1227,10 @@ struct WebView: UIViewRepresentable {
         // GH#75: Material's native bridge — receives MATERIAL-PLAYER messages
         // when loaded with nativePlayer=3 (lms-material utils.js emitNative dest 3)
         contentController.add(context.coordinator, name: "mskNative")
+        // Tells a player the user chose from Material's own switch to its
+        // default player, so only the second is undone after a reconnect.
+        contentController.addUserScript(WKUserScript(source: MaterialPlayerRestore.watchScript,
+                                                     injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         configuration.userContentController = contentController
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
