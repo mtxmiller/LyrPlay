@@ -47,6 +47,14 @@ Env: the smoke.py knobs (LYRPLAY_LMS_HOST/PORT, LYRPLAY_PLAYER_NAME/ID), plus
 | O29 | phase 2 (bd kpu0): paused online (LMS knows), then 150s with every connection reset and new ones accepted but silent (a weak cellular link: iOS still reports a network); lock-screen Play 20s in | LMS playing where the saved music got to, counted from when the copies started (they wait 6-12s for the server first) |
 | O30 | as O29, new connections refused (no route) | as O29 |
 | O31 | as O29, but LyrPlay is backgrounded and opened on the weak link before Play (app-open recovery runs) | as O29; screenshot of what the user sees |
+| O34 | phase 2 (car 2026-11-17): paused online, app in the background, web side dead 120s (held, sockets reset) while SlimProto stays up, lock-screen Play | the saved copies take over (app log) within 25s; LMS playing where they got to once the web side is back (-18/+4s) |
+| O35 | as O34, app in front | as O34 |
+| O36 | as O34, the phone's saved position cleared (Debug hook `forgetposition`) | as O34: the copies start from LMS's track stored with the download plan |
+| O37 | as O34, the stream socket frozen instead of reset | as O34 |
+| O38 | web side dead 30s (SlimProto up), Play 3s in | LMS playing within 60s of the link coming back: the Play is not lost |
+| O39 | web side held 40s and delivered late (after=resume) with the answers dropped 30s (`/oneway`): the press's jump lands at LMS while the copies play | the copy plays on ("the saved copy plays on" in the app log); LMS where the copies got to (-18/+4s) |
+| O40 | as O39, the answers come back with the late delivery | the jump's strm hands back to the copy; LMS where the copies got to (-18/+4s) |
+| O41 | web dead 40s, Play 3s in, up 4s, dead 60s more | no "out of retries"; LMS where the copies got to (-18/+4s) |
 | P1 | saved copies online: seek track 0 to 25s before its end | track 1 plays from its copy (app log), no stream request for it (proxy /requests), the boundary on time (-4/+10s) |
 | P2 | a song playing from its copy, 150s offline | LMS on the continuous position (±6s), no stream opened |
 | P3 | a song playing from its copy, signal off/on every 3-5s for 2 min (resume and drop alternate) | LMS on the continuous position (±10s), no stream request and no streaming decision |
@@ -1743,6 +1751,87 @@ def o38_play_survives_short_web_outage(oracle, album_id):
         raise CheckFailed(f"LMS {s['mode']} {time.time() - t_play:.0f}s after Play: the Play was lost")
 
 
+def late_landing(oracle, album_id, answer_after):
+    # Review of db1f166: the press's jump, held by the dead link, reaches LMS
+    # late while the copies already play. LMS stops us and streams; the app
+    # must keep the copy (web still dead: the stream can't load) or hand back
+    # (web back), and LMS must end where the copies got to.
+    s0 = fresh_start(oracle, album_id, settle=10)
+    durations = oracle.playlist_durations()
+    wait_for_copies(oracle, [s0["index"], s0["index"] + 1])
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    s_p = oracle.status()
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+    time.sleep(3)
+    fault("/outage?secs=40&after=resume&new=hold&scope=http")   # held requests go on at the end
+    fault("/kill?scope=http")
+    print(f"   … paused at track {s_p['index']} {s_p['time']:.1f}s; web side held 40s (delivered late)", flush=True)
+    time.sleep(3)
+    press("play"); t_play = time.time()
+    time.sleep(33)   # copies play by now; the outage ends at ~+34s
+    if answer_after:
+        fault(f"/oneway?secs={answer_after}")   # the late requests land, their answers never come
+        print(f"   … late delivery with answers dropped for {answer_after}s", flush=True)
+    time.sleep(8)
+    m = oracle.status()
+    print(f"   … during: LMS {m['mode']} at track {m['index']} {m['time']:.1f}s", flush=True)
+    time.sleep(max(0, answer_after - 8) + 25)
+    s = watch_monotonic(oracle, seconds=6)
+    kept = app_log_count("the saved copy plays on", since=t_play)
+    handback = app_log_count("Handback", since=t_play) + app_log_count("handing back", since=t_play)
+    idx, t = expected_position(durations, s_p["index"], s_p["time"], time.time() - t_play)
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s; saved music would be at track {idx} {t:.1f}s"
+          f" (copy kept: {kept}, handback: {handback})")
+    if s["mode"] != "play" or s["index"] != idx or not (t - 18 <= s["time"] <= t + 4):
+        raise CheckFailed(f"LMS {s['mode']} at track {s['index']} {s['time']:.1f}s, expected play at track {idx} {t - 18:.1f}-{t + 4:.1f}s")
+
+
+def o39_late_landing_web_dead(oracle, album_id):
+    late_landing(oracle, album_id, answer_after=30)
+
+
+def o40_late_landing_web_back(oracle, album_id):
+    late_landing(oracle, album_id, answer_after=0)
+
+
+def o41_flap_while_copies_play(oracle, album_id):
+    # The web side answers for 4s while the copies play, then dies again: the
+    # move to the copies may start and fail; it must wait for LMS again, not
+    # use up its retries, and land once the link is really back.
+    s0 = fresh_start(oracle, album_id, settle=10)
+    durations = oracle.playlist_durations()
+    wait_for_copies(oracle, [s0["index"], s0["index"] + 1])
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    s_p = oracle.status()
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+    time.sleep(3)
+    fault("/outage?secs=40&after=drop&new=hold&scope=http")
+    fault("/kill?scope=http")
+    time.sleep(3)
+    press("play"); t_play = time.time()
+    time.sleep(37)
+    fault("/end")
+    print("   … web side up for 4s", flush=True)
+    time.sleep(4)
+    fault("/outage?secs=60&after=drop&new=hold&scope=http")
+    fault("/kill?scope=http")
+    print("   … web side dead again 60s", flush=True)
+    time.sleep(60)
+    deadline = time.time() + 45
+    while time.time() < deadline and oracle.status()["mode"] != "play":
+        time.sleep(1)
+    time.sleep(10)
+    s = watch_monotonic(oracle, seconds=6)
+    gave_up = app_log_count("out of retries", since=t_play)
+    idx, t = expected_position(durations, s_p["index"], s_p["time"], time.time() - t_play)
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s; saved music would be at track {idx} {t:.1f}s (out of retries: {gave_up})")
+    if gave_up or s["mode"] != "play" or s["index"] != idx or not (t - 18 <= s["time"] <= t + 4):
+        raise CheckFailed(f"LMS {s['mode']} at track {s['index']} {s['time']:.1f}s, expected play at track {idx} {t - 18:.1f}-{t + 4:.1f}s"
+                          f" (out of retries: {gave_up})")
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -1785,6 +1874,9 @@ SCENARIOS = [
     ("O36", "as O34, no saved position", o36_commands_dead_no_saved_position),
     ("O37", "as O34, stream frozen not reset", o37_commands_dead_stream_frozen),
     ("O38", "Play survives a 30s web outage", o38_play_survives_short_web_outage),
+    ("O39", "press's jump lands late, web dead", o39_late_landing_web_dead),
+    ("O40", "press's jump lands late, web back", o40_late_landing_web_back),
+    ("O41", "web flaps while copies play", o41_flap_while_copies_play),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),

@@ -85,12 +85,23 @@ struct CommandChannelLogTests {
         #expect(log.isDown(since: press))
     }
 
-    @Test func anyResponseSinceThePressMeansUp() {
+    @Test func aResponseResetsTheCountInsteadOfProvingTheLink() {
         var log = Log()
         log.noteFailure(started: press.addingTimeInterval(0.5), ended: press.addingTimeInterval(5.5))
         log.noteFailure(started: press.addingTimeInterval(2), ended: press.addingTimeInterval(7))
         log.noteResponse(at: press.addingTimeInterval(8))
         #expect(!log.isDown(since: press))
+        // A flapping link: one status got through, then dead again (review of db1f166).
+        log.noteFailure(started: press.addingTimeInterval(9), ended: press.addingTimeInterval(14))
+        #expect(!log.isDown(since: press))
+        log.noteFailure(started: press.addingTimeInterval(10), ended: press.addingTimeInterval(15))
+        #expect(log.isDown(since: press))
+        // A timeout of a request sent before that response doesn't count.
+        var log2 = Log()
+        log2.noteFailure(started: press.addingTimeInterval(1), ended: press.addingTimeInterval(9))
+        log2.noteResponse(at: press.addingTimeInterval(3))
+        log2.noteFailure(started: press.addingTimeInterval(4), ended: press.addingTimeInterval(9))
+        #expect(!log2.isDown(since: press))
     }
 
     @Test func quickFailuresAndOlderRequestsDontCount() {
