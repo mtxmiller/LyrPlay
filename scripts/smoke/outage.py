@@ -1658,6 +1658,91 @@ def o33_next_song_deleted_online_then_cut(oracle, album_id):
                           "(offline the phone played the wrong next song)")
 
 
+def commands_dead_play(oracle, album_id, reset=True, front=False, forget=False, secs=120):
+    # Car 2026-11-17 (1.8.1 build 4): a weak link where SlimProto's small
+    # frames keep arriving but every web request (JSON-RPC, stream) times out.
+    # Paused online (LMS knows), then lock-screen Play: the saved copies must
+    # play once the commands are seen to fail, and LMS must land where they got
+    # to once the web side is back - never left paused with the Play lost.
+    s0 = fresh_start(oracle, album_id, settle=10)
+    durations = oracle.playlist_durations()
+    wait_for_copies(oracle, [s0["index"], s0["index"] + 1])
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    s_p = oracle.status()
+    if not front:
+        subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+        time.sleep(3)
+    t0 = time.time()
+    fault(f"/outage?secs={secs}&after=drop&new=hold&scope=http")
+    if reset:
+        fault("/kill?scope=http")   # stream + JSON-RPC sockets reset; without: frozen (stalled, no reset)
+    print(f"   … paused at track {s_p['index']} {s_p['time']:.1f}s; web side dead {secs}s, SlimProto up"
+          f"{'' if reset else ' (stream frozen, not reset)'}; app {'in front' if front else 'in the background'}", flush=True)
+    time.sleep(3)
+    if forget:
+        press("forgetposition")   # Debug hook: the phone has no saved position (the car's state)
+        time.sleep(1)
+    press("play"); t_play = time.time()
+    time.sleep(25)
+    copies = app_log_count("playing the saved copies", since=t_play - 1)
+    print(f"   … copies took over: {'yes' if copies else 'no'}", flush=True)
+    if not copies:
+        raise CheckFailed("the saved copies did not take over within 25s of Play (commands dead, SlimProto live)")
+    time.sleep(max(0, secs - (time.time() - t0)))
+    deadline = time.time() + 45
+    while time.time() < deadline and oracle.status()["mode"] != "play":
+        time.sleep(1)
+    time.sleep(8)
+    s = watch_monotonic(oracle, seconds=6)
+    moved = app_log_count("Command link back - moving LMS", since=t_play)
+    idx, t = expected_position(durations, s_p["index"], s_p["time"], time.time() - t_play)
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s; saved music would be at track {idx} {t:.1f}s"
+          f" (move after the link came back: {moved})")
+    # Copies start 6-15s after the press (the commands must be seen failing first).
+    if s["mode"] != "play" or s["index"] != idx or not (t - 18 <= s["time"] <= t + 4):
+        raise CheckFailed(f"LMS {s['mode']} at track {s['index']} {s['time']:.1f}s, expected play at track {idx} {t - 18:.1f}-{t + 4:.1f}s")
+
+
+def o34_commands_dead_play(oracle, album_id):
+    commands_dead_play(oracle, album_id)
+
+
+def o35_commands_dead_play_front(oracle, album_id):
+    commands_dead_play(oracle, album_id, front=True)
+
+
+def o36_commands_dead_no_saved_position(oracle, album_id):
+    commands_dead_play(oracle, album_id, forget=True)
+
+
+def o37_commands_dead_stream_frozen(oracle, album_id):
+    commands_dead_play(oracle, album_id, reset=False)
+
+
+def o38_play_survives_short_web_outage(oracle, album_id):
+    # The web side comes back 25s after Play, between the retries: LMS paused
+    # (our Play never got there) must not end the attempt - LMS ends up playing.
+    fresh_start(oracle, album_id, settle=10)
+    oracle.player_rpc(["pause", "1"])
+    time.sleep(3)
+    subprocess.run(["xcrun", "simctl", "launch", SIM_NAME, "com.apple.Preferences"], capture_output=True)
+    time.sleep(3)
+    fault("/outage?secs=30&after=drop&new=hold&scope=http")
+    fault("/kill?scope=http")
+    time.sleep(3)
+    press("play"); t_play = time.time()
+    time.sleep(max(0, 30 - (time.time() - t_play) + 3))
+    deadline = time.time() + 60
+    while time.time() < deadline and oracle.status()["mode"] != "play":
+        time.sleep(1)
+    s = oracle.status()
+    gave_up = app_log_count("paused on server", since=t_play) + app_log_count("out of retries", since=t_play)
+    print(f"   … LMS {s['mode']} at track {s['index']} {s['time']:.1f}s, {time.time() - t_play:.0f}s after Play (gave up: {gave_up})")
+    if s["mode"] != "play":
+        raise CheckFailed(f"LMS {s['mode']} {time.time() - t_play:.0f}s after Play: the Play was lost")
+
+
 SCENARIOS = [
     ("O1", "25s, connections survive", o1_resume),
     ("O2", "25s, download cut", o2_cut),
@@ -1695,6 +1780,11 @@ SCENARIOS = [
     # Download before you go (bd tcr5, avt6), -Lifeboat 2, only when named:
     ("O32", "queue filled while stopped", o32_queue_filled_while_stopped),
     ("O33", "next song deleted, then cut", o33_next_song_deleted_online_then_cut),
+    ("O34", "commands dead, SlimProto live, Play", o34_commands_dead_play),
+    ("O35", "as O34, app in front", o35_commands_dead_play_front),
+    ("O36", "as O34, no saved position", o36_commands_dead_no_saved_position),
+    ("O37", "as O34, stream frozen not reset", o37_commands_dead_stream_frozen),
+    ("O38", "Play survives a 30s web outage", o38_play_survives_short_web_outage),
     # Playing saved copies online (bd 5syr), phase 2, only when named:
     ("P1", "next song from its copy", p1_next_song_from_file),
     ("P2", "150s drop on a copy", p2_drop_while_file_plays),

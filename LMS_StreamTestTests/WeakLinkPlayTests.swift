@@ -3,6 +3,7 @@
 // (a suspended app with the network fine must reach LMS). On a weak link the
 // socket may connect but the server is never heard, while iOS still reports
 // a network: then the saved copies play (bd kpu0).
+import Foundation
 import Testing
 @testable import LMS_StreamTest
 
@@ -47,5 +48,90 @@ struct WeakLinkPlayTests {
     @Test func alreadyPlayingOrPausedAgainDoesNothing() {
         #expect(!decide(Facts(localState: "Playing", sincePress: 30)))
         #expect(!decide(Facts(stillWaiting: false, sincePress: 30)))  // a pause ended the hold
+    }
+
+    // MARK: SlimProto live, web requests dead (car 2026-11-17)
+
+    @Test func liveSlimProtoWithDeadCommandsPlaysTheCopies() {
+        // Small SlimProto frames keep arriving; every JSON-RPC times out; LMS sent no strm.
+        #expect(decide(Facts(connectionLive: true, sincePress: 8, serverHeardSincePress: true, commandsDown: true)))
+    }
+
+    @Test func liveSlimProtoWithWorkingCommandsLeavesItToTheServer() {
+        #expect(!decide(Facts(connectionLive: true, sincePress: 60, serverHeardSincePress: true)))
+    }
+
+    @Test func aStrmSinceThePressMeansThePlayReachedLMS() {
+        // A slow but working link: replies time out, the command still landed.
+        #expect(!decide(Facts(connectionLive: true, sincePress: 20, commandsDown: true, streamSincePress: true)))
+    }
+
+    @Test func deadCommandsStillWaitTheMinimumAndTheJump() {
+        #expect(!decide(Facts(connectionLive: true, sincePress: 5, commandsDown: true)))
+        #expect(!decide(Facts(recoveryInProgress: true, connectionLive: true, sincePress: 20, commandsDown: true)))
+        #expect(!decide(Facts(connectionLive: true, copiesCoverLastPosition: false, sincePress: 20, commandsDown: true)))
+    }
+}
+
+struct CommandChannelLogTests {
+    typealias Log = SlimProtoCoordinator.CommandChannelLog
+    let press = Date(timeIntervalSince1970: 1_000)
+
+    @Test func twoTimeoutsAfterThePressMeanDown() {
+        var log = Log()
+        log.noteFailure(started: press.addingTimeInterval(0.5), ended: press.addingTimeInterval(5.5))
+        #expect(!log.isDown(since: press))
+        log.noteFailure(started: press.addingTimeInterval(2), ended: press.addingTimeInterval(7))
+        #expect(log.isDown(since: press))
+    }
+
+    @Test func anyResponseSinceThePressMeansUp() {
+        var log = Log()
+        log.noteFailure(started: press.addingTimeInterval(0.5), ended: press.addingTimeInterval(5.5))
+        log.noteFailure(started: press.addingTimeInterval(2), ended: press.addingTimeInterval(7))
+        log.noteResponse(at: press.addingTimeInterval(8))
+        #expect(!log.isDown(since: press))
+    }
+
+    @Test func quickFailuresAndOlderRequestsDontCount() {
+        var log = Log()
+        // A short status check (2 s timeout) or an instant refusal is not a real timeout.
+        log.noteFailure(started: press.addingTimeInterval(0.1), ended: press.addingTimeInterval(2.1))
+        log.noteFailure(started: press.addingTimeInterval(0.2), ended: press.addingTimeInterval(0.3))
+        // Sent before the press.
+        log.noteFailure(started: press.addingTimeInterval(-3), ended: press.addingTimeInterval(2))
+        log.noteFailure(started: press.addingTimeInterval(1), ended: press.addingTimeInterval(6))
+        #expect(!log.isDown(since: press))
+    }
+
+    @Test func aResponseBeforeThePressDoesNotHideLaterTimeouts() {
+        var log = Log()
+        log.noteResponse(at: press.addingTimeInterval(-1))
+        log.noteFailure(started: press.addingTimeInterval(1), ended: press.addingTimeInterval(6))
+        log.noteFailure(started: press.addingTimeInterval(2), ended: press.addingTimeInterval(7))
+        #expect(log.isDown(since: press))
+    }
+}
+
+struct UndeliveredUserPlayTests {
+    typealias C = SlimProtoCoordinator
+
+    @Test func lmsPausedEndsRetriesOnlyWithoutAnUndeliveredPlay() {
+        #expect(C.pauseOnServerEndsRetries(userPlayUndeliveredFor: nil))
+        #expect(!C.pauseOnServerEndsRetries(userPlayUndeliveredFor: 30))
+        #expect(C.pauseOnServerEndsRetries(userPlayUndeliveredFor: C.userPlayUndeliveredLimit + 1))
+    }
+
+    @Test func retriesWaitingForTheLinkAreFreeUntilTheLimit() {
+        #expect(C.retryWaitsForCommandLink(userPlayUndeliveredFor: 40, commandsDown: true))
+        #expect(!C.retryWaitsForCommandLink(userPlayUndeliveredFor: 40, commandsDown: false))
+        #expect(!C.retryWaitsForCommandLink(userPlayUndeliveredFor: nil, commandsDown: true))
+        #expect(!C.retryWaitsForCommandLink(userPlayUndeliveredFor: C.userPlayUndeliveredLimit + 1, commandsDown: true))
+    }
+
+    @Test func savedMusicStartsFromThePlanWhenNoIndexIsSaved() {
+        #expect(C.savedMusicIndex(saved: 4, planCurrent: 7) == 4)
+        #expect(C.savedMusicIndex(saved: nil, planCurrent: 7) == 7)
+        #expect(C.savedMusicIndex(saved: nil, planCurrent: nil) == nil)
     }
 }
