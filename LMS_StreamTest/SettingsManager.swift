@@ -131,6 +131,13 @@ class SettingsManager: ObservableObject {
     @Published var serverPassword: String = ""
     @Published var backupServerUsername: String = ""
     @Published var backupServerPassword: String = ""
+    /// The Keychain had something for this server but couldn't be read (a
+    /// launch on a locked phone, GH #146). Until it is read, a save must not
+    /// write or delete it: the empty fields mean "unknown", not "none".
+    private var primaryCredentialsUnreadable = false
+    private var backupCredentialsUnreadable = false
+    private var protectedDataObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
 
     // MARK: - Read-only Properties
     private(set) var playerMACAddress: String = ""
@@ -314,6 +321,21 @@ class SettingsManager: ObservableObject {
 
     private init() {
         loadSettings()
+        protectedDataObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.reloadUnreadableCredentials()
+        }
+        // The unlock notification may not reach an app suspended at the time:
+        // read again whenever the app comes to the front (review of GH #146).
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.reloadUnreadableCredentials()
+        }
+        reloadUnreadableCredentials()   // unlocked between the read and the observer
         if playerMACAddress.isEmpty {
             generateMACAddress()
         }
@@ -425,17 +447,23 @@ class SettingsManager: ObservableObject {
         }
 
         // Load credentials from Keychain
-        if let primaryCreds = KeychainManager.shared.load(for: .primary) {
-            serverUsername = primaryCreds.username
-            serverPassword = primaryCreds.password
-            os_log(.info, log: logger, "✅ Loaded primary server credentials from Keychain (username: %{public}s)", primaryCreds.username)
+        switch KeychainManager.shared.loadResult(for: .primary) {
+        case let .found(username, password):
+            serverUsername = username
+            serverPassword = password
+            os_log(.info, log: logger, "✅ Loaded primary server credentials from Keychain (username: %{public}s)", username)
+        case .unavailable:
+            primaryCredentialsUnreadable = true
+            os_log(.default, log: logger, "🔒 Primary server credentials can't be read yet (phone locked?) - kept, read again on unlock")
+        case .notFound:
+            break
         }
 
         // Rig seed: credentials written to the defaults domain (`defaults write …
         // ServerUsername/ServerPassword`, like the other settings the smoke
         // harness seeds) are adopted once, moved to the Keychain and removed
         // from the defaults so they never stay there in plain text.
-        if serverUsername.isEmpty,
+        if serverUsername.isEmpty, !primaryCredentialsUnreadable,
            let seededUser = UserDefaults.standard.string(forKey: "ServerUsername"), !seededUser.isEmpty {
             serverUsername = seededUser
             serverPassword = UserDefaults.standard.string(forKey: "ServerPassword") ?? ""
@@ -445,16 +473,65 @@ class SettingsManager: ObservableObject {
             os_log(.info, log: logger, "🛠️ Primary server credentials seeded from defaults (user: %{public}s)", seededUser)
         }
 
-        if let backupCreds = KeychainManager.shared.load(for: .backup) {
-            backupServerUsername = backupCreds.username
-            backupServerPassword = backupCreds.password
-            os_log(.info, log: logger, "✅ Loaded backup server credentials from Keychain (username: %{public}s)", backupCreds.username)
+        switch KeychainManager.shared.loadResult(for: .backup) {
+        case let .found(username, password):
+            backupServerUsername = username
+            backupServerPassword = password
+            os_log(.info, log: logger, "✅ Loaded backup server credentials from Keychain (username: %{public}s)", username)
+        case .unavailable:
+            backupCredentialsUnreadable = true
+            os_log(.default, log: logger, "🔒 Backup server credentials can't be read yet (phone locked?) - kept, read again on unlock")
+        case .notFound:
+            break
         }
 
         os_log(.info, log: logger, "Settings loaded - Host: %{public}s, Player: %{public}s, Configured: %{public}s, Format: %{public}s, AppOpenRecovery: %{public}s",
                serverHost, playerName, isConfigured ? "YES" : "NO", audioFormat.displayName, enableAppOpenRecovery ? "ON" : "OFF")
     }
     
+    enum CredentialWrite: Equatable { case save, delete, keep }
+
+    /// What a settings save does with one server's Keychain item. An empty
+    /// username normally means "no login" and deletes it; after a load that
+    /// couldn't read the item it only means "not read yet" (GH #146).
+    static func credentialWrite(username: String, unreadable: Bool) -> CredentialWrite {
+        if !username.isEmpty { return .save }
+        return unreadable ? .keep : .delete
+    }
+
+    /// The phone unlocked: read credentials a locked launch couldn't. Values
+    /// the user typed meanwhile (non-empty) win and were already saved.
+    private func reloadUnreadableCredentials() {
+        if primaryCredentialsUnreadable && serverUsername.isEmpty {
+            switch KeychainManager.shared.loadResult(for: .primary) {
+            case let .found(username, password):
+                serverUsername = username
+                serverPassword = password
+                primaryCredentialsUnreadable = false
+                os_log(.default, log: logger, "🔓 Primary server credentials read after unlock (username: %{public}s)", username)
+                shouldReloadWebView = true   // Material may have loaded without them
+            case .notFound:
+                primaryCredentialsUnreadable = false
+            case .unavailable:
+                break
+            }
+        }
+        if backupCredentialsUnreadable && backupServerUsername.isEmpty {
+            switch KeychainManager.shared.loadResult(for: .backup) {
+            case let .found(username, password):
+                backupServerUsername = username
+                backupServerPassword = password
+                backupCredentialsUnreadable = false
+                os_log(.default, log: logger, "🔓 Backup server credentials read after unlock (username: %{public}s)", username)
+                shouldReloadWebView = true   // Material may have loaded without them
+            case .notFound:
+                backupCredentialsUnreadable = false
+            case .unavailable:
+                break
+            }
+        }
+    }
+
     func saveSettings() {
         os_log(.info, log: logger, "Saving settings to UserDefaults")
 
@@ -501,21 +578,30 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(enabledLibraryShelves.sorted().joined(separator: ","), forKey: Keys.enabledLibraryShelves)
         UserDefaults.standard.set(seenPluginShelfKeys.sorted().joined(separator: ","), forKey: Keys.seenPluginShelfKeys)
 
-        // Save credentials to Keychain
-        if !serverUsername.isEmpty {
-            KeychainManager.shared.save(username: serverUsername, password: serverPassword, for: .primary)
-            os_log(.info, log: logger, "✅ Saved primary server credentials to Keychain")
-        } else {
+        // Save credentials to Keychain. Empty fields after an unreadable load
+        // mean "not known yet": leave the stored item alone (GH #146).
+        switch Self.credentialWrite(username: serverUsername, unreadable: primaryCredentialsUnreadable) {
+        case .save:
+            if KeychainManager.shared.save(username: serverUsername, password: serverPassword, for: .primary) {
+                primaryCredentialsUnreadable = false
+            }
+        case .delete:
             KeychainManager.shared.delete(for: .primary)
             os_log(.debug, log: logger, "Deleted primary server credentials (empty username)")
+        case .keep:
+            os_log(.default, log: logger, "🔒 Primary server credentials not read yet - left as stored")
         }
 
-        if !backupServerUsername.isEmpty {
-            KeychainManager.shared.save(username: backupServerUsername, password: backupServerPassword, for: .backup)
-            os_log(.info, log: logger, "✅ Saved backup server credentials to Keychain")
-        } else {
+        switch Self.credentialWrite(username: backupServerUsername, unreadable: backupCredentialsUnreadable) {
+        case .save:
+            if KeychainManager.shared.save(username: backupServerUsername, password: backupServerPassword, for: .backup) {
+                backupCredentialsUnreadable = false
+            }
+        case .delete:
             KeychainManager.shared.delete(for: .backup)
             os_log(.debug, log: logger, "Deleted backup server credentials (empty username)")
+        case .keep:
+            os_log(.default, log: logger, "🔒 Backup server credentials not read yet - left as stored")
         }
 
         // Update BASS auth header when credentials change
