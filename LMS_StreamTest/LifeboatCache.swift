@@ -171,6 +171,11 @@ final class LifeboatCache {
     private(set) var replayGainMode = 0
     /// The server ("host:slimport") the plan's ids and indexes belong to.
     private(set) var server: String?
+    /// LMS's current track (playlist index) when the plan was made: the first
+    /// `upcoming` track. Not `plan.first`: the plan skips tracks that can't be
+    /// downloaded (radio, streaming services, CUE). Saved with the plan, so a
+    /// phone that lost its recovery index still knows where it was.
+    private(set) var currentIndex: Int?
     private var artworkInFlight: Set<String> = []
 
     /// The plan, saved next to the files so a relaunch (no server) still knows them.
@@ -182,6 +187,7 @@ final class LifeboatCache {
         var server: String? = nil
         var flacVariant: String? = nil
         var replayGainMode: Int? = nil
+        var currentIndex: Int? = nil
     }
     private static let planFileName = "plan.json"
 
@@ -289,6 +295,7 @@ final class LifeboatCache {
             UserDefaults.standard.set(learnedAll, forKey: Self.learnedFlacVariantsKey)
         }
         plan = wanted
+        currentIndex = upcoming.first?.index
         self.streamFormat = streamFormat
         self.replayGainApplied = replayGainApplied
         self.replayGainMode = replayGainMode
@@ -421,6 +428,7 @@ final class LifeboatCache {
 
     func removeAll() {
         plan = []
+        currentIndex = nil
         active?.cancel()
         active = nil
         activeID = nil
@@ -462,7 +470,8 @@ final class LifeboatCache {
     private func savePlan() {
         let saved = SavedPlan(tracks: plan, streamFormat: streamFormat,
                               replayGainApplied: replayGainApplied, server: server,
-                              flacVariant: flacVariant.rawValue, replayGainMode: replayGainMode)
+                              flacVariant: flacVariant.rawValue, replayGainMode: replayGainMode,
+                              currentIndex: currentIndex)
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: directory.appendingPathComponent(Self.planFileName), options: .atomic)
     }
@@ -477,6 +486,7 @@ final class LifeboatCache {
         replayGainApplied = saved.replayGainApplied
         replayGainMode = saved.replayGainMode ?? (saved.replayGainApplied ? 1 : 0)  // plans from before bd i1qs
         server = saved.server
+        currentIndex = saved.currentIndex
         os_log(.info, log: logger, "🛟 Loaded saved plan: %d tracks", plan.count)
         return saved.flacVariant
     }

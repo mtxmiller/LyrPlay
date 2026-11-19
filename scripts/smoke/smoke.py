@@ -54,6 +54,17 @@ class Oracle:
         self.use_curl = False
 
     def rpc(self, cmd, player=""):
+        # LMS now and then answers a JSON-RPC POST with a cometd reply meant for
+        # Material's long poll (seen on lms-test, 2026-11-17). Ask once more.
+        try:
+            return self._rpc_once(cmd, player)
+        except OSError as e:
+            if "unexpected JSON-RPC reply" not in str(e):
+                raise
+            time.sleep(0.5)
+            return self._rpc_once(cmd, player)
+
+    def _rpc_once(self, cmd, player):
         body = json.dumps(
             {"id": 1, "method": "slim.request", "params": [player, cmd]}
         ).encode()

@@ -237,7 +237,7 @@ final class PlaybackSessionController {
         guard !Self.debugRemoteCommandsRegistered else { return }
         Self.debugRemoteCommandsRegistered = true
         let center = CFNotificationCenterGetDarwinNotifyCenter()
-        for name in ["play", "pause", "next", "previous", "playsaved"] {
+        for name in ["play", "pause", "next", "previous", "playsaved", "forgetposition"] {
             CFNotificationCenterAddObserver(center, Unmanaged.passUnretained(self).toOpaque(), { _, observer, cfName, _, _ in
                 guard let observer = observer, let cfName = cfName else { return }
                 let controller = Unmanaged<PlaybackSessionController>.fromOpaque(observer).takeUnretainedValue()
@@ -252,6 +252,14 @@ final class PlaybackSessionController {
             // The "Play Saved Music" button (offline launch).
             os_log(.info, log: logger, "🧪 Debug: play saved music")
             (slimProtoProvider?() as? SlimProtoCoordinator)?.playSavedMusicOffline()
+            return
+        }
+        if name == "forgetposition" {
+            // The phone has no saved position (device log 2026-11-17: "No recovery data").
+            os_log(.default, log: logger, "🧪 Debug: forgetting the saved recovery position")
+            for key in ["lyrplay_recovery_index", "lyrplay_recovery_position", "lyrplay_recovery_timestamp"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             return
         }
         let commands: [String: RemoteCommand] = ["play": .play, "pause": .pause, "next": .next, "previous": .previous]

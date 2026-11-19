@@ -28,6 +28,12 @@ Control (plain HTTP GET, e.g. with curl):
                         request sent over an interface that then went away
                         (cellular → Wi-Fi) looks like this to the app: alive
                         but silent until its own timeout.
+    /oneway?secs=N      For N seconds web requests still reach LMS but nothing
+                        it sends back is delivered (the bytes are dropped):
+                        a command lands, the app never hears the answer. With
+                        an outage that ends with after=resume this delivers
+                        the requests the outage held, late, into a link that
+                        still can't answer (rig O39).
     /shape?kbps=N       Cap each web/stream connection's download to N kbit/s
                         (0 = no cap). On a LAN, LMS sends a whole track in a
                         second and it sits in socket buffers; a mobile link
@@ -120,6 +126,7 @@ class Proxy:
         self.kbps = 0
         self.requests = collections.deque(maxlen=5000)
         self.strand = None       # {"path": prefix, "left": n} from /strand
+        self.oneway_until = 0.0  # /oneway: web responses dropped until then
 
     # -- data path ------------------------------------------------------------
     async def gate(self, conn):
@@ -155,6 +162,11 @@ class Proxy:
                             break
                 else:
                     conn.down_bytes += len(data)
+                    if conn.kind == "http" and time.time() < self.oneway_until:
+                        if not getattr(conn, "oneway_logged", False):
+                            conn.oneway_logged = True
+                            log(f"#{conn.id} response dropped (oneway)")
+                        continue
                 writer.write(data)
                 await writer.drain()
                 if not up and conn.kind == "http" and self.kbps > 0:
@@ -262,6 +274,9 @@ class Proxy:
             elif url.path == "/strand":
                 self.strand = {"path": q.get("path", "/cometd"), "left": max(0, int(q.get("count", "1")))}
                 log(f"STRAND the next {self.strand['left']} request(s) for {self.strand['path']}")
+            elif url.path == "/oneway":
+                self.oneway_until = time.time() + float(q.get("secs", "30"))
+                log(f"ONEWAY {q.get('secs', '30')}s: web responses dropped")
             elif url.path == "/shape":
                 self.kbps = max(0, int(q.get("kbps", "0")))
                 log(f"SHAPE http download cap {self.kbps} kbit/s" if self.kbps else "SHAPE off")
@@ -269,7 +284,7 @@ class Proxy:
                 since = float(q.get("since", "0"))
                 body = {"now": round(time.time(), 3), "requests": [r for r in self.requests if r["t"] >= since]}
             elif url.path != "/status":
-                raise ValueError("paths: /outage /kill /end /strand /shape /status /requests")
+                raise ValueError("paths: /outage /kill /end /strand /oneway /shape /status /requests")
             o = self.outage
             if url.path != "/requests":
                 body = {"kbps": self.kbps,

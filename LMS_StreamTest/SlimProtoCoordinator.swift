@@ -419,6 +419,151 @@ class SlimProtoCoordinator: ObservableObject {
     /// A remote play is being decided: app-open recovery must not start under it.
     var remotePlayPending: Bool { remotePlayIntent != nil }
 
+    /// A user Play (lock screen, CarPlay) is being recovered and LMS hasn't
+    /// started or resumed a stream since. LMS reporting "pause" then means our
+    /// Play never got there, not that someone paused elsewhere: the retries
+    /// must keep going (car log 2026-11-17: weak link, LMS paused, retries
+    /// ended on "paused on server" and the Play was lost).
+    private var userPlayUndeliveredSince: Date?
+    /// LMS's last strm 'u' (unpause), as lastServerStreamStartAt is its last 's'.
+    private var lastServerResumeAt: Date?
+    /// How long an undelivered user Play outranks LMS's pause.
+    static let userPlayUndeliveredLimit: TimeInterval = 120
+
+    /// JSON-RPC outcomes, for telling a dead command channel from a live
+    /// SlimProto socket. On a weak link (Tailscale over weak cellular, car
+    /// 2026-11-17) SlimProto's small frames keep arriving while every web
+    /// request times out, so `connectionIsLive` alone says "online" while the
+    /// server can't be told anything. Main thread only.
+    struct CommandChannelLog: Equatable {
+        struct Failure: Equatable { let started: Date; let ended: Date }
+        private(set) var failures: [Failure] = []
+        private(set) var lastResponseAt: Date?
+
+        mutating func noteResponse(at: Date) { lastResponseAt = at }
+        mutating func noteFailure(started: Date, ended: Date) {
+            failures.append(Failure(started: started, ended: ended))
+            if failures.count > 20 { failures.removeFirst(failures.count - 20) }
+        }
+
+        /// Requests keep failing at the transport level: at least two that
+        /// waited `minWait` or longer (a real timeout, not an instant refusal),
+        /// sent after `since` and after the last HTTP response. A response
+        /// resets the count instead of proving the link for good: on a flapping
+        /// link one status got through and the copies never played (review).
+        func isDown(since: Date, minWait: TimeInterval = CommandChannelLog.minWait) -> Bool {
+            let from = max(since, lastResponseAt ?? .distantPast)
+            let timedOut = failures.filter { $0.started >= from && $0.ended.timeIntervalSince($0.started) >= minWait }
+            return timedOut.count >= 2
+        }
+        static let minWait: TimeInterval = 4.5
+    }
+    private var commandChannel = CommandChannelLog()
+
+    /// Called from every JSON-RPC completion (any thread). Any HTTP response
+    /// (even an error status) proves the channel; only transport errors count
+    /// against it, and a cancelled task is neither.
+    private func noteCommandResult(started: Date, response: URLResponse?, error: Error?) {
+        let ended = Date()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if response is HTTPURLResponse {
+                self.commandChannel.noteResponse(at: ended)
+            } else if let urlError = error as? URLError, urlError.code != .cancelled {
+                self.commandChannel.noteFailure(started: started, ended: ended)
+            }
+        }
+    }
+
+    /// Saved copies took over a user Play while SlimProto stayed live but no
+    /// command reached LMS. Until a web request gets an answer again the
+    /// session is offline in every way that matters (LMS can't be told
+    /// anything), so the offline paths must not take `connectionIsLive` for
+    /// "online": a probe watches for the answer, then moves LMS to the copies.
+    private var copiesOverDeadCommands = false
+    /// Bumped when copies take over a user Play: pending plain-play retries stop.
+    private var sendJSONRPCPlayGeneration = 0
+    /// Last logged picture of the copy fallback's facts (logged on change).
+    private var lastCopyFallbackPicture: String?
+    private var commandProbeGeneration = 0
+
+    /// SlimProto live AND the copies aren't riding out a dead command channel:
+    /// what the offline/lifeboat paths mean by "online".
+    private var linkUsable: Bool { connectionIsLive && !copiesOverDeadCommands }
+
+    private func beginCopiesOverDeadCommands() {
+        guard !copiesOverDeadCommands else { return }
+        copiesOverDeadCommands = true
+        commandProbeGeneration += 1
+        os_log(.default, log: logger, "📴 Saved copies play over a live SlimProto link - LMS can't be told anything until a web request is answered")
+        probeCommandChannel(generation: commandProbeGeneration, attempt: 1)
+    }
+
+    /// STMs / STMd / STMu for our own playback. While saved copies ride out a
+    /// dead command channel LMS thinks we're paused (or on another song): a
+    /// track event over the live socket would flip it to playing or make it
+    /// send the next song (StreamingController: Started on a PAUSED player).
+    /// Offline these are held by SlimProtoClient and dropped at the HELO;
+    /// here they are dropped now, and the probe's jump puts LMS right.
+    private func sendPlaybackEvent(_ code: String) {
+        if copiesOverDeadCommands {
+            os_log(.default, log: logger, "📴 Not sending %{public}s - the saved copy plays while LMS can't be told", code)
+            return
+        }
+        client.sendStatus(code)
+    }
+
+    private func endCopiesOverDeadCommands(reason: String) {
+        guard copiesOverDeadCommands else { return }
+        copiesOverDeadCommands = false
+        commandProbeGeneration += 1
+        os_log(.default, log: logger, "📴 Command link check stopped (%{public}s)", reason)
+    }
+
+    /// Every 5s while the copies ride out a dead command channel: one status
+    /// request. The first answer means LMS can be told where we are.
+    private func probeCommandChannel(generation: Int, attempt: Int) {
+        let delay: TimeInterval = attempt == 1 ? 3 : 5
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.copiesOverDeadCommands, self.commandProbeGeneration == generation else { return }
+            let status: [String: Any] = ["id": 1, "method": "slim.request",
+                                         "params": [self.settings.playerMACAddress, ["status", "-", 1]]]
+            self.sendJSONRPCCommandDirect(status) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self = self, self.copiesOverDeadCommands, self.commandProbeGeneration == generation else { return }
+                    guard response["result"] != nil else {
+                        if attempt % 6 == 0 {
+                            os_log(.default, log: self.logger, "📴 Command link still down (%d checks)", attempt)
+                        }
+                        self.probeCommandChannel(generation: generation, attempt: attempt + 1)
+                        return
+                    }
+                    self.endCopiesOverDeadCommands(reason: "LMS answered")
+                    guard self.offlinePlaybackOwnsRecovery else { return }
+                    guard self.connectionIsLive else {
+                        // SlimProto went too: the reconnect moves LMS to us as after any outage.
+                        return
+                    }
+                    os_log(.default, log: self.logger, "📴 Command link back - moving LMS to the saved copies")
+                    self.lifeboatJumpConnection = nil  // same SlimProto connection: allow this jump
+                    self.jumpLMSToLifeboatPosition()
+                }
+            }
+        }
+    }
+
+    /// A retry of an undelivered user Play while the command channel is down
+    /// costs nothing: it is waiting for the link, not failing.
+    static func retryWaitsForCommandLink(userPlayUndeliveredFor: TimeInterval?, commandsDown: Bool) -> Bool {
+        guard let age = userPlayUndeliveredFor, commandsDown else { return false }
+        return age <= userPlayUndeliveredLimit
+    }
+
+    static func pauseOnServerEndsRetries(userPlayUndeliveredFor: TimeInterval?) -> Bool {
+        guard let age = userPlayUndeliveredFor else { return true }
+        return age > userPlayUndeliveredLimit
+    }
+
     /// Set when a remote play was sent as a plain unpause; checked 3s later.
     private var resumeInPlaceCheck: UUID?
 
@@ -779,7 +924,7 @@ class SlimProtoCoordinator: ObservableObject {
 
         // This is when we should send STMs (track started playing)
         // Only after RESP and STMc have been sent
-        client.sendStatus("STMs")
+        sendPlaybackEvent("STMs")
     }
     
     deinit {
@@ -1106,6 +1251,16 @@ class SlimProtoCoordinator: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
+            // Saved copies ride out a dead command channel: a recovery started
+            // by a status that was already in flight would re-seed the clock to
+            // the old target and send a jump over the copy. The probe moves LMS
+            // to the copy once it answers (review of db1f166, finding 5).
+            if self.copiesOverDeadCommands {
+                os_log(.default, log: self.logger, "[APP-RECOVERY] Skipped (shouldPlay: %{public}s) - the saved copy plays until LMS answers",
+                       shouldPlay ? "YES" : "NO")
+                return
+            }
+
             // Audible recovery = the user wants audio: stay awake until it
             // actually starts (bd 6lvg, 8tjj).
             if shouldPlay {
@@ -1313,9 +1468,9 @@ class SlimProtoCoordinator: ObservableObject {
         let savedPosition = UserDefaults.standard.double(forKey: "lyrplay_recovery_position")
         let isAudibleRetry = shouldPlay && outageHoldActive && audibleRecoveryTarget != nil
 
-        // Position saved but the index is gone (a jump that just succeeded
-        // deletes all three keys; later saves write only position +
-        // timestamp). A plain play/pause would lose the position: on a
+        // Position saved but no index (before 1.8.1 build 4 a successful jump
+        // deleted it, and later saves write only position + timestamp; a
+        // phone updated from then can still be in this state). A plain play/pause would lose the position: on a
         // stopped player play starts the track at 0:00, and on a player LMS
         // thinks is playing it does nothing (Commands.pm playcontrolCommand).
         // Ask LMS which track it's on and jump there (bd 27ye).
@@ -1438,6 +1593,7 @@ class SlimProtoCoordinator: ObservableObject {
             ]]
         ]
         
+        let jumpSentAt = Date().timeIntervalSince1970
         sendJSONRPCCommandDirect(playlistJumpCommand) { [weak self] response in
             // URLSession invokes this on a background thread — hop to main, where
             // all recovery state lives.
@@ -1487,8 +1643,16 @@ class SlimProtoCoordinator: ObservableObject {
                 self.isRecoveryInProgress = false
                 os_log(.info, log: self.logger, "🔒 Recovery state cleared - other recovery methods can now proceed")
 
-                // Clear recovery data after successful use
-                UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_index")
+                // Used: clear the position and its timestamp (the app-open gates look
+                // at the timestamp, so nothing jumps here again). Keep the index: it
+                // is where LMS now is, the boundary bump and the 3s poll keep it
+                // current, and the offline paths (saved copies, offline buttons)
+                // read only the index. Deleting it left a car with copies and no
+                // way to find them when the next Play hit a weak link (2026-11-17).
+                // (A boundary bump since the jump was sent wins: it is newer.)
+                if UserDefaults.standard.double(forKey: Self.recoveryIndexBumpStampKey) < jumpSentAt {
+                    UserDefaults.standard.set(savedIndex, forKey: "lyrplay_recovery_index")
+                }
                 UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_position")
                 UserDefaults.standard.removeObject(forKey: "lyrplay_recovery_timestamp")
             }
@@ -1509,7 +1673,7 @@ class SlimProtoCoordinator: ObservableObject {
             os_log(.info, log: logger, "🛟 %{public}s recovery: offline playback owns it - moving LMS to us instead",
                    String(describing: trigger))
             audioManager.cancelPreMute(reason: "offline playback owns recovery")
-            if connectionIsLive { jumpLMSToLifeboatPosition() }
+            if linkUsable { jumpLMSToLifeboatPosition() }
             return
         }
 
@@ -1756,6 +1920,9 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
     func slimProtoDidDisconnect(error: Error?) {
         os_log(.info, log: logger, "🔌 Connection lost")
         serverUnreachableSince = serverUnreachableSince ?? Date()
+        // Copies riding out a dead command channel: now a plain outage, and the
+        // reconnect moves LMS to them as after any other.
+        endCopiesOverDeadCommands(reason: "SlimProto dropped")
         stopQueueWatch()
         // A strm being decided died with the connection: its status reply is
         // void, and hasActiveStream must not call the reconnect's 'u' a resume.
@@ -1821,7 +1988,7 @@ extension SlimProtoCoordinator: SlimProtoClientDelegate {
             // The socket never dropped (no reconnect will run), but we played or
             // paused offline meanwhile: move LMS to us now (review M4).
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self, self.offlinePlaybackOwnsRecovery, self.connectionIsLive else { return }
+                guard let self = self, self.offlinePlaybackOwnsRecovery, self.linkUsable else { return }
                 self.jumpLMSToLifeboatPosition()
             }
         }
@@ -2138,6 +2305,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     
     func didStartStream(url: String, format: String, startTime: Double, replayGain: Float) {
         lastServerStreamStartAt = Date()
+        userPlayUndeliveredSince = nil
         resetSlowLinkStateForNewStream()
         clearHeldTrackEnd()
         decodingCopy = nil
@@ -2185,6 +2353,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
     }
 
     func didStartDirectStream(url: String, format: String, startTime: Double, replayGain: Float, autostart: UInt8) {
+        userPlayUndeliveredSince = nil
         lastServerStreamStartAt = Date()
         // A stream that starts while we play is the next track's (LMS sends it
         // after our STMd); a start, seek or jump flushes playback first.
@@ -2201,9 +2370,15 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             lifeboat.removeAll()  // switched off: don't keep copies around
         }
         muteForgottenRestartOverCopies()
+        // A saved copy riding out a dead command channel: this strm may be a
+        // late landing of the press's jump or play. If LMS can't answer which
+        // song it is, its stream can't load either: keep the copy (below).
+        let riding = copiesOverDeadCommands && lifeboatActive && playingCopy != nil
+            ? (paused: lifeboatPausedLocally, startedOffline: savedMusicStartedOffline) : nil
         if lifeboatActive || lifeboatUsed {
             os_log(.info, log: logger, "🛟 LMS is streaming again - leaving the downloaded copies")
         }
+        endCopiesOverDeadCommands(reason: "LMS is streaming again")
         lifeboatActive = false
         lifeboatUsed = false
         // A muted forgotten-player restart is LMS's stream, not our jump: the
@@ -2287,6 +2462,19 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             // A decode end held while we asked is moot: a start flushes it, a
             // handback works it out again below.
             self.copyDecodeEndHeld = false
+            if status == nil, let riding = riding, self.playingCopy != nil {
+                // Web side still dead: LMS's stream would never load. The copy
+                // plays on and the probe moves LMS to it once LMS answers.
+                os_log(.default, log: self.logger, "📼 strm 's' while the web side is dead - the saved copy plays on")
+                self.pausedDuringCopyDecision = false
+                self.lifeboatActive = true
+                self.lifeboatUsed = true
+                self.lifeboatPausedLocally = riding.paused
+                self.savedMusicStartedOffline = riding.startedOffline
+                self.connectionManager.persistForPlayback = true
+                self.beginCopiesOverDeadCommands()
+                return
+            }
             // LMS paused us meanwhile: start, but play only on its 'u'.
             let paused = self.pausedDuringCopyDecision || waitForUnpause
             let decision = self.copyDecision(strmFormat: format, afterDecodeEnd: isGapless,
@@ -2581,6 +2769,8 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
     func didResumeStream() {
         os_log(.info, log: logger, "▶️ Server unpause command")
+        userPlayUndeliveredSince = nil
+        lastServerResumeAt = Date()
         if rebufferPausedByServer {
             os_log(.default, log: logger, "📉 Rebuffer done - LMS resumed us (%d so far on this song)", outputUnderrunReportsThisStream)
             rebufferPausedByServer = false
@@ -2645,7 +2835,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
                 guard let self = self, self.handbackStopDeferred, self.copyDecisionGeneration == generation else { return }
                 self.handbackStopDeferred = false
                 self.expectedHandbacks = []  // nothing to hand back once the copy stops
-                if !self.connectionIsLive {
+                if !self.linkUsable {
                     // The link died before the strm came: the copy rides out
                     // the outage as before, the next reconnect jumps to it again.
                     os_log(.default, log: self.logger, "📼 No strm after LMS's stop and the connection is gone - the saved copy plays on")
@@ -2663,6 +2853,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // LMS's forgotten-player restart is q then s: decide before the flags clear.
         muteForgottenRestartOverCopies()
         clearHeldTrackEnd()
+        endCopiesOverDeadCommands(reason: "LMS stopped the stream")
         lifeboatActive = false
         lifeboatUsed = false
         savedMusicStartedOffline = false
@@ -2733,7 +2924,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
             return
         }
         if mayHold, let copy = decodingCopy, Self.holdsCopyDecodeEnd(
-            live: connectionIsLive, decodingCopy: true, decodingAhead: audioManager.pushStreamState().decodingAhead) {
+            live: linkUsable, decodingCopy: true, decodingAhead: audioManager.pushStreamState().decodingAhead) {
             // A copy decodes in a moment, not in real time like a stream: its
             // STMd now would make LMS send the song after it while the one
             // before still plays. One song queued behind the playing one at most.
@@ -2755,7 +2946,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         expectingGaplessTransition = true
 
         // Like squeezelite: decode.state = DECODE_COMPLETE → wake_controller() → sendSTAT("STMd", 0)
-        client.sendStatus("STMd")
+        sendPlaybackEvent("STMd")
 
         // Server will respond with new STRM command for next track
         // With autostart=2 or 3 (wait for CONT before starting decode)
@@ -2796,13 +2987,13 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
         // instead of holding the STMu in silence until the reconnect (which then
         // moves LMS to us, as after any copy played offline). Fresh, not gapless:
         // queued onto the drained push stream its boundary never fires (rig O22).
-        if !connectionIsLive, lifeboatEnabled, !lifeboatActive,
+        if !linkUsable, lifeboatEnabled, !lifeboatActive,
            let index = decodingCopy?.index ?? UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
            startCopyAfterDrain(index: index + 1) {
             return
         }
         os_log(.info, log: logger, "🏁 Playback complete (output drained) - sending STMu to server")
-        client.sendStatus("STMu")
+        sendPlaybackEvent("STMu")
         // Nothing is left to play out: the next strm starts fresh. Queued
         // "gaplessly" onto a drained push stream its boundary never fires, so
         // no STMs goes out and LMS stays on the old track (rig O22).
@@ -2842,7 +3033,7 @@ extension SlimProtoCoordinator: SlimProtoCommandHandlerDelegate {
 
         // Like squeezelite output.c:155 - output.track_started = true → send STMs
         // This updates Material to show the track that's NOW PLAYING (not just queued)
-        client.sendStatus("STMs")
+        sendPlaybackEvent("STMs")
         // The copy queued behind the last song plays now: its STMd may go.
         releaseHeldCopyDecodeEnd()
 
@@ -3067,7 +3258,9 @@ extension SlimProtoCoordinator {
         request.httpBody = jsonData
         request.timeoutInterval = 5.0
         
+        let started = Date()
         URLSession.lms.dataTask(with: request) { [weak self] data, response, error in
+            self?.noteCommandResult(started: started, response: response, error: error)
             DispatchQueue.main.async {
                 self?.parseServerTimeResponse(data: data, error: error)
             }
@@ -3307,6 +3500,7 @@ extension SlimProtoCoordinator {
         // A user pause/stop ends any attempt to resume playback (bd 6lvg).
         if command.lowercased() == "pause" || command.lowercased() == "stop" {
             endOutageHold(reason: "user \(command.lowercased())")
+            userPlayUndeliveredSince = nil
             resumeInPlaceCheck = nil
             remotePlayIntent = nil
             copyFallbackForPlay = nil
@@ -3455,6 +3649,7 @@ extension SlimProtoCoordinator {
         // Stay awake until the reconnect + recovery gets audio going:
         // in the car the network may not be up yet (bd 8tjj).
         beginOutageHold(reason: "remote play, connection not live")
+        userPlayUndeliveredSince = Date()
         // A weak link may never let the server answer: then the copies play.
         scheduleCopyFallbackForPlay()
 
@@ -3601,13 +3796,18 @@ extension SlimProtoCoordinator {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
+        let started = Date()
+        let playGeneration = sendJSONRPCPlayGeneration
         let task = URLSession.lms.dataTask(with: request) { data, response, error in
+            self.noteCommandResult(started: started, response: response, error: error)
             DispatchQueue.main.async {
                 if let error = error {
                     os_log(.error, log: self.logger, "JSON-RPC %{public}s failed: %{public}s", command, error.localizedDescription)
                     
                     if retryCount < 2 && (command.lowercased() == "play" || command.lowercased() == "pause") {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            // Saved copies took over the Play: a late plain play would restart LMS's stream over them.
+                            guard command.lowercased() != "play" || playGeneration == self.sendJSONRPCPlayGeneration else { return }
                             self.sendJSONRPCCommand(command, retryCount: retryCount + 1)
                         }
                     }
@@ -3674,7 +3874,9 @@ extension SlimProtoCoordinator {
         request.httpBody = jsonData
         request.timeoutInterval = timeout
         
+        let started = Date()
         let task = URLSession.lms.dataTask(with: request) { data, response, error in
+            self.noteCommandResult(started: started, response: response, error: error)
             if let error = error {
                 os_log(.error, log: self.logger, "❌ JSON-RPC request failed: %{public}s", error.localizedDescription)
                 completion([:])
@@ -4119,7 +4321,9 @@ extension SlimProtoCoordinator {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
 
+        let started = Date()
         let task = URLSession.lms.dataTask(with: request) { data, response, error in
+            self.noteCommandResult(started: started, response: response, error: error)
             if let error = error {
                 os_log(.error, log: self.logger, "Enhanced metadata request failed: %{public}s", error.localizedDescription)
                 return
@@ -4673,7 +4877,7 @@ extension SlimProtoCoordinator {
                 DispatchQueue.main.async {
                     guard let self = self, self.decodeEndHeld else { return }
                     guard let result = response["result"] as? [String: Any] else {
-                        if self.connectionIsLive {
+                        if self.linkUsable {
                             // SlimProto is fine but JSON-RPC isn't: don't stall the queue on it.
                             os_log(.info, log: self.logger, "📬 No status for the held decode end, connection live - sending STMd")
                             self.sendHeldTrackEnd()
@@ -4778,7 +4982,7 @@ extension SlimProtoCoordinator {
 
     /// Playing from copies (or paused offline) while the server is away.
     private var lifeboatHoldsSession: Bool {
-        (lifeboatActive || lifeboatUsed) && !connectionIsLive
+        (lifeboatActive || lifeboatUsed) && !linkUsable
     }
 
     /// Copies may be played (whatever the network now: they were fetched earlier).
@@ -5054,7 +5258,7 @@ extension SlimProtoCoordinator {
             let mayDownload = self.lifeboatMayDownload
             if mayDownload && !self.lifeboatCouldDownload { self.scheduleLifeboatPlan(after: 0.5) }
             self.lifeboatCouldDownload = mayDownload
-            guard !self.lifeboatActive, !self.connectionIsLive,
+            guard !self.lifeboatActive, !self.linkUsable,
                   self.audioManager.getPlayerState() == "Playing" || self.audioManager.isPushStreamStalled() else { return }
             let stream = self.audioManager.pushStreamState()
             guard stream.connected, !stream.completedNaturally,
@@ -5099,7 +5303,7 @@ extension SlimProtoCoordinator {
     /// track's duration does: from the downloaded-copies plan when we have
     /// it, else from LMS. True = handled here, don't send STMd now.
     private func handleDownloadEnd() -> Bool {
-        let live = connectionIsLive
+        let live = linkUsable
         let stream = audioManager.pushStreamState()
         if let copy = decodingCopy, !lifeboatActive {
             // A saved copy played in place of the stream ended: the end of the
@@ -5215,7 +5419,7 @@ extension SlimProtoCoordinator {
                     // .default: persisted, so the rig can count it (O26); .info is memory-only.
                     os_log(.default, log: self.logger, "🛟 Restarting the copy of track %d at %.1fs (no splice: %{public}s)",
                            index, playhead, String(describing: failure))
-                } else if self.connectionIsLive {
+                } else if self.linkUsable {
                     self.decodeEndHeld = true
                     self.recoverFromCutDownload(tryCopy: false)
                 } else if self.startLifeboatTrack(index: index + 1) {
@@ -5343,7 +5547,7 @@ extension SlimProtoCoordinator {
     /// playing (or paused on the phone). Polled by the settings screen.
     var offlinePlaybackStatus: OfflinePlaybackStatus? {
         // From the moment iOS reports no network, not only once a copy takes over.
-        guard lifeboatEnabled, lifeboat.server == (sessionServer ?? currentSessionServer), !connectionIsLive,
+        guard lifeboatEnabled, lifeboat.server == (sessionServer ?? currentSessionServer), !linkUsable,
               lifeboatActive || lifeboatPausedLocally
                 || ((networkUnavailable || outageHoldActive) && audioManager.getPlayerState() == "Playing"),
               let index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
@@ -5426,7 +5630,7 @@ extension SlimProtoCoordinator {
 
     /// Tap on a saved song in the offline player: play it from the start.
     func playSavedTrackOffline(index: Int) {
-        guard !connectionIsLive, lifeboat.fileURL(forIndex: index) != nil else { return }
+        guard !linkUsable, lifeboat.fileURL(forIndex: index) != nil else { return }
         os_log(.info, log: logger, "📴 Offline: playing the downloaded copy of track %d (chosen in the app)", index)
         prepareToPlaySavedMusic()
         _ = playLifeboatTrackNow(index: index)
@@ -5455,7 +5659,7 @@ extension SlimProtoCoordinator {
         // No network at all (airplane mode) is one too, paused or not.
         // Not lifeboatUsed alone: after the copies ran out a suspended app with the
         // network fine must reconnect and tell LMS (review H6).
-        guard networkUnavailable || (!connectionIsLive &&
+        guard networkUnavailable || (!linkUsable &&
               (outageHoldActive || lifeboatPausedLocally || audioManager.getPlayerState() == "Playing")) else { return false }
         let state = audioManager.getPlayerState()
         let hasLocalAudio = state == "Playing" || state == "Paused" || audioManager.isPushStreamStalled() || lifeboatActive
@@ -5546,18 +5750,28 @@ extension SlimProtoCoordinator {
         var sincePress: TimeInterval = 6
         var serverHeardSincePress = false
         var silentConnectFor: TimeInterval?  // a connect since the press, silent this long
+        // SlimProto live but the web side dead (weak link, car 2026-11-17):
+        var commandsDown = false             // JSON-RPC timing out since the press (CommandChannelLog)
+        var streamSincePress = false         // LMS sent strm s/u since the press: our command got there
     }
 
     static func playFromCopiesAfterSilentPlay(_ f: SilentPlayFacts) -> Bool {
-        guard f.stillWaiting, !f.recoveryInProgress, !f.connectionLive, f.copiesCoverLastPosition,
+        guard f.stillWaiting, !f.recoveryInProgress, f.copiesCoverLastPosition,
               ["Paused", "Stopped", "No Stream"].contains(f.localState),
               f.sincePress >= copyFallbackDelay else { return false }
+        if f.connectionLive {
+            // SlimProto is fine, so any command that reached LMS would have
+            // brought a strm within moments: none, and the web requests time
+            // out, means LMS can't be told to play.
+            return f.commandsDown && !f.streamSincePress
+        }
         if f.serverHeardSincePress { return f.sincePress >= copyFallbackStalledDelay }
         return (f.silentConnectFor ?? 0) >= 3 || f.sincePress >= copyFallbackNoEvidenceDelay
     }
 
     private func scheduleCopyFallbackForPlay() {
         let state = audioManager.getPlayerState()
+        lastCopyFallbackPicture = nil
         guard lifeboatEnabled, ["Paused", "Stopped", "No Stream"].contains(state) else { return }
         let check = UUID()
         copyFallbackForPlay = check
@@ -5580,8 +5794,19 @@ extension SlimProtoCoordinator {
                 stillWaiting: self.outageHoldActive, localState: state,
                 recoveryInProgress: self.isRecoveryInProgress, connectionLive: self.connectionIsLive,
                 copiesCoverLastPosition: self.savedMusicFromLastPosition() != nil,
-                sincePress: sincePress, serverHeardSincePress: heard, silentConnectFor: silentConnectFor)
+                sincePress: sincePress, serverHeardSincePress: heard, silentConnectFor: silentConnectFor,
+                commandsDown: self.commandChannel.isDown(since: pressedAt),
+                streamSincePress: [self.lastServerStreamStartAt, self.lastServerResumeAt].contains { ($0 ?? .distantPast) >= pressedAt })
             guard Self.playFromCopiesAfterSilentPlay(facts) else {
+                // Logged when the picture changes, at .default so the in-app export keeps it.
+                let picture = String(format: "hold %@, local %@, recovery %@, live %@, commands %@, strm %@, copies %@, heard %@",
+                                     facts.stillWaiting ? "on" : "off", state, facts.recoveryInProgress ? "running" : "idle",
+                                     facts.connectionLive ? "yes" : "no", facts.commandsDown ? "down" : "ok",
+                                     facts.streamSincePress ? "yes" : "no", facts.copiesCoverLastPosition ? "yes" : "no", heard ? "yes" : "no")
+                if picture != self.lastCopyFallbackPicture {
+                    self.lastCopyFallbackPicture = picture
+                    os_log(.default, log: self.logger, "📴 Play fallback: waiting %.0fs after the press (%{public}s)", sincePress, picture)
+                }
                 // Not yet: keep checking while this play still waits for audio.
                 if self.outageHoldActive, ["Paused", "Stopped", "No Stream"].contains(state),
                    sincePress < Self.copyFallbackGiveUp {
@@ -5591,25 +5816,39 @@ extension SlimProtoCoordinator {
                 }
                 return
             }
-            os_log(.info, log: self.logger, "📴 Play: server not reachable %.0fs after the press (heard %{public}s) - playing the saved copies",
-                   sincePress, heard ? "once" : "never")
-            self.playCopiesForUserPlay()
+            os_log(.default, log: self.logger, "📴 Play: server not reachable %.0fs after the press (heard %{public}s, live %{public}s, commands %{public}s) - playing the saved copies",
+                   sincePress, heard ? "once" : "never", facts.connectionLive ? "yes" : "no", facts.commandsDown ? "down" : "ok")
+            self.playCopiesForUserPlay(overLiveLink: facts.connectionLive)
         }
     }
 
     /// The user asked for audio and the server can't give it: the copies play,
     /// from the paused buffer or (nothing local) from the saved position.
-    private func playCopiesForUserPlay() {
-        if audioManager.getPlayerState() == "Paused" {
+    private func playCopiesForUserPlay(overLiveLink: Bool = false) {
+        // The press's target: a late landing of its jump or play must hand
+        // back to the copy, not restart LMS's stream over it.
+        let pressed = audibleRecoveryTarget
+        if audioManager.getPlayerState() == "Paused" && !overLiveLink {
             cancelServerRecoveryForCopies()
             resumeOfflineFromPause()
             return
         }
+        // Over a live SlimProto link the paused buffer belongs to a stream
+        // that may be stalled, not reset: its end never comes and nothing
+        // would follow it. Play the copy from the paused position instead.
         guard let offer = savedMusicFromLastPosition() else { return }
         cancelServerRecoveryForCopies()
-        os_log(.info, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
+        if overLiveLink {
+            beginCopiesOverDeadCommands()
+            sendJSONRPCPlayGeneration += 1  // pending plain-play retries stop
+        }
+        os_log(.default, log: logger, "📴 Offline: playing saved music from track %d at %.1fs", offer.index, offer.position)
         prepareToPlaySavedMusic()
         _ = playLifeboatTrackNow(index: offer.index, from: offer.position)
+        if overLiveLink, let id = lifeboat.track(at: offer.index)?.id {
+            let offset = pressed.map { $0.index == offer.index ? $0.position : 0 } ?? 0
+            expectHandback(CopyPlaybackDecision.ExpectedHandback(index: offer.index, id: id, offset: offset), for: Self.lateJumpWindow)
+        }
     }
 
     /// A reconnect's recovery waiting for the server would jump LMS to the old
@@ -5646,7 +5885,7 @@ extension SlimProtoCoordinator {
     /// reports a network (bd kpu0).
     var savedMusicOffer: SavedMusicOffer? {
         let state = audioManager.getPlayerState()
-        guard !connectionIsLive, serverUnreachable,
+        guard !linkUsable, serverUnreachable || copiesOverDeadCommands,
               state == "No Stream" || state == "Stopped" || state == "Paused" else { return nil }
         return savedMusicFromLastPosition()
     }
@@ -5656,7 +5895,8 @@ extension SlimProtoCoordinator {
     private func savedMusicFromLastPosition() -> SavedMusicOffer? {
         let state = audioManager.getPlayerState()
         guard lifeboatEnabled, !lifeboatActive, !lifeboatPausedLocally,
-              var index = UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+              var index = Self.savedMusicIndex(saved: UserDefaults.standard.object(forKey: "lyrplay_recovery_index") as? Int,
+                                               planCurrent: lifeboat.currentIndex),
               lifeboat.server == (sessionServer ?? currentSessionServer),  // copies from this server (review H7)
               let saved = lifeboat.track(at: index) else { return nil }
         var position = state == "Paused" ? getCurrentTimeForSaving()
@@ -5673,6 +5913,13 @@ extension SlimProtoCoordinator {
         guard seconds >= 30 else { return nil }
         return SavedMusicOffer(index: index, position: position, title: track.title,
                                minutesLeft: Int((seconds / 60).rounded(.down)))
+    }
+
+    /// Where saved music starts: the recovery index, or (none saved: a phone
+    /// that lost it, car 2026-11-17) LMS's current track when the download
+    /// plan was last made.
+    static func savedMusicIndex(saved: Int?, planCurrent: Int?) -> Int? {
+        saved ?? planCurrent
     }
 
     /// Play the saved copies from where we left off; the reconnect then moves LMS here.
@@ -5767,6 +6014,14 @@ extension SlimProtoCoordinator {
             DispatchQueue.main.async {
                 guard let self = self, self.lifeboatUsed || self.lifeboatPausedLocally else { return }
                 let result = response["result"] as? [String: Any]
+                if result == nil, self.connectionIsLive, self.lifeboatActive || self.lifeboatPausedLocally {
+                    // SlimProto up, web side dead again (a flap): carrying on would
+                    // jump with no answer and burn the retries. Wait for LMS again.
+                    os_log(.default, log: self.logger, "🛟 No answer from LMS for the move to the saved copies - waiting for it again")
+                    self.lifeboatJumpConnection = nil
+                    self.beginCopiesOverDeadCommands()
+                    return
+                }
                 var target = index
                 if let playedID = playedID, let index = index,
                    let loop = result?["playlist_loop"] as? [[String: Any]] {
@@ -5847,6 +6102,7 @@ extension SlimProtoCoordinator {
             playingCopy = nil
         }
         clearHeldTrackEnd()
+        endCopiesOverDeadCommands(reason: "following the server")
         lifeboatActive = false
         lifeboatUsed = false
         lifeboatPausedLocally = false
@@ -5868,7 +6124,7 @@ extension SlimProtoCoordinator {
         audibleRecoveryRetries = 0
         audioManager.setOutputKeepAlive(true)
         connectionManager.persistForPlayback = true
-        os_log(.info, log: logger, "🔋 Outage hold ON (%{public}s)", reason)
+        os_log(.default, log: logger, "🔋 Outage hold ON (%{public}s)", reason)
         scheduleOutageHoldLimit(generation: generation)
         scheduleOutageHoldWatchdog(generation: generation)
         scheduleOutageHoldClock(generation: generation)
@@ -5898,9 +6154,20 @@ extension SlimProtoCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self = self, self.outageHoldActive, self.outageHoldGeneration == generation else { return }
             let (time, playing) = self.simpleTimeTracker.getCurrentTime()
-            if playing && self.audioManager.getPlayerState() != "Playing" {
+            let state = self.audioManager.getPlayerState()
+            if playing && state != "Playing" {
                 self.simpleTimeTracker.updateFromServer(time: time, playing: false)
                 os_log(.info, log: self.logger, "🔋 Outage hold: audio not flowing - holding position at %.2f", time)
+            } else if !playing && state == "Playing" && (self.lifeboatActive || self.lifeboatUsed) {
+                // A saved copy plays and no server time will come: run the clock
+                // from the copy. Without this, a tick that caught the copy before
+                // its first samples froze the clock for the whole outage, and LMS
+                // was moved back to where the copy started (rig O36, 2026-11-17).
+                let position = self.audioManager.getAudioPlayerTimeForFallback()
+                if position > 0 {
+                    self.simpleTimeTracker.updateFromServer(time: position, playing: true)
+                    os_log(.default, log: self.logger, "🔋 Outage hold: saved copy playing - clock runs again at %.2f", position)
+                }
             }
             self.scheduleOutageHoldClock(generation: generation)
         }
@@ -5967,7 +6234,8 @@ extension SlimProtoCoordinator {
         if case .networkRestored = pendingRecoveryTrigger {
             pendingRecoveryTrigger = .none
         }
-        os_log(.info, log: logger, "🔋 Outage hold OFF (%{public}s)", reason)
+        userPlayUndeliveredSince = nil
+        os_log(.default, log: logger, "🔋 Outage hold OFF (%{public}s)", reason)
     }
 
     /// Automatic recoveries (reconnect, retries) must not override a pause
@@ -5991,6 +6259,13 @@ extension SlimProtoCoordinator {
                 let result = response["result"] as? [String: Any]
                 let mode = result?["mode"] as? String
                 if mode == "pause" {
+                    let undelivered = self.userPlayUndeliveredSince.map { Date().timeIntervalSince($0) }
+                    guard Self.pauseOnServerEndsRetries(userPlayUndeliveredFor: undelivered) else {
+                        os_log(.default, log: self.logger, "🔁 LMS paused, but the user's Play (%.0fs ago) never reached it - retrying it",
+                               undelivered ?? 0)
+                        action(result)
+                        return
+                    }
                     self.endOutageHold(reason: "paused on server")
                     return
                 }
@@ -6013,23 +6288,52 @@ extension SlimProtoCoordinator {
     /// on: now if we're connected, otherwise on the next reconnect.
     private func retryAudibleRecovery(reason: String) {
         guard outageHoldActive else { return }
+        let copiesHere = lifeboatActive || lifeboatPausedLocally
+        if copiesOverDeadCommands && !copiesHere {
+            // The copies ran out (or were left): retry normally again.
+            endCopiesOverDeadCommands(reason: "no saved copy playing")
+        }
+        if !copiesOverDeadCommands, copiesHere, offlinePlaybackOwnsRecovery, connectionIsLive,
+           commandChannel.isDown(since: Date().addingTimeInterval(-30)) {
+            // The move to the copies failed on a dead web side (SlimProto up):
+            // wait for LMS to answer instead of using up the retries.
+            lifeboatJumpConnection = nil
+            beginCopiesOverDeadCommands()
+        }
+        guard !copiesOverDeadCommands else {
+            // The copies play and LMS can't be told: the probe moves LMS once it can.
+            os_log(.info, log: logger, "🔁 Audible recovery %{public}s - not retrying, the saved copies play until LMS answers", reason)
+            return
+        }
         guard connectionManager.connectionState.isConnected else {
             pendingRecoveryTrigger = .networkRestored
             os_log(.info, log: logger, "🔁 Audible recovery %{public}s - will retry on reconnect", reason)
             return
         }
-        guard audibleRecoveryRetries < Self.maxAudibleRecoveryRetries else {
+        // The user's Play hasn't reached LMS because web requests time out (weak
+        // link): that isn't a failed recovery, so it doesn't use up the retries.
+        // Retry until the Play is delivered, up to its limit (car 2026-11-17).
+        let undeliveredPlayAge = userPlayUndeliveredSince.map { Date().timeIntervalSince($0) }
+        let waitingOnLink = Self.retryWaitsForCommandLink(
+            userPlayUndeliveredFor: undeliveredPlayAge,
+            commandsDown: userPlayUndeliveredSince.map { commandChannel.isDown(since: $0) } ?? false)
+        guard audibleRecoveryRetries < Self.maxAudibleRecoveryRetries || waitingOnLink else {
             // Connected and nothing left to try: don't keep the app awake
             // playing silence for the rest of the time limit.
             os_log(.error, log: logger, "🔁 Audible recovery %{public}s - out of retries", reason)
             endOutageHold(reason: "out of retries")
             return
         }
-        audibleRecoveryRetries += 1
+        if waitingOnLink {
+            os_log(.default, log: logger, "🔁 Audible recovery %{public}s - LMS unreachable for web requests, retrying the Play (%.0fs since it was pressed)",
+                   reason, undeliveredPlayAge ?? 0)
+        } else {
+            audibleRecoveryRetries += 1
+        }
         os_log(.info, log: logger, "🔁 Audible recovery %{public}s - retry %d/%d in 5s",
                reason, audibleRecoveryRetries, Self.maxAudibleRecoveryRetries)
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            guard let self = self, self.outageHoldActive else { return }
+            guard let self = self, self.outageHoldActive, !self.copiesOverDeadCommands else { return }
             // A timed-out jump may still have reached the server and started a
             // stream; don't jump on top of it (the watchdog re-checks later).
             guard !self.serverRestartedStreamRecently else {
@@ -6160,8 +6464,8 @@ extension SlimProtoCoordinator {
             self.beginOutageHold(reason: "media services reset")
             self.unlessPausedOnServer(withStatus: { status in
                 // Jump to the track LMS is on now. The saved index may be
-                // gone: a jump that just succeeded deletes all three keys,
-                // and the 3s poll that rewrites it is held off after a jump.
+                // gone or stale (never saved, or the 3s poll that keeps it
+                // current is held off after a jump).
                 // Without an index the recovery sends a plain play instead.
                 if let index = Self.playlistIndex(fromStatus: status) {
                     self.setRecoveryIndexFromServer(index)
