@@ -56,15 +56,21 @@ class KeychainManager {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: serverKey.rawValue,
-            kSecAttrService as String: "LyrPlay-LMS-Auth",
-            kSecValueData as String: data
+            kSecAttrService as String: "LyrPlay-LMS-Auth"
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: Self.accessibility
         ]
 
-        // Delete any existing item first
-        SecItemDelete(query as CFDictionary)
-
-        // Add new item
-        let status = SecItemAdd(query as CFDictionary, nil)
+        // Update in place; add only when there is none. (Delete-then-add lost
+        // the item whenever the add failed, e.g. on a locked phone.)
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item.merge(attributes) { _, new in new }
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
 
         if status == errSecSuccess {
             os_log(.info, log: logger, "✅ Credentials saved successfully for %{public}s", serverKey.rawValue)
@@ -75,41 +81,84 @@ class KeychainManager {
         }
     }
 
+    /// Readable once the device has been unlocked after a restart, also while
+    /// it is locked again: CarPlay and background launches start the app on a
+    /// locked phone. The old default (when unlocked) failed those reads and the
+    /// next settings save deleted the password (GH #146).
+    static let accessibility = kSecAttrAccessibleAfterFirstUnlock
+
+    enum LoadResult {
+        case found(username: String, password: String)
+        case notFound
+        /// The item may exist but can't be read now (device locked, or another
+        /// Keychain error): the caller must not treat this as "no credentials".
+        case unavailable(OSStatus)
+    }
+
     /// Load credentials from Keychain
     /// - Parameter serverKey: Which server (primary or backup)
-    /// - Returns: Tuple of (username, password) or nil if not found
+    /// - Returns: Tuple of (username, password) or nil if not found or unreadable
     func load(for serverKey: ServerKey) -> (username: String, password: String)? {
+        if case let .found(username, password) = loadResult(for: serverKey) {
+            return (username: username, password: password)
+        }
+        return nil
+    }
+
+    /// Load credentials, telling "none stored" apart from "can't read now".
+    /// A readable item saved with the old accessibility is moved to
+    /// `accessibility` so the next locked launch can read it.
+    func loadResult(for serverKey: ServerKey) -> LoadResult {
         os_log(.debug, log: logger, "Loading credentials for %{public}s", serverKey.rawValue)
 
-        // Build Keychain query
-        let query: [String: Any] = [
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: serverKey.rawValue,
-            kSecAttrService as String: "LyrPlay-LMS-Auth",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecAttrService as String: "LyrPlay-LMS-Auth"
         ]
+        var query = base
+        query[kSecReturnData as String] = true
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
-        guard status == errSecSuccess,
-              let data = result as? Data,
+        if status == errSecItemNotFound {
+            os_log(.debug, log: logger, "No credentials found for %{public}s", serverKey.rawValue)
+            return .notFound
+        }
+        guard status == errSecSuccess else {
+            os_log(.error, log: logger, "❌ Can't read credentials for %{public}s now: %d%{public}s",
+                   serverKey.rawValue, status,
+                   status == errSecInteractionNotAllowed ? " (device locked)" : "")
+            return .unavailable(status)
+        }
+        guard let item = result as? [String: Any],
+              let data = item[kSecValueData as String] as? Data,
               let credentials = try? JSONDecoder().decode([String: String].self, from: data),
               let username = credentials["username"],
               let password = credentials["password"] else {
+            // Read fine but unusable: nothing to protect, a save may replace it.
+            os_log(.error, log: logger, "❌ Stored credentials for %{public}s are unreadable", serverKey.rawValue)
+            return .notFound
+        }
 
-            if status == errSecItemNotFound {
-                os_log(.debug, log: logger, "No credentials found for %{public}s", serverKey.rawValue)
+        if let current = item[kSecAttrAccessible as String] as? String,
+           current != Self.accessibility as String {
+            let update = SecItemUpdate(base as CFDictionary,
+                                       [kSecAttrAccessible as String: Self.accessibility] as CFDictionary)
+            if update == errSecSuccess {
+                os_log(.default, log: logger, "🔑 Credentials for %{public}s moved to after-first-unlock access", serverKey.rawValue)
             } else {
-                os_log(.error, log: logger, "❌ Failed to load credentials: %d", status)
+                os_log(.error, log: logger, "❌ Couldn't move credentials for %{public}s to after-first-unlock access: %d",
+                       serverKey.rawValue, update)
             }
-            return nil
         }
 
         os_log(.info, log: logger, "✅ Credentials loaded for %{public}s (username: %{public}s)",
                serverKey.rawValue, username)
-        return (username: username, password: password)
+        return .found(username: username, password: password)
     }
 
     /// Delete credentials from Keychain

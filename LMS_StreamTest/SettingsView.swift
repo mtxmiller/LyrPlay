@@ -830,6 +830,14 @@ struct ServerConfigView: View {
             webUseHTTPS = settings.serverWebUseHTTPS
             allowSelfSignedCert = settings.serverAllowSelfSignedCert
         }
+        .onReceive(settings.$serverPassword) { password in
+            // Credentials read after a locked launch (GH #146): an untouched
+            // form must not save its stale empty fields over them.
+            guard !hasChanges, serverUsername.isEmpty, !settings.serverUsername.isEmpty else { return }
+            serverUsername = settings.serverUsername
+            serverPassword = password
+            DispatchQueue.main.async { hasChanges = false }
+        }
         .sheet(isPresented: $showingConnectionTest) {
             ConnectionTestSheet(
                 testPrimary: {
@@ -1551,6 +1559,13 @@ struct BackupServerConfigView: View {
         }
         .onAppear {
             loadCurrentSettings()
+        }
+        .onReceive(settings.$backupServerPassword) { password in
+            // As in ServerConfigView: credentials read after a locked launch (GH #146).
+            guard !hasChanges, backupUsername.isEmpty, !settings.backupServerUsername.isEmpty else { return }
+            backupUsername = settings.backupServerUsername
+            backupPassword = password
+            DispatchQueue.main.async { hasChanges = false }
         }
         // Unlike ServerConfigView (typed host + saved ports), this tests typed host
         // AND typed ports — backup ports are editable on this screen.
