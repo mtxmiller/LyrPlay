@@ -1535,7 +1535,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // !isAudio) drill recursively into their children (guarded by CarPlay's
         // template-depth cap). Album browse-then-play is out of scope by design.
         let favoritesItem = CPListItem(
-            text: "★ Favorites",
+            text: "Favorites",
             detailText: "Your saved favorites",
             image: nil,
             accessoryImage: nil,
