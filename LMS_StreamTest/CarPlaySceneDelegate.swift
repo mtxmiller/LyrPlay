@@ -1561,34 +1561,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         items.append(browseArtistsItem)
 
-        // Add Random Artists item
-        let randomArtistsItem = CPListItem(
-            text: "Random Artists",
-            detailText: "Discover artists from your library",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        randomArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.showRandomArtists()
-            completion()
-        }
-        items.append(randomArtistsItem)
-
-        // Add Random Albums item
-        let randomAlbumsItem = CPListItem(
-            text: "More Random Releases",
-            detailText: "More random albums to explore",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        randomAlbumsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.showRandomAlbums()
-            completion()
-        }
-        items.append(randomAlbumsItem)
-
         // Add Playlists item (navigates to full playlist list)
         let playlistsItem = CPListItem(
             text: "Playlists",
@@ -1602,6 +1574,20 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion()
         }
         items.append(playlistsItem)
+
+        // Add Random Artists item
+        let randomArtistsItem = CPListItem(
+            text: "Random Artists",
+            detailText: "Discover artists from your library",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        randomArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showRandomArtists()
+            completion()
+        }
+        items.append(randomArtistsItem)
 
         // Add Refresh item at bottom
         let refreshItem = CPListItem(
@@ -2123,7 +2109,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
     // MARK: - Random Artists
 
     /// Random albums, one page sized to the car's row limit (the home row's
-    /// "Random Releases" heading and "More Random Releases" open this). No More
+    /// "Random Releases" heading opens this). No More
     /// row: a second random page would repeat albums. Each visit reshuffles.
     private func showRandomAlbums() {
         os_log(.info, log: logger, "💿 Fetching random albums for CarPlay")
