@@ -45,6 +45,12 @@ struct ContentView: View {
     /// frozen then); a network drop while the app is in use only shows the banner.
     @State private var openOfflinePlayerUntil: Date?
     private let offlinePoll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    // bd f9r0: loading-screen watchdog (LoadingWatchdog) and state notes (Breadcrumbs)
+    @State private var loadingSeconds = 0
+    @State private var loadingRetried = false
+    @State private var showLoadingEscape = false
+    @State private var lastCrumbState = ""
+    @State private var gaveUpLoadingAt: Date?
     private static let offlineBannerHeight: CGFloat = 30
     /// GH#75: hardware volume rocker → external player forwarding
     @StateObject private var volumeRocker = VolumeRockerForwarder()
@@ -90,7 +96,7 @@ struct ContentView: View {
         .onReceive(settings.$isConfigured) { isConfigured in
             guard isConfigured else { return }
             hasShownError = false  // Reset error flag
-            hasConnectionError = false
+            leaveCantConnectScreen()
             // Setup just finished: on first run, or after Reset All Settings and
             // setup again. A connection that already exists (from before the
             // reset, or made at launch from the old settings) carries the old
@@ -115,7 +121,7 @@ struct ContentView: View {
         // ADD THE .sheet MODIFIER HERE (after .onReceive):
         .sheet(isPresented: $showingSettings, onDismiss: {
             // Reset error states when dismissing settings
-            hasConnectionError = false
+            leaveCantConnectScreen()
             hasShownError = false
             hasHandledError = false
             loadError = nil
@@ -180,9 +186,10 @@ struct ContentView: View {
             Color(red: 0.25, green: 0.25, blue: 0.25) // Dark gray like Material
                 .ignoresSafeArea(.all)
             
-            // Loading screen overlay that covers the entire view when loading
-            // FIXED: Always show loading screen when isLoading=true, regardless of error state
-            if isLoading {
+            // Loading screen overlay that covers the entire view when loading.
+            // Never over the can't-connect screen: there is no web view loading then,
+            // and the loading screen would hide that screen's buttons (bd f9r0).
+            if loadingScreenVisible {
                 lyrPlayLoadingScreen
                     .ignoresSafeArea(.all)
                     .zIndex(1) // Ensure it appears above WebView
@@ -358,10 +365,13 @@ struct ContentView: View {
             if offer != savedMusicOffer { savedMusicOffer = offer }
             let player = isAppInBackground ? nil : slimProtoCoordinator.offlinePlayerState
             if player != offlinePlayer { offlinePlayer = player }
-            if hasConnectionError && !showingSettings && slimProtoCoordinator.connectionIsLive {
+            if hasConnectionError && !showingSettings && slimProtoCoordinator.connectionIsLive
+                && !(gaveUpLoadingAt.map { Date().timeIntervalSince($0) < LoadingWatchdog.retryAfterGiveUp } ?? false) {
                 // Launched offline and the server is back: load Material (as closing Settings does).
+                // Not right after the watchdog gave up: the can't-connect screen stays up
+                // a while instead of flashing for a second (review, bd f9r0).
                 os_log(.info, log: logger, "🌐 Server reachable again - loading Material")
-                hasConnectionError = false
+                leaveCantConnectScreen()
                 hasShownError = false
                 hasHandledError = false
                 loadError = nil
@@ -377,6 +387,8 @@ struct ContentView: View {
                 openOfflinePlayerUntil = nil
                 showingOfflinePlayer = true
             }
+            tickLoadingWatchdog()
+            noteStateChanges()
         }
         .onReceive(audioManager.audioPlayer.$currentOutputInfo) { _ in
             pushStreamInfoToWebView()
@@ -453,8 +465,7 @@ struct ContentView: View {
                 if let webView = webView {
                     print("🔄 WebView found, reloading...")
                     let newURL = URL(string: materialWebURL)!
-                    let request = URLRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
-                    webView.load(request)
+                    webView.load(WebView.materialRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
                     print("🔄 WebView reload requested")
                 } else {
                     print("❌ WebView is nil!")
@@ -484,8 +495,7 @@ struct ContentView: View {
             // Force WebView reload with new server URL
             if let webView = webView {
                 let newURL = URL(string: materialWebURL)!
-                let request = URLRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
-                webView.load(request)
+                webView.load(WebView.materialRequest(url: newURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
                 os_log(.info, log: logger, "✅ WebView reloaded for server switch to: %{public}s", settings.activeServerHost)
             }
 
@@ -879,6 +889,103 @@ struct ContentView: View {
         return "Check your server configuration and network connection."
     }
     
+    // MARK: - Loading watchdog (bd f9r0)
+
+    private var loadingScreenVisible: Bool { isLoading && !hasConnectionError }
+
+    /// Leave the can't-connect screen. When that brings a new web view, it loads
+    /// behind the loading screen (as at launch) so the watchdog covers it; before,
+    /// it loaded in the open with nothing watching (review, bd f9r0).
+    private func leaveCantConnectScreen() {
+        if hasConnectionError {
+            isLoading = true
+            Breadcrumbs.note("leaving can't-connect screen: new web view")
+        }
+        hasConnectionError = false
+    }
+
+    /// Once a second (offlinePoll). Counts seconds the loading screen is in front
+    /// of the user; LoadingWatchdog decides. Scene state is read here, in an
+    /// action, never in body (the 1.7.9 AttributeGraph hang).
+    private func tickLoadingWatchdog() {
+        guard loadingScreenVisible else {
+            if loadingSeconds != 0 || loadingRetried || showLoadingEscape {
+                loadingSeconds = 0
+                loadingRetried = false
+                showLoadingEscape = false
+            }
+            return
+        }
+        let phoneActive = UIApplication.shared.connectedScenes.contains {
+            $0.session.role == .windowApplication && $0.activationState == .foregroundActive
+        }
+        // Not under Settings either (opened from the loading screen): its sheet is the screen then.
+        guard phoneActive, !showingSettings else { return }
+        loadingSeconds += 1
+        // No web view yet = one is being built (its load starts with it). The count
+        // runs on across rebuilds, so 60 s bounds the whole wait, not each try.
+        let busy = webView?.isLoading ?? true
+        switch LoadingWatchdog.action(seconds: loadingSeconds, webViewBusy: busy,
+                                      retried: loadingRetried, escapeShown: showLoadingEscape) {
+        case .none:
+            break
+        case .showEscape:
+            showLoadingEscape = true
+            Breadcrumbs.note("loading screen \(loadingSeconds)s: showing Retry/Settings")
+        case .freshLoad:
+            loadingRetried = true
+            os_log(.error, log: logger, "⏱️ Loading screen up %ds with no load in flight - loading Material again", loadingSeconds)
+            Breadcrumbs.note("loading screen \(loadingSeconds)s, web view idle: fresh load")
+            loadMaterialFresh()
+        case .giveUp:
+            os_log(.error, log: logger, "⏱️ Loading screen up %ds - showing the can't-connect screen", loadingSeconds)
+            Breadcrumbs.note("loading screen \(loadingSeconds)s: giving up")
+            giveUpLoading()
+        }
+    }
+
+    private func retryLoading() {
+        Breadcrumbs.note("loading screen: Retry pressed")
+        loadingSeconds = 0
+        loadingRetried = false
+        showLoadingEscape = false
+        if webView == nil {
+            giveUpLoading()  // nothing to load into: the can't-connect screen rebuilds it
+        } else {
+            loadMaterialFresh()
+        }
+    }
+
+    private func loadMaterialFresh() {
+        // No stopLoading(): load() replaces a navigation in flight by itself.
+        guard let webView, let url = URL(string: materialWebURL) else { return }
+        webView.load(WebView.materialRequest(url: url))
+    }
+
+    /// Show the can't-connect screen (its buttons, the saved-music offer). When the
+    /// server answers, offlinePoll builds a new web view as for any failed load.
+    private func giveUpLoading() {
+        webView?.stopLoading()
+        gaveUpLoadingAt = Date()
+        isLoading = false
+        loadError = "Material did not load. Check the connection, or open Settings."
+        hasConnectionError = true
+    }
+
+    /// One line per change of the screen and connection state, kept across a
+    /// force-quit (Breadcrumbs).
+    private func noteStateChanges() {
+        let state = "loading=\(loadingScreenVisible ? 1 : 0) cantConnect=\(hasConnectionError ? 1 : 0) "
+            + "error=\(loadError == nil ? 0 : 1) offlinePlayer=\(showingOfflinePlayer ? 1 : 0) "
+            + "settings=\(showingSettings ? 1 : 0) background=\(isAppInBackground ? 1 : 0) "
+            + "webview=\(webView == nil ? 0 : 1) connected=\(slimProtoCoordinator.isConnected ? 1 : 0) "
+            + "live=\(slimProtoCoordinator.connectionIsLive ? 1 : 0) "
+            + "savedMusic=\(slimProtoCoordinator.offlinePlaybackOwnsRecovery ? 1 : 0)"
+        guard state != lastCrumbState else { return }
+        lastCrumbState = state
+        Breadcrumbs.note(state)
+    }
+
     // MARK: - LyrPlay Loading Screen
     private var lyrPlayLoadingScreen: some View {
         ZStack {
@@ -939,6 +1046,17 @@ struct ContentView: View {
                                     )
                             }
                         }
+                    }
+
+                    // A way out when Material doesn't arrive (bd f9r0).
+                    if showLoadingEscape {
+                        HStack(spacing: 16) {
+                            Button("Retry") { retryLoading() }
+                            Button("Settings") { showingSettings = true }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .padding(.top, 8)
                     }
                 }
                 
@@ -1257,28 +1375,47 @@ struct WebView: UIViewRepresentable {
         // doesn't use it, so the check always returned false and forced network loads.
         // .useProtocolCachePolicy respects HTTP cache headers (ETag, Cache-Control),
         // giving instant loads when cached and fresh fetches when stale.
-        var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy)
-        request.timeoutInterval = 15.0
-
         os_log(.info, log: logger, "Loading Material interface with protocol cache policy")
-
-        // Add HTTP Basic Authentication header if credentials are configured
-        let settings = SettingsManager.shared
-        if let authHeader = settings.generateAuthHeader() {
-            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
-            os_log(.debug, log: logger, "🔐 Added Authorization header for WebView (user: %{public}s)", settings.activeServerUsername)
-        } else {
-            os_log(.debug, log: logger, "ℹ️ No authentication configured - loading WebView without credentials")
-        }
-
-        webView.load(request)
-
+        webView.load(Self.materialRequest(url: url))
+        Breadcrumbs.note("webview created, loading Material")
 
         os_log(.info, log: logger, "WKWebView load request started with Material appSettings integration")
         return webView
     }
-    
+
+    /// Every Material page load: the 15 s timeout (a dead link fails instead of
+    /// hanging) and the login header. Server switch and reload used a bare request
+    /// before (60 s, no login) (bd f9r0).
+    static func materialRequest(url: URL, cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: cachePolicy)
+        request.timeoutInterval = 15.0
+        if let authHeader = SettingsManager.shared.generateAuthHeader() {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    /// The WebView left the screen (the can't-connect screen replaced it). Shut the
+    /// old WKWebView down: it was kept alive by the stored reference and by its
+    /// script handlers, and its callbacks kept writing to the loading and error
+    /// state. A content-process kill hours later put the loading screen over the
+    /// can't-connect screen with nothing left to take it down (bd f9r0).
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.isDismantled = true
+        uiView.stopLoading()
+        uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
+        uiView.configuration.userContentController.removeAllScriptMessageHandlers()
+        Breadcrumbs.note("webview dismantled")
+        let reference = coordinator.parent.$webViewReference
+        DispatchQueue.main.async {
+            if reference.wrappedValue === uiView { reference.wrappedValue = nil }
+        }
+    }
+
     func updateUIView(_ uiView: WKWebView, context: Context) {
+        // Callbacks use the current URL and bindings (a fresh load after a server switch).
+        context.coordinator.parent = self
         // FIX (LMS_StreamTest-nzk): Force layout update on iPad after app minimize/restore
         // Without this, WebView can become horizontally compressed on iOS 26
         uiView.setNeedsLayout()
@@ -1296,8 +1433,7 @@ struct WebView: UIViewRepresentable {
 
         // Check if host changed - reload if server switched
         if let currentURL = uiView.url, currentURL.host != url.host {
-            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
-            uiView.load(request)
+            uiView.load(Self.materialRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
         }
     }
     
@@ -1315,6 +1451,8 @@ struct WebView: UIViewRepresentable {
         /// value (including 0) always injects once. Prevents redundant JS on every
         /// updateUIView call (which SwiftUI fires for many unrelated reasons).
         var lastInjectedTopInset: CGFloat = -1
+        /// Set by dismantleUIView: this web view is off screen for good (bd f9r0).
+        var isDismantled = false
         private let logger = OSLog(subsystem: "com.lmsstream", category: "WebViewCoordinator")
 
         /// topPad for page-load injection: the GeometryReader inset updateUIView last
@@ -1376,6 +1514,7 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             os_log(.info, log: logger, "📡 WebView: Started loading Material interface")
             DispatchQueue.main.async {
+                guard !self.isDismantled else { return }  // bd f9r0
                 self.parent.loadError = nil
                 // GH#75: selected player is unknown until Material re-reports it
                 self.parent.onMaterialPlayerChanged(nil)
@@ -1388,6 +1527,7 @@ struct WebView: UIViewRepresentable {
             // didFinish (all sub-resources). Users see the page building like a browser.
             os_log(.info, log: logger, "WebView committed - showing interface (progressive load)")
             DispatchQueue.main.async {
+                guard !self.isDismantled else { return }  // bd f9r0
                 self.parent.isLoading = false
             }
 
@@ -1410,6 +1550,7 @@ struct WebView: UIViewRepresentable {
 
             // First, check if this is an error page (401 auth error, etc.)
             webView.evaluateJavaScript("document.title") { title, error in
+                guard !self.isDismantled else { return }  // bd f9r0
                 if let title = title as? String {
                     os_log(.debug, log: self.logger, "📄 Page title: %{public}s", title)
 
@@ -1516,6 +1657,8 @@ struct WebView: UIViewRepresentable {
                 """
 
                 webView.evaluateJavaScript(settingsHandlerScript) { result, error in
+                    // An off-screen web view must not clear the can't-connect state (bd f9r0).
+                    guard !self.isDismantled else { return }
                     if let error = error {
                         os_log(.error, log: self.logger, "❌ Failed to inject settings handler: %{public}s", error.localizedDescription)
                         // Enable fallback settings button and ensure loading is hidden
@@ -1542,18 +1685,31 @@ struct WebView: UIViewRepresentable {
         }
         
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            os_log(.error, log: logger, "WebView content process terminated by iOS - reloading Material interface")
+            // bd f9r0: reload() does nothing for a view that never committed a page
+            // (it returns nil), and an off-screen view must not raise the loading
+            // screen at all: either left it up with nothing to take it down.
+            let recovery = ContentProcessRecovery.decide(dismantled: isDismantled,
+                                                         hasPage: webView.backForwardList.currentItem != nil)
+            os_log(.error, log: logger, "WebView content process terminated by iOS - %{public}s",
+                   String(describing: recovery))
+            Breadcrumbs.note("webview content process ended -> \(recovery)")
+            guard recovery != .ignore else { return }
             DispatchQueue.main.async {
                 self.parent.isLoading = true
                 // GH#75: JS state is gone — disengage the rocker until reload re-reports
                 self.parent.onMaterialPlayerChanged(nil)
             }
-            webView.reload()
+            if recovery == .freshLoad || webView.reload() == nil {
+                webView.load(WebView.materialRequest(url: parent.url))
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             os_log(.error, log: logger, "Failed to load Material interface: %{public}s", error.localizedDescription)
+            // A load replaced by a newer one (Retry, server switch) is not a failure.
+            if (error as NSError).domain == NSURLErrorDomain && (error as NSError).code == NSURLErrorCancelled { return }
             DispatchQueue.main.async {
+                guard !self.isDismantled else { return }  // bd f9r0
                 os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (didFail)")
                 self.parent.isLoading = false
                 self.parent.loadError = "Failed to load Material: \(error.localizedDescription)"
@@ -1594,6 +1750,7 @@ struct WebView: UIViewRepresentable {
             }
 
             DispatchQueue.main.async {
+                guard !self.isDismantled else { return }  // bd f9r0
                 self.parent.isLoading = false
                 self.parent.loadError = message
                 self.parent.hasConnectionError = true
@@ -1606,6 +1763,12 @@ struct WebView: UIViewRepresentable {
 
             if cancelledForHTTPError {
                 cancelledForHTTPError = false
+                return
+            }
+            // A load replaced by a newer one (Retry, the watchdog, a server switch)
+            // ends with "cancelled": not a connection failure (review, bd f9r0).
+            if (error as NSError).domain == NSURLErrorDomain && (error as NSError).code == NSURLErrorCancelled {
+                os_log(.info, log: logger, "Provisional navigation cancelled (replaced by a newer load)")
                 return
             }
 
@@ -1635,6 +1798,7 @@ struct WebView: UIViewRepresentable {
             }
 
             DispatchQueue.main.async {
+                guard !self.isDismantled else { return }  // bd f9r0
                 os_log(.debug, log: self.logger, "❌ WebView: Setting isLoading = false (didFailProvisionalNavigation)")
                 self.parent.isLoading = false
 

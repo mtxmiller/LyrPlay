@@ -78,11 +78,19 @@ struct SettingsView: View {
                 .compactMap { $0 as? OSLogEntryLog }
                 .filter { $0.subsystem == "com.lmsstream" }
                 .map { "\(formatter.string(from: $0.date)) [\($0.category)] \($0.composedMessage)" }
+            // bd f9r0: state changes kept in a file, so a force-quit run is not lost.
+            var crumbs = ""
+            if let previous = Breadcrumbs.previousLaunch() {
+                crumbs += "\n\n--- Previous launch: state changes ---\n" + previous
+            }
+            if let current = Breadcrumbs.currentLaunch() {
+                crumbs += "\n--- This launch: state changes ---\n" + current
+            }
             guard !lines.isEmpty else {
-                return "No LyrPlay log entries found in the last 30 minutes of this app session."
+                return "No LyrPlay log entries found in the last 30 minutes of this app session." + crumbs
             }
             let header = "LyrPlay diagnostic log — \(appDiagnosticVersion()) — exported \(Date())\n"
-            return header + lines.joined(separator: "\n")
+            return header + lines.joined(separator: "\n") + crumbs
         } catch {
             return "Log collection failed: \(error.localizedDescription)"
         }

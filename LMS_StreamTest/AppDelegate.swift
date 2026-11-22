@@ -8,7 +8,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         os_log(.info, log: logger, "App launching")
-        
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        Breadcrumbs.startLaunch("launch v\(version) (\(build)) at \(Date())")
+
         // Load settings early
         let settings = SettingsManager.shared
         os_log(.info, log: logger, "Settings loaded - Configured: %{public}s", settings.isConfigured ? "YES" : "NO")
