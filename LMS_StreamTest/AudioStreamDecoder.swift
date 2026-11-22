@@ -757,39 +757,68 @@ class AudioStreamDecoder {
 
         os_log(.info, log: logger, "🎵 Creating push stream: %d Hz, %d channels", sampleRate, channels)
 
-        #if os(iOS)
-        // CRITICAL: Set iOS audio session rate to match content for bit-perfect playback
+        // CRITICAL: Set the audio session rate to match content for bit-perfect playback.
         // Per Ian @ un4seen (topic 20831): Use AVAudioSession.setPreferredSampleRate
         // "BASS will also detect when the output rate is changed" via this method
-        // This is the RECOMMENDED approach for iOS instead of BASS_DEVICE_REINIT
-        // Called HERE (not during prefetch) so sample rate changes only when stream is actually recreated
+        // (BASS_DEVICE_REINIT is not needed). Called HERE (not during prefetch) so
+        // the rate changes only when the stream is actually recreated.
+        // tvOS (API available since tvOS 9) only with "Match Output Sample Rate" on:
+        // every switch makes the HDMI sink renegotiate, so off keeps the 48 kHz
+        // BASS_Init asked for. Before, tvOS never asked and HDMI always carried
+        // 48 kHz whatever the stream's rate (GH #150).
+        #if os(tvOS)
+        let wantedRate = SettingsManager.shared.matchOutputSampleRate ? sampleRate : 48000
+        #else
+        let wantedRate = sampleRate
+        #endif
         do {
             let session = AVAudioSession.sharedInstance()
             let currentRate = session.sampleRate
 
-            if Int(currentRate) != sampleRate {
-                os_log(.info, log: logger, "🔄 iOS session rate (%.0fHz) != stream rate (%dHz) - updating for bit-perfect playback", currentRate, sampleRate)
+            if Int(currentRate) != wantedRate {
+                os_log(.info, log: logger, "🔄 Session rate (%.0fHz) != wanted rate (%dHz, stream %dHz) - updating", currentRate, wantedRate, sampleRate)
 
-                // Set preferred sample rate - iOS will honor this for external DACs
-                // Built-in speakers may remain locked at 48kHz (hardware limitation)
-                try session.setPreferredSampleRate(Double(sampleRate))
+                // Set preferred sample rate - honoured for external DACs / HDMI sinks
+                // that support it; built-in speakers may stay at 48kHz
+                try session.setPreferredSampleRate(Double(wantedRate))
 
-                // BASS automatically detects the rate change - verify what we got
+                // BASS detects the rate change (StreamFormat listener) - verify what we got
                 var deviceInfo = BASS_INFO()
                 if BASS_GetInfo(&deviceInfo) != 0 {
                     let finalRate = Int(deviceInfo.freq)
-                    let actualIOSRate = Int(session.sampleRate)
+                    let actualRate = Int(session.sampleRate)
 
-                    if finalRate == sampleRate && actualIOSRate == sampleRate {
-                        os_log(.info, log: logger, "✅ Bit-perfect playback: %.0fHz → %dHz (iOS session + BASS device)", currentRate, finalRate)
-                    } else if actualIOSRate == sampleRate {
-                        os_log(.info, log: logger, "✅ iOS session at %dHz (BASS shows %dHz)", actualIOSRate, finalRate)
+                    if finalRate == sampleRate && actualRate == sampleRate {
+                        os_log(.info, log: logger, "✅ Bit-perfect playback: %.0fHz → %dHz (session + BASS device)", currentRate, finalRate)
+                    } else if actualRate == wantedRate {
+                        os_log(.info, log: logger, "✅ Session at %dHz (BASS shows %dHz)", actualRate, finalRate)
                     } else {
-                        os_log(.info, log: logger, "ℹ️ Device limited to %dHz (iOS: %dHz) - audio will be resampled from %dHz", finalRate, actualIOSRate, sampleRate)
+                        os_log(.info, log: logger, "ℹ️ Device limited to %dHz (session: %dHz) - audio will be resampled from %dHz", finalRate, actualRate, sampleRate)
                     }
                 }
+                // The check above runs microseconds after the request; the route
+                // (an HDMI receiver renegotiating, GH #150) settles later. Log what
+                // the output really runs at, at .default so the diagnostic export
+                // has it: requested vs honoured vs BASS's mix tells "ignored by
+                // tvOS" from "BASS didn't follow".
+                let requested = wantedRate
+                let streamRate = sampleRate
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self = self else { return }
+                    var info = BASS_INFO()
+                    let bassRate = BASS_GetInfo(&info) != 0 ? Int(info.freq) : 0
+                    let s = AVAudioSession.sharedInstance()
+                    let port = s.currentRoute.outputs.first
+                    os_log(.default, log: self.logger,
+                           "🔊 Output rate (stream %dHz): requested %dHz, preferred %.0fHz, session %.0fHz, BASS %dHz, route %{public}s/%{public}s, %dch",
+                           streamRate, requested, s.preferredSampleRate, s.sampleRate, bassRate,
+                           port?.portType.rawValue ?? "none", port?.portName ?? "none", s.outputNumberOfChannels)
+                    #if os(tvOS)
+                    AudioManager.shared.audioPlayer.updateOutputDeviceInfo()   // Settings → Signal Path
+                    #endif
+                }
             } else {
-                os_log(.debug, log: logger, "✅ iOS session rate matches stream: %.0fHz (bit-perfect)", currentRate)
+                os_log(.debug, log: logger, "✅ Session rate already %.0fHz (stream %dHz)", currentRate, sampleRate)
             }
         } catch {
             os_log(.error, log: logger, "❌ Failed to set preferred sample rate: %{public}s", error.localizedDescription)
@@ -800,7 +829,6 @@ class AudioStreamDecoder {
                 os_log(.info, log: logger, "ℹ️ Continuing with BASS device at %dHz", Int(deviceInfo.freq))
             }
         }
-        #endif
 
         // Create push stream with STREAMPROC_PUSH
         // STREAMPROC_PUSH is defined as (STREAMPROC*)-1 in bass.h

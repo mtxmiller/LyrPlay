@@ -65,6 +65,9 @@ class AudioPlayer: NSObject, ObservableObject {
         let outputSampleRate: Int
         let outputChannels: Int
         let latency: Int  // milliseconds
+        /// tvOS: BASS's mix rate when it differs from the session's output
+        /// rate (the OS then resamples the mix; GH #150). nil elsewhere.
+        var mixSampleRate: Int? = nil
 
         var displayString: String {
             return "\(deviceName) • \(AudioPlayer.formatSampleRateKHz(outputSampleRate))kHz • \(latency)ms latency"
@@ -1162,15 +1165,21 @@ class AudioPlayer: NSObject, ObservableObject {
         os_log(.info, log: logger, "🔊 Output device: %{public}s (port: %{public}s)",
                outputInfo.displayString, output.portType.rawValue)
         #else
-        // tvOS: BASS info only — no AVAudioSession route querying. Apple TV outputs
-        // through HDMI/optical via the system; specific port names are not exposed.
-        let outputInfo = OutputDeviceInfo(
-            deviceName: "AppleTV/HDMI",
-            deviceType: "HDMI",
-            outputSampleRate: Int(info.freq),
+        // tvOS: the rate on the wire is the session's (what the TV/receiver
+        // shows); BASS's mix rate is kept separately when it differs (GH #150).
+        let session = AVAudioSession.sharedInstance()
+        let port = session.currentRoute.outputs.first
+        let sessionRate = Int(session.sampleRate)
+        var outputInfo = OutputDeviceInfo(
+            deviceName: port?.portName ?? "HDMI",
+            deviceType: port?.portType.rawValue ?? "HDMI",
+            outputSampleRate: sessionRate > 0 ? sessionRate : Int(info.freq),
             outputChannels: Int(info.speakers),
             latency: Int(info.latency)
         )
+        if sessionRate > 0 && Int(info.freq) != sessionRate {
+            outputInfo.mixSampleRate = Int(info.freq)
+        }
         currentOutputInfo = outputInfo
         os_log(.info, log: logger, "🔊 Output device (tvOS): %{public}s", outputInfo.displayString)
         #endif

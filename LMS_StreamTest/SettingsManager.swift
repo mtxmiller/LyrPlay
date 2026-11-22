@@ -89,6 +89,10 @@ class SettingsManager: ObservableObject {
     }
     @Published var keepScreenAwake: Bool = SettingsManager.keepScreenAwakeDefault  // Prevent screen sleep during playback
     @Published var fixOutputAt100Percent: Bool = SettingsManager.fixOutputAt100PercentDefault  // Lock LMS player at 100% — TV/AVR owns volume
+    /// tvOS: switch the HDMI output to each track's sample rate (GH #150). Off
+    /// keeps the fixed 48 kHz: every switch makes the TV/receiver renegotiate
+    /// (a second or more of silence, a cut first note). iOS always matches.
+    @Published var matchOutputSampleRate: Bool = false
     @Published var experimentalRateMatching: Bool = true  // Multi-room sync drift via BASS_ATTRIB_FREQ rate matching (kill switch)
     @Published var hardwareVolumeButtonsEnabled: Bool = false  // iOS: forward hardware volume buttons to the selected external player (GH#75) — default OFF, opt-in while hardened
     /// tvOS Library tab: set of `LibraryShelf` rawValues that the user has
@@ -238,6 +242,7 @@ class SettingsManager: ObservableObject {
         static let enableAppOpenRecovery = "EnableAppOpenRecovery"
         static let keepScreenAwake = "KeepScreenAwake"
         static let fixOutputAt100Percent = "FixOutputAt100Percent"
+        static let matchOutputSampleRate = "MatchOutputSampleRate"
         static let maxSampleRate = "MaxSampleRate"
         static let customFormatCodes = "CustomFormatCodes"
         static let iOSPlayerFocus = "lyrplay_iOS_Player_Focus"
@@ -425,6 +430,7 @@ class SettingsManager: ObservableObject {
         enableAppOpenRecovery = UserDefaults.standard.object(forKey: Keys.enableAppOpenRecovery) as? Bool ?? true
         keepScreenAwake = UserDefaults.standard.object(forKey: Keys.keepScreenAwake) as? Bool ?? Self.keepScreenAwakeDefault
         fixOutputAt100Percent = UserDefaults.standard.object(forKey: Keys.fixOutputAt100Percent) as? Bool ?? Self.fixOutputAt100PercentDefault
+        matchOutputSampleRate = UserDefaults.standard.bool(forKey: Keys.matchOutputSampleRate)
         maxSampleRate = UserDefaults.standard.object(forKey: Keys.maxSampleRate) as? Int ?? 192000
         customFormatCodes = UserDefaults.standard.string(forKey: Keys.customFormatCodes) ?? ""
         iOSPlayerFocus = UserDefaults.standard.object(forKey: Keys.iOSPlayerFocus) as? Bool ?? false
@@ -568,6 +574,7 @@ class SettingsManager: ObservableObject {
         UserDefaults.standard.set(enableAppOpenRecovery, forKey: Keys.enableAppOpenRecovery)
         UserDefaults.standard.set(keepScreenAwake, forKey: Keys.keepScreenAwake)
         UserDefaults.standard.set(fixOutputAt100Percent, forKey: Keys.fixOutputAt100Percent)
+        UserDefaults.standard.set(matchOutputSampleRate, forKey: Keys.matchOutputSampleRate)
         UserDefaults.standard.set(maxSampleRate, forKey: Keys.maxSampleRate)
         UserDefaults.standard.set(customFormatCodes, forKey: Keys.customFormatCodes)
         UserDefaults.standard.set(iOSPlayerFocus, forKey: Keys.iOSPlayerFocus)

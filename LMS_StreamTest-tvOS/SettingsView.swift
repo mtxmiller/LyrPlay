@@ -38,6 +38,7 @@ struct SettingsView: View {
     var onAudioFormatChanged: () -> Void
 
     @State private var showServerChange = false
+    @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @State private var showFormatPicker = false
     @State private var showLibraryShelves = false
 
@@ -157,9 +158,57 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .tvListRow()
+
+            Toggle("Match Output Sample Rate", isOn: $settings.matchOutputSampleRate)
+                .tvListRow()
+                .onChange(of: settings.matchOutputSampleRate) { _, _ in
+                    settings.saveSettings()
+                }
+
+            signalPathRow
+                .tvListRow()
         } header: {
             Text("Audio").tvSectionHeader()
+        } footer: {
+            Text("Match Output Sample Rate switches HDMI to each track's rate (44.1 to 192 kHz) for receivers that show and use it. The TV or receiver may go quiet for a moment at each switch. Off keeps 48 kHz. Applies from the next track.")
         }
+        .onAppear { audioPlayer.updateOutputDeviceInfo() }
+    }
+
+    /// What plays and what goes out over HDMI, like the iPhone's Signal Path
+    /// (GH #150). The output rate is the session's: what the receiver shows.
+    @ViewBuilder
+    private var signalPathRow: some View {
+        if let stream = audioPlayer.currentStreamInfo, let output = audioPlayer.currentOutputInfo {
+            let matches = abs(stream.sampleRate - output.outputSampleRate) < 100 && output.mixSampleRate == nil
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Signal Path")
+                    Spacer()
+                    Text(matches ? "Native rate" : "Resampled")
+                        .foregroundStyle(.secondary)
+                }
+                Text(signalPathText(stream: stream, output: output))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            HStack {
+                Text("Signal Path")
+                Spacer()
+                Text("Nothing playing").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func signalPathText(stream: AudioPlayer.StreamInfo, output: AudioPlayer.OutputDeviceInfo) -> String {
+        let source = stream.isSavedCopy ? "Saved copy · " : ""
+        var text = "\(source)\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
+        if let mix = output.mixSampleRate {
+            text += " (mixed at \(AudioPlayer.formatSampleRateKHz(mix)) kHz)"
+        }
+        return text
     }
 
     // MARK: - Library
