@@ -59,10 +59,10 @@ Changes to shared files (`LMS_StreamTest/*.swift` compiled into both targets) mu
 
 **Autonomous pilot loop**: `/pilot` (`.claude/commands/pilot.md`) runs one bd-issue → draft-PR iteration scoped to tvOS/UI work (audio pipeline and recovery files are off-limits to it); `/loop /pilot` keeps it running. It never merges, never closes bd issues, and caps at 3 open draft PRs.
 
-**Herdr coordination**: when `HERDR_ENV=1`, the session runs inside [Herdr](https://herdr.dev) and the `herdr` CLI reaches its socket (`$HERDR_SOCKET_PATH`). The maintainer may ask you to coordinate worker agents for LyrPlay: split panes, start named workers, prompt them, wait, read their output, and review their results. Run `herdr --skill` for the command reference before the first command. Rules:
-- LyrPlay only: never prompt, read or control agents in other workspaces.
+**Herdr coordination**: Herdr here is the Herdr desktop app on the herdr-core backend, driven with `hc` (terminals and agents, here or on other machines) and `herdr-app` (what the window shows). Inside a Herdr terminal, `$HC_TERMINAL_ID` is your address. The maintainer may ask you to coordinate worker agents for LyrPlay: start named workers, prompt them, wait, read their output, and review their results. Before the first command, read `hc --skill` (and `herdr-app --skill` when the window layout changes); the user-level `herdr` skill has the local details. Don't use the old `herdr` TUI CLI or `herdr --skill`. Rules:
+- LyrPlay only: never prompt, read or control agents or terminals that aren't LyrPlay work.
 - Workers that edit code get their own git worktree.
-- Never answer a worker's approval or question prompt without asking the maintainer. Never close panes or tabs you didn't create.
+- Never answer a worker's approval or question prompt without asking the maintainer. Never close terminals, panes or tabs you didn't create.
 - Workers never merge, push to `main`, run `scripts/testflight/upload.sh`, or touch App Store Connect. The coordinator reports; the maintainer decides.
 
 ## Issue Tracking
