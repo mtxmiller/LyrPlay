@@ -1535,7 +1535,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         // !isAudio) drill recursively into their children (guarded by CarPlay's
         // template-depth cap). Album browse-then-play is out of scope by design.
         let favoritesItem = CPListItem(
-            text: "★ Favorites",
+            text: "Favorites",
             detailText: "Your saved favorites",
             image: nil,
             accessoryImage: nil,
@@ -1561,34 +1561,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
         }
         items.append(browseArtistsItem)
 
-        // Add Random Artists item
-        let randomArtistsItem = CPListItem(
-            text: "Random Artists",
-            detailText: "Discover artists from your library",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        randomArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.showRandomArtists()
-            completion()
-        }
-        items.append(randomArtistsItem)
-
-        // Add Random Albums item
-        let randomAlbumsItem = CPListItem(
-            text: "More Random Releases",
-            detailText: "More random albums to explore",
-            image: nil,
-            accessoryImage: nil,
-            accessoryType: .disclosureIndicator
-        )
-        randomAlbumsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-            self?.showRandomAlbums()
-            completion()
-        }
-        items.append(randomAlbumsItem)
-
         // Add Playlists item (navigates to full playlist list)
         let playlistsItem = CPListItem(
             text: "Playlists",
@@ -1602,6 +1574,20 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
             completion()
         }
         items.append(playlistsItem)
+
+        // Add Random Artists item
+        let randomArtistsItem = CPListItem(
+            text: "Random Artists",
+            detailText: "Discover artists from your library",
+            image: nil,
+            accessoryImage: nil,
+            accessoryType: .disclosureIndicator
+        )
+        randomArtistsItem.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+            self?.showRandomArtists()
+            completion()
+        }
+        items.append(randomArtistsItem)
 
         // Add Refresh item at bottom
         let refreshItem = CPListItem(
@@ -2122,69 +2108,76 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
 
     // MARK: - Random Artists
 
+    /// Random albums, one page sized to the car's row limit (the home row's
+    /// "Random Releases" heading opens this). No More
+    /// row: a second random page would repeat albums. Each visit reshuffles.
     private func showRandomAlbums() {
         os_log(.info, log: logger, "💿 Fetching random albums for CarPlay")
-
-        fetchRandomAlbumsList { [weak self] albums in
-            guard let self = self else { return }
-
-            if albums.isEmpty {
-                os_log(.error, log: self.logger, "❌ No albums returned from LMS")
-                return
-            }
-
-            // Load artwork for albums
-            self.loadArtworkForAlbums(albums) { [weak self] albumsWithArt in
+        showPagedList(title: "Random Releases", emptyText: "No albums") { [weak self] _, limit, done in
+            self?.fetchAlbumsPage(sort: "random", offset: 0, limit: limit) { albums, _ in
                 guard let self = self else { return }
-
-                var albumItems: [CPListItem] = []
-
-                for album in albumsWithArt {
-                    let item = CPListItem(
-                        text: album.name,
-                        detailText: album.artist,
-                        image: album.artwork ?? self.createPlaceholderImage(),
-                        accessoryImage: nil,
-                        accessoryType: .disclosureIndicator
-                    )
-
-                    item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
-                        self?.playAlbum(album)
-                        completion()
-                    }
-
-                    albumItems.append(item)
-                }
-
-                let albumsTemplate = CPListTemplate(
-                    title: "Random Albums",
-                    sections: [CPListSection(items: albumItems)]
-                )
-
-                self.pushTemplateSafely(albumsTemplate, animated: true)
-                os_log(.info, log: self.logger, "✅ Displayed %d random albums", albumItems.count)
+                self.albumListItems(albums) { items in done(items, items.count) }
             }
         }
     }
 
-    private func fetchRandomAlbumsList(completion: @escaping ([Album]) -> Void) {
+    /// Newest albums first, paged with More (GH #147).
+    private func showFullNewMusicList() {
+        os_log(.info, log: logger, "🆕 Fetching new music for CarPlay")
+        showPagedList(title: "New Music", emptyText: "No albums") { [weak self] offset, limit, done in
+            self?.fetchAlbumsPage(sort: "new", offset: offset, limit: limit) { albums, total in
+                guard let self = self else { return }
+                self.albumListItems(albums) { items in done(items, total) }
+            }
+        }
+    }
+
+    private func showFullRandomReleasesList() {
+        showRandomAlbums()
+    }
+
+    /// Album rows (cover, artist) that play the album when tapped.
+    private func albumListItems(_ albums: [Album], completion: @escaping ([CPListItem]) -> Void) {
+        loadArtworkForAlbums(albums) { [weak self] albumsWithArt in
+            guard let self = self else { return }
+            let items = albumsWithArt.map { album -> CPListItem in
+                let item = CPListItem(
+                    text: album.name,
+                    detailText: album.artist,
+                    image: album.artwork ?? self.createPlaceholderImage(),
+                    accessoryImage: nil,
+                    accessoryType: .disclosureIndicator
+                )
+                item.handler = { [weak self] (item: CPSelectableListItem, completion: @escaping () -> Void) in
+                    self?.playAlbum(album)
+                    completion()
+                }
+                return item
+            }
+            completion(items)
+        }
+    }
+
+    /// One page of `albums` in LMS order `sort` (new, random, …) plus LMS's total.
+    private func fetchAlbumsPage(sort: String, offset: Int, limit: Int,
+                                 completion: @escaping ([Album], Int) -> Void) {
         guard let coordinator = AudioManager.shared.slimClient else {
-            completion([])
+            completion([], 0)
             return
         }
 
         let jsonRPCCommand: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": ["", ["albums", 0, 20, "sort:random", "tags:ajlqy"]]
+            "params": ["", ["albums", offset, limit, "sort:\(sort)", "tags:ajlqy"]]
         ]
 
         coordinator.sendJSONRPCCommandDirect(jsonRPCCommand) { [weak self] response in
             DispatchQueue.main.async {
                 guard let result = response["result"] as? [String: Any],
                       let albumsLoop = result["albums_loop"] as? [[String: Any]] else {
-                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to parse random albums response")
-                    completion([])
+                    os_log(.error, log: self?.logger ?? OSLog.default, "❌ Failed to parse albums (sort:%{public}s)", sort)
+                    completion([], 0)
                     return
                 }
 
@@ -2193,15 +2186,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                           let name = albumData["album"] as? String else {
                         return nil
                     }
-
                     let artist = albumData["artist"] as? String ?? "Unknown Artist"
                     let artworkTrackId = albumData["artwork_track_id"] as? String
-
                     return Album(id: id, name: name, artist: artist, artworkTrackId: artworkTrackId, artwork: nil)
                 }
 
-                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Fetched %d random albums", albums.count)
-                completion(albums)
+                let total = Self.intValue(result["count"]) ?? albums.count
+                os_log(.info, log: self?.logger ?? OSLog.default, "✅ Fetched %d of %d albums (sort:%{public}s, from %d)",
+                       albums.count, total, sort, offset)
+                completion(albums, total)
             }
         }
     }
@@ -2807,16 +2800,6 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPN
                 completion(albums, total)
             }
         }
-    }
-
-    private func showFullNewMusicList() {
-        // TODO: Implement full New Music list view
-        os_log(.info, log: logger, "📋 Show full New Music list")
-    }
-
-    private func showFullRandomReleasesList() {
-        // TODO: Implement full Random Releases list view
-        os_log(.info, log: logger, "📋 Show full Random Releases list")
     }
 
     // MARK: - Fast Metadata Fetch (No Artwork)
