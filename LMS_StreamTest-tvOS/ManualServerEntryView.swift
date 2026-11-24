@@ -20,6 +20,7 @@ struct ManualServerEntryView: View {
     @State private var testTask: Task<Void, Never>? = nil
     @State private var errorMessage: String? = nil
     @State private var didPrefill: Bool = false
+    @State private var signInTarget: ServerSignInTarget? = nil
 
     @FocusState private var focusedField: Field?
 
@@ -60,6 +61,9 @@ struct ManualServerEntryView: View {
         .onAppear(perform: prefillIfNeeded)
         .onDisappear { testTask?.cancel() }
         .defaultFocus($focusedField, .octet1)
+        .navigationDestination(item: $signInTarget) { target in
+            ServerSignInView(target: target, onComplete: onComplete)
+        }
     }
 
     private var octetRow: some View {
@@ -191,14 +195,7 @@ struct ManualServerEntryView: View {
         let port = Int(webPort) ?? 9000
 
         testTask = Task {
-            let result = await settings.testConnection(
-                host: host,
-                webPort: port,
-                slimProtoPort: 3483,
-                webUseHTTPS: false,
-                allowSelfSignedCert: false,
-                authHeader: nil
-            )
+            let result = await ServerSetup.test(host: host, port: port, settings: settings)
 
             if Task.isCancelled { return }
 
@@ -222,18 +219,16 @@ struct ManualServerEntryView: View {
         switch result {
         case .success:
             os_log(.info, log: logger, "Manual entry succeeded for %{public}s:%ld", host, port)
-            settings.serverHost = host
-            settings.serverWebPort = port
-            settings.serverSlimProtoPort = 3483
-            settings.saveSettings()
-            if let onComplete {
-                onComplete()
-            } else {
-                settings.markAsConfigured()
-            }
+            let login = ServerSetup.savedLogin(for: host, settings: settings)
+            ServerSetup.commit(host: host, port: port, username: login.username, password: login.password,
+                               settings: settings, onComplete: onComplete)
+
+        case _ where ServerSetup.needsSignIn(result):
+            os_log(.info, log: logger, "%{public}s:%ld requires sign-in", host, port)
+            signInTarget = ServerSignInTarget(host: host, port: port)
 
         case .webPortFailure:
-            errorMessage = "\(host):\(port) answered, but it doesn't look like LMS (or it requires sign-in)."
+            errorMessage = "\(host):\(port) answered, but it doesn't look like LMS."
 
         case .slimProtoPortFailure:
             errorMessage = "\(host) answered on the web port, but the player port (3483) didn't. Make sure LMS is fully running."

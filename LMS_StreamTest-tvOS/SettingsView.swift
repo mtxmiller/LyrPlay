@@ -96,6 +96,7 @@ struct SettingsView: View {
     private var serverSection: some View {
         Section {
             row(label: "Current host", value: settings.serverHost.isEmpty ? "—" : settings.serverHost)
+            row(label: "Signed in as", value: settings.serverUsername.isEmpty ? "No sign-in" : settings.serverUsername)
 
             Button {
                 showServerChange = true

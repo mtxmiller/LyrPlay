@@ -12,6 +12,10 @@ struct ServerConnectView: View {
 
     @StateObject private var discovery = ServerDiscoveryManager()
     @FocusState private var focusedField: FocusField?
+    /// The discovered server being checked for sign-in (shows a spinner).
+    @State private var checkingServerID: DiscoveredServer.ID? = nil
+    @State private var checkTask: Task<Void, Never>? = nil
+    @State private var signInTarget: ServerSignInTarget? = nil
 
     private enum FocusField: Hashable {
         case manualEntry
@@ -31,7 +35,15 @@ struct ServerConnectView: View {
         .frame(maxWidth: 900)
         .padding(.horizontal, 80)
         .onAppear { discovery.startDiscovery() }
+        .onDisappear {
+            checkTask?.cancel()
+            checkTask = nil
+            checkingServerID = nil
+        }
         .defaultFocus($focusedField, .manualEntry)
+        .navigationDestination(item: $signInTarget) { target in
+            ServerSignInView(target: target, onComplete: onComplete)
+        }
     }
 
     @ViewBuilder
@@ -113,13 +125,18 @@ struct ServerConnectView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(.secondary)
+                            if checkingServerID == server.id {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .padding(.vertical, 16)
                         .padding(.horizontal, 24)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .disabled(checkingServerID != nil)
                     .accessibilityLabel("\(server.name), \(server.host) port \(server.port)")
                 }
             }
@@ -164,17 +181,32 @@ struct ServerConnectView: View {
         .accessibilityLabel("Enter server address manually")
     }
 
+    /// Checks the server for password protection first (bd dtz): a 401
+    /// opens Sign In. Any other result commits as before, so a slow or
+    /// half-started server still gets picked and the app's own reconnect
+    /// logic takes over.
     private func applyDiscoveredServer(_ server: DiscoveredServer) {
+        guard checkingServerID == nil else { return }
         let settings = SettingsManager.shared
-        settings.serverHost = server.host
-        settings.serverWebPort = server.port
-        settings.serverSlimProtoPort = 3483
-        settings.saveSettings()
+        checkingServerID = server.id
 
-        if let onComplete {
-            onComplete()
-        } else {
-            settings.markAsConfigured()
+        checkTask = Task {
+            let result = await ServerSetup.test(host: server.host, port: server.port, settings: settings)
+            if Task.isCancelled { return }
+
+            await MainActor.run {
+                if Task.isCancelled { return }
+                checkingServerID = nil
+                checkTask = nil
+                if ServerSetup.needsSignIn(result) {
+                    signInTarget = ServerSignInTarget(host: server.host, port: server.port)
+                } else {
+                    let login = ServerSetup.savedLogin(for: server.host, settings: settings)
+                    ServerSetup.commit(host: server.host, port: server.port,
+                                       username: login.username, password: login.password,
+                                       settings: settings, onComplete: onComplete)
+                }
+            }
         }
     }
 }
