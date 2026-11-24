@@ -15,6 +15,7 @@ struct ManualServerEntryView: View {
     @State private var octet3: String = ""
     @State private var octet4: String = ""
     @State private var webPort: String = "9000"
+    @State private var slimPort: String = "3483"
 
     @State private var isTesting: Bool = false
     @State private var testTask: Task<Void, Never>? = nil
@@ -29,6 +30,7 @@ struct ManualServerEntryView: View {
     private enum Field: Hashable {
         case octet1, octet2, octet3, octet4
         case webPort
+        case slimPort
         case connect
     }
 
@@ -94,21 +96,30 @@ struct ManualServerEntryView: View {
             }
     }
 
+    /// Web port + player (SlimProto) port. The player port is 3483 unless
+    /// the server maps it elsewhere (Docker, a second LMS on one host).
     private var portRow: some View {
+        HStack(spacing: 48) {
+            portField(label: "Web port", placeholder: "9000", text: $webPort, focus: .webPort)
+            portField(label: "Player port", placeholder: "3483", text: $slimPort, focus: .slimPort)
+        }
+    }
+
+    private func portField(label: String, placeholder: String, text: Binding<String>, focus: Field) -> some View {
         HStack(spacing: 24) {
-            Text("Web port")
+            Text(label)
                 .font(.title3)
-            TextField("9000", text: $webPort)
+            TextField(placeholder, text: text)
                 .keyboardType(.numberPad)
                 .multilineTextAlignment(.center)
                 .frame(width: 200)
-                .focused($focusedField, equals: .webPort)
-                .accessibilityLabel("Web port")
-                .accessibilityValue(webPort.isEmpty ? "Empty" : webPort)
-                .onChange(of: webPort) { _, newValue in
+                .focused($focusedField, equals: focus)
+                .accessibilityLabel(label)
+                .accessibilityValue(text.wrappedValue.isEmpty ? "Empty" : text.wrappedValue)
+                .onChange(of: text.wrappedValue) { _, newValue in
                     let filtered = String(newValue.filter(\.isNumber).prefix(5))
                     if filtered != newValue {
-                        webPort = filtered
+                        text.wrappedValue = filtered
                     }
                 }
         }
@@ -152,6 +163,7 @@ struct ManualServerEntryView: View {
     private var isFormValid: Bool {
         guard validOctet(octet1), validOctet(octet2), validOctet(octet3), validOctet(octet4) else { return false }
         guard let port = Int(webPort), (1...65535).contains(port) else { return false }
+        guard let slim = Int(slimPort), (1...65535).contains(slim) else { return false }
         return true
     }
 
@@ -177,6 +189,9 @@ struct ManualServerEntryView: View {
         if settings.serverWebPort > 0 {
             webPort = String(settings.serverWebPort)
         }
+        if settings.serverSlimProtoPort > 0 {
+            slimPort = String(settings.serverSlimProtoPort)
+        }
     }
 
     private func parseIPv4(_ s: String) -> (String, String, String, String)? {
@@ -193,9 +208,10 @@ struct ManualServerEntryView: View {
 
         let host = assembledHost
         let port = Int(webPort) ?? 9000
+        let slim = Int(slimPort) ?? 3483
 
         testTask = Task {
-            let result = await ServerSetup.test(host: host, port: port, settings: settings)
+            let result = await ServerSetup.test(host: host, port: port, slimPort: slim, settings: settings)
 
             if Task.isCancelled { return }
 
@@ -203,7 +219,7 @@ struct ManualServerEntryView: View {
                 if Task.isCancelled { return }
                 isTesting = false
                 testTask = nil
-                handleTestResult(result, host: host, port: port)
+                handleTestResult(result, host: host, port: port, slimPort: slim)
             }
         }
     }
@@ -215,23 +231,23 @@ struct ManualServerEntryView: View {
         os_log(.info, log: logger, "User cancelled connection test")
     }
 
-    private func handleTestResult(_ result: SettingsManager.ConnectionTestResult, host: String, port: Int) {
+    private func handleTestResult(_ result: SettingsManager.ConnectionTestResult, host: String, port: Int, slimPort: Int) {
         switch result {
         case .success:
             os_log(.info, log: logger, "Manual entry succeeded for %{public}s:%ld", host, port)
             let login = ServerSetup.savedLogin(for: host, settings: settings)
-            ServerSetup.commit(host: host, port: port, username: login.username, password: login.password,
+            ServerSetup.commit(host: host, port: port, slimPort: slimPort, username: login.username, password: login.password,
                                settings: settings, onComplete: onComplete)
 
         case _ where ServerSetup.needsSignIn(result):
             os_log(.info, log: logger, "%{public}s:%ld requires sign-in", host, port)
-            signInTarget = ServerSignInTarget(host: host, port: port)
+            signInTarget = ServerSignInTarget(host: host, port: port, slimPort: slimPort)
 
         case .webPortFailure:
             errorMessage = "\(host):\(port) answered, but it doesn't look like LMS."
 
         case .slimProtoPortFailure:
-            errorMessage = "\(host) answered on the web port, but the player port (3483) didn't. Make sure LMS is fully running."
+            errorMessage = "\(host) answered on the web port, but the player port (\(slimPort)) didn't. Make sure LMS is fully running."
 
         case .networkError, .timeout:
             errorMessage = "Couldn't reach \(host):\(port). Check the address and that LMS is on the same network."

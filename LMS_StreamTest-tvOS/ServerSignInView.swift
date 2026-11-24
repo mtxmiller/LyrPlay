@@ -5,7 +5,8 @@ import os.log
 struct ServerSignInTarget: Hashable, Identifiable {
     let host: String
     let port: Int
-    var id: String { "\(host):\(port)" }
+    var slimPort: Int = 3483
+    var id: String { "\(host):\(port):\(slimPort)" }
 }
 
 /// Shared by server discovery, manual entry and sign-in (bd dtz).
@@ -25,12 +26,13 @@ enum ServerSetup {
     }
 
     /// Tests `host` with the saved login for it (if any).
-    static func test(host: String, port: Int, settings: SettingsManager) async -> SettingsManager.ConnectionTestResult {
+    static func test(host: String, port: Int, slimPort: Int = 3483,
+                     settings: SettingsManager) async -> SettingsManager.ConnectionTestResult {
         let login = savedLogin(for: host, settings: settings)
         return await settings.testConnection(
             host: host,
             webPort: port,
-            slimProtoPort: 3483,
+            slimProtoPort: slimPort,
             webUseHTTPS: false,
             allowSelfSignedCert: false,
             authHeader: SettingsManager.generateAuthHeader(username: login.username, password: login.password)
@@ -40,11 +42,11 @@ enum ServerSetup {
     /// Saves the server and its login. An empty username means "no login"
     /// and removes a stored one, so a previous server's password never
     /// follows the user to a new server.
-    static func commit(host: String, port: Int, username: String, password: String,
+    static func commit(host: String, port: Int, slimPort: Int = 3483, username: String, password: String,
                        settings: SettingsManager, onComplete: (() -> Void)?) {
         settings.serverHost = host
         settings.serverWebPort = port
-        settings.serverSlimProtoPort = 3483
+        settings.serverSlimProtoPort = slimPort
         settings.serverUsername = username
         settings.serverPassword = username.isEmpty ? "" : password
         settings.saveSettings()
@@ -183,7 +185,7 @@ struct ServerSignInView: View {
             let result = await settings.testConnection(
                 host: target.host,
                 webPort: target.port,
-                slimProtoPort: 3483,
+                slimProtoPort: target.slimPort,
                 webUseHTTPS: false,
                 allowSelfSignedCert: false,
                 authHeader: SettingsManager.generateAuthHeader(username: user, password: pass)
@@ -210,7 +212,8 @@ struct ServerSignInView: View {
         switch result {
         case .success:
             os_log(.info, log: logger, "Signed in to %{public}s:%ld as %{public}s", host, target.port, username)
-            ServerSetup.commit(host: host, port: target.port, username: username, password: password,
+            ServerSetup.commit(host: host, port: target.port, slimPort: target.slimPort,
+                               username: username, password: password,
                                settings: settings, onComplete: onComplete)
 
         case _ where ServerSetup.needsSignIn(result):
@@ -221,7 +224,7 @@ struct ServerSignInView: View {
             errorMessage = "\(host):\(target.port) answered, but it doesn't look like LMS."
 
         case .slimProtoPortFailure:
-            errorMessage = "\(host) answered on the web port, but the player port (3483) didn't. Make sure LMS is fully running."
+            errorMessage = "\(host) answered on the web port, but the player port (\(target.slimPort)) didn't. Make sure LMS is fully running."
 
         case .networkError, .timeout:
             errorMessage = "Couldn't reach \(host):\(target.port). Check that LMS is running."
