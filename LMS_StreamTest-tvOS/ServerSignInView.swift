@@ -105,6 +105,10 @@ struct ServerSignInView: View {
 
                 SecureField("Password", text: $password)
                     .textContentType(.password)
+                    // Without these the keyboard (and iPhone keyboard entry)
+                    // capitalizes the first letter, hidden by the dots.
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
                     .focused($focusedField, equals: .password)
                     .onSubmit { focusedField = .signIn }
 
