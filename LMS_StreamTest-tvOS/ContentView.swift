@@ -145,8 +145,11 @@ struct ContentView: View {
     // MARK: - Reset
 
     private func resetConfiguration() {
+        // Keep AudioManager's coordinator: the next ContentView reuses it
+        // (startPlayerRegistration) and points it at the new server. A new
+        // one would run next to this one with the same player MAC, as
+        // Change Server did (CLAUDE.md rule #8).
         coordinator?.disconnect()
-        AudioManager.shared.slimClient = nil
         coordinator = nil
         unregisterRemoteCommands()
         settings.resetConfiguration()
