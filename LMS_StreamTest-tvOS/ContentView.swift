@@ -154,17 +154,16 @@ struct ContentView: View {
 
     // MARK: - Server change (Settings ▸ Change Server)
 
-    /// Tears down the current SlimProtoCoordinator and rebuilds against the
-    /// new host that ServerConnectView has already written to
-    /// `settings.serverHost`. SettingsView clears the 3 recovery keys before
+    /// Reconnects the existing SlimProtoCoordinator to the new host that
+    /// ServerConnectView has already written to `settings.serverHost`. SettingsView clears the 3 recovery keys before
     /// invoking this closure (they point at the OLD server's playlist —
     /// CLAUDE.md rule #4 atomicity).
     ///
     /// Differs from `resetConfiguration()` in two ways:
     ///   1. Does NOT call `settings.resetConfiguration()` — that would zero
     ///      `serverHost`, but ServerConnectView just wrote the NEW host there.
-    ///   2. Re-runs `startPlayerRegistration()` immediately so the user
-    ///      doesn't need to drop back to the onboarding flow.
+    ///   2. Keeps the coordinator and reconnects it, so the user doesn't
+    ///      need to drop back to the onboarding flow.
     // MARK: - Audio format change (Settings ▸ Audio Format)
 
     /// Audio format change requires a fresh HELO so the server learns the new
@@ -180,12 +179,27 @@ struct ContentView: View {
     }
 
     private func handleServerChanged() {
-        os_log(.info, log: logger, "🔄 Server change committed — rebuilding coordinator against new host")
-        coordinator?.disconnect()
-        AudioManager.shared.slimClient = nil
-        coordinator = nil
-        unregisterRemoteCommands()
-        startPlayerRegistration()
+        // Reuse the one coordinator, as iOS does (ContentView.swift server
+        // change). Replacing it left the old one alive and reconnecting:
+        // its client reads the server from settings, so both connected to
+        // the NEW server with the same player MAC and kept knocking each
+        // other off (reconnect every ~2 s until the app restarted). CLAUDE.md
+        // rule #8: never create a coordinator when one exists.
+        guard let coordinator else {
+            startPlayerRegistration()
+            return
+        }
+        os_log(.info, log: logger, "🔄 Server change committed — reconnecting the coordinator to %{public}s", settings.activeServerHost)
+        coordinator.disconnect()
+        coordinator.updateServerSettings(
+            host: settings.activeServerHost,
+            port: UInt16(settings.activeServerSlimProtoPort)
+        )
+        coordinator.resetConnectionManager()
+        // Same short pause as iOS so the SHUT + socket close finish first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            coordinator.connect()
+        }
     }
 
     // MARK: - MPRemoteCommandCenter (per design D2 — register once, outlive sub-screens)
