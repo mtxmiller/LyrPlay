@@ -42,6 +42,9 @@ struct SettingsPage<Content: View>: View {
             // The list's scroll view clipped the focused row as it grew,
             // cutting off the rounded ends of the focus highlight.
             .scrollClipDisabled()
+            // Space between the tab bar and the first row (it sat close,
+            // more so when focused and grown).
+            .padding(.top, 40)
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 60)
