@@ -59,7 +59,7 @@ struct JiveBrowseView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "JiveBrowseView")
 
     private var dispatcher: JiveDispatcher {
-        JiveDispatcher(coordinator: coordinator, playerID: settings.playerMACAddress)
+        JiveDispatcher(coordinator: coordinator, playerID: ControlledPlayer.shared.targetID)
     }
 
     var body: some View {

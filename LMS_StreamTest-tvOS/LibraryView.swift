@@ -309,7 +309,7 @@ struct LibraryView: View {
         let request: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, cliList]
+            "params": [ControlledPlayer.shared.targetID, cliList]
         ]
         let response = await coordinator.sendJSONRPCCommand(request)
         return response["result"] as? [String: Any]

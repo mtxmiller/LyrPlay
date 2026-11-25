@@ -267,7 +267,7 @@ struct BuiltinTrackListView: View {
             "id": 1,
             "method": "slim.request",
             "params": [
-                settings.playerMACAddress,
+                ControlledPlayer.shared.targetID,
                 ["playlistcontrol", "cmd:load", source.idParam, "play_index:\(index)"]
             ]
         ]
@@ -287,7 +287,7 @@ struct BuiltinTrackListView: View {
             "id": 1,
             "method": "slim.request",
             "params": [
-                settings.playerMACAddress,
+                ControlledPlayer.shared.targetID,
                 ["playlistcontrol", "cmd:load", "track_id:\(track.id)"]
             ]
         ]
@@ -301,7 +301,7 @@ struct BuiltinTrackListView: View {
             "id": 1,
             "method": "slim.request",
             "params": [
-                settings.playerMACAddress,
+                ControlledPlayer.shared.targetID,
                 ["playlistcontrol", "cmd:add", "track_id:\(track.id)"]
             ]
         ]
