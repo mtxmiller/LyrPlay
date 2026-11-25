@@ -6,6 +6,8 @@ struct QueueView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     let accentColor: Color
+    /// Queue of the chosen player (bd 9dtq): this Apple TV or another one.
+    @ObservedObject var controlled: ControlledPlayer = .shared
 
     @State private var tracks: [PlaylistTrack] = []
     @State private var currentIndex: Int = 0
@@ -15,7 +17,7 @@ struct QueueView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "QueueView")
 
     var body: some View {
-        TVScreen(artwork: nowPlaying.currentArtwork) {
+        TVScreen(artwork: controlled.isRemote ? controlled.artwork : nowPlaying.currentArtwork) {
             ScrollViewReader { proxy in
                 TVList {
                     if tracks.isEmpty && !isLoading {
@@ -53,7 +55,13 @@ struct QueueView: View {
                 // TabView-level .onPlayPauseCommand never sees presses from inside the
                 // cover. Local handler restores resume-from-paused here. See ContentView
                 // for the tvOS-asymmetric-MPRC explanation.
-                .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
+                .onPlayPauseCommand {
+                    if controlled.isRemote {
+                        controlled.togglePlayPause()
+                    } else {
+                        coordinator.toggleLockScreenPlayPause()
+                    }
+                }
                 .onAppear {
                     fetchPlaylist {
                         scrollToCurrent(proxy: proxy, animated: false)
@@ -62,6 +70,12 @@ struct QueueView: View {
                 .onChange(of: nowPlaying.currentTrackTitle) { _, _ in
                     // Refresh contents + indicator on track change, but don't yank scroll
                     // away from a user who is browsing past rows. Indicator moves on its own.
+                    guard !controlled.isRemote else { return }
+                    fetchPlaylist(completion: nil)
+                }
+                // Another player: its polled status says when the track moves.
+                .onChange(of: controlled.status?.title) { _, _ in
+                    guard controlled.isRemote else { return }
                     fetchPlaylist(completion: nil)
                 }
             }
@@ -128,7 +142,7 @@ struct QueueView: View {
             // Using "-" as start returns tracks from the current track forward, which would offset all indices.
             // tags: d=duration, a=artist, l=album, c=coverid (lowercase — uppercase C silently
             // returns nothing), K=artwork_url (the real cover for remote/plugin tracks).
-            "params": [settings.playerMACAddress, ["status", 0, 9999, "tags:dalcK"]]
+            "params": [ControlledPlayer.shared.targetID, ["status", 0, 9999, "tags:dalcK"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { response in
             DispatchQueue.main.async {
@@ -172,7 +186,7 @@ struct QueueView: View {
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["playlist", "index", index]]
+            "params": [ControlledPlayer.shared.targetID, ["playlist", "index", index]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in
             // Server broadcasts track-change; .onChange(currentTrackTitle) refetches and re-scrolls.

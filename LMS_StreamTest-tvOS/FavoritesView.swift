@@ -125,7 +125,7 @@ struct FavoritesView: View {
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["favorites", "playlist", "play", "item_id:\(item.id)"]]
+            "params": [ControlledPlayer.shared.targetID, ["favorites", "playlist", "play", "item_id:\(item.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
@@ -271,7 +271,7 @@ struct FavoritesFolderView: View {
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["favorites", "playlist", "play", "item_id:\(item.id)"]]
+            "params": [ControlledPlayer.shared.targetID, ["favorites", "playlist", "play", "item_id:\(item.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }

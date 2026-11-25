@@ -60,7 +60,14 @@ struct ContentView: View {
                 //   responder chain to this .onPlayPauseCommand instead.
                 // Attached at TabView level so it catches the press regardless of which
                 // tab/sub-view has focus. Both this and MPRC route to sendLockScreenCommand.
-                .onPlayPauseCommand { coordinator.toggleLockScreenPlayPause() }
+                // With another player chosen (bd 9dtq) the press controls it.
+                .onPlayPauseCommand {
+                    if ControlledPlayer.shared.isRemote {
+                        ControlledPlayer.shared.togglePlayPause()
+                    } else {
+                        coordinator.toggleLockScreenPlayPause()
+                    }
+                }
             } else {
                 connectingView
             }
@@ -152,6 +159,7 @@ struct ContentView: View {
         coordinator?.disconnect()
         coordinator = nil
         unregisterRemoteCommands()
+        ControlledPlayer.shared.selectThisDevice()
         // Forget the login too, so it can't follow the user to another
         // server. resetConfiguration() saves, which removes it from the
         // Keychain (empty username).
@@ -198,6 +206,8 @@ struct ContentView: View {
             return
         }
         os_log(.info, log: logger, "🔄 Server change committed — reconnecting the coordinator to %{public}s", settings.activeServerHost)
+        // Players belong to the old server.
+        ControlledPlayer.shared.selectThisDevice()
         coordinator.disconnect()
         coordinator.updateServerSettings(
             host: settings.activeServerHost,

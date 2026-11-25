@@ -8,6 +8,10 @@ struct NowPlayingView: View {
     let coordinator: SlimProtoCoordinator
     @ObservedObject var settings: SettingsManager
     @ObservedObject var audioPlayer: AudioPlayer
+    /// The player Now Playing shows and controls (bd 9dtq): this Apple TV
+    /// (NowPlayingManager + coordinator, as before) or another LMS player
+    /// (ControlledPlayer's polled status + JSON-RPC commands).
+    @ObservedObject var controlled: ControlledPlayer = .shared
 
     @State private var accentColor: Color = .accentColor
     @State private var accentRGB: SIMD3<Float> = SIMD3<Float>(0.5, 0.6, 1.0)
@@ -18,6 +22,7 @@ struct NowPlayingView: View {
     @State private var scrubElapsed: Double = 0
     @State private var showVisualizer: Bool = false
     @State private var showQueue: Bool = false
+    @State private var showPlayerPicker: Bool = false
     // LMS playlist modes (w53). Synced from the server on appear / track change
     // and after each toggle — same sync points CarPlay uses for its shuffle
     // button (external toggles mid-screen reflect on the next track change).
@@ -33,7 +38,7 @@ struct NowPlayingView: View {
     private let scrubStepSeconds: Double = 10.0
 
     var body: some View {
-        TVScreen(artwork: nowPlaying.currentArtwork) {
+        TVScreen(artwork: artwork) {
             HStack(alignment: .top, spacing: 64) {
                 artworkPanel
                     .frame(width: 720, height: 720)
@@ -69,10 +74,15 @@ struct NowPlayingView: View {
                 }
             }
         }
-        .onChange(of: nowPlaying.currentArtwork) { _, _ in updateAccent() }
+        .onChange(of: artwork) { _, _ in updateAccent() }
+        .onChange(of: controlled.selectedID) { _, _ in
+            tick()
+            updateAccent()
+            syncPlaylistModes()
+        }
         // Track changes are the cheap re-sync point for repeat/shuffle toggled
         // from another controller (Material web UI, iPhone) — w53.
-        .onChange(of: nowPlaying.currentTrackTitle) { _, _ in syncPlaylistModes() }
+        .onChange(of: trackTitle) { _, _ in syncPlaylistModes() }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in tick() }
         .fullScreenCover(isPresented: $showVisualizer) {
             VisualizerView(accentColor: accentRGB,
@@ -97,6 +107,18 @@ struct NowPlayingView: View {
         }
     }
 
+    // MARK: - Display source (this Apple TV or another player)
+
+    private var remote: PlayerStatus? {
+        controlled.isRemote ? (controlled.status ?? PlayerStatus()) : nil
+    }
+    private var artwork: UIImage? { controlled.isRemote ? controlled.artwork : nowPlaying.currentArtwork }
+    private var hasTrack: Bool { remote?.hasTrack ?? nowPlaying.hasTrackLoaded }
+    private var trackTitle: String { remote?.title ?? nowPlaying.currentTrackTitle }
+    private var trackArtist: String { remote?.artist ?? nowPlaying.currentArtist }
+    private var trackAlbum: String { remote?.album ?? nowPlaying.currentAlbum }
+    private var trackDuration: Double { remote?.duration ?? nowPlaying.metadataDuration }
+
     // MARK: - Foreground content
 
     @ViewBuilder
@@ -114,7 +136,7 @@ struct NowPlayingView: View {
 
     private var artworkPanel: some View {
         ZStack {
-            if let art = nowPlaying.currentArtwork {
+            if let art = artwork {
                 Image(uiImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -141,15 +163,17 @@ struct NowPlayingView: View {
         .shadow(color: .black.opacity(0.4), radius: 24, x: 0, y: 12)
         .opacity(isPlaying ? 1.0 : 0.88)
         .animation(reduceMotion ? .none : .spring(response: 0.4, dampingFraction: 0.85),
-                   value: nowPlaying.currentArtwork)
+                   value: artwork)
         .animation(reduceMotion ? .none : .easeInOut(duration: 0.3), value: isPlaying)
         .animation(reduceMotion ? .none : .easeInOut(duration: 0.15), value: artworkFocused)
-        .focusable(nowPlaying.hasTrackLoaded)
+        // The visualizer shows this Apple TV's own audio: not offered while
+        // another player is controlled.
+        .focusable(hasTrack && !controlled.isRemote)
         .focused($artworkFocused)
         .onTapGesture {
             // Only enter visualizer when a track is loaded — silent or pre-first-track
             // state has no FFT to react to.
-            if nowPlaying.hasTrackLoaded {
+            if hasTrack && !controlled.isRemote {
                 showVisualizer = true
             }
         }
@@ -160,9 +184,21 @@ struct NowPlayingView: View {
 
     private var metadataPanel: some View {
         VStack(spacing: 0) {
+            PlayingOnButton(name: controlled.displayName, isRemote: controlled.isRemote) {
+                os_log(.info, log: logger, "Player picker opened")
+                showPlayerPicker = true
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            // On the button, not the screen root: a third fullScreenCover on
+            // the root (next to the visualizer and queue covers) never showed.
+            .fullScreenCover(isPresented: $showPlayerPicker) {
+                PlayerPickerView(controlled: controlled) { showPlayerPicker = false }
+                    .onExitCommand { showPlayerPicker = false }
+            }
+
             Spacer(minLength: 24)
 
-            if nowPlaying.hasTrackLoaded {
+            if hasTrack {
                 trackHeader
             } else {
                 emptyState
@@ -174,26 +210,31 @@ struct NowPlayingView: View {
 
             transportRow
                 .padding(.top, 24)
+
+            if controlled.isRemote {
+                volumeRow
+                    .padding(.top, 24)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var trackHeader: some View {
         VStack(spacing: 16) {
-            Text(nowPlaying.currentTrackTitle)
+            Text(trackTitle)
                 .font(.system(size: 64, weight: .bold))
                 .lineLimit(2)
                 .truncationMode(.tail)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.primary)
 
-            Text(nowPlaying.currentArtist)
+            Text(trackArtist)
                 .font(.title)                 // 28pt per design D2-2
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .foregroundStyle(.secondary)
 
-            Text(nowPlaying.currentAlbum)
+            Text(trackAlbum)
                 .font(.title3)                // 20pt
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -208,7 +249,9 @@ struct NowPlayingView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Connected to \(settings.effectivePlayerName)")
+            Text(controlled.isRemote
+                 ? "Nothing playing on \(controlled.displayName)"
+                 : "Connected to \(settings.effectivePlayerName)")
                 .font(.system(size: 56, weight: .bold))
                 .foregroundStyle(.primary)
 
@@ -228,12 +271,12 @@ struct NowPlayingView: View {
 
     @ViewBuilder
     private var playbackPanel: some View {
-        if nowPlaying.hasTrackLoaded && nowPlaying.metadataDuration > 0 {
+        if hasTrack && trackDuration > 0 {
             VStack(spacing: 6) {
                 streamInfoLine
                 progressRow
             }
-        } else if nowPlaying.hasTrackLoaded {
+        } else if hasTrack {
             VStack(spacing: 6) {
                 streamInfoLine
                 liveRow
@@ -248,7 +291,7 @@ struct NowPlayingView: View {
     /// timer is the visual focus of the playback panel, not this.
     @ViewBuilder
     private var streamInfoLine: some View {
-        if let stream = audioPlayer.currentStreamInfo {
+        if !controlled.isRemote, let stream = audioPlayer.currentStreamInfo {
             Text(stream.displayString)
                 .font(.caption)
                 .monospacedDigit()
@@ -307,7 +350,7 @@ struct NowPlayingView: View {
 
     private var progressRow: some View {
         let displayElapsed = isScrubbing ? scrubElapsed : elapsed
-        let total = max(nowPlaying.metadataDuration, 1)
+        let total = max(trackDuration, 1)
         let progress = min(max(displayElapsed / total, 0), 1)
         return HStack(spacing: 16) {
             Text(formatTime(displayElapsed))
@@ -318,7 +361,7 @@ struct NowPlayingView: View {
 
             scrubBar(progress: progress)
 
-            Text(formatTime(nowPlaying.metadataDuration))
+            Text(formatTime(trackDuration))
                 .font(.system(size: 20, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -326,7 +369,7 @@ struct NowPlayingView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Playback progress")
-        .accessibilityValue("\(formatTime(displayElapsed)) of \(formatTime(nowPlaying.metadataDuration))")
+        .accessibilityValue("\(formatTime(displayElapsed)) of \(formatTime(trackDuration))")
         .accessibilityHint(isScrubbing
             ? "Swipe left or right to scrub, click to commit, Menu to cancel"
             : "Click to scrub")
@@ -419,7 +462,7 @@ struct NowPlayingView: View {
                 iconColor: repeatMode != 0 ? accentColor : nil,
                 action: toggleRepeat
             )
-            if nowPlaying.hasTrackLoaded {
+            if hasTrack {
                 Spacer()
                 queueNavigationLink
             }
@@ -471,13 +514,52 @@ struct NowPlayingView: View {
         )
     }
 
+    // MARK: - Volume (another player only)
+
+    /// Volume of the controlled player (design screen 3). This Apple TV's
+    /// own volume is the TV's or receiver's, so no row for it.
+    private var volumeRow: some View {
+        let volume = max(0, controlled.status?.volume ?? 0)
+        return HStack(spacing: 24) {
+            CircleFocusButton(systemImage: "minus", accessibilityLabel: "Volume Down",
+                              diameter: 64, iconSize: 22,
+                              action: { controlled.changeVolume(by: -5) })
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.25)).frame(height: 8)
+                    Capsule().fill(accentColor)
+                        .frame(width: geo.size.width * CGFloat(volume) / 100, height: 8)
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+            }
+            .frame(height: 28)
+            CircleFocusButton(systemImage: "plus", accessibilityLabel: "Volume Up",
+                              diameter: 64, iconSize: 22,
+                              action: { controlled.changeVolume(by: 5) })
+            Text(verbatim: "\(volume)")
+                .font(.system(size: 22, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .leading)
+        }
+        .padding(.horizontal, 24)
+        // Down from the transport row lands here even though the bar in the
+        // middle can't take focus.
+        .focusSection()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(volume)")
+    }
+
     // MARK: - Reconnect badge
 
     private var reconnectBadge: some View {
         HStack(spacing: 12) {
             ProgressView()
                 .controlSize(.small)
-            Text("Reconnecting…")
+            Text(controlled.isRemote && controlled.statusFailed
+                 ? "\(controlled.displayName) isn't answering"
+                 : "Reconnecting…")
                 .font(.callout)
                 .foregroundStyle(.primary)
         }
@@ -492,6 +574,14 @@ struct NowPlayingView: View {
     // MARK: - Tick / state refresh
 
     private func tick() {
+        if controlled.isRemote {
+            if !isScrubbing { elapsed = controlled.elapsed }
+            isPlaying = controlled.status?.isPlaying ?? false
+            isConnected = coordinator.isConnected && !controlled.statusFailed
+            shuffleMode = controlled.status?.shuffleMode ?? 0
+            repeatMode = controlled.status?.repeatMode ?? 0
+            return
+        }
         let (interpolated, playing) = coordinator.getCurrentInterpolatedTime()
         if !isScrubbing { elapsed = interpolated }
         isPlaying = playing
@@ -507,7 +597,7 @@ struct NowPlayingView: View {
     private func handleTap() {
         if isScrubbing {
             commitScrubNow()
-        } else if nowPlaying.hasTrackLoaded && nowPlaying.metadataDuration > 0 {
+        } else if hasTrack && trackDuration > 0 {
             enterScrubMode()
         } else {
             sendCommand(isPlaying ? "pause" : "play")
@@ -524,7 +614,7 @@ struct NowPlayingView: View {
         case .up, .down: return
         @unknown default: return
         }
-        scrubElapsed = max(0, min(nowPlaying.metadataDuration, scrubElapsed + delta))
+        scrubElapsed = max(0, min(trackDuration, scrubElapsed + delta))
     }
 
     private func enterScrubMode() {
@@ -536,7 +626,11 @@ struct NowPlayingView: View {
     }
 
     private func commitScrubNow() {
-        coordinator.seek(toSeconds: scrubElapsed)
+        if controlled.isRemote {
+            controlled.seek(to: scrubElapsed)
+        } else {
+            coordinator.seek(toSeconds: scrubElapsed)
+        }
         isScrubbing = false
         DispatchQueue.main.async { playbackFocused = true }
     }
@@ -550,12 +644,27 @@ struct NowPlayingView: View {
     // MARK: - Lock-screen-style command dispatch
 
     private func sendCommand(_ command: String) {
-        coordinator.sendLockScreenCommand(command)
+        guard controlled.isRemote else {
+            coordinator.sendLockScreenCommand(command)
+            return
+        }
+        // Another player: plain JSON-RPC to it. Never through
+        // sendLockScreenCommand, which runs this Apple TV's own playback
+        // logic (outage hold, saved positions, offline copies).
+        switch command {
+        case "play": controlled.setPlaying(true)
+        case "pause": controlled.setPlaying(false)
+        case "next": controlled.next()
+        case "previous": controlled.previous()
+        default: break
+        }
     }
 
     // MARK: - Repeat / shuffle (w53)
 
     private func syncPlaylistModes() {
+        // Another player's modes come with its status (tick).
+        guard !controlled.isRemote else { return }
         coordinator.fetchPlaylistModes { repeatMode, shuffleMode in
             self.repeatMode = repeatMode
             self.shuffleMode = shuffleMode
@@ -563,12 +672,22 @@ struct NowPlayingView: View {
     }
 
     private func toggleShuffle() {
+        if controlled.isRemote {
+            controlled.toggleShuffle()
+            shuffleMode = controlled.status?.shuffleMode ?? shuffleMode
+            return
+        }
         coordinator.toggleShuffleMode { newMode in
             DispatchQueue.main.async { shuffleMode = newMode }
         }
     }
 
     private func toggleRepeat() {
+        if controlled.isRemote {
+            controlled.toggleRepeat()
+            repeatMode = controlled.status?.repeatMode ?? repeatMode
+            return
+        }
         coordinator.toggleRepeatMode { newMode in
             DispatchQueue.main.async { repeatMode = newMode }
         }
@@ -585,7 +704,7 @@ struct NowPlayingView: View {
     }
 
     private func updateAccent() {
-        guard let image = nowPlaying.currentArtwork else {
+        guard let image = artwork else {
             withAnimation { accentColor = .accentColor }
             accentRGB = SIMD3<Float>(0.5, 0.6, 1.0)
             return

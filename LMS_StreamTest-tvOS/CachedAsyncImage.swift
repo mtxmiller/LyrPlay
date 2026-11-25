@@ -73,7 +73,7 @@ extension CachedAsyncImage {
         return request
     }
 
-    private static func session(for url: URL, settings: SettingsManager = .shared) -> URLSession {
+    static func session(for url: URL, settings: SettingsManager = .shared) -> URLSession {
         guard isActiveServer(url, settings: settings) else { return .shared }
         return .lms(host: settings.activeServerHost, allowSelfSignedCert: settings.activeServerAllowSelfSignedCert)
     }

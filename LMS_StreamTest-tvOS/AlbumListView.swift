@@ -251,7 +251,7 @@ struct AlbumListView: View {
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
+            "params": [ControlledPlayer.shared.targetID, ["playlistcontrol", "cmd:load", "album_id:\(album.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
@@ -261,7 +261,7 @@ struct AlbumListView: View {
         let cmd: [String: Any] = [
             "id": 1,
             "method": "slim.request",
-            "params": [settings.playerMACAddress, ["playlistcontrol", "cmd:add", "album_id:\(album.id)"]]
+            "params": [ControlledPlayer.shared.targetID, ["playlistcontrol", "cmd:add", "album_id:\(album.id)"]]
         ]
         coordinator.sendJSONRPCCommandDirect(cmd) { _ in }
     }
