@@ -39,6 +39,9 @@ struct SettingsPage<Content: View>: View {
             TVList(.settings) {
                 content()
             }
+            // The list's scroll view clipped the focused row as it grew,
+            // cutting off the rounded ends of the focus highlight.
+            .scrollClipDisabled()
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 60)
