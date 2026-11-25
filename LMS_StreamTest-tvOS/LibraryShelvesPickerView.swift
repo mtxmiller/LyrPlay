@@ -22,12 +22,19 @@ struct LibraryShelvesPickerView: View {
 
     var body: some View {
         TVList(.settings) {
-            builtInSection
-            if !settings.pluginExtraRegistry.isEmpty {
-                pluginSection
-            }
+            sections
         }
         .navigationTitle("Library Shelves")
+    }
+
+    /// The list sections, for hosting inside `SettingsPage` (Settings ›
+    /// Library Shelves) instead of this view's own full-width list.
+    @ViewBuilder
+    var sections: some View {
+        builtInSection
+        if !settings.pluginExtraRegistry.isEmpty {
+            pluginSection
+        }
     }
 
     // MARK: - Built-in section
