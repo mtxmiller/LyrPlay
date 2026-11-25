@@ -3,8 +3,8 @@ import Foundation
 /// Builds artwork URLs against the user's active LMS server.
 ///
 /// Centralizes the URL composition that QueueView, FavoritesView, AlbumListView, and
-/// PlaylistsView all need. Single fix-site for the credential-leak follow-up
-/// (`LMS_StreamTest-7e4`) and the AsyncImage shared-cache work (`LMS_StreamTest-ppz`).
+/// PlaylistsView all need. URLs carry no credentials: `CachedAsyncImage` sends
+/// the server login as an Authorization header (bd 7e4, 8ch).
 enum LMSArtworkURL {
 
     /// LMS `/music/<id>/cover_200x200_o.jpg` — the canonical track/album cover endpoint.
@@ -26,13 +26,6 @@ enum LMSArtworkURL {
         components.port = settings.activeServerWebPort
         components.path = "/music/\(id)/cover_200x200_o.jpg"
 
-        // Inline credentials when the server requires auth. Tracked for credential
-        // leak via cache keys + http wire as LMS_StreamTest-7e4.
-        let user = settings.activeServerUsername
-        if !user.isEmpty {
-            components.user = user
-            components.password = settings.activeServerPassword
-        }
         return components.url
     }
 
@@ -49,12 +42,6 @@ enum LMSArtworkURL {
         components.host = settings.activeServerHost
         components.port = settings.activeServerWebPort
         components.path = "/material/playlists/\(name)"
-
-        let user = settings.activeServerUsername
-        if !user.isEmpty {
-            components.user = user
-            components.password = settings.activeServerPassword
-        }
         return components.url
     }
 
@@ -70,12 +57,6 @@ enum LMSArtworkURL {
         components.host = settings.activeServerHost
         components.port = settings.activeServerWebPort
         components.path = "/imageproxy/mai/artist/\(id)/image_200x200_o.png"
-
-        let user = settings.activeServerUsername
-        if !user.isEmpty {
-            components.user = user
-            components.password = settings.activeServerPassword
-        }
         return components.url
     }
 
@@ -111,12 +92,6 @@ enum LMSArtworkURL {
             components.percentEncodedPath = encoded
         } else {
             components.path = prefixed
-        }
-
-        let user = settings.activeServerUsername
-        if !user.isEmpty {
-            components.user = user
-            components.password = settings.activeServerPassword
         }
         return components.url
     }

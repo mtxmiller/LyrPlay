@@ -50,7 +50,7 @@ struct CachedAsyncImage<Placeholder: View>: View {
         // Genuine miss — drop any stale image, fetch, decode, cache.
         image = nil
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await Self.session(for: url).data(for: Self.request(for: url))
             guard !Task.isCancelled, let decoded = UIImage(data: data) else { return }
             ImageCache.shared.setObject(decoded, forKey: url as NSURL)
             image = decoded
@@ -58,6 +58,30 @@ struct CachedAsyncImage<Placeholder: View>: View {
             // Transient failure — placeholder stays; recovers on the next
             // remount via `.task(id:)`.
         }
+    }
+}
+
+extension CachedAsyncImage {
+    /// Requests to the active LMS server carry its login as an Authorization
+    /// header, never in the URL (bd 7e4: the URL showed the password;
+    /// bd 8ch: special characters in it broke the URL). Other hosts get none.
+    static func request(for url: URL, settings: SettingsManager = .shared) -> URLRequest {
+        var request = URLRequest(url: url)
+        if isActiveServer(url, settings: settings), let auth = settings.generateAuthHeader() {
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private static func session(for url: URL, settings: SettingsManager = .shared) -> URLSession {
+        guard isActiveServer(url, settings: settings) else { return .shared }
+        return .lms(host: settings.activeServerHost, allowSelfSignedCert: settings.activeServerAllowSelfSignedCert)
+    }
+
+    private static func isActiveServer(_ url: URL, settings: SettingsManager) -> Bool {
+        guard let host = url.host, !settings.activeServerHost.isEmpty else { return false }
+        return host.caseInsensitiveCompare(settings.activeServerHost) == .orderedSame
+            && (url.port ?? (url.scheme == "https" ? 443 : 80)) == settings.activeServerWebPort
     }
 }
 
