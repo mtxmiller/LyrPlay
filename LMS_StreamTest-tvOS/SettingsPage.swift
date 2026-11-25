@@ -45,21 +45,20 @@ struct SettingsPage<Content: View>: View {
     }
 }
 
-/// A row that opens another screen: title on the left, current value and a
-/// chevron on the right.
-struct SettingsLinkRow: View {
+/// One Settings row: title on the left, optional value, optional trailing
+/// symbol. Every row in the Settings screens (links, switches, actions,
+/// pickers) is built from this, so they all have the same height. The
+/// system `Toggle` is not used: its own padding made switch rows taller
+/// than the others.
+struct SettingsRow<Trailing: View>: View {
     let title: LocalizedStringKey
-    var systemImage: String? = nil
     var value: String? = nil
     let action: () -> Void
+    @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 20) {
-                if let systemImage {
-                    Image(systemName: systemImage)
-                        .frame(width: 44)
-                }
                 Text(title)
                 Spacer(minLength: 24)
                 if let value {
@@ -67,13 +66,48 @@ struct SettingsLinkRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Image(systemName: "chevron.right")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                trailing()
             }
-            .padding(.vertical, 8)
+            .frame(minHeight: SettingsRowMetrics.minHeight)
         }
         .buttonStyle(.plain)
         .tvListRow()
+    }
+}
+
+enum SettingsRowMetrics {
+    /// Row content height. With the list's own row insets this gives the
+    /// ~86 pt rows of the system tvOS Settings app.
+    static let minHeight: CGFloat = 66
+}
+
+/// A row that opens another screen: value and a chevron on the right.
+struct SettingsLinkRow: View {
+    let title: LocalizedStringKey
+    var value: String? = nil
+    let action: () -> Void
+
+    var body: some View {
+        SettingsRow(title: title, value: value, action: action) {
+            Image(systemName: "chevron.right")
+                .font(.body)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// An on/off setting, shown as "On"/"Off" like the system tvOS Settings.
+/// Selecting the row flips it.
+struct SettingsToggleRow: View {
+    let title: LocalizedStringKey
+    @Binding var isOn: Bool
+
+    var body: some View {
+        SettingsRow(title: title,
+                    value: isOn ? String(localized: "On") : String(localized: "Off"),
+                    action: { isOn.toggle() }) {
+            EmptyView()
+        }
+        .accessibilityAddTraits(.isToggle)
     }
 }

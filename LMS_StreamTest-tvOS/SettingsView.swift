@@ -50,8 +50,7 @@ struct SettingsView: View {
                         SettingsLinkRow(title: "Player Name", value: settings.effectivePlayerName) {
                             path.append(.playerName)
                         }
-                        Toggle("Keep Screen Awake", isOn: $settings.keepScreenAwake)
-                            .tvListRow()
+                        SettingsToggleRow(title: "Keep Screen Awake", isOn: $settings.keepScreenAwake)
                             .onChange(of: settings.keepScreenAwake) { _, _ in
                                 settings.saveSettings()
                                 AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
@@ -146,13 +145,7 @@ private struct PlayerNameView: View {
                     .focused($fieldFocused)
                     .onSubmit(save)
                     .tvListRow()
-                Button(action: save) {
-                    Text("Save")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                }
-                .buttonStyle(.plain)
-                .tvListRow()
+                SettingsRow(title: "Save", action: save) { EmptyView() }
                 .disabled(trimmed.isEmpty || trimmed == settings.effectivePlayerName)
             }
         }
@@ -194,8 +187,7 @@ private struct AudioSettingsView: View {
                 SettingsLinkRow(title: "Format", value: settings.audioFormat.displayName) {
                     showFormatPicker = true
                 }
-                Toggle("Fix Output Level at 100%", isOn: $settings.fixOutputAt100Percent)
-                    .tvListRow()
+                SettingsToggleRow(title: "Fix Output Level at 100%", isOn: $settings.fixOutputAt100Percent)
                     .onChange(of: settings.fixOutputAt100Percent) { _, newValue in
                         settings.saveSettings()
                         if newValue {
@@ -204,8 +196,7 @@ private struct AudioSettingsView: View {
                             AudioManager.shared.slimClient?.restoreSoftwareVolumeControl()
                         }
                     }
-                Toggle("Match Output Sample Rate", isOn: $settings.matchOutputSampleRate)
-                    .tvListRow()
+                SettingsToggleRow(title: "Match Output Sample Rate", isOn: $settings.matchOutputSampleRate)
                     .onChange(of: settings.matchOutputSampleRate) { _, _ in
                         settings.saveSettings()
                     }
@@ -266,18 +257,10 @@ private struct AboutSettingsView: View {
             // on the tvOS product page and tvOS must offer Restore Purchases.
             // `AppStore.sync()` is StoreKit 2's restore.
             Section {
-                Button {
-                    restorePurchases()
-                } label: {
-                    HStack {
-                        Text(isRestoringPurchases ? "Restoring…" : "Restore Purchases")
-                        Spacer()
-                        if isRestoringPurchases { ProgressView() }
-                    }
-                    .padding(.vertical, 8)
+                SettingsRow(title: isRestoringPurchases ? "Restoring…" : "Restore Purchases",
+                            action: restorePurchases) {
+                    if isRestoringPurchases { ProgressView() }
                 }
-                .buttonStyle(.plain)
-                .tvListRow()
                 .disabled(isRestoringPurchases)
             } footer: {
                 Text("Purchases made in LyrPlay on iPhone or iPad are shared with this Apple TV automatically.")
@@ -333,6 +316,7 @@ private struct FormatPickerView: View {
                             Image(systemName: "checkmark")
                         }
                     }
+                    .frame(minHeight: SettingsRowMetrics.minHeight)
                 }
                 .buttonStyle(.plain)
                 .tvListRow()
