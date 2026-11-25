@@ -18,17 +18,25 @@ enum ServerSetup {
         return false
     }
 
-    /// The saved login, if it belongs to this host. Lets the user re-pick
+    /// True when host and web port are the saved server's. Two LMS servers
+    /// can share one address (lms + lms-demo on one machine), so the port
+    /// must match too.
+    static func isSavedServer(host: String, port: Int, settings: SettingsManager) -> Bool {
+        host == settings.serverHost && port == settings.serverWebPort
+    }
+
+    /// The saved login, if it belongs to this server. Lets the user re-pick
     /// their current server without typing the password again.
-    static func savedLogin(for host: String, settings: SettingsManager) -> (username: String, password: String) {
-        guard host == settings.serverHost, !settings.serverUsername.isEmpty else { return ("", "") }
+    static func savedLogin(for host: String, port: Int, settings: SettingsManager) -> (username: String, password: String) {
+        guard isSavedServer(host: host, port: port, settings: settings),
+              !settings.serverUsername.isEmpty else { return ("", "") }
         return (settings.serverUsername, settings.serverPassword)
     }
 
     /// Tests `host` with the saved login for it (if any).
     static func test(host: String, port: Int, slimPort: Int = 3483,
                      settings: SettingsManager) async -> SettingsManager.ConnectionTestResult {
-        let login = savedLogin(for: host, settings: settings)
+        let login = savedLogin(for: host, port: port, settings: settings)
         return await settings.testConnection(
             host: host,
             webPort: port,
@@ -172,7 +180,7 @@ struct ServerSignInView: View {
         didPrefill = true
         // Same server as before: offer the saved username (it was refused
         // or the password changed). Never prefill the password.
-        if target.host == settings.serverHost {
+        if ServerSetup.isSavedServer(host: target.host, port: target.port, settings: settings) {
             username = settings.serverUsername
         }
         if !username.isEmpty { focusedField = .password }

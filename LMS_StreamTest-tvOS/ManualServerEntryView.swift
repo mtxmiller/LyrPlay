@@ -105,7 +105,7 @@ struct ManualServerEntryView: View {
         }
     }
 
-    private func portField(label: String, placeholder: String, text: Binding<String>, focus: Field) -> some View {
+    private func portField(label: LocalizedStringKey, placeholder: String, text: Binding<String>, focus: Field) -> some View {
         HStack(spacing: 24) {
             Text(label)
                 .font(.title3)
@@ -114,7 +114,7 @@ struct ManualServerEntryView: View {
                 .multilineTextAlignment(.center)
                 .frame(width: 200)
                 .focused($focusedField, equals: focus)
-                .accessibilityLabel(label)
+                .accessibilityLabel(Text(label))
                 .accessibilityValue(text.wrappedValue.isEmpty ? "Empty" : text.wrappedValue)
                 .onChange(of: text.wrappedValue) { _, newValue in
                     let filtered = String(newValue.filter(\.isNumber).prefix(5))
@@ -235,7 +235,7 @@ struct ManualServerEntryView: View {
         switch result {
         case .success:
             os_log(.info, log: logger, "Manual entry succeeded for %{public}s:%ld", host, port)
-            let login = ServerSetup.savedLogin(for: host, settings: settings)
+            let login = ServerSetup.savedLogin(for: host, port: port, settings: settings)
             ServerSetup.commit(host: host, port: port, slimPort: slimPort, username: login.username, password: login.password,
                                settings: settings, onComplete: onComplete)
 

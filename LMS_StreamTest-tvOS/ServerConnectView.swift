@@ -20,6 +20,7 @@ struct ServerConnectView: View {
     private enum FocusField: Hashable {
         case manualEntry
         case retry
+        case cancelCheck
     }
 
     var body: some View {
@@ -141,6 +142,24 @@ struct ServerConnectView: View {
                 }
             }
 
+            // The check can take up to the connection timeout on a server
+            // that is slow to answer; let the user back out.
+            if checkingServerID != nil {
+                HStack {
+                    Spacer()
+                    Button {
+                        cancelCheck()
+                    } label: {
+                        Text("Cancel")
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .focused($focusedField, equals: .cancelCheck)
+                    Spacer()
+                }
+            }
+
             HStack(spacing: 24) {
                 Text(discovery.isDiscovering
                      ? "Searching for more…"
@@ -185,10 +204,19 @@ struct ServerConnectView: View {
     /// opens Sign In. Any other result commits as before, so a slow or
     /// half-started server still gets picked and the app's own reconnect
     /// logic takes over.
+    private func cancelCheck() {
+        checkTask?.cancel()
+        checkTask = nil
+        checkingServerID = nil
+        focusedField = .manualEntry
+    }
+
     private func applyDiscoveredServer(_ server: DiscoveredServer) {
         guard checkingServerID == nil else { return }
         let settings = SettingsManager.shared
         checkingServerID = server.id
+        // The rows are disabled while checking, so move focus to Cancel.
+        focusedField = .cancelCheck
 
         checkTask = Task {
             let result = await ServerSetup.test(host: server.host, port: server.port, settings: settings)
@@ -201,7 +229,7 @@ struct ServerConnectView: View {
                 if ServerSetup.needsSignIn(result) {
                     signInTarget = ServerSignInTarget(host: server.host, port: server.port)
                 } else {
-                    let login = ServerSetup.savedLogin(for: server.host, settings: settings)
+                    let login = ServerSetup.savedLogin(for: server.host, port: server.port, settings: settings)
                     ServerSetup.commit(host: server.host, port: server.port,
                                        username: login.username, password: login.password,
                                        settings: settings, onComplete: onComplete)

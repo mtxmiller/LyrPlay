@@ -152,6 +152,11 @@ struct ContentView: View {
         coordinator?.disconnect()
         coordinator = nil
         unregisterRemoteCommands()
+        // Forget the login too, so it can't follow the user to another
+        // server. resetConfiguration() saves, which removes it from the
+        // Keychain (empty username).
+        settings.serverUsername = ""
+        settings.serverPassword = ""
         settings.resetConfiguration()
     }
 
@@ -199,6 +204,11 @@ struct ContentView: View {
             port: UInt16(settings.activeServerSlimProtoPort)
         )
         coordinator.resetConnectionManager()
+        // Drop to the connecting screen now. This also closes Settings and
+        // the Change Server screens. Waiting for the 1 s status poll can
+        // miss the short disconnect and leave the user on Sign In.
+        isConnected = false
+        connectionStatus = "Connecting…"
         // Same short pause as iOS so the SHUT + socket close finish first.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             coordinator.connect()
