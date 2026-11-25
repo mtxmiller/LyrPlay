@@ -2,45 +2,247 @@ import SwiftUI
 import StoreKit
 import os.log
 
-/// tvOS Settings — single-screen List wrapped in a NavigationStack so
-/// "Change Server" and "Audio Format" can push detail screens without
-/// leaving the cover.
+/// tvOS Settings. Every screen uses `SettingsPage` (symbol + status on the
+/// left, list on the right, like Apple's Settings app). The root screen is a
+/// short list; each row opens its own screen:
+///   - Server: opens ServerConnectView in change-server mode (`onComplete`, E6).
+///   - Player Name: PlayerNameView saves the name and renames the player in LMS.
+///   - Keep Screen Awake: toggle.
+///   - Audio: AudioSettingsView (format, fixed output level, sample rate,
+///     signal path on the left).
+///   - Library Shelves: LibraryShelvesPickerView.
+///   - About: version, build, player MAC, Restore Purchases.
 ///
-/// Scope per design doc + /plan-eng-review (LMS_StreamTest-53n):
-///   - Server: shows current host, button pushes ServerConnectView
-///     (in change-server mode via `onComplete` parameter — E6).
-///   - Player Name: inline TextField bound to `settings.playerName`. Re-HELO
-///     happens on next reconnect (deferred, not urgent).
-///   - Audio Format: Button pushes a custom FormatPickerView so the full
-///     format displayNames are readable. (`.pickerStyle(.navigationLink)`
-///     was tried but pushed a transparent side-sheet that let NowPlayingView
-///     bleed through.)
-///   - About: 4 read-only rows — version, build, host, player MAC.
+/// Row pattern: `Button + .buttonStyle(.plain) + .tvListRow()` and manual
+/// navigation (`NavigationLink` gives tvOS Lists a wide white-pill focus halo
+/// that hides the row text).
 ///
-/// Row pattern: `Button + .buttonStyle(.plain) + .tvListRow()`
-/// matches the project convention (SearchView / AlbumListView / FavoritesView).
-/// `NavigationLink` gives tvOS Lists a wide white-pill focus halo that
-/// obscures the row text — Buttons + manual navigation via `.navigationDestination`
-/// avoid that.
-///
-/// `onServerChanged` is called when the user successfully commits a NEW host
-/// from inside Change Server. Caller (NowPlayingView → ContentView) is
-/// responsible for clearing recovery keys + tearing down + rebuilding the
-/// SlimProtoCoordinator (E1).
+/// `onServerChanged` is called when the user commits a new server from
+/// Change Server. ContentView reconnects the existing coordinator (E1).
 struct SettingsView: View {
     @ObservedObject var settings: SettingsManager
     var onServerChanged: () -> Void
-    /// Called when the user picks a new audio format. Caller (ContentView)
-    /// re-runs the SlimProto connection so the server gets a fresh HELO with
-    /// the new capabilities string. Matches the iOS pattern at
-    /// SettingsView.swift:1733-1745. Without this, the server keeps using
-    /// the OLD capabilities until the user restarts the app.
+    /// Called when the user picks a new audio format. ContentView restarts
+    /// the SlimProto connection so the server gets a fresh HELO with the new
+    /// capabilities (same as iOS).
     var onAudioFormatChanged: () -> Void
 
-    @State private var showServerChange = false
+    private enum Route: Hashable {
+        case server, playerName, audio, shelves, about
+    }
+
+    @State private var path: [Route] = []
+
+    private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
+
+    var body: some View {
+        TVScreen {
+            NavigationStack(path: $path) {
+                SettingsPage(
+                    systemImage: "gearshape",
+                    title: "Settings",
+                    details: rootDetails
+                ) {
+                    Section {
+                        SettingsLinkRow(title: "Server", value: settings.serverHost.isEmpty ? "—" : settings.serverHost) {
+                            path.append(.server)
+                        }
+                        SettingsLinkRow(title: "Player Name", value: settings.effectivePlayerName) {
+                            path.append(.playerName)
+                        }
+                        Toggle("Keep Screen Awake", isOn: $settings.keepScreenAwake)
+                            .tvListRow()
+                            .onChange(of: settings.keepScreenAwake) { _, _ in
+                                settings.saveSettings()
+                                AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
+                            }
+                    }
+                    Section {
+                        SettingsLinkRow(title: "Audio", value: settings.audioFormat.displayName) {
+                            path.append(.audio)
+                        }
+                        SettingsLinkRow(title: "Library Shelves", value: shelvesValue) {
+                            path.append(.shelves)
+                        }
+                        SettingsLinkRow(title: "About") {
+                            path.append(.about)
+                        }
+                    }
+                }
+                // No navigationTitle: the tab bar already says "Settings",
+                // and the left panel names each screen.
+                .navigationDestination(for: Route.self) { route in
+                    destination(route)
+                }
+                .onChange(of: settings.audioFormat) { _, _ in
+                    os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
+                    settings.saveSettings()
+                    onAudioFormatChanged()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destination(_ route: Route) -> some View {
+        switch route {
+        case .server:
+            ServerConnectView(onComplete: {
+                os_log(.info, log: logger, "Server change committed — invoking onServerChanged")
+                SettingsServerChange.clearRecoveryKeys()
+                onServerChanged()
+            })
+        case .playerName:
+            PlayerNameView(settings: settings)
+        case .audio:
+            AudioSettingsView(settings: settings)
+        case .shelves:
+            SettingsPage(systemImage: "rectangle.stack", title: "Library Shelves",
+                         details: [String(localized: "Choose what the Library tab shows.")]) {
+                LibraryShelvesPickerView(settings: settings).sections
+            }
+        case .about:
+            AboutSettingsView(settings: settings)
+        }
+    }
+
+    private var rootDetails: [String] {
+        var lines = [settings.effectivePlayerName]
+        if !settings.serverHost.isEmpty {
+            lines.append(String(localized: "Connected to \(settings.serverHost)"))
+        }
+        if !settings.serverUsername.isEmpty {
+            lines.append(String(localized: "Signed in as \(settings.serverUsername)"))
+        }
+        return lines
+    }
+
+    private var shelvesValue: String {
+        String(localized: "\(settings.enabledLibraryShelves.count + (settings.showBrowseShelf ? 1 : 0)) on")
+    }
+}
+
+// MARK: - Player name
+
+/// Edits the player name. Saving stores it and renames the player in LMS
+/// right away (`<player> name <new>`), so no reconnect is needed. Before,
+/// the name was only stored when another setting saved, and LMS only saw it
+/// at the next connect.
+private struct PlayerNameView: View {
+    @ObservedObject var settings: SettingsManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @FocusState private var fieldFocused: Bool
+
+    private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
+
+    var body: some View {
+        SettingsPage(systemImage: "tv", title: "Player Name",
+                     details: [String(localized: "The name LMS and other apps show for this Apple TV.")]) {
+            Section {
+                TextField(settings.effectivePlayerName, text: $name)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+                    .tvListRow()
+                Button(action: save) {
+                    Text("Save")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .tvListRow()
+                .disabled(trimmed.isEmpty || trimmed == settings.effectivePlayerName)
+            }
+        }
+        .onAppear { name = settings.playerName }
+    }
+
+    private var trimmed: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func save() {
+        let newName = trimmed
+        guard !newName.isEmpty else { return }
+        settings.playerName = newName
+        settings.saveSettings()
+        if let coordinator = AudioManager.shared.slimClient {
+            let request: [String: Any] = [
+                "id": 1,
+                "method": "slim.request",
+                "params": [settings.playerMACAddress, ["name", newName]]
+            ]
+            coordinator.sendJSONRPCCommandDirect(request) { _ in }
+        }
+        os_log(.info, log: logger, "Player renamed to %{public}s", newName)
+        dismiss()
+    }
+}
+
+// MARK: - Audio
+
+private struct AudioSettingsView: View {
+    @ObservedObject var settings: SettingsManager
     @ObservedObject private var audioPlayer = AudioManager.shared.audioPlayer
     @State private var showFormatPicker = false
-    @State private var showLibraryShelves = false
+
+    var body: some View {
+        SettingsPage(systemImage: "waveform", title: "Audio", details: signalPathLines) {
+            Section {
+                SettingsLinkRow(title: "Format", value: settings.audioFormat.displayName) {
+                    showFormatPicker = true
+                }
+                Toggle("Fix Output Level at 100%", isOn: $settings.fixOutputAt100Percent)
+                    .tvListRow()
+                    .onChange(of: settings.fixOutputAt100Percent) { _, newValue in
+                        settings.saveSettings()
+                        if newValue {
+                            AudioManager.shared.slimClient?.applyFixedOutputPolicy()
+                        } else {
+                            AudioManager.shared.slimClient?.restoreSoftwareVolumeControl()
+                        }
+                    }
+                Toggle("Match Output Sample Rate", isOn: $settings.matchOutputSampleRate)
+                    .tvListRow()
+                    .onChange(of: settings.matchOutputSampleRate) { _, _ in
+                        settings.saveSettings()
+                    }
+            } footer: {
+                Text("Match Output Sample Rate sends each track to the TV or receiver at its own rate (44.1 to 192 kHz). The sound may stop for a moment at each change. Off keeps 48 kHz.")
+            }
+        }
+        .navigationDestination(isPresented: $showFormatPicker) {
+            FormatPickerView(selection: $settings.audioFormat)
+        }
+        .onAppear { audioPlayer.updateOutputDeviceInfo() }
+    }
+
+    /// What plays and what goes out over HDMI, like the iPhone's Signal Path
+    /// (GH #150). Shown on the left: it is status, not a setting.
+    private var signalPathLines: [String] {
+        guard let stream = audioPlayer.currentStreamInfo, let output = audioPlayer.currentOutputInfo else {
+            return [String(localized: "Signal Path: nothing playing")]
+        }
+        let matches = abs(stream.sampleRate - output.outputSampleRate) < 100 && output.mixSampleRate == nil
+        let source = stream.isSavedCopy ? String(localized: "Saved copy") + " · " : ""
+        var lines = [
+            matches ? String(localized: "Signal Path: native rate") : String(localized: "Signal Path: resampled"),
+            "\(source)\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit",
+            "→ \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
+        ]
+        if let mix = output.mixSampleRate {
+            lines.append(String(localized: "Mixed at \(AudioPlayer.formatSampleRateKHz(mix)) kHz"))
+        }
+        return lines
+    }
+}
+
+// MARK: - About
+
+private struct AboutSettingsView: View {
+    @ObservedObject var settings: SettingsManager
 
     @State private var isRestoringPurchases = false
     @State private var showRestoreAlert = false
@@ -50,223 +252,41 @@ struct SettingsView: View {
     private let logger = OSLog(subsystem: "com.lmsstream", category: "tvOSSettings")
 
     var body: some View {
-        TVScreen {
-            NavigationStack {
-                TVList(.settings) {
-                    serverSection
-                    playerSection
-                    audioSection
-                    librarySection
-                    purchasesSection
-                    aboutSection
-                }
-                // No root navigationTitle — on a tvOS list root it renders as
-                // a large title floating over the scrolled content. The tab
-                // bar already labels this screen "Settings"; the other tab
-                // roots (NowPlaying / Search / Library) set no title either.
-                .navigationDestination(isPresented: $showServerChange) {
-                    ServerConnectView(onComplete: {
-                        os_log(.info, log: logger, "Server change committed — invoking onServerChanged")
-                        SettingsServerChange.clearRecoveryKeys()
-                        onServerChanged()
-                    })
-                }
-                .navigationDestination(isPresented: $showFormatPicker) {
-                    FormatPickerView(selection: $settings.audioFormat)
-                }
-                .navigationDestination(isPresented: $showLibraryShelves) {
-                    LibraryShelvesPickerView(settings: settings)
-                }
-                .onChange(of: settings.audioFormat) { _, _ in
-                    os_log(.info, log: logger, "Audio format changed — saving + restarting connection")
-                    settings.saveSettings()
-                    onAudioFormatChanged()
-                }
-                .alert(restoreAlertTitle, isPresented: $showRestoreAlert) {
-                    Button("OK", role: .cancel) { }
-                } message: {
-                    Text(restoreAlertMessage)
-                }
-            }
-        }
-    }
-
-    // MARK: - Server
-
-    private var serverSection: some View {
-        Section {
-            row(label: "Current host", value: settings.serverHost.isEmpty ? "—" : settings.serverHost)
-            row(label: "Signed in as", value: settings.serverUsername.isEmpty ? "No sign-in" : settings.serverUsername)
-
-            Button {
-                showServerChange = true
-            } label: {
-                Label("Change Server", systemImage: "arrow.triangle.2.circlepath")
-            }
-            .buttonStyle(.plain)
-            .tvListRow()
-        } header: {
-            Text("Server").tvSectionHeader()
-        }
-    }
-
-    // MARK: - Player
-
-    private var playerSection: some View {
-        Section {
-            TextField("Player name", text: $settings.playerName)
-                .accessibilityLabel("Player name")
-                .tvListRow()
-
-            Toggle("Keep screen awake during playback", isOn: $settings.keepScreenAwake)
-                .tvListRow()
-                .onChange(of: settings.keepScreenAwake) { _, _ in
-                    settings.saveSettings()
-                    AudioManager.shared.getNowPlayingManager().applyIdleTimerSetting()
-                }
-        } header: {
-            Text("Player").tvSectionHeader()
-        }
-    }
-
-    // MARK: - Audio Format
-
-    private var audioSection: some View {
-        Section {
-            Toggle("Fix output level at 100%", isOn: $settings.fixOutputAt100Percent)
-                .tvListRow()
-                .onChange(of: settings.fixOutputAt100Percent) { _, newValue in
-                    settings.saveSettings()
-                    if newValue {
-                        AudioManager.shared.slimClient?.applyFixedOutputPolicy()
-                    } else {
-                        AudioManager.shared.slimClient?.restoreSoftwareVolumeControl()
-                    }
-                }
-
-            Button {
-                showFormatPicker = true
-            } label: {
-                HStack {
-                    Text("Format")
-                    Spacer()
-                    Text(settings.audioFormat.displayName)
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
-                        .foregroundStyle(.secondary)
-                        .font(.body)
-                }
-            }
-            .buttonStyle(.plain)
-            .tvListRow()
-
-            Toggle("Match Output Sample Rate", isOn: $settings.matchOutputSampleRate)
-                .tvListRow()
-                .onChange(of: settings.matchOutputSampleRate) { _, _ in
-                    settings.saveSettings()
-                }
-
-            signalPathRow
-                .tvListRow()
-        } header: {
-            Text("Audio").tvSectionHeader()
-        } footer: {
-            Text("Match Output Sample Rate switches HDMI to each track's rate (44.1 to 192 kHz) for receivers that show and use it. The TV or receiver may go quiet for a moment at each switch. Off keeps 48 kHz. Applies from the next track.")
-        }
-        .onAppear { audioPlayer.updateOutputDeviceInfo() }
-    }
-
-    /// What plays and what goes out over HDMI, like the iPhone's Signal Path
-    /// (GH #150). The output rate is the session's: what the receiver shows.
-    @ViewBuilder
-    private var signalPathRow: some View {
-        if let stream = audioPlayer.currentStreamInfo, let output = audioPlayer.currentOutputInfo {
-            let matches = abs(stream.sampleRate - output.outputSampleRate) < 100 && output.mixSampleRate == nil
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Signal Path")
-                    Spacer()
-                    Text(matches ? "Native rate" : "Resampled")
-                        .foregroundStyle(.secondary)
-                }
-                Text(signalPathText(stream: stream, output: output))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-        } else {
-            HStack {
-                Text("Signal Path")
-                Spacer()
-                Text("Nothing playing").foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func signalPathText(stream: AudioPlayer.StreamInfo, output: AudioPlayer.OutputDeviceInfo) -> String {
-        let source = stream.isSavedCopy ? "Saved copy · " : ""
-        var text = "\(source)\(stream.format) \(AudioPlayer.formatSampleRateKHz(stream.sampleRate)) kHz · \(stream.bitDepth)-bit → \(output.deviceName) \(AudioPlayer.formatSampleRateKHz(output.outputSampleRate)) kHz"
-        if let mix = output.mixSampleRate {
-            text += " (mixed at \(AudioPlayer.formatSampleRateKHz(mix)) kHz)"
-        }
-        return text
-    }
-
-    // MARK: - Library
-
-    private var librarySection: some View {
-        Section {
-            Button {
-                showLibraryShelves = true
-            } label: {
-                HStack {
-                    Label("Shelves", systemImage: "rectangle.stack.fill")
-                    Spacer()
-                    Text("\(settings.enabledLibraryShelves.count + (settings.showBrowseShelf ? 1 : 0)) on")
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
-                        .foregroundStyle(.secondary)
-                        .font(.body)
-                }
-            }
-            .buttonStyle(.plain)
-            .tvListRow()
-        } header: {
-            Text("Library").tvSectionHeader()
-        }
-    }
-
-    // MARK: - Purchases
-
-    /// App Review Guideline 3.1.1: the iOS and tvOS apps share one App Store
-    /// record (universal purchase), so the iOS icon-pack IAP is listed on the
-    /// tvOS product page and the tvOS app must offer an explicit "Restore
-    /// Purchases" action even though it sells nothing itself. `AppStore.sync()`
-    /// is StoreKit 2's restore: it re-syncs the signed-in account's
-    /// transactions onto this device.
-    private var purchasesSection: some View {
-        Section {
-            Button {
-                restorePurchases()
-            } label: {
-                HStack {
-                    Label(
-                        isRestoringPurchases ? "Restoring…" : "Restore Purchases",
-                        systemImage: "arrow.clockwise.circle"
-                    )
-                    if isRestoringPurchases {
+        let info = SettingsServerChange.aboutInfo(
+            serverHost: settings.serverHost,
+            playerMAC: settings.playerMACAddress
+        )
+        SettingsPage(systemImage: "info.circle", title: "About", details: [
+            String(localized: "LyrPlay \(info.version.isEmpty ? "—" : info.version) (\(info.build.isEmpty ? "—" : info.build))"),
+            String(localized: "Server: \(info.host.isEmpty ? "—" : info.host)"),
+            String(localized: "Player MAC: \(info.playerMAC.isEmpty ? "—" : info.playerMAC)")
+        ]) {
+            // App Review Guideline 3.1.1: iOS and tvOS share one App Store
+            // record (universal purchase), so the iOS icon-pack IAP is listed
+            // on the tvOS product page and tvOS must offer Restore Purchases.
+            // `AppStore.sync()` is StoreKit 2's restore.
+            Section {
+                Button {
+                    restorePurchases()
+                } label: {
+                    HStack {
+                        Text(isRestoringPurchases ? "Restoring…" : "Restore Purchases")
                         Spacer()
-                        ProgressView()
+                        if isRestoringPurchases { ProgressView() }
                     }
+                    .padding(.vertical, 8)
                 }
+                .buttonStyle(.plain)
+                .tvListRow()
+                .disabled(isRestoringPurchases)
+            } footer: {
+                Text("Purchases made in LyrPlay on iPhone or iPad are shared with this Apple TV automatically.")
             }
-            .buttonStyle(.plain)
-            .tvListRow()
-            .disabled(isRestoringPurchases)
-        } header: {
-            Text("Purchases").tvSectionHeader()
-        } footer: {
-            Text("Purchases made in LyrPlay on iPhone or iPad are shared with this Apple TV automatically.")
+        }
+        .alert(restoreAlertTitle, isPresented: $showRestoreAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(restoreAlertMessage)
         }
     }
 
@@ -278,57 +298,18 @@ struct SettingsView: View {
             do {
                 try await AppStore.sync()
                 os_log(.info, log: logger, "Restore purchases: sync complete")
-                restoreAlertTitle = "Restore Complete"
-                restoreAlertMessage = "Your previous purchases have been restored to this Apple TV."
+                restoreAlertTitle = String(localized: "Restore Complete")
+                restoreAlertMessage = String(localized: "Your previous purchases have been restored to this Apple TV.")
                 showRestoreAlert = true
             } catch StoreKitError.userCancelled {
                 os_log(.info, log: logger, "Restore purchases: user cancelled")
             } catch {
                 os_log(.error, log: logger, "Restore purchases failed: %{public}s", error.localizedDescription)
-                restoreAlertTitle = "Restore Failed"
+                restoreAlertTitle = String(localized: "Restore Failed")
                 restoreAlertMessage = error.localizedDescription
                 showRestoreAlert = true
             }
         }
-    }
-
-    // MARK: - About
-
-    private var aboutSection: some View {
-        let info = SettingsServerChange.aboutInfo(
-            serverHost: settings.serverHost,
-            playerMAC: settings.playerMACAddress
-        )
-        return Section {
-            row(label: "Version", value: info.version.isEmpty ? "—" : info.version)
-            row(label: "Build", value: info.build.isEmpty ? "—" : info.build)
-            row(label: "Server", value: info.host.isEmpty ? "—" : info.host)
-            row(label: "Player MAC", value: info.playerMAC.isEmpty ? "—" : info.playerMAC)
-        } header: {
-            Text("About").tvSectionHeader()
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Read-only label/value row. Explicitly `.focusable()` — a plain `HStack`
-    /// of `Text` is NOT focusable by default on tvOS, so the focus engine
-    /// needs this to have a landing spot below the "Shelves" row. Without it,
-    /// pressing DOWN from Shelves has nowhere to go and the list never scrolls
-    /// to the About section. The row has no action; focusing it just enables
-    /// the scroll (standard tvOS, e.g. Apple's own Settings).
-    @ViewBuilder
-    private func row(label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Text(value)
-                .foregroundStyle(.secondary)
-        }
-        .focusable()
-        .tvListRow()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label), \(value)")
     }
 }
 
@@ -339,7 +320,7 @@ private struct FormatPickerView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        TVList(.settings) {
+        SettingsPage(systemImage: "waveform", title: "Format") {
             ForEach(SettingsManager.AudioFormat.allCases, id: \.self) { fmt in
                 Button {
                     selection = fmt
@@ -357,7 +338,6 @@ private struct FormatPickerView: View {
                 .tvListRow()
             }
         }
-        .navigationTitle("Audio Format")
     }
 }
 
