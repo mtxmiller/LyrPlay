@@ -519,28 +519,6 @@ class AudioStreamDecoder {
                     return
                 }
 
-                // === [SYNC-DIAG] Pre-Start snapshot ===========================
-                let scheduleSkew = currentJiffies - targetJiffies
-                let posBytesBefore = BASS_ChannelGetPosition(self.pushStream, DWORD(BASS_POS_BYTE))
-                let posSecBefore = BASS_ChannelBytes2Seconds(self.pushStream, posBytesBefore)
-                let queueBytes = BASS_StreamPutData(self.pushStream, nil, 0)
-                let playbackBufBytes = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
-                #if os(iOS)
-                let halLatency = AVAudioSession.sharedInstance().outputLatency
-                #else
-                let halLatency = 0.0
-                #endif
-                let bytesPerSec = Double(self.sampleRate * self.channels * 4)
-                let queueSec = Double(queueBytes) / bytesPerSec
-                let pbBufSec = (playbackBufBytes == DWORD.max) ? 0 : Double(playbackBufBytes) / bytesPerSec
-                os_log(.info, log: self.logger,
-                       "[SYNC-DIAG] pre-start: schedule_skew=%.3fms, pos=%.3fs (%llu B), push_queue=%.3fs (%u B), playback_buf=%.3fs (%u B), HAL=%.3fs, total_pipeline=%.3fs",
-                       scheduleSkew * 1000, posSecBefore, posBytesBefore,
-                       queueSec, queueBytes, pbBufSec, playbackBufBytes,
-                       halLatency, queueSec + pbBufSec + halLatency)
-                let wallAtStart = Date()
-                // ============================================================
-
                 // SILENT RECOVERY: mute BEFORE ChannelPlay — VOLDSP set after
                 // play starts is delayed by the playback buffer (bd 34l).
                 if self.muteNextStream {
@@ -552,30 +530,6 @@ class AudioStreamDecoder {
                 if result != 0 {
                     os_log(.info, log: self.logger, "✅ Synchronized playback started successfully (muted: %{public}s)", self.muteNextStream ? "YES" : "NO")
                     self.delegate?.audioStreamDecoderDidStartPlayback(self)
-
-                    // === [SYNC-DIAG] Post-Start +1s snapshot ===================
-                    // Re-read position 1s after BASS_ChannelPlay so we can compute
-                    // the effective playback rate during the first second of resumed
-                    // audio. If rate < nominal, there's a startup gap during which
-                    // BASS hadn't fully spun up but jiffies still advanced — which is
-                    // the cause we're hunting.
-                    let myStream = self.pushStream
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                        guard let self = self else { return }
-                        guard self.pushStream != 0, self.pushStream == myStream else { return }
-                        let posBytesAfter = BASS_ChannelGetPosition(self.pushStream, DWORD(BASS_POS_BYTE))
-                        let wallElapsed = Date().timeIntervalSince(wallAtStart)
-                        let bytesAdvanced = (posBytesAfter >= posBytesBefore) ? (posBytesAfter - posBytesBefore) : 0
-                        let observedBps = Double(bytesAdvanced) / wallElapsed
-                        let effectiveRate = observedBps / bytesPerSec
-                        let queueAfter = BASS_StreamPutData(self.pushStream, nil, 0)
-                        let pbBufAfter = BASS_ChannelGetData(self.pushStream, nil, DWORD(BASS_DATA_AVAILABLE))
-                        os_log(.info, log: self.logger,
-                               "[SYNC-DIAG] +%.3fs after start: bytes_advanced=%llu (expected %.0f), effective_rate=%.4fx, push_queue=%u B, playback_buf=%u B",
-                               wallElapsed, bytesAdvanced, bytesPerSec * wallElapsed,
-                               effectiveRate, queueAfter, pbBufAfter)
-                    }
-                    // ============================================================
                 } else {
                     let error = BASS_ErrorGetCode()
                     os_log(.error, log: self.logger, "❌ Synchronized play failed: %d", error)
