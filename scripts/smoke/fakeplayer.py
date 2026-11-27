@@ -4,8 +4,9 @@
 It registers with LMS like squeezelite (HELO, device 12) and answers the
 server the way a player with an instant, bottomless buffer would: STMc +
 STMl on strm 's', STMs at once (or on 'u' when LMS holds the start for the
-group), STMd two seconds later, STMt with the elapsed time on every poll.
-It never opens the audio stream: LMS's state machine runs on STAT only.
+group), STMt with the elapsed time on every poll. It reads and discards the
+song's stream (a sync group stalls if one member doesn't) and sends STMd
+when the stream ends.
 
     python3 fakeplayer.py [--host 127.0.0.1] [--port 3490] [--mac 02:00:00:00:99:98] [--name "SmokeTest Fake"]
 
@@ -57,8 +58,28 @@ class Player:
         payload = struct.pack(">BB6s16sHII2s", 12, 0, self.mac, b"\0" * 16, 0, 0, 0, b"en") + caps
         self.send(b"HELO", payload)
 
-    def decode_done_later(self, generation):
-        time.sleep(2)
+    def fetch_stream(self, payload, generation):
+        # Read and discard the song's stream like a player with a bottomless
+        # buffer, then report decode done. LMS feeds a sync group from one
+        # source read, so a member that never reads its stream stalls the
+        # others after their buffers drain.
+        port = struct.unpack(">H", payload[18:20])[0]
+        ip = socket.inet_ntoa(payload[20:24])
+        if ip == "0.0.0.0":
+            ip = self.sock.getpeername()[0]
+        request = payload[24:]
+        try:
+            with socket.create_connection((ip, port), timeout=30) as s:
+                s.sendall(request)
+                total = 0
+                while generation == self.generation:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+            log(f"stream read {total} bytes")
+        except OSError as e:
+            log(f"stream error: {e}")
         if generation == self.generation:
             self.stat("STMd")
 
@@ -80,7 +101,7 @@ class Player:
             self.stat("STMl")
             if autostart in ("1", "3"):
                 self.start_playing()
-            threading.Thread(target=self.decode_done_later, args=(self.generation,), daemon=True).start()
+            threading.Thread(target=self.fetch_stream, args=(payload, self.generation), daemon=True).start()
         elif command == "u":
             log("strm u")
             if self.paused_elapsed is not None and self.started_at:

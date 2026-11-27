@@ -112,6 +112,10 @@ They count the app's `.default` log lines and the proxy's request log
 which songs were streamed). P8 starts `fakeplayer.py` (a silent SlimProto
 player) on the LMS host over ssh (`LYRPLAY_FAKE_HOST`, default ser5) for a
 sync group; P9 counts transcoder processes in the `lms-test` container.
+The fake reads and discards its stream: LMS feeds a sync group from one
+source read, so a member that never reads stalls the group (LyrPlay sends
+STMo after ~5 s). It starts a gapless next song as soon as the stream
+arrives, so LMS's drift figures after a song change are not meaningful.
 
 O5 (320 s) runs only when named. O25 needs a queue that mixes FLAC and MP3
 songs: `LYRPLAY_MIXED_TRACKS=11,130,12,131,13,132` on the test LMS. Stream format for a run:

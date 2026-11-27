@@ -123,7 +123,6 @@
 				NowPlayingManager.swift,
 				PCMAlign.swift,
 				PeakTracker.swift,
-				Phase2SyncControllerVerification.swift,
 				PlaylistModels.swift,
 				PurchaseManager.swift,
 				ServerDiscoveryManager.swift,
